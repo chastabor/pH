@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from textual.binding import Binding
 from textual.pilot import Pilot
 
@@ -147,19 +148,25 @@ class StubHost:
     def __init__(self) -> None:
         self.approvals: list[ApprovalRequest] = []
         self.questions: list[UserQuestion] = []
+        self.withdrawn: list[str] = []
         self.redraws = 0
         self.redrawn = Surface.NOTHING
 
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
+    async def ask_approval(
+        self, request: ApprovalRequest, *, ask_id: str = ""
+    ) -> tuple[ApprovalAnswer, str]:
         # `ApprovalAnswer`, not `tuple[str, str]`: `ModalHost` promises the
         # narrowed answer, and the whole reason it is a Protocol is that a
         # double whose member drifted fails here rather than at the first modal.
         self.approvals.append(request)
         return "allowed-once", ""
 
-    async def ask_question(self, question: UserQuestion) -> str | None:
+    async def ask_question(self, question: UserQuestion, *, ask_id: str = "") -> str | None:
         self.questions.append(question)
         return "42"
+
+    def withdraw_ask(self, ask_id: str, *, reason: str = "") -> None:
+        self.withdrawn.append(ask_id)
 
     def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
         # Unioned so a test can assert what a batch did *not* reach.
@@ -197,3 +204,52 @@ class StubApp:
     async def run_action(self, action: str) -> None:
         self.ran.append(action)
         return None
+
+
+class StubClient:
+    """A `DaemonClient` for a front end with no daemon behind it.
+
+    **All four members `DaemonSession` reaches**, not the one a given test needs
+    — the rule `StubApp`'s docstring states, and the reason: a double that stubs
+    only today's path stops being one the moment the path changes, silently.
+    Recorded rather than dropped, so a test can assert what was asked for.
+    """
+
+    def __init__(self) -> None:
+        self.prompts: list[tuple[str, str]] = []
+        self.calls: list[str] = []
+        self.mutations: list[str] = []
+        self.closed = anyio.Event()
+
+    async def prompt(self, session_id: str, text: str) -> None:
+        self.prompts.append((session_id, text))
+
+    async def call(self, verb: Any, params: Any = None) -> Any:  # noqa: ANN401
+        self.calls.append(getattr(verb, "method", str(verb)))
+        return None
+
+    async def mutate(self, *arguments: Any, **options: Any) -> Any:  # noqa: ANN401
+        self.mutations.append(str(arguments[:1]))
+        return None
+
+
+class WorkingApp(StubApp):
+    """A `StubApp` that actually *runs* what it is handed.
+
+    `StubApp` closes the coroutine, which is right for a test asserting on what
+    was asked for — but wrong for one whose subject is the effect of the work.
+    A `queue()` whose frame is never sent cannot be counted at the other end.
+
+    The task group is the caller's, so the work is bounded by the `async with`
+    that owns it rather than outliving the test that started it.
+    """
+
+    def __init__(self, tasks: anyio.abc.TaskGroup) -> None:
+        super().__init__()
+        self.tasks = tasks
+
+    def run_worker(self, work: Coroutine[Any, Any, Any]) -> None:
+        async def run() -> None:
+            await work
+
+        self.tasks.start_soon(run)

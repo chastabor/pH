@@ -242,8 +242,19 @@ class TuiEventAdapter:
     def _append_stream(self, turn: int, step: int, role: ItemRole, text: str, seq: int) -> None:
         if not text:
             return
-        item = self.state.streaming_item(turn, step)
-        if item is None or item.role != role:
+        item = self.state.streaming_item(turn, step, role)
+        if item is None:
+            # **A second row, not a replacement** (H5). A step streams reasoning
+            # and then text, and both rows stay open until the step's message
+            # settles them together. Keyed by the step alone the second role
+            # evicted the first, so nothing ever settled it: the thinking row
+            # kept `streaming=True` — and with it a live `MarkdownStream` task —
+            # for the rest of the session.
+            #
+            # Settling the first row *here*, on the switch, is the tempting
+            # shortcut and it is wrong: `_on_assistant_message` would then see
+            # only the text row, find the message's reasoning unaccounted for,
+            # and add a *second* thinking row beside the one already on screen.
             self._fragment += 1
             item = ChatItem(
                 key=f"stream-{turn}-{step}-{self._fragment}",
@@ -252,7 +263,7 @@ class TuiEventAdapter:
                 turn=turn,
                 seq=seq,
             )
-            self.state.begin_streaming(turn, step, item)
+            self.state.begin_streaming(turn, step, role, item)
         item.text += text
 
     def _on_assistant_message(self, event: SessionEvent, frame: Frame) -> None:
@@ -276,16 +287,22 @@ class TuiEventAdapter:
         text = text_of_wire(blocks)
         thinking = text_of_wire(blocks, kind="reasoning")
         self._count_usage(as_obj(event.data.get("usage")))
-        if frame.live and streamed is not None:
-            # Finalize what streamed rather than adding a duplicate row.
-            streamed.text = text if streamed.role == "assistant" else thinking
-            streamed.seq = event.seq
-            if streamed.role == "thinking" and text:
-                self._row("msg", "assistant", text, event, turn=turn)
-            return
-        if thinking:
+        # Finalize what streamed rather than adding a duplicate row: the message
+        # is authoritative, so each open row takes its own half of it.
+        shown: set[ItemRole] = set()
+        if frame.live:
+            for item in streamed:
+                item.text = thinking if item.role == "thinking" else text
+                item.seq = event.seq
+            shown = {item.role for item in streamed}
+        # And a half that did *not* stream is still in the message. One pair of
+        # lines rather than two: written twice — once for the streamed branch and
+        # once for the replayed one — the two spellings came to disagree, which
+        # is how a step whose text streamed and whose reasoning did not dropped
+        # the reasoning entirely. An empty `shown` is the replay case.
+        if thinking and "thinking" not in shown:
             self._row("think", "thinking", thinking, event, turn=turn)
-        if text:
+        if text and "assistant" not in shown:
             self._row("msg", "assistant", text, event, turn=turn)
 
     def _count_usage(self, usage: JsonObject) -> None:
@@ -409,6 +426,10 @@ class TuiEventAdapter:
         self.state.queued = 0
 
     def _on_turn_end(self, event: SessionEvent, frame: Frame) -> None:
+        # Whatever this turn left open. A step that raised never appends an
+        # `assistant/message`, so this is the only thing that stops its row
+        # animating — see `TuiState.end_streaming`.
+        self.state.end_streaming(as_int(event.data.get("turn")))
         reason = as_obj(event.data.get("reason"))
         kind = reason.get("kind")
         if kind in ("completed", None):

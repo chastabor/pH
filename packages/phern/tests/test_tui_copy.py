@@ -59,9 +59,13 @@ class _Transcript(App[None]):
     failure rather than a missing color.
     """
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, written: str = "") -> None:
         super().__init__()
         self.text = text
+        self.written = written
+        """What the row streamed before `text` settled it, for the case where the
+        two are not the same string — attaching mid-answer, or a message
+        assembled from blocks rather than from the chunks this client saw."""
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return fallback_variables()
@@ -70,7 +74,10 @@ class _Transcript(App[None]):
         yield StreamingMessage(ChatItem(key="a", role="assistant"))
 
     async def on_mount(self) -> None:
-        await self.query_one(StreamingMessage).finalize(self.text)
+        row = self.query_one(StreamingMessage)
+        if self.written:
+            await row.write_tail(self.written)
+        await row.finalize(self.text)
 
 
 async def _copy(
@@ -183,3 +190,30 @@ async def test_a_message_with_no_markdown_is_unchanged() -> None:
     plain = "Just a sentence.\n"
 
     assert (await _copy(plain)).strip() == plain.strip()
+
+
+async def test_a_row_whose_text_was_replaced_shows_the_replacement() -> None:
+    """The cursor into a streamed row is a *string*, not a length (H2).
+
+    `write_tail` sliced the new text at the number of characters already written,
+    which is only a cursor while every update extends the last one. It does not:
+    attaching mid-answer builds the row from a snapshot, and the settled
+    `assistant/message` is assembled from blocks rather than from the
+    concatenated chunks. Sliced at the old length, what got appended was the
+    *tail of a string the row does not hold* — so the row showed neither text:
+    the start of one joined to the end of the other at a position that means
+    nothing in either, and it stayed that way until something forced a rebuild.
+
+    The two strings share a prefix and then diverge, which is the case a length
+    cannot see. A text that merely *extends* what was written is handled
+    identically either way — that is the case the old code was written for.
+
+    `source` is the row's own markdown: what the copy path reads, and what was
+    corrupted. The rendering only reflected it.
+    """
+    app = _Transcript("thought about it, and the answer is no", written="thinking about i")
+    async with app.run_test(size=(60, 20)) as pilot:
+        await pilot.pause()
+        row = app.query_one(StreamingMessage)
+
+        assert row.source == "thought about it, and the answer is no"

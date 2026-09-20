@@ -651,13 +651,21 @@ def _recorded_violations(session: Session) -> set[str]:
     return {as_str(as_obj(one).get("invariant")) for one in as_seq(event.data.get("violations"))}
 
 
-QUIET: tuple[str, ...] = ("idle", "waiting")
+QUIET: tuple[str, ...] = ("idle", "waiting", "failed")
 """The statuses that are not work in hand — read by `passivatable` and `busy`.
 
 `waiting` joins `idle`, which is the whole reason that status exists: a root
 parked on a person who has closed their terminal reports `running` from the
 agent, which is true and not useful. `retrying` is deliberately absent — a root
 in P5-04's backoff is between attempts, not finished.
+
+**`failed` is here because it is the one status that can never change on its
+own** (E3). `give_up` is the end of the recovery ladder: no further attempt is
+scheduled, and nothing in the process will move that root again. Absent from
+this tuple it read as work in hand forever, so `busy()` was permanently true and
+an ephemeral daemon — one started for a run, meant to exit when the work is done
+— stayed up for the life of the machine over a root that had already given up.
+The person is not waiting on it, which is what this tuple is asking.
 
 Named rather than spelled twice, because the two readers answer *different*
 questions from the same rule — "may this root be released" and "may this process

@@ -20,6 +20,7 @@ import pytest
 from ph.agent.inbox import Inbox, InboxNotifications
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.json import JsonObject
 from ph.keys import AGENTS, LLM, SESSIONS, TOOLS
 from ph.llm.adapter import ResolvedModel
 from ph.llm.types import (
@@ -82,6 +83,18 @@ def _shape(state: TuiState) -> list[tuple[str, str]]:
 
 def _replay(session: Session) -> TuiState:
     return TuiEventAdapter().replay(session)
+
+
+def _live(session: Session) -> TuiState:
+    """The same fold, event by event, as a client watching it happen.
+
+    `_replay`'s pair. The two must agree (P2-01), and a test that asserts they do
+    should not have to spell one of them out by hand.
+    """
+    adapter = TuiEventAdapter()
+    for event in session.events:
+        adapter.apply(event)
+    return adapter.state
 
 
 async def _drive(mount: MountProfile, *, prompt: str = "hello there") -> tuple[TuiState, Session]:
@@ -465,6 +478,92 @@ async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(
     inbox.append("next-step", create_user_message(content=[TextBlock(text="second")], source=relay))
     assert inbox.claim("next-step", 1), "consumed, not dropped"
     assert len([item for item in _replay(session).visible_items() if item.role == "notice"]) == 1
+
+
+async def test_reasoning_then_text_in_one_step_settles_both_rows(
+    mount: MountProfile,
+) -> None:
+    """A step has two voices, and both of them finish (H5).
+
+    The open streaming row was keyed by `(turn, step)` alone, so the text row
+    *replaced* the thinking row in the map the moment the model stopped
+    reasoning. Nothing then settled the thinking row: it stayed `streaming`, and
+    in the transcript a streaming row is a `StreamingMessage` holding a live
+    `MarkdownStream` task — one per reasoning block, never stopped, and a
+    thinking row still animating on a turn that ended minutes ago.
+
+    Replayed as well as streamed, because the two must agree: the same log has to
+    produce the same rows either way (P2-01).
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-two-voices")
+    chunks: list[JsonObject] = [
+        {"type": "reasoning-delta", "index": 0, "text": "let me think"},
+        {"type": "text-delta", "index": 1, "text": "the answer"},
+    ]
+    for chunk in chunks:
+        session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": chunk})
+    session.append(
+        "assistant/message",
+        assistant_payload(
+            "the answer",
+            "m1",
+            content=[
+                {"type": "reasoning", "text": "let me think"},
+                {"type": "text", "text": "the answer"},
+            ],
+        ),
+        SurfaceIntent("append"),
+    )
+
+    live = _live(session)
+
+    assert _shape(live) == [("thinking", "let me think"), ("assistant", "the answer")], (
+        "two voices, one row each — and the reasoning not shown twice"
+    )
+    assert not any(item.streaming for item in live.items), "a row was left animating"
+    assert _shape(_replay(session)) == _shape(live), "and replay draws the same thing"
+
+
+async def test_a_step_that_only_reasoned_still_shows_its_answer(mount: MountProfile) -> None:
+    """The half that did not stream is still in the message (H5).
+
+    `assistant/message` carries both voices whatever arrived as deltas, and the
+    finalizer used to name one direction only — a thinking row plus text. The
+    reverse, a step whose text streamed and whose reasoning came only in the
+    message, dropped the reasoning silently.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-one-voice")
+    session.append(
+        "assistant/chunk",
+        {"turn": 1, "step": 1, "chunk": {"type": "text-delta", "index": 0, "text": "the answer"}},
+    )
+    session.append(
+        "assistant/message",
+        assistant_payload(
+            "the answer",
+            "m1",
+            content=[
+                {"type": "reasoning", "text": "quietly considered"},
+                {"type": "text", "text": "the answer"},
+            ],
+        ),
+        SurfaceIntent("append"),
+    )
+
+    live = _live(session)
+
+    assert _shape(live) == [("assistant", "the answer"), ("thinking", "quietly considered")], (
+        "the reasoning that never streamed was dropped"
+    )
+    assert not any(item.streaming for item in live.items)
+    # The *reading* order differs from replay's here, and honestly so: live, the
+    # answer was on screen before the reasoning existed as anything but blocks in
+    # a message that had not arrived. Replay knows both at once and puts the
+    # thinking first. What must not differ is the content, which is what was
+    # being lost.
+    assert sorted(_shape(live)) == sorted(_shape(_replay(session)))
 
 
 async def test_a_violated_invariant_is_a_notice_in_the_conversation(mount: MountProfile) -> None:

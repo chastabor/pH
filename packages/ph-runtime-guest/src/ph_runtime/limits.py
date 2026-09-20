@@ -14,6 +14,13 @@ Exceeding it raises `CpuBudgetExceeded`, which derives from `BaseException` on
 purpose: like a denial (C3), a budget is not the program's to catch. A cell that
 could `except Exception` its way past the limit would make the limit advisory.
 
+**Who raises it is the runner's decision, not this module's.** `SIGXCPU` can only
+be turned into an exception safely when the main thread is executing the cell —
+otherwise it lands in whatever library frame the interpreter happens to be in,
+which for a guest that is mostly waiting means `asyncio`'s own internals. So this
+module arms and disarms the limit, and `Runner` installs the handler that knows
+where the cell is.
+
 @module ph_runtime.limits
 """
 
@@ -21,10 +28,25 @@ from __future__ import annotations
 
 import contextlib
 import math
-import signal
 from typing import Any
 
-__all__ = ["CpuBudgetExceeded", "apply_limits", "arm_cpu_budget", "cpu_seconds_used"]
+__all__ = [
+    "CPU_BUDGET_MESSAGE",
+    "CpuBudgetExceeded",
+    "apply_limits",
+    "arm_cpu_budget",
+    "cpu_seconds_used",
+    "relax_cpu_budget",
+]
+
+
+CPU_BUDGET_MESSAGE = "this cell used its CPU budget"
+"""What both routes out of a budget breach say.
+
+The handler raises on one path and cancels the run on the other, and
+`_on_cpu_budget`'s docstring promises they end in the same `cpu` error. Written
+out at each of them, that promise was two string literals keeping each other
+honest."""
 
 
 class CpuBudgetExceeded(BaseException):
@@ -82,15 +104,10 @@ def apply_limits(*, address_space_bytes: int) -> dict[str, Any]:
     return applied
 
 
-def _on_sigxcpu(_signum: int, _frame: object) -> None:
-    raise CpuBudgetExceeded("this cell used its CPU budget")
-
-
 def arm_cpu_budget(cpu_seconds: int) -> None:
     """Give the *next* run `cpu_seconds` of CPU, from whatever is spent so far."""
     if resource is None or cpu_seconds <= 0:  # pragma: no cover
         return
-    signal.signal(signal.SIGXCPU, _on_sigxcpu)
     # `ceil`, not `int`: flooring the CPU already spent hands the next cell less
     # than `cpu_seconds` — a bomb that burned 1.9s floors to 1, so a budget of 1
     # leaves 0.1s and the *next* trivial cell dies on the previous one's spend.
@@ -101,3 +118,27 @@ def arm_cpu_budget(cpu_seconds: int) -> None:
         soft = min(soft, hard)
     with contextlib.suppress(ValueError, OSError):  # pragma: no cover
         resource.setrlimit(resource.RLIMIT_CPU, (soft, hard))
+
+
+def relax_cpu_budget() -> None:
+    """Put the soft limit back to the hard one. **Called first, from the handler.**
+
+    `RLIMIT_CPU` is not a one-shot. Linux delivers `SIGXCPU` when the soft limit
+    is first crossed and then **again every CPU-second** for as long as the
+    process stays over it — and the process stays over it, because the limit is
+    cumulative and nothing gives CPU back. So one budget breach became a signal
+    per second for the rest of the run's teardown: one landed in the cell and
+    unwound it as intended, and the next landed in `_snapshot` or `_settle`,
+    escaped the `try` that was supposed to report the failure, and the `done`
+    frame was never sent. The host has no wall clock of its own on a run, so it
+    waited for a frame that was never coming.
+
+    Disarming at the first delivery is what makes the budget the one-shot the
+    rest of the design assumes. The next `arm_cpu_budget` re-arms it, which is
+    where a per-run budget comes from in the first place.
+    """
+    if resource is None:  # pragma: no cover
+        return
+    _, hard = resource.getrlimit(resource.RLIMIT_CPU)
+    with contextlib.suppress(ValueError, OSError):  # pragma: no cover
+        resource.setrlimit(resource.RLIMIT_CPU, (hard, hard))

@@ -307,6 +307,34 @@ async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive
             tasks.cancel_scope.cancel()
 
 
+async def test_a_root_that_gave_up_does_not_keep_an_ephemeral_daemon_alive(
+    tmp_path: Path,
+) -> None:
+    """`failed` is the one status that can never change on its own (E3).
+
+    `give_up` is the end of the recovery ladder: no further attempt is scheduled
+    and nothing in the process will move that root again. It was absent from
+    `QUIET`, so `busy()` read it as work in hand — permanently — and an ephemeral
+    daemon, the kind started for a run and meant to leave when the run is done,
+    stayed resident for the life of the machine over a root that had already
+    stopped trying. Nobody is waiting on it, which is the question this tuple
+    asks.
+
+    Sabotage: take `"failed"` back out of `QUIET` and the sweep below finds work
+    to do forever.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
+        daemon.aged()
+        root = await daemon.running.supervisor.start("spent")
+        root.give_up("the provider is down", attempts=3)
+        assert root.status == "failed", "the ladder is over, and the log says so"
+
+        assert not daemon.running.holds(), "a root that gave up is not work in hand"
+        await daemon.running.sweep()
+
+        assert daemon.running.stop.is_set()
+
+
 async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Path) -> None:
     """So the next client starts one rather than hitting a crash diagnosis.
 
@@ -325,6 +353,34 @@ async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Pa
         await until(lambda: not path.exists(), what="the socket to be unlinked")
 
     assert not path.exists()
+
+
+async def test_a_daemon_leaving_does_not_unlink_the_socket_that_replaced_it(
+    tmp_path: Path,
+) -> None:
+    """The exit removes *its own* door, not whatever is standing where it was (E2).
+
+    `check_reachable` latches `replaced` for a reason: the person logged back in,
+    a second `phern daemon` bound a new socket at this path, and the file there
+    is now **its** door. The teardown unlinked unconditionally — so the old
+    daemon's exit took the live one's socket with it, and every root the
+    newcomer was serving became unreachable with nothing in either process's log
+    to say why. The next client then started a *third* daemon, against sessions
+    the second one still holds leases on.
+
+    The replacement is a plain file rather than a second live daemon: what
+    decides is `socket_identity`, which is `(st_dev, st_ino)` for whatever is at
+    the path, and a different inode is a different door however it got there.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
+        path = daemon.path
+        assert path.exists(), "the daemon bound its socket"
+        # Somebody else's door, at this daemon's path.
+        path.unlink()
+        path.write_text("another daemon's socket stands here")
+
+    assert path.exists(), "the exit deleted a socket that was not its own"
+    assert path.read_text() == "another daemon's socket stands here"
 
 
 async def test_a_session_created_and_never_used_does_not_pin_the_daemon(

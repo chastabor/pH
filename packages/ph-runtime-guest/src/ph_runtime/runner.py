@@ -42,6 +42,8 @@ import signal
 import sys
 import time
 import traceback
+from contextvars import ContextVar
+from types import FrameType
 from typing import Any
 
 from . import snapshot as snapshot_module
@@ -49,13 +51,34 @@ from .cell import CELL_FILENAME, CELL_FUNCTION, compile_cell
 from .channel import Channel
 from .errors import RunStopped, ToolFailed
 from .lifecycle import die_with_parent
-from .limits import CpuBudgetExceeded, apply_limits, arm_cpu_budget
+from .limits import (
+    CPU_BUDGET_MESSAGE,
+    CpuBudgetExceeded,
+    apply_limits,
+    arm_cpu_budget,
+    relax_cpu_budget,
+)
 from .protocol import PROTOCOL_VERSION, as_str, truncation_marker
 from .proxies import build_namespaces
 from .skill import UnavailableSkill, wrap_skill_module
 
 __all__ = ["Runner", "main"]
 
+
+_RUN: ContextVar[int] = ContextVar("ph_runtime.run", default=0)
+"""Which program the code running right now belongs to (F4).
+
+**A `ContextVar`, not a field, and that is the whole of the fix.** A field is
+read at the moment the call goes out, so a task the cell left behind — still
+running, because the guest is persistent — stamped whatever run was open *then*
+and the host waved it through as its own. The guard, the required wire field and
+the protocol bump would all have bought only the case where no run is open.
+
+`asyncio.create_task` copies the current context, so a task the cell starts
+carries the run that started it for as long as it lives, and the next `_execute`
+setting this in its own task cannot relabel it. `0` is the value outside any
+run, which no run uses.
+"""
 
 FLUSH_BYTES = 8 * 1024
 FLUSH_SECONDS = 0.05
@@ -162,6 +185,13 @@ class Runner:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_call_id = 0
         self._run: asyncio.Task[None] | None = None
+        self._cpu_exceeded = False
+        """Set by the `SIGXCPU` handler, read by `_execute`'s cancellation arm.
+
+        The cancel route loses the reason — a task cancelled for a budget and one
+        cancelled by the host both arrive as `CancelledError` — and "the run was
+        canceled" for a cell that burned its CPU sends the model looking for a
+        user who did not do it."""
         self._snapshotter = snapshot_module.NamespaceSnapshotter()
         """Owns the per-variable memo, so an unchanged variable is neither
         re-serialized nor re-sent (D17)."""
@@ -174,17 +204,50 @@ class Runner:
     # ----------------------------------------------------------- bootstrap --
 
     def install_signal_handlers(self) -> None:
-        """Route `SIGINT` through the loop rather than into the running frame."""
+        """Route `SIGINT` through the loop, and `SIGXCPU` to wherever the cell is."""
         loop = asyncio.get_running_loop()
         with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
             # Not available on Windows, where the host's Job Object and the
             # `cancel` frame are the mechanisms that apply.
             loop.add_signal_handler(signal.SIGINT, self._on_interrupt)
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            # **Not** `add_signal_handler`, unlike `SIGINT` above. A loop callback
+            # cannot reach a cell spinning in Python, and a cell spinning in
+            # Python is the one thing the CPU budget exists to stop — the loop is
+            # starved, so a callback queued on it never runs. This one has to
+            # land in the running frame, which is what `signal.signal` does.
+            signal.signal(signal.SIGXCPU, self._on_cpu_budget)
 
     def _on_interrupt(self) -> None:
         run = self._run
         if run is not None and not run.done():
             run.cancel()
+
+    def _on_cpu_budget(self, _signum: int, frame: FrameType | None) -> None:
+        """The cell spent its CPU budget. Raise into it, or cancel it — never both.
+
+        **Raising is only safe where the cell is.** This handler runs on the main
+        thread at the next bytecode boundary, wherever that thread happens to be,
+        and the raise unwinds from *there*. When the cell is executing that is
+        exactly right and it is the only route that reaches a spin. When the cell
+        is `await`ing — or has already finished, or burned its CPU on a
+        `to_thread` worker while the main thread sat in `select()` — the frame
+        that gets the exception belongs to `asyncio`, and the guest dies of a
+        budget breach in one cell. The whole process, namespace included, for a
+        limit that is supposed to cost one run.
+
+        So the stack decides: the cell's own filename on it means raise, and
+        anything else means cancel the run task and let `_execute` report it.
+        Both paths end in the same `cpu` error; they differ only in what they are
+        allowed to interrupt.
+        """
+        relax_cpu_budget()
+        if _executing_cell(frame):
+            raise CpuBudgetExceeded(CPU_BUDGET_MESSAGE)
+        # Set only on the route that loses the reason: the raise carries its own
+        # and is caught by name.
+        self._cpu_exceeded = True
+        self._on_interrupt()
 
     def _install_namespaces(self, declared: list[dict[str, Any]]) -> None:
         namespaces = build_namespaces(declared, self._dispatch)
@@ -291,6 +354,7 @@ class Runner:
             {
                 "type": "call",
                 "id": call_id,
+                "run": _RUN.get(),
                 "global": namespace,
                 "name": name,
                 "args": _plain(arguments),
@@ -304,6 +368,13 @@ class Runner:
     # ----------------------------------------------------------- execution --
 
     async def _execute(self, run_id: int, program: str) -> None:
+        _RUN.set(run_id)
+        self._cpu_exceeded = False
+        # Every task alive before the cell ran. What the cell leaves behind is
+        # the difference, which is exact — the alternative, "cancel everything
+        # except the two I know about", is a rule that silently kills the first
+        # task anything else in this module ever starts.
+        before = asyncio.all_tasks()
         arm_cpu_budget(self.cpu_seconds)
         out = _CappedStream(self, "stdout", self.max_log_bytes)
         err = _CappedStream(self, "stderr", self.max_log_bytes)
@@ -324,7 +395,13 @@ class Runner:
                 cell = self.globals.pop(CELL_FUNCTION)
                 value = await cell()
         except asyncio.CancelledError:
-            error = {"kind": "aborted", "message": "the run was canceled"}
+            # The budget's other route (see `_on_cpu_budget`), which arrives here
+            # indistinguishable from the host's cancel unless the flag says so.
+            error = (
+                {"kind": "cpu", "message": CPU_BUDGET_MESSAGE}
+                if self._cpu_exceeded
+                else {"kind": "aborted", "message": "the run was canceled"}
+            )
         except KeyboardInterrupt:
             error = {"kind": "aborted", "message": "the run was interrupted"}
         except CpuBudgetExceeded as exceeded:
@@ -340,13 +417,42 @@ class Runner:
             for pending in self._pending.values():
                 pending.cancel()
             self._pending.clear()
+            _cancel_all(asyncio.all_tasks() - before)
         # Snapshotted *before* the run settles, so `done` is the last frame of a
         # run and nothing arrives after it. That lets the host read one run's
         # frames inline instead of keeping a reader task whose lifetime crosses
         # calls — and a task group entered in one task and exited in another is
         # exactly the bug that ordering caused.
-        self._snapshot(run_id)
-        self._settle(run_id, value, error, out, err)
+        # **Nothing between here and `done` may fail to settle.** The host has no
+        # wall clock on a run: it waits for this frame, and a run that never
+        # sends one wedges the kernel until a human cancels. Snapshotting is the
+        # step that can raise — it serializes whatever the cell left behind — so
+        # a failure there costs the namespace and says so, rather than costing
+        # the session.
+        try:
+            self._snapshot(run_id)
+        except BaseException as raised:
+            err.write(f"the namespace could not be snapshotted: {raised!r}\n")
+        try:
+            self._settle(run_id, value, error, out, err)
+        except BaseException as raised:
+            # **The last resort, and the reason it exists is the comment above.**
+            # Guarding the snapshot alone left `_settle` outside the promise it
+            # states: `_encode_value` catches `TypeError` and `ValueError`, and a
+            # container being mutated by a thread the cell left running raises
+            # `RuntimeError` out of the encoder instead. A run that cannot report
+            # its result must still report that, or the host waits for a frame
+            # nobody is going to send.
+            self.channel.send(
+                {
+                    "type": "done",
+                    "id": run_id,
+                    "error": {
+                        "kind": type(raised).__name__,
+                        "message": f"the run could not be settled: {raised!r}",
+                    },
+                }
+            )
 
     def _settle(
         self,
@@ -374,11 +480,26 @@ class Runner:
         self.channel.send(frame)
 
     def _snapshot(self, run_id: int) -> None:
-        records = self._snapshotter.changed(
+        """One frame per changed variable (F3).
+
+        **The cap that bounds a value is per variable; the frame carried all of
+        them.** `max_snapshot_bytes` is applied by `changed` to each value it
+        encodes, so a cell that leaves three variables just under it produces a
+        frame three times the size — and the host refuses a frame over
+        `MAX_FRAME_BYTES` on the reasonable ground that a peer writing megabytes
+        with no newline is hostile. A legitimate namespace was therefore read as
+        an attack: the channel closed and the model was told the runtime had
+        exited, with the namespace gone and nothing naming the real cause.
+
+        Sending one frame each makes the wire bound and the value bound the same
+        bound. The host already records per variable — `SnapshotPolicy.record`
+        appends one `kernel/snapshot` event each — so nothing downstream can tell
+        the difference.
+        """
+        for record in self._snapshotter.changed(
             self.globals, protected=self._protected, max_value_bytes=self.max_snapshot_bytes
-        )
-        if records:
-            self.channel.send({"type": "snapshot", "id": run_id, "variables": records})
+        ):
+            self.channel.send({"type": "snapshot", "id": run_id, "variables": [record]})
 
 
 def _plain(value: object) -> object:
@@ -440,6 +561,50 @@ def _cell_traceback(raised: BaseException) -> str:
     lines += traceback.format_list(cell_frames)
     lines += traceback.format_exception_only(type(raised), raised)
     return "".join(lines)
+
+
+def _cancel_all(tasks: set[asyncio.Task[Any]]) -> None:
+    """A run owns the tasks it started. **The namespace persists; tasks do not.**
+
+    `asyncio.create_task` in a cell outlives the cell that made it, and the loop
+    keeps running between programs because the guest is persistent — so a task
+    left behind went on calling bindings after its run had settled. The host
+    served those calls against whichever program was open next: its bindings, its
+    call budget, its parent dispatch id. One cell's work was recorded as
+    another's, and the approval decisions were taken for the wrong turn.
+
+    Cancelled at settle rather than refused later, because the refusal is the
+    backstop and this is the fix: a task that is gone issues nothing.
+    """
+    current = asyncio.current_task()
+    for task in tasks:
+        if task is not current:
+            task.cancel()
+
+
+def _executing_cell(frame: FrameType | None) -> bool:
+    """Whether the cell's own code is on this stack, right now.
+
+    The discrimination the `SIGXCPU` handler needs, and it is exact rather than a
+    heuristic: a cell that is running has its frame on the main thread's stack,
+    and a cell that is suspended at an `await` does not — its frame belongs to a
+    coroutine the loop is holding, and what is on the stack is `asyncio`. So this
+    answers "may an exception be raised here" by asking the only question that
+    settles it.
+
+    **Unbounded on purpose.** A depth cap looks like the prudent thing to write
+    in a signal handler, and here it is the opposite: an `f_back` chain is finite
+    and acyclic — it ends at the interpreter's outermost frame — so there is
+    nothing to guard against, and a cell that recursed past the cap would be
+    answered `False` and get the *cancel* route. That is the one route that
+    cannot reach a cell spinning in Python, which is the case the budget exists
+    for. The cap would have quietly switched the fix off for deep cells.
+    """
+    while frame is not None:
+        if frame.f_code.co_filename == CELL_FILENAME:
+            return True
+        frame = frame.f_back
+    return False
 
 
 def main() -> int:

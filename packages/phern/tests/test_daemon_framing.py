@@ -16,10 +16,12 @@ parameter here for exactly that reason: the refusal has to be the same on both.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import anyio
 import pytest
 
+from ph_app.daemon.duplex import Peer
 from ph_app.daemon.framing import MAX_LINE, FramingError, read_frames
 
 pytestmark = pytest.mark.anyio
@@ -95,3 +97,46 @@ async def test_a_peer_that_closes_mid_frame_ends_the_iteration() -> None:
     conflate: a truncated frame is not an oversized one. The peer did not send it,
     so there is nothing to refuse and nothing to act on."""
     assert await _frames(b'{"type":"log","text":"half', LINUX_CHUNK) == []
+
+
+async def test_an_in_flight_slot_is_held_until_the_reply_is_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`IN_FLIGHT` bounds work *outstanding*, not work started (E4).
+
+    The release was a `finally` around the dispatch alone, so the slot came back
+    the moment the handler returned and the send that follows it ran unbounded.
+    A peer that pipelines requests and stops reading then got every one of them
+    dispatched: the outbox filled, each reply parked in `send`, and the tasks and
+    frames piled up against a reader that was never going to drain them — which
+    is the shape the bound exists to refuse.
+
+    `send` is held open here rather than a real socket being filled, because what
+    is under test is the accounting and not the kernel's buffer size.
+    """
+    released = anyio.Event()
+
+    async def parked_send(self: Peer, frame: object) -> None:
+        await released.wait()
+
+    async def answer(method: str, params: dict[str, object]) -> dict[str, object]:
+        return {"ok": True}
+
+    monkeypatch.setattr(Peer, "send", parked_send)
+    peer = Peer(stream=cast("Any", None), dispatch=answer)
+    limit = anyio.Semaphore(1)
+    # Taken by the reader before it starts a handler, as `_read` does: `_handle`
+    # only ever gives a slot back, so a test that did not take one would be
+    # counting the wrong direction.
+    await limit.acquire()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(
+            peer._handle, {"jsonrpc": "2.0", "id": 1, "method": "anything", "params": {}}, limit
+        )
+        await anyio.sleep(0.05)
+
+        assert limit.value == 0, "the slot came back before the reply was out"
+
+        released.set()
+    assert limit.value == 1, "and it comes back once the reply has gone"

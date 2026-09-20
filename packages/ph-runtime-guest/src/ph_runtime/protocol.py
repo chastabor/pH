@@ -55,8 +55,16 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 1
-"""One, and it stays there until there is something to be compatible with.
+PROTOCOL_VERSION: Final = 2
+"""Two, since `call` gained a required `run` (F4).
+
+Moved by exactly the rule below: a **required field added**, which a mismatched
+pairing would misread rather than ignore. A guest that does not send `run` has
+its every binding call refused by a host that requires it — silently, as "not
+available" — so the pairing has to be refused at `boot-ack` instead, and a warm
+venv from before the change has to rebuild. That is what the number is for.
+
+The original note, still the rule:
 
 A version gate exists for two builds that have to understand each other, and
 before a first release there are not two: the host and the guest ship together
@@ -140,7 +148,7 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
     "cancel": (frozenset({"type"}), frozenset({"id"})),
     "shutdown": (frozenset({"type"}), frozenset()),
     "boot-ack": (frozenset({"type", "protocol", "python", "limits"}), frozenset()),
-    "call": (frozenset({"type", "id", "global", "name", "args"}), frozenset()),
+    "call": (frozenset({"type", "id", "run", "global", "name", "args"}), frozenset()),
     "log": (frozenset({"type", "stream", "text"}), frozenset({"truncated"})),
     "display": (frozenset({"type", "mime", "data"}), frozenset({"meta"})),
     "snapshot": (frozenset({"type", "id", "variables"}), frozenset()),

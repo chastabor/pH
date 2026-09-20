@@ -248,7 +248,15 @@ class TuiState:
     _cards: dict[str, ToolCard] = field(default_factory=dict, repr=False)
     """Every tool card by call id — top-level calls and Code Mode sub-dispatches
     alike, so a `tool/code-dispatch` finds its row the way a `tool/result` does."""
-    _streaming: dict[tuple[int, int], ChatItem] = field(default_factory=dict, repr=False)
+    _streaming: dict[tuple[int, int, ItemRole], ChatItem] = field(default_factory=dict, repr=False)
+    """The open streaming row per `(turn, step, role)` — **role included** (H5).
+
+    One step can stream reasoning and then text, and keyed by the step alone the
+    second role evicted the first from this map. Nothing then settled the
+    evicted row: it stayed `streaming=True` forever, which in the transcript is a
+    `StreamingMessage` holding a live `MarkdownStream` task — one per reasoning
+    block, for the life of the app — and a thinking row that never stopped
+    animating on a turn that had long since finished."""
 
     def sync_subagents(self) -> None:
         """Bring the drawn rows in line with the folded roster.
@@ -266,6 +274,23 @@ class TuiState:
             row.deleted = as_bool(entry.get("deleted"))
 
     # ------------------------------------------------------------------ rows --
+
+    def stand_down(self) -> None:
+        """Stop claiming work that is not happening — the daemon has gone.
+
+        One member because two callers reach it from two layers: the front end's
+        own `submit`, whose optimistic `running` is what put the spinner up, and
+        the app's watcher, which is the only thing that hears about a turn
+        somebody *else* started. Written inline in both, the two guards had
+        already drifted — one preserved `failed` and the other did not — and the
+        surviving value depended on which ran last.
+
+        `failed` is kept because it is a fact the daemon reported and nothing
+        here has learned otherwise; every other status is a claim about work in
+        flight, and there is none.
+        """
+        if self.status != "failed":
+            self.status = "idle"
 
     @property
     def busy(self) -> bool:
@@ -308,18 +333,35 @@ class TuiState:
         self._cards[card.call_id] = card
         return card
 
-    def streaming_item(self, turn: int, step: int) -> ChatItem | None:
-        return self._streaming.get((turn, step))
+    def streaming_item(self, turn: int, step: int, role: ItemRole) -> ChatItem | None:
+        return self._streaming.get((turn, step, role))
 
-    def begin_streaming(self, turn: int, step: int, item: ChatItem) -> ChatItem:
-        self._streaming[(turn, step)] = item
+    def begin_streaming(self, turn: int, step: int, role: ItemRole, item: ChatItem) -> ChatItem:
+        self._streaming[(turn, step, role)] = item
         return self.add(item)
 
-    def end_streaming(self, turn: int, step: int) -> ChatItem | None:
-        item = self._streaming.pop((turn, step), None)
-        if item is not None:
+    def end_streaming(self, turn: int, step: int | None = None) -> list[ChatItem]:
+        """Settle open rows — one step's, or every step's of this turn.
+
+        All of a step's roles together, because its voices finish together: the
+        `assistant/message` that ends a step is the whole of what it produced,
+        reasoning and text alike, and a row left open is a row still animating.
+
+        **`step=None` is the turn's own end, and it is the backstop.** A step
+        that raised — a request error with no retry — never appends an
+        `assistant/message`, so nothing settles what it had already streamed and
+        the row animates for the life of the app. That is the same leak the role
+        key closes on the ordinary path, arriving through the other door.
+        """
+        keys = [
+            key for key in self._streaming if key[0] == turn and (step is None or key[1] == step)
+        ]
+        settled = []
+        for key in keys:
+            item = self._streaming.pop(key)
             item.streaming = False
-        return item
+            settled.append(item)
+        return settled
 
     @property
     def pressure(self) -> float | None:

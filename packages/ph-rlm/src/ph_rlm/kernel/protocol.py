@@ -201,8 +201,24 @@ class BootAckFrame(TypedDict):
 # the module docstring says why it stays — which a class body cannot spell.
 CallFrame = TypedDict(
     "CallFrame",
-    {"type": Literal["call"], "id": int, "global": str, "name": str, "args": dict[str, Any]},
+    {
+        "type": Literal["call"],
+        "id": int,
+        "run": int,
+        "global": str,
+        "name": str,
+        "args": dict[str, Any],
+    },
 )
+"""`run` is which program issued this call, and it is required (F4).
+
+A cell can leave a task behind — `asyncio.create_task` and never awaited — and
+that task can call a binding after its run has settled. The call then arrived
+while the *next* program was open and was served against that program's
+bindings, its budget and its parent dispatch id: one cell's work recorded as
+another's, with the approval and limit decisions taken for the wrong turn. The
+guest stamps the run it belongs to and the host refuses a stamp that is not the
+open one."""
 
 
 class LogFrame(TypedDict):

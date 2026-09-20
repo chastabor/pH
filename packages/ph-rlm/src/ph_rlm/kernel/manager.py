@@ -175,6 +175,25 @@ class _ActiveRun:
     `_serve_call` starts the abort from its own task, and the escalation clock
     the pump runs has to be the same clock."""
 
+    def begin_abort(self) -> bool:
+        """Start the escalation clock. **The first caller wins**; returns whether
+        this call was it.
+
+        Separate from *asking* the guest to stop, and that separation is the
+        point. The ask is a socket write, and a write blocks when the guest has
+        stopped reading — which is precisely the run the escalation exists for.
+        Both callers used to start the clock by calling a helper that sent the
+        frame first, so the clock for a wedged channel started only once the
+        wedged channel had accepted a frame: `_watch` sat inside its own
+        `_send`, never returned to the loop that times the grace, and the ladder
+        stopped one rung short of the kill. The clock now starts here, in a
+        method that cannot block, and the ask follows it.
+        """
+        if self.aborting_since is not None:
+            return False
+        self.aborting_since = anyio.current_time()
+        return True
+
     def settle(self, *, error: str | None = None, value: object = None) -> bool:
         """Record how this run ended. **The first writer wins**; returns whether
         this call was it.
@@ -546,7 +565,7 @@ class Kernel:
                 tasks.start_soon(self._drain, process.stderr if process else None, active)
                 # The stop ladder's clock, as a sibling rather than as an
                 # interruption of the read — `_pump` says why.
-                tasks.start_soon(self._watch, active, token)
+                tasks.start_soon(self._watch, active, token, tasks)
                 await self._send(RunFrame(id=active.run_id, program=program))
                 await self._pump(active, tasks)
                 # The drains and any in-flight call tasks belong to this run.
@@ -608,6 +627,15 @@ class Kernel:
             line = await self._recv_line()
             if line is None:
                 self._on_closed(active)
+                # **Torn down, not merely disowned.** A channel that ended
+                # because the guest exited leaves a child to reap; one that
+                # ended because the host refused an oversized frame leaves a
+                # child that is *still running*, still holding the namespace's
+                # memory, and unreachable — `_alive` is false, so the next run
+                # spawns a second process beside it and the first leaks until
+                # the session ends. Either way this channel is over, and the
+                # process on the other end of it has no further use.
+                await self._teardown()
                 return
             frame = decode(line)
             if frame is not None:
@@ -615,7 +643,9 @@ class Kernel:
                 # the child crash the host on demand (C10).
                 await self._handle(frame, active, tasks)
 
-    async def _watch(self, active: _ActiveRun, token: CancelToken | None) -> None:
+    async def _watch(
+        self, active: _ActiveRun, token: CancelToken | None, tasks: anyio.abc.TaskGroup
+    ) -> None:
         """The stop ladder's clock, off the read path (C3).
 
         The two questions `_pump` used to interrupt itself to ask, asked by
@@ -641,18 +671,21 @@ class Kernel:
                 return
             if active.aborting_since is None:
                 if is_canceled(token):
-                    await self._begin_abort(active)
+                    # **The clock first, and the ask started rather than
+                    # awaited.** `_interrupt` writes a frame, and a write waits
+                    # on `_send_lock` — which a reply the guest is not reading
+                    # can hold indefinitely. Awaiting it here would park the
+                    # clock inside the thing it is timing, so the grace below
+                    # never expired and the kill never came. Started, the ask can
+                    # take as long as it likes.
+                    active.begin_abort()
+                    tasks.start_soon(self._interrupt, active.run_id)
             elif anyio.current_time() - active.aborting_since > self.cancel_grace:
                 # Neither the frame nor the signal reached it, which means the
                 # cell is spinning in Python and the guest's loop is starved.
                 # Killing costs the namespace; leaving it costs the session.
                 await self._kill_unresponsive(active)
                 return
-
-    async def _begin_abort(self, active: _ActiveRun) -> None:
-        """Start the stop ladder and the clock that escalates it."""
-        active.aborting_since = anyio.current_time()
-        await self._interrupt(active.run_id)
 
     async def _interrupt(self, run_id: int) -> None:
         """Ask twice, by two routes that fail in different ways (D5).
@@ -782,6 +815,18 @@ class Kernel:
 
     async def _serve_call(self, frame: CallFrame, active: _ActiveRun) -> None:
         """One binding call, back through the full tool pipeline (C1)."""
+        if frame["run"] != active.run_id:
+            # A call from a program that has already settled — a task the cell
+            # left behind, still running because the guest is persistent. Serving
+            # it would charge this run's budget for another run's work and record
+            # it under this run's dispatch id (F4). Answered rather than dropped:
+            # the caller is awaiting a reply, and silence would hold a task open
+            # for the life of the kernel. The guest cancels such tasks at settle,
+            # so reaching this is a task that survived cancellation.
+            await self._reply(
+                frame["id"], ok=False, message="the program that made this call has finished"
+            )
+            return
         key = (frame["global"], frame["name"])
         binding = active.bindings.get(key)
         if binding is None or binding.dispatch is None:
@@ -797,9 +842,16 @@ class Kernel:
             # thing that can stop it is ending the process's turn, via the same
             # frame-then-signal-then-kill ladder user cancellation uses.
             active.failure = failure
+            # The clock first, the reply second, the ask third. The reply has to
+            # precede the cancel frame — a well-behaved cell raises `RunStopped`
+            # and unwinds, which is the tidier of the two stops — but it is also
+            # a write that can block behind a guest that has stopped reading, and
+            # a ladder that only starts once the reply has gone out never starts
+            # for the cell that has stopped listening.
+            asking = active.begin_abort()
             await self._reply(frame["id"], ok=False, message=failure.message, fatal=True)
-            if active.aborting_since is None:
-                await self._begin_abort(active)
+            if asking:
+                await self._interrupt(active.run_id)
         except ToolCallError as error:
             await self._reply(frame["id"], ok=False, message=error.message, name=frame["name"])
         except Exception as error:
@@ -940,8 +992,23 @@ class Kernel:
     async def _teardown(self) -> None:
         process, self._process = self._process, None
         if process is not None and process.returncode is None:
-            await self._send(ShutdownFrame())
-            with anyio.move_on_after(self.shutdown_grace):
+            # **Bounded, because the ask is a write and the peer may not be
+            # reading.** A guest spinning in Python drains nothing, so the socket
+            # buffer fills and this send waits on `_send_lock` forever — and
+            # `aclose` with it, which is a shutdown that hangs on exactly the
+            # kernel that most needs shutting down. A frame the guest never reads
+            # is worth waiting on no longer than the exit itself; the kill below
+            # is what actually ends it, and a half-written frame on a channel
+            # about to be closed costs nothing.
+            #
+            # **One instant for both**, which is the rule `serve`'s own teardown
+            # states: two scopes each given `shutdown_grace` spend it twice, so a
+            # wedged guest cost ten seconds under a constant that says five, and
+            # the number stopped meaning what it says.
+            until = anyio.current_time() + self.shutdown_grace
+            with anyio.CancelScope(deadline=until):
+                await self._send(ShutdownFrame())
+            with anyio.CancelScope(deadline=until):
                 await process.wait()
             if process.returncode is None:
                 with suppress(ProcessLookupError, OSError):

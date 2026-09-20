@@ -167,16 +167,41 @@ class StreamingMessage(Markdown):
         super().__init__("", id=f"row-{_slug(item.key)}")
         self.item = item
         self._stream: MarkdownStream | None = None
-        self._written = 0
+        self._written = ""
+        """What has been handed to the stream — the string, not its length.
+
+        A count is only a safe cursor while every update *extends* the last one,
+        and the transcript's text is a derivation that can be replaced: attaching
+        mid-answer builds the row from a snapshot, and the settled
+        `assistant/message` is assembled from blocks rather than from the
+        concatenated chunks. When the new text was not an extension, slicing it
+        at the old length appended the middle of the answer to the end of it, and
+        the row showed that until something forced a rebuild."""
         self.add_class(f"-{item.role}")
         self.add_class("-streaming")
 
     async def write_tail(self, text: str) -> None:
-        """Append whatever part of `text` has not been written yet."""
-        if len(text) <= self._written:
+        """Append whatever part of `text` has not been written yet.
+
+        **Decided by comparing the strings**, so "this is more of what we have"
+        and "this is something else" are told apart rather than assumed. Only the
+        first is an append; the second is a rewrite, which costs one re-render of
+        a row that was wrong anyway.
+        """
+        if text == self._written:
             return
-        fragment = text[self._written :]
-        self._written = len(text)
+        if not text.startswith(self._written):
+            # The row's text changed under the stream: render it whole. Stopping
+            # first is what flushes whatever the stream still had pending — an
+            # `update` before that would be overwritten by the fragments landing
+            # after it. A later extension re-opens a stream and appends to
+            # `Markdown.source`, which `update` has just set, so the two compose.
+            await self._stop_stream()
+            self._written = text
+            await self.update(text)
+            return
+        fragment = text[len(self._written) :]
+        self._written = text
         if self._stream is None:
             self._stream = self.get_stream(self)
         await self._stream.write(fragment)

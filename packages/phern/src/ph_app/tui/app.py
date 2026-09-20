@@ -63,7 +63,7 @@ from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_set
 from .frontend import FrontSession
 from .modals.approval import ApprovalModal
 from .modals.ask_user import AskUserModal
-from .modals.base import Choice, ChoicePicker
+from .modals.base import Choice, ChoicePicker, PhModal
 from .modals.login import LoginModal, credential_choices
 from .modals.pickers import (
     NEW_SESSION,
@@ -94,6 +94,9 @@ from .widgets.transcript import TranscriptView
 __all__ = ["PHTuiApp", "run_tui"]
 
 log = logging.getLogger("ph_app.tui.app")
+
+ANSWERED_ELSEWHERE = "Answered in another terminal."
+"""Why a modal went away by itself — the ordinary reason, and the default."""
 
 FRAME_INTERVAL = 1 / 30
 """Redraws a second. Fast enough that streaming looks continuous, slow enough
@@ -174,6 +177,12 @@ class PHTuiApp(App[str | None]):
         self._client: DaemonClient | None = None
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
+        self._open_asks: dict[str, PhModal[Any]] = {}
+        """Ask modals currently up, by the `ask_id` the daemon asked under (H1).
+
+        So that `withdraw_ask` can take one down when another terminal answers
+        first. Empty for an ask with no id — an in-process caller has no second
+        front end to race with."""
         self._dirty = Surface.ALL
         self._draw_timer: Timer | None = None
         """The one scheduled draw, or `None` when none is pending.
@@ -330,6 +339,9 @@ class PHTuiApp(App[str | None]):
             client = await DaemonClient.connect(started.path)
             self._client = client
             self.run_worker(client.pump(), group="pump", exclusive=False)
+            # Started before the attach, because the attach itself is a call that
+            # a dead daemon never answers.
+            self.run_worker(self._watch_daemon(client), group="daemon", exclusive=False)
             chosen = await self._offer_sessions(client)
             self.front = await attach_session(
                 client,
@@ -606,6 +618,39 @@ class PHTuiApp(App[str | None]):
             self.notify(shown, title=name, markup=False)
         self.state_changed()
 
+    async def _watch_daemon(self, client: DaemonClient) -> None:
+        """Say so, once, when the daemon goes away (H3).
+
+        Nothing did. The pump ended, `_until_idle` returned, and the terminal
+        went on showing a spinner for a turn that had stopped existing — the
+        failure state the whole UI could not name. A person's only evidence was
+        that nothing ever happened again.
+
+        The app is **not** ended here. The transcript up to the disconnection is
+        worth reading, `/sessions` still works once a daemon is back, and killing
+        a terminal over a socket is this row's own failure arriving from the
+        other side. What is owed is the truth on screen.
+        """
+        await client.closed.wait()
+        front = self.front
+        if front is not None:
+            front.state.stand_down()
+        # **Every open ask, for the same reason one is withdrawn when somebody
+        # else answers it: a question nothing can receive is a control that looks
+        # live and is not.** The task awaiting the modal has been cancelled with
+        # the read loop, and Textual leaves a screen on the stack when its waiter
+        # goes — so without this the person is left holding a modal while the
+        # notification below tells them the daemon is gone.
+        for ask_id in list(self._open_asks):
+            self.withdraw_ask(ask_id, reason="")
+        self.notify(
+            "The daemon is no longer reachable. The agent keeps running; reopen to attach.",
+            title="pH lost the daemon",
+            severity="error",
+            markup=False,
+        )
+        self.state_changed()
+
     @work(exclusive=True, group="turn")
     async def _run_turn(self, text: str) -> None:
         """One turn, in a worker — which is what makes the modals legal."""
@@ -624,13 +669,43 @@ class PHTuiApp(App[str | None]):
 
     # ------------------------------------------------------------ modal host --
 
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
-        decision = await self.push_screen_wait(ApprovalModal(request))
+    async def ask_approval(
+        self, request: ApprovalRequest, *, ask_id: str = ""
+    ) -> tuple[ApprovalAnswer, str]:
+        decision = await self._ask(ask_id, ApprovalModal(request))
         return decision.answer, decision.reason
 
-    async def ask_question(self, question: UserQuestion) -> str | None:
-        answer = await self.push_screen_wait(AskUserModal(question))
+    async def ask_question(self, question: UserQuestion, *, ask_id: str = "") -> str | None:
+        answer = await self._ask(ask_id, AskUserModal(question))
         return answer if isinstance(answer, str) else None
+
+    async def _ask[T](self, ask_id: str, modal: PhModal[T]) -> T:
+        """Push one ask modal and wait, findable by `ask_id` while it is up."""
+        if ask_id:
+            self._open_asks[ask_id] = modal
+        try:
+            return await self.push_screen_wait(modal)
+        finally:
+            self._open_asks.pop(ask_id, None)
+
+    def withdraw_ask(self, ask_id: str, *, reason: str = ANSWERED_ELSEWHERE) -> None:
+        """`ModalHost`: this ask can no longer be delivered (H1).
+
+        Dismissed with the modal's own cancel value — the same one Esc produces —
+        because the answer is discarded either way: whoever mooted the ask did so
+        before this got here. What matters is that the modal goes and that the
+        person is told *why*, rather than watching it vanish under their hands.
+
+        `reason=""` withdraws silently, for the caller that is about to say
+        something better: the daemon going away takes every open ask with it, and
+        one notification per modal would bury the sentence that explains them.
+        """
+        modal = self._open_asks.pop(ask_id, None)
+        if modal is None:
+            return
+        if reason:
+            self.notify(reason, severity="information")
+        modal.dismiss(modal.cancel_value)
 
     # -------------------------------------------------------------- actions --
     # One per `TuiVerb`. Reached by key, by `/command`, and by `run_action`.
@@ -1033,6 +1108,14 @@ async def run_tui(
             offer_sessions=offer_sessions,
         )
         chosen = await app.run_async()
+        if app.return_code:
+            # **The exit code is the app's** (H3). Textual sets `return_code` to 1
+            # when the app ended on an unhandled error, and returning `None` here
+            # reported that as success: a terminal that crashed and a terminal
+            # the person quit were indistinguishable to anything scripting
+            # `phern --mode tui`, including a supervisor deciding whether to
+            # restart it.
+            raise SystemExit(app.return_code)
         if chosen is None:
             return
         session_id = chosen

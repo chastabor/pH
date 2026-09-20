@@ -1638,6 +1638,12 @@ async def serve(
         os.chmod(socket_path, 0o600)
     except OSError as error:
         raise DaemonUnavailable(f"cannot listen on {socket_path}: {error}") from error
+    # Taken here, immediately after the bind and before anything can have
+    # replaced it — the one moment at which "the socket at this path" and "the
+    # socket this daemon is listening on" are the same file by construction
+    # rather than by assumption (P5-11). A local as well as a field because the
+    # teardown below needs it whether or not the server was ever built.
+    identity = socket_identity(socket_path)
     async with anyio.create_task_group() as tasks:
         # Built inside the group so `tasks` is a required field rather than an
         # Optional with a "not serving" guard: a supervisor that cannot start a
@@ -1662,11 +1668,7 @@ async def serve(
                 invariants_every=invariants_every,
                 ephemeral=ephemeral,
                 keep_alive=keep_alive,
-                # Taken here, immediately after the bind and before anything can
-                # have replaced it — the one moment at which "the socket at this
-                # path" and "the socket this daemon is listening on" are the
-                # same file by construction rather than by assumption (P5-11).
-                identity=socket_identity(socket_path),
+                identity=identity,
             )
             # Wired after the build rather than passed into it, because the two
             # hold each other: the server needs the supervisor to ask what is
@@ -1729,6 +1731,24 @@ async def serve(
                     ready.set()
                 await server.stop.wait()
         finally:
+            # **The socket goes first, and only if it is still ours** (E2).
+            #
+            # *Only if ours*, because `check_reachable` latches `replaced` for a
+            # reason: the person logged back in, a second `phern daemon` bound a
+            # new socket at this path, and the file here is now **its** door. An
+            # unconditional unlink made this daemon's exit take the live one's
+            # socket with it, and the roots it was serving became unreachable
+            # for no reason anybody could see from either process.
+            #
+            # *First*, because the drain below is allowed to take `GRACE_SECONDS`
+            # and the listener has already stopped accepting. A file that exists
+            # but refuses is the one state a client cannot act on: it spawns a
+            # daemon, the new one binds this same path, and the old teardown
+            # then deleted the newcomer's socket. Removing it up front turns that
+            # window into a plain "no daemon", which is a state the client
+            # already knows how to handle.
+            if identity is not None and socket_identity(socket_path) == identity:
+                socket_path.unlink(missing_ok=True)
             # Shielded, and bounded. `shutdown` is a notification — the caller
             # does not wait for it — so a cancel from whoever started `serve()`
             # routinely arrives *while* this is unwinding, and an unwinding cut
@@ -1751,7 +1771,6 @@ async def serve(
             until = anyio.current_time() + GRACE_SECONDS
             with anyio.CancelScope(deadline=until, shield=True):
                 await supervisor.aclose(deadline=until)
-            socket_path.unlink(missing_ok=True)
             # Last: the accept loop and any root task still in flight. Roots are
             # unwound above by their own channels closing, so this cancels a
             # listener rather than a turn.

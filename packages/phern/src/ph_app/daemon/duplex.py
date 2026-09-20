@@ -358,21 +358,30 @@ class Peer:
             self._unwatchable += 1
 
     async def _handle(self, frame: dict[str, Any], limit: anyio.Semaphore) -> None:
+        """Serve one request, and **hold the slot until its reply is out** (E4).
+
+        The release used to be a `finally` around the dispatch alone, which made
+        the sentence below false: the slot came back the moment the handler
+        returned, so a peer that pipelined requests and stopped reading got every
+        one of them dispatched — the bound counted work *started* rather than
+        work outstanding, and both the tasks and the frames they were holding
+        piled up unbounded against a reader that was never going to drain them.
+        """
         try:
             reply = await respond(frame, self.dispatch)
+            if reply is None:
+                return
+            # **Through `send`, so a reply waits for room rather than being
+            # dropped.** A full outbox is a slow *reader*, and discarding a reply
+            # strands the asker on the other end until the connection closes —
+            # the one frame where dropping is least defensible, and the only one
+            # nobody chose to drop. Blocking here is the backpressure working:
+            # this task holds one of `IN_FLIGHT`, so a peer that stops reading
+            # stops being served rather than being quietly lied to.
+            with suppress(DaemonGone, anyio.ClosedResourceError, anyio.BrokenResourceError):
+                await self.send(reply)
         finally:
             limit.release()
-        if reply is None:
-            return
-        # **Through `send`, so a reply waits for room rather than being dropped.**
-        # A full outbox is a slow *reader*, and discarding a reply strands the
-        # asker on the other end until the connection closes — the one frame
-        # where dropping is least defensible, and the only one nobody chose to
-        # drop. Blocking here is the backpressure working: this task holds one of
-        # `IN_FLIGHT`, so a peer that stops reading stops being served rather
-        # than being quietly lied to.
-        with suppress(DaemonGone, anyio.ClosedResourceError, anyio.BrokenResourceError):
-            await self.send(reply)
 
     def _settle(self, frame: dict[str, Any]) -> None:
         """An answer to something this end asked.

@@ -155,6 +155,53 @@ async def test_a_cpu_bomb_hits_its_budget_and_the_kernel_survives(
     assert (await kernel.run("1 + 1", (), None)).value == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is POSIX")
+async def test_a_cpu_bomb_on_a_worker_thread_costs_the_cell_and_not_the_guest(
+    make_kernel: MakeKernel,
+) -> None:
+    """The budget must cost one run, wherever the CPU was burned (F1).
+
+    `SIGXCPU` was a raising `signal.signal` handler, and a raising handler
+    unwinds from wherever the **main thread** happens to be. When the cell is on
+    that thread the raise lands in the cell, which is the whole design. When the
+    burn is on a worker the main thread is sitting in the loop's `select()`, so
+    the exception came out of `asyncio`'s own internals and the guest exited —
+    the namespace, the session's kernel and every later cell, for a limit that is
+    supposed to end one run.
+
+    The handler now asks where the cell is before it raises, and cancels the run
+    task when the answer is "not here". Both routes report the same `cpu` error;
+    what differs is what they are allowed to interrupt.
+    """
+    import anyio
+
+    kernel = await make_kernel(cpu_seconds=1)
+
+    # Under `fail_after` because the old failure is a *hang*, not a wrong
+    # answer: the main thread died of the raise, and the worker it could not
+    # interrupt kept the process alive — so the channel never reached EOF and
+    # the host, which has no wall clock on a run, waited for a `done` frame no
+    # one was left to send.
+    with anyio.fail_after(60):
+        result = await kernel.run(
+            "import asyncio\n"
+            "def burn() -> None:\n"
+            "    while True:\n"
+            "        pass\n"
+            "await asyncio.to_thread(burn)",
+            (),
+            None,
+        )
+
+    assert result.error is not None
+    assert "CPU budget" in result.error, result.error
+    # The guest is still serving — which is the regression. A restarted kernel
+    # would say so in the next run's logs.
+    revived = await kernel.run("'alive'", (), None)
+    assert revived.value == "alive"
+    assert RESET_NOTICE not in revived.logs, "the guest died of the budget"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_AS is POSIX")
 @pytest.mark.skipif(
     sys.platform == "darwin",
@@ -227,6 +274,161 @@ async def test_a_spinning_cell_is_killed_after_the_grace_period(
     revived = await kernel.run("'back'", (), None)
     assert revived.value == "back"
     assert RESET_NOTICE in revived.logs
+
+
+async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
+    make_kernel: MakeKernel,
+) -> None:
+    """The ladder must not wait on the channel it is trying to give up on (F2).
+
+    One background call, a reply too big for the socket buffer, and a cell that
+    then spins: the guest's loop is starved so it drains nothing, the host's
+    write fills the buffer and parks holding `_send_lock`, and every later frame
+    queues behind it. That is the state the stop ladder exists for — and the
+    ladder went through the same lock. `_watch` asked for the cancel frame,
+    blocked on the lock, and never returned to the loop that times the grace, so
+    the escalation to `SIGKILL` was unreachable. `aclose` queued behind it too,
+    which is a kernel that cannot even be shut down.
+
+    The clock now starts before the ask and the ask runs in its own task, so the
+    grace expires on schedule whatever the channel is doing. Under `fail_after`
+    because the regression is a hang: without the fix nothing here ever returns.
+    """
+    import anyio
+
+    from ph.cancel import CancelToken
+
+    # Comfortably past a unix socket's buffer, so the reply cannot be handed off
+    # in one write and the host is still mid-frame when the cancel lands.
+    huge = "x" * (8 * 1024 * 1024)
+
+    async def big(**_arguments: object) -> str:
+        return huge
+
+    bindings = tools(big=big)
+    kernel = await make_kernel(namespaces=(bindings,), cpu_seconds=600, cancel_grace=0.3)
+    token = CancelToken()
+    program = (
+        "import asyncio\n"
+        # Issued from a background task, so the cell does not await the reply it
+        # is about to stop reading.
+        "asyncio.get_running_loop().create_task(tools.big())\n"
+        "await asyncio.sleep(0)\n"
+        "while True:\n"
+        "    pass\n"
+    )
+
+    async with anyio.create_task_group() as tasks:
+
+        async def cancel_shortly() -> None:
+            await anyio.sleep(0.5)
+            token.cancel("user")
+
+        tasks.start_soon(cancel_shortly)
+        with anyio.fail_after(30):
+            result = await kernel.run(program, (bindings,), token)
+
+    assert result.error is not None
+    assert "namespace is gone" in result.error, result.error
+    # And the session survives it, which is the reason the ladder has a last rung.
+    revived = await kernel.run("'back'", (), None)
+    assert revived.value == "back"
+
+
+async def test_a_namespace_larger_than_one_frame_is_still_snapshotted(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-variable cap and the per-frame cap have to be the same cap (F3).
+
+    `max_snapshot_bytes` bounds each *value* the guest encodes, and the guest put
+    every changed value in one `snapshot` frame — so three variables just under
+    the cap made a frame three times over it. The host refuses an oversized
+    frame, and rightly: a peer writing megabytes with no newline is how a hostile
+    child would try to exhaust the reader (C10). But that made an ordinary
+    namespace indistinguishable from an attack — the channel closed, the model
+    was told the runtime had exited, and the namespace was gone with no mention
+    of a snapshot anywhere in the account.
+
+    `MAX_FRAME_BYTES` is lowered rather than the namespace inflated: the property
+    is the *ratio* between the two caps, and asserting it at 64 MiB would mean
+    base64-encoding eighty megabytes to prove something a small number proves
+    exactly as well.
+    """
+    from ph_rlm.kernel import manager
+
+    monkeypatch.setattr(manager, "MAX_FRAME_BYTES", 256 * 1024)
+    kernel = await make_kernel(max_snapshot_bytes=200 * 1024)
+
+    result = await kernel.run(
+        "\n".join(f"v{index} = 'x' * 100_000" for index in range(3)), (), None
+    )
+
+    assert result.error is None, result.error
+    # The kernel is still the one that ran the cell: a refused frame closed the
+    # channel, and the next run would have said so.
+    revived = await kernel.run("v0 == 'x' * 100_000 and v2 == 'x' * 100_000", (), None)
+    assert revived.value is True
+    assert RESET_NOTICE not in revived.logs, "the namespace was lost to its own snapshot"
+
+
+async def test_a_task_a_cell_left_behind_cannot_call_into_the_next_run(
+    make_kernel: MakeKernel,
+) -> None:
+    """A run owns its calls, and the namespace outliving the cell is not the same
+    thing as its tasks outliving it (F4).
+
+    The guest is persistent, so the loop keeps running between programs: a task
+    the cell started with `asyncio.create_task` and never awaited goes on calling
+    bindings after its run has settled. The host had no way to tell — a `call`
+    frame said which *call* it was, never which *program* — so the stray was
+    served against whichever run was open next. It spent that run's call budget,
+    was recorded under its dispatch id, and had its approval decided for a turn
+    that had nothing to do with it.
+
+    The first cell leaves a task looping on a binding; the second cell calls the
+    same binding once. What must reach the second run is its own call and nothing
+    else.
+    """
+    import anyio
+
+    seen: list[str] = []
+
+    async def note(**arguments: object) -> str:
+        seen.append(str(arguments.get("tag")))
+        return "ok"
+
+    bindings = tools(note=note)
+    kernel = await make_kernel(namespaces=(bindings,))
+
+    first = await kernel.run(
+        "import asyncio\n"
+        "async def keep_calling() -> None:\n"
+        "    while True:\n"
+        "        try:\n"
+        # Swallowing the cancel on purpose: a well-behaved task is ended by the
+        # guest at settle, and this test is about the one that is not. It is what
+        # makes the *host's* refusal the thing under test rather than the guest's
+        # cancellation — and it is the case the run stamp exists for.
+        "            await tools.note(tag='stray')\n"
+        "            await asyncio.sleep(0.01)\n"
+        "        except asyncio.CancelledError:\n"
+        "            pass\n"
+        "asyncio.get_running_loop().create_task(keep_calling())\n"
+        "await asyncio.sleep(0.05)\n"
+        "'done'",
+        (bindings,),
+        None,
+    )
+    assert first.value == "done", first.error
+    assert "stray" in seen, "the background task never got going, so this proves nothing"
+
+    # Long enough that a surviving task would have called many times over.
+    await anyio.sleep(0.2)
+    seen.clear()
+    second = await kernel.run("await tools.note(tag='mine')", (bindings,), None)
+
+    assert second.error is None, second.error
+    assert seen == ["mine"], f"a settled run's task reached the next one: {seen}"
 
 
 # --------------------------------------------------------------- the boundary --

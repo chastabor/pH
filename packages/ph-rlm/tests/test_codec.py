@@ -45,8 +45,8 @@ HOSTILE = [
     '{"type": "done", "id": true}',  # bool is an int in Python; must not pass
     '{"type": "done", "id": 1.5}',
     '{"type": "done", "id": null}',
-    '{"type": "call", "id": 1, "global": "tools", "name": "read"}',  # no args
-    '{"type": "call", "id": 1, "global": "tools", "name": "read", "args": []}',
+    '{"type": "call", "id": 1, "run": 1, "global": "tools", "name": "read"}',  # no args
+    '{"type": "call", "id": 1, "run": 1, "global": "tools", "name": "read", "args": []}',
     '{"type": "log", "stream": "stdout", "text": 42}',
     '{"type": "snapshot", "id": 1, "variables": {}}',
     '{"nested": {"deeply": {"type": "done", "id": 1}}}',
@@ -83,7 +83,9 @@ def test_an_id_that_is_not_a_number_is_never_echoed() -> None:
     child choose which pending call a reply lands on.
     """
     for bad in ('"1"', "1.0", "true", "null", "[1]"):
-        frame = f'{{"type": "call", "id": {bad}, "global": "t", "name": "n", "args": {{}}}}'
+        frame = (
+            f'{{"type": "call", "id": {bad}, "run": 1, "global": "t", "name": "n", "args": {{}}}}'
+        )
         assert decode(frame) is None
 
 
@@ -117,7 +119,8 @@ def test_a_large_integer_inside_a_payload_does_not_veto_the_frame() -> None:
     assert done is not None and done["type"] == "done"
     assert done["value"] == 2**60
     call = decode(
-        f'{{"type": "call", "id": 1, "global": "g", "name": "n", "args": {{"n": {huge}}}}}'
+        '{"type": "call", "id": 1, "run": 1, "global": "g", "name": "n", '
+        f'"args": {{"n": {huge}}}}}'
     )
     assert call is not None and call["type"] == "call"
     assert call["args"] == {"n": huge}

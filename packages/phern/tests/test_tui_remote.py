@@ -23,14 +23,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from daemon_helpers import Daemon, running, until
-from tui_helpers import StubApp, StubHost
+from tui_helpers import StubApp, StubClient, StubHost, WorkingApp
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
 from ph.json import as_int
 from ph.keys import APPROVAL, SKILLS, TOOLS, USER_QUESTIONS
+from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
@@ -51,6 +53,8 @@ pytestmark = pytest.mark.anyio
 async def _front(
     daemon: Daemon,
     session_id: str = "remote",
+    *,
+    host: StubHost | None = None,
     **options: Any,  # noqa: ANN401
 ) -> tuple[DaemonSession, StubHost]:
     """One attached `DaemonSession` and the host behind it.
@@ -60,10 +64,29 @@ async def _front(
     type-checked and the double got away with implementing one of three members
     because the other two happened not to be reached.
     """
-    host = StubHost()
+    host = host or StubHost()
     client = await daemon.client()
     front = await attach_session(client, session_id, host=host, **options)
     return front, host
+
+
+def _detached(session_id: str, *, client: Any = None) -> DaemonSession:  # noqa: ANN401
+    """A `DaemonSession` with no daemon behind it, for the folds.
+
+    **One `TuiState` between the adapter and the front end**, as `attach_session`
+    builds it: the adapter folds into the state the screen reads, and a test with
+    two of them asserts on an object nothing draws. Written out at each call site
+    the two variants had already diverged, and `DaemonSession` gains constructor
+    arguments (`generation` did) that then have to be added five times.
+    """
+    state = TuiState()
+    return DaemonSession(
+        client=client,
+        session_id=session_id,
+        state=state,
+        adapter=TuiEventAdapter(state=state),
+        host=StubHost(),
+    )
 
 
 # ------------------------------------------------------------ the transcript --
@@ -160,14 +183,7 @@ def test_the_generation_is_a_constructor_argument_not_a_later_setter() -> None:
     assert front.session.header.created_at == 1_700_000_000_000
     assert not hasattr(front, "begin"), "no second phase to forget"
     # Driven without a daemon, it still has a valid session of its own.
-    bare = DaemonSession(
-        client=None,  # type: ignore[arg-type]
-        session_id="k",
-        state=TuiState(),
-        adapter=TuiEventAdapter(state=TuiState()),
-        host=StubHost(),
-    )
-    assert bare.session.seq == 0
+    assert _detached("k").session.seq == 0
 
 
 def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> None:
@@ -177,13 +193,7 @@ def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> 
     at screen-open time; keeping the mirror incrementally moved the refusal earlier,
     and this is what keeps it from becoming silent."""
 
-    front = DaemonSession(
-        client=None,  # type: ignore[arg-type]
-        session_id="d",
-        state=TuiState(),
-        adapter=TuiEventAdapter(state=TuiState()),
-        host=StubHost(),
-    )
+    front = _detached("d")
     assert not front.diverged
 
     # seq 1 with nothing at seq 0: the hole a dropped frame leaves.
@@ -191,6 +201,52 @@ def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> 
 
     assert front.diverged, "the mirror knows it is short"
     assert front.session.seq == 0, "and did not admit a log with a gap"
+
+
+def test_a_short_mirror_still_draws_what_arrives_after_the_hole() -> None:
+    """The mirror and the transcript are two objects with two rules (H4).
+
+    A *log* with a gap in it is a worse artifact than a short one, so the mirror
+    refuses — but the refusal used to skip the adapter as well, and the adapter
+    has no contiguity to keep. Every frame after the hole was then refused for
+    following the one that was dropped, so one unreadable frame froze the
+    transcript for the rest of the session: no rows, no error on screen, and a
+    single log line as the whole account.
+
+    `diverged` is how a screen that rebuilds *from the log* learns it cannot, and
+    it is still set. What changes is that the person keeps seeing the
+    conversation.
+    """
+    front = _detached("d")
+
+    # A hole at seq 0, then an ordinary message behind it.
+    front._apply(
+        [
+            ({"type": "turn/start", "seq": 1, "time": 1, "data": {}}, None),
+            (
+                {
+                    "type": "user/message",
+                    "seq": 2,
+                    "time": 2,
+                    "surfaceOp": "append",
+                    "data": {
+                        "id": "m1",
+                        "role": "user",
+                        "content": [{"type": "text", "text": "still here"}],
+                        "source": {"kind": "user"},
+                    },
+                },
+                None,
+            ),
+        ],
+        True,
+    )
+
+    assert front.diverged, "the mirror still knows it is short"
+    assert front.session.seq == 0, "and still refuses a log with a gap"
+    assert [item.text for item in front.state.items] == ["still here"], (
+        "the transcript froze behind the hole"
+    )
 
 
 async def test_an_event_arriving_on_both_routes_is_folded_once() -> None:
@@ -281,6 +337,50 @@ async def test_the_second_front_end_sees_the_first_ones_prompt(tmp_path: Path) -
             lambda: any("from the first" in (item.text or "") for item in second.state.items),
             what="the other front end to see the prompt",
         )
+
+
+async def test_a_queued_prompt_is_counted_once_and_by_the_log() -> None:
+    """The footer counts the inbox, and the inbox is counted by the log (H6).
+
+    `queue` bumped the count itself *as well*, so a person's own prompt was
+    counted twice — once optimistically on the keystroke and once when
+    `agent/inbox/spliced` came back — and the footer read "2 queued" for one
+    pending message, then fell to 1 when the turn claimed it.
+
+    Driven at the seam rather than through a live turn, because the two halves
+    have to be told apart: what the keystroke does, and what the event does. A
+    real root claims an idle session's prompt in the same breath it inserts it,
+    which is a race, not a reading.
+    """
+
+    front = _detached("counted", client=StubClient())
+
+    async with anyio.create_task_group() as tasks:
+        # An app that runs what it is given, so the prompt is actually sent —
+        # `StubApp` closes it, which would leave the wrapper's inner coroutine
+        # unawaited.
+        front.attach_surfaces(WorkingApp(tasks))
+        front.queue("while you are at it")
+
+    assert front.state.queued == 0, "the keystroke is not the account; the log is"
+
+    # And the event the daemon sends back for that same prompt.
+    front._apply(
+        [
+            (
+                {
+                    "type": "agent/inbox/spliced",
+                    "seq": 0,
+                    "time": 1,
+                    "data": {"inserted": [{"target": "next-turn"}]},
+                },
+                None,
+            )
+        ],
+        True,
+    )
+
+    assert front.state.queued == 1, "one pending message, counted once"
 
 
 # ---------------------------------------------------------------- the words --
@@ -526,6 +626,62 @@ async def test_an_approval_from_the_daemon_reaches_this_screen(tmp_path: Path) -
 
         assert outcome == "allowed-once"
         assert [one.tool_name for one in host.approvals] == ["write"]
+        assert [one.type for one in root.session.events].count("approval/decided") == 1
+
+
+async def test_a_second_terminals_modal_comes_down_when_the_first_answers(
+    tmp_path: Path,
+) -> None:
+    """One question, one decision, and **every** terminal told (H1).
+
+    The desk asks every attached front end and keeps whichever answer arrives
+    first; the rest are discarded, on purpose — pH appends the decision it acted
+    on, and a second would be a log claiming two. `ask.settled` exists to tell
+    the losers, and nothing consumed it: the other terminal's modal stayed up,
+    and the person answering it had their answer dropped in silence. They were
+    left believing they had refused a call that had already been allowed.
+
+    The slow host is what makes the order a fact rather than a race: the fast one
+    answers, the desk settles, and the notice reaches the slow one while its
+    modal is still up — which is exactly the state the fix is about.
+    """
+
+    class SlowHost(StubHost):
+        """A front end whose person has not answered yet."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = anyio.Event()
+
+        async def ask_approval(
+            self, request: ApprovalRequest, *, ask_id: str = ""
+        ) -> tuple[ApprovalAnswer, str]:
+            self.approvals.append(request)
+            await self.release.wait()
+            return "rejected", "too late"
+
+    async with running(tmp_path) as daemon:
+        # The local keeps the narrow type: `_front` answers `StubHost`, and this
+        # test reaches for the subclass's own `release`.
+        slow = SlowHost()
+        _slow_front, _ = await _front(daemon, "remote", host=slow)
+        _fast_front, fast = await _front(daemon, "remote")
+        root = daemon.running.supervisor.roots["remote"]
+
+        outcome = await root.ctx.require(APPROVAL).request(
+            agent=StubAgent(ctx=root.ctx, session=root.session),
+            tool_name="write",
+            call_id="c1",
+        )
+
+        assert outcome == "allowed-once", "the fast terminal's answer is the decision"
+        assert [one.tool_name for one in fast.approvals] == ["write"]
+        await until(
+            lambda: slow.withdrawn == ["c1"],
+            what="the other terminal to be told its modal is moot",
+        )
+        # And the decision is recorded once, whatever the slow one does next.
+        slow.release.set()
         assert [one.type for one in root.session.events].count("approval/decided") == 1
 
 

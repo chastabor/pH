@@ -93,6 +93,7 @@ from ..payloads import (
     FED,
     ApprovalAsk,
     ApprovalAskReply,
+    AskSettledNotice,
     CommandShown,
     DaemonLifetime,
     QuestionAsk,
@@ -254,12 +255,22 @@ class DaemonSession:
                 # than admitting a log with a gap in it.
                 self.session.admit(event)
             except ValueError:
+                # **Recorded, and not `continue`** (H4). The mirror and the
+                # transcript are two objects with two rules: a *log* with a gap
+                # in it is a worse artifact than a short one, so the refusal
+                # stands — but the *view* renders what arrived, and it has no
+                # contiguity to keep. Skipping the fold as well meant one
+                # unreadable frame froze the transcript for the rest of the
+                # session: every later seq was refused for following the one
+                # that was dropped, so nothing was ever drawn again and a single
+                # log line was the whole account. `diverged` is what the screens
+                # that rebuild *from the log* read, and `_unread` has already
+                # said it once.
                 self._unread(
                     "ph_app.tui: the mirror refused seq %s; it stops at %s",
                     event.seq,
                     self.session.seq,
                 )
-                continue
             try:
                 # `view_of` at the wire edge, so the fold is handed a type rather
                 # than a mapping it would have to distrust; `tools` stays `None`
@@ -340,6 +351,12 @@ class DaemonSession:
             if self.app is not None:
                 self._wire_screens(self.app)
             self.host.state_changed()
+        elif isinstance(notice, AskSettledNotice):
+            # Another terminal answered first (H1). The daemon settled the ask
+            # before publishing this, so the modal here can only produce an
+            # answer that would be discarded — and a person answering it would be
+            # told nothing at all.
+            self.host.withdraw_ask(notice.ask_id)
         elif isinstance(notice, SessionStagedNotice):
             self._staged = Tray()
             for ref in notice.staged:
@@ -407,8 +424,21 @@ class DaemonSession:
         """
         self.state.status = "running"
         self.host.state_changed()
-        await self.client.prompt(self.session_id, text)
-        await self._until_idle()
+        try:
+            await self.client.prompt(self.session_id, text)
+            await self._until_idle()
+        finally:
+            if self.client.closed.is_set():
+                # `_until_idle` also returns when the daemon goes away, and the
+                # `running` set above is this client's optimism rather than
+                # anything the root said. Left standing it is a spinner that
+                # never stops, on a turn nobody is running, with `state.busy`
+                # true — so every later prompt is silently queued into a socket
+                # that is gone. The daemon's death is *reported* by the app's
+                # watcher; what belongs here is not claiming work that is not
+                # happening, and `stand_down` is that rule for both of them.
+                self.state.stand_down()
+                self.host.state_changed()
 
     async def _until_idle(self) -> None:
         """Wait for this root to stop working, or for the daemon to go away.
@@ -426,9 +456,15 @@ class DaemonSession:
     def queue(self, text: str) -> None:
         """Add to the inbox mid-turn, without waiting. Sync because the app calls
         it from a key handler, so the frame is sent by a worker — and the person's
-        own text reaches them back off `session.event` like everybody else's."""
-        self.state.queued += 1
-        self.host.state_changed()
+        own text reaches them back off `session.event` like everybody else's.
+
+        **The count is not touched here** (H6). `agent/inbox/spliced` carries
+        `inserted`, and `_on_agent_inbox_spliced` folds it — that is the
+        authoritative account, it is the one replay produces, and it arrives for
+        this prompt like any other. Incrementing optimistically as well counted
+        the person's own message twice, so a footer that said "2 queued" for one
+        pending prompt then went to 1 when the turn claimed it.
+        """
         self._spawn(self.client.prompt(self.session_id, text))
 
     def cancel(self) -> None:
@@ -442,7 +478,7 @@ class DaemonSession:
         for key handlers, and key handlers exist only once there is an app."""
         if self.app is None:
             raise RuntimeError("attach_surfaces first: nothing owns background work yet")
-        self.app.run_worker(work)
+        self.app.run_worker(_reported(work))
 
     async def run_command(self, line: str) -> str | None:
         """Dispatch a `/name` line — the merge in `commands()`, read back.
@@ -772,6 +808,25 @@ def _screens_of(schemas: Sequence[ScreenSchema]) -> dict[str, ScreenDefinition]:
     return found
 
 
+async def _reported(work: Coroutine[Any, Any, Any]) -> None:
+    """Await background work and **log** what it raised rather than letting it out (H3).
+
+    Textual ends the app on an unhandled worker exception, which is right for a
+    bug and wrong for this: every caller here is a key handler's fire-and-forget
+    frame, and the ordinary way one fails is that the daemon went away. The app
+    then died on the *next* keystroke — the person's own Enter — with a traceback
+    where an explanation belonged, and the death of the daemon still unreported.
+
+    Wrapped rather than passing Textual's `exit_on_error=False`, because
+    `AppSurface.run_worker` deliberately declares only what is called of it, and
+    swallowing silently is not what is wanted either: the reason is worth a line.
+    """
+    try:
+        await work
+    except Exception:
+        log.exception("ph_app.tui: background work failed")
+
+
 def _asking_approval(host: ModalHost) -> Callable[[ApprovalAsk], Awaitable[ApprovalAskReply]]:
     """`approval/ask` → the modal, in a worker.
 
@@ -781,7 +836,7 @@ def _asking_approval(host: ModalHost) -> Callable[[ApprovalAsk], Awaitable[Appro
     """
 
     async def ask(asked: ApprovalAsk) -> ApprovalAskReply:
-        outcome, reason = await host.ask_approval(asked.request)
+        outcome, reason = await host.ask_approval(asked.request, ask_id=asked.ask_id)
         # Through the seam's own encoder: `Edited` and `Responded` are frozen
         # dataclasses, and putting one in a frame unencoded is a `TypeError`
         # inside the task group that answers the ask — which the desk reads as
@@ -795,6 +850,6 @@ def _asking_question(host: ModalHost) -> Callable[[QuestionAsk], Awaitable[Quest
     """`question/ask` → the ask-user modal, in a worker."""
 
     async def ask(asked: QuestionAsk) -> QuestionAskReply:
-        return QuestionAskReply(answer=await host.ask_question(asked.question))
+        return QuestionAskReply(answer=await host.ask_question(asked.question, ask_id=asked.ask_id))
 
     return ask

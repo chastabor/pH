@@ -53,12 +53,34 @@ __all__ = ["FrontSession", "ModalHost"]
 class ModalHost(Protocol):
     """What the front-end needs from whatever is drawing it."""
 
-    async def ask_approval(self, request: ApprovalRequest) -> tuple[ApprovalAnswer, str]:
-        """Put the approval modal up and wait. Must be called from a worker."""
+    async def ask_approval(
+        self, request: ApprovalRequest, *, ask_id: str = ""
+    ) -> tuple[ApprovalAnswer, str]:
+        """Put the approval modal up and wait. Must be called from a worker.
+
+        `ask_id` is what `withdraw_ask` takes it down by. Defaulted rather than
+        required so an in-process caller with no wire ask can leave it out.
+        """
         ...
 
-    async def ask_question(self, question: UserQuestion) -> str | None:
+    async def ask_question(self, question: UserQuestion, *, ask_id: str = "") -> str | None:
         """Put the ask-user modal up and wait. Must be called from a worker."""
+        ...
+
+    def withdraw_ask(self, ask_id: str, *, reason: str = "") -> None:
+        """Take down a modal that can no longer be answered here (H1).
+
+        The daemon asks *every* attached front end and keeps the first answer,
+        then publishes `ask.settled` to the rest. Nothing consumed it: the second
+        terminal's modal stayed up, and the person answering it was told nothing
+        — their answer went to a daemon that had already decided, was discarded
+        in silence, and the modal they had just dismissed was the only evidence
+        they had that anything happened.
+
+        Sync, and safe to call for an id this host has never seen: a client that
+        was not asked still receives the notice. `reason` is what the person is
+        told; empty says nothing, for a caller with a better sentence of its own.
+        """
         ...
 
     def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
