@@ -27,8 +27,8 @@ from ph.persistence.repair import (
 )
 from ph.seams.approval import INTERRUPTED, pending_approvals
 from ph.seams.user_questions import pending_questions
-from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, user_payload
+from ph.session import Session, SurfaceIntent, SurfaceReplace
+from ph.testing import MountProfile, assistant_payload, tool_result_payload, user_payload
 
 
 def _assistant_with_call(call_id: str, *, turn: int = 1, step: int = 1) -> dict[str, Any]:
@@ -105,6 +105,50 @@ def test_a_recorded_call_is_closed_as_outcome_unknown() -> None:
     assert "Do not retry blindly." in str(text)
     assert "read-only or idempotent" in str(text)
     assert result.source_event_seqs == (call_seq,)
+
+
+def test_a_replaced_assistant_message_does_not_reopen_answered_calls() -> None:
+    """A rewrite is not a new message, and repair used to read it as one.
+
+    `compaction`'s argument truncation runs at `agent/pre-step` — inside an open
+    turn, after `step/end` has cleared the pending set — and its replacement
+    carries the same `tool-call` blocks as the message it rewrites. Registering
+    those again re-opens calls whose results are already in the log, so the
+    closers below synthesized a *second* `tool/result` for one of them.
+
+    That is worse than a spurious event: a message carrying two results for one
+    `tool_use` id is a log several providers reject outright, and repair has
+    closed the turn by the time anything could notice.
+
+    The step is closed before the rewrite lands, which is where the real one
+    runs: this is the ordering that makes a replacement look like fresh work.
+    """
+    session = _open_turn_with_unstarted_call()
+    assistant_seq = session.events[-1].seq
+    call_seq = session.append(
+        "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"}
+    ).seq
+    session.append(
+        "tool/result", tool_result_payload("done", "r1", "c1"), SurfaceIntent("append", (call_seq,))
+    )
+    session.append("step/end", {"turn": 1, "step": 1})
+    session.append("step/start", {"turn": 1, "step": 2})
+    # The elision: the same call, its arguments shortened, standing in place of
+    # the message already on the surface.
+    session.append(
+        "assistant/message",
+        _assistant_with_call("c1", step=1),
+        SurfaceIntent(
+            surface_op=SurfaceReplace(replaces=(assistant_seq,)),
+            source_event_seqs=(assistant_seq,),
+        ),
+    )
+
+    closers = interrupted_turn_closers(session.events)
+
+    assert [event.type for event in closers] == ["step/end", "turn/end"], (
+        "the rewrite re-opened a call the log had already answered"
+    )
 
 
 def test_a_completed_call_is_not_re_closed() -> None:

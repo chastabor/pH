@@ -29,6 +29,7 @@ dispatches by type in a single pass and runs the whole sweep on a worker thread:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -185,24 +186,81 @@ async def test_a_reserved_blob_is_not_collected_before_its_event_lands(
     assert await store.sweep_session(session) == [], "and it stays, now that the log names it"
 
 
-async def test_a_staged_blob_no_run_will_commit_is_collected(tmp_path: Path) -> None:
-    """The leak the staging directory would otherwise turn into a permanent one.
+async def test_a_write_interrupted_before_its_rename_is_completed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The repair half of write-ahead, and the reason no bookkeeping is needed.
 
-    A run that ends between staging a blob and appending the event naming it
-    leaves a file nothing will ever publish — the crash `SpillClaim` describes,
-    which used to be uncollectable because an orphan at a real locator is
-    indistinguishable from a file somebody wants. Staged, it is unambiguous: no
-    live reservation claims it, so the next sweep takes it.
+    A run that dies between appending the locator and renaming the bytes leaves
+    the log naming a blob that is not at its locator — with the bytes one
+    directory down, under the name they were always going to take. The sweep
+    holds both halves of that comparison already, so finishing the rename is the
+    whole repair, and the log is the only record of intent it needs.
+
+    This is what replaced a set of in-flight reservations. That set existed so
+    the sweep could delete abandoned staged files without eating a live one, and
+    it could not tell them apart for the reason write-ahead exists: neither is
+    referenced yet. Recovering instead of collecting removes the question.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("producer", session.id))
+    ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
+    _named(session, SPILLED, ref.locator)  # the dead run got this far and no further
+
+    with caplog.at_level(logging.INFO, logger="ph.seams.spill"):
+        assert await store.sweep_session(session) == []
+
+    assert Path(ref.locator).read_text(encoding="utf-8") == "x", "the rename was finished"
+    assert not store._staging_for(ref.locator).exists()
+    assert "completed an interrupted write" in caplog.text
+
+
+async def test_a_blob_the_log_names_and_nothing_holds_is_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The half a sweep that only deletes cannot see.
+
+    The fold knows every locator the log names and every file on disk, and used
+    one direction of that: files nothing names. The other direction is a log
+    naming a file nothing has, which is what a failed write leaves once the
+    append is already durable — and the first thing that meets it is the model,
+    following a path that does not resolve.
+
+    Said out loud at the one moment it is cheap to notice, rather than left for
+    the read that fails.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("producer", session.id))
+    _named(session, SPILLED, str(tmp_path / "spill" / session.id / "never-written.md"))
+
+    with caplog.at_level(logging.WARNING, logger="ph.seams.spill"):
+        assert await store.sweep_session(session) == []
+
+    assert "names a blob that is not there" in caplog.text
+    assert "never-written.md" in caplog.text
+
+
+async def test_a_staged_blob_no_run_will_commit_is_left_alone(
+    tmp_path: Path,
+) -> None:
+    """Nothing is deleted from staging, and the leak that leaves is the old one.
+
+    A reservation in flight and one abandoned by a dead run look identical:
+    neither is referenced, which is the whole point of appending the locator
+    second. Collecting the second would therefore race the first, so the sweep
+    collects neither — and what is left behind is exactly the leak `SpillClaim`
+    already describes, one file per run that died between the write and the
+    append. Recovering the *referenced* ones is the case worth having, and it is
+    the test above.
     """
     store = _store(tmp_path)
     session = Session("s1")
     store.claim(_claim("producer", session.id))
     ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
     staged = store._staging_for(ref.locator)
-    assert staged.exists()
 
-    # The next run: the reservation belongs to a process that is gone.
-    store._staged.clear()
+    assert await store.sweep_session(session) == []
 
-    assert await store.sweep_session(session) == [str(staged)]
-    assert not staged.exists()
+    assert staged.exists(), "an unreferenced staged blob is nobody's to judge"

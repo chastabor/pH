@@ -464,19 +464,31 @@ async def test_a_profile_resumes_through_whichever_backend_it_mounted(
 
 
 def _reference_fork(
-    store: SessionPersistence, child: str, parent: str, boundary: int, family: str | None = None
+    store: SessionPersistence,
+    child: str,
+    parent: str,
+    boundary: int,
+    family: str | None = None,
+    *,
+    own: bool = True,
 ) -> Session:
     """`reference_fork` put through this backend.
 
     `family` because a lineage shares one directory, which `SessionStore.create`
     settles for anything it builds — a header assembled here has to say it, and a
     synthetic chain with no real root has to pick one.
+
+    `own=False` keeps the header and drops the child's one event, which is the
+    shape a fork taken *at* an end-seed has: `Session.__init__` suppresses the
+    marker when the seed already ends in one, so such a child stores nothing at
+    all and the file has no first seq to read a boundary off.
     """
-    header, own = reference_fork(child, parent, boundary=boundary, family=family)
+    header, events = reference_fork(child, parent, boundary=boundary, family=family)
     session = Session(child, header=header)
     store.track(session)
-    for event in own:
-        store.record(session, event)
+    if own:
+        for event in events:
+            store.record(session, event)
     return session
 
 
@@ -520,6 +532,44 @@ async def test_a_child_holding_only_its_own_events_materializes_its_lineage(
     assert header.id == "c", "the lineage supplies events, not identity"
     assert [event.seq for event in events] == [0, 1, 2, 3, 4, 5]
     assert [event.type for event in events[:4]] == [event.type for event in parent.events[:4]]
+
+
+async def test_a_fork_at_an_end_seed_still_reads_its_history(
+    store: SessionPersistence,
+) -> None:
+    """A child that owns *nothing* inherits everything, and used to read as empty.
+
+    `Session.__init__` suppresses the `session/end-seed` marker when the seed
+    already ends in one, so a fork taken at an end-seed — a fork of a fresh fork,
+    or any trajectory fork aimed at that boundary — writes a header and no events
+    at all. With no first event to read a boundary off, the walk took an empty
+    file for a complete log and handed back nothing.
+
+    The damage compounds rather than stopping there: `resume_session` seeds from
+    that empty answer, appends its own marker at seq 0, and the next read refuses
+    the log outright as a child that claims completeness but is short. So the
+    symptom is a session that silently loses its history and then cannot be
+    opened at all.
+
+    `seed_length` is the boundary here, which is what it has always meant — the
+    file simply has no event to say it with.
+    """
+    parent = _session(store, "p")
+    for turn in range(2):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+
+    childless = _reference_fork(store, "c", "p", boundary=4, own=False)
+    assert childless.events == (), "a fork at an end-seed owns nothing of its own"
+    await store.flush(childless)
+
+    header, events = store.read("c")
+    assert header.id == "c"
+    assert [event.seq for event in events] == [0, 1, 2, 3], "the inherited prefix came back"
+    # And the log it hands back is one a resume accepts, which is the half the
+    # empty answer broke on its way to being refused.
+    Session("c", seed=list(events), header=header)
 
 
 async def test_a_growing_parent_never_disturbs_a_child(store: SessionPersistence) -> None:
@@ -997,6 +1047,44 @@ async def test_a_claimed_session_refuses_a_second_writer_until_released(
     await second.dispose()
 
 
+async def test_a_cwd_tagged_session_is_refused_to_a_second_process(
+    store: SessionPersistence, tmp_path: Path
+) -> None:
+    """The lease has to outlive the log moving, because the log moves.
+
+    A root is claimed *before* it is created, and creation is what decides where
+    the file goes: a session with a working directory is filed under
+    `<cwd-tag>-<id>` rather than `<id>`. Keyed by the log's path, the first
+    claimant therefore locked a path the log never appeared at, and a second
+    process — which finds the log on disk and derives the *other* path — was
+    handed a lease nobody was holding. Two writers on one log, which is the one
+    thing I-5 refuses.
+
+    The second store is a second process's view by construction: its own
+    instance, with no buffer to remember where the first one put anything.
+    """
+    assert isinstance(store, ClaimingStore), "both shipped backends can claim"
+    first, second = Context(), Context()
+    await store.claim("tagged", scope=first)
+
+    # Created *after* the claim, and with a cwd, which is what moves the file.
+    session = _session(store, "tagged", cwd="/w/repo")
+    _append(store, session, "user/message", user_payload("hello", "m1"), APPEND)
+    await store.flush(session)
+
+    # A second process, built rather than simulated: it knows the log only by
+    # finding it on disk, which is what made it derive the *other* path. That is
+    # the whole difference between this test and the one above.
+    fresh = type(store)(ctx=None, root=tmp_path)  # type: ignore[call-arg]
+    assert isinstance(fresh, ClaimingStore)
+    with pytest.raises(SessionBusy) as refused:
+        await fresh.claim("tagged", scope=second)
+    assert refused.value.code == "session_already_active"
+
+    await first.dispose()
+    await second.dispose()
+
+
 async def test_a_flush_that_does_not_happen_still_owes_its_events(
     store: SessionPersistence,
 ) -> None:
@@ -1033,6 +1121,56 @@ async def test_a_flush_that_does_not_happen_still_owes_its_events(
         "the log came back with a hole where the canceled flush had been"
     )
     Session("owed", seed=list(events), header=_header)  # the resume `_readmit` refuses
+
+
+async def test_two_overlapping_flushes_keep_seq_order(store: SessionPersistence) -> None:
+    """The case the take-then-restore was written for, and could not survive.
+
+    Clearing the queue before the write makes a concurrent flush a no-op, which
+    is right. Restoring it on failure is also right. Together, unserialized, they
+    lose: the first flush parks in the thread pool holding seqs 0-5, a second one
+    takes and writes seq 6 while it is there, and the first then puts its batch
+    back at the *front* of the queue. The file ends up holding 6 before 0, and
+    `header_written` is restored by whichever failed last, so a log can end up
+    with no header line at all. `read_session` refuses both, which makes this an
+    unopenable session rather than a mis-ordered one.
+
+    **The parking is what the earlier draft of this test missed.** Cancel the
+    first flush at its own thread hop and the restore runs immediately, with no
+    await in between for anything to interleave with — so it passed with the lock
+    deleted. `sleep(0)` lets the first flush get *into* the thread, and anyio
+    waits for that thread before delivering the cancellation, which is the window
+    the second one runs in.
+
+    Sabotage: drop `buffer.writing` and the JSONL log reads back out of order.
+    Turso upserts by seq and is order-independent, so it is here for the queue
+    bookkeeping rather than for the ordering.
+    """
+    session = _session(store, "overlap")
+    for turn in range(3):
+        _append(store, session, "turn/start", {"turn": turn})
+        _append(store, session, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+
+    async with anyio.create_task_group() as tasks:
+        parked = anyio.CancelScope()
+
+        async def interrupted() -> None:
+            with parked:
+                await store.flush(session)
+
+        tasks.start_soon(interrupted)
+        await anyio.sleep(0)
+        # Teardown arrives while that flush is in the thread pool, holding 0-5.
+        parked.cancel()
+        _append(store, session, "turn/start", {"turn": 3})
+        await store.flush(session)
+
+    await store.flush(session)
+
+    _header, events = store.read("overlap")
+    assert [event.seq for event in events] == list(range(len(session.events))), (
+        "the restored batch landed behind events written after it"
+    )
 
 
 async def test_a_failed_write_is_retried_rather_than_lost(

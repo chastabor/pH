@@ -232,7 +232,7 @@ class ClaimingStore(Protocol):
     A backend with no per-session file does not implement this, and a host
     finding no `ClaimingStore` says so out loud rather than locking a path that
     protects nothing. Both shipped backends keep one file per session and
-    implement it through `lease.claim_file`.
+    implement it through `lease.claim_session`.
 
     `scope` is **required**: it is the lifetime that holds the lock, and a lease
     with a defaulted owner is one nobody remembers to release.

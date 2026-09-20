@@ -51,7 +51,7 @@ from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
-from .lease import claim_file
+from .lease import claim_session
 from .lineage import materialize
 from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
@@ -287,8 +287,11 @@ class TursoSessionStore:
     def locate(self, session_id: str) -> Path | None:
         """One database per session, so there is always a path to point at.
 
-        Which is what makes P5-03's lease work here at all: a shared database
-        had none, and `locate` returning `None` silently disabled I-5.
+        That was once what made P5-03's lease work here at all — a shared
+        database has no path to lock, and `locate` returning `None` silently
+        disabled I-5. The lease is keyed by the session id now
+        (`lease.claim_session`), so this answers the ordinary question instead:
+        where does this session's storage live.
         """
         return self._path_for(session_id)
 
@@ -299,7 +302,7 @@ class TursoSessionStore:
         second process appending a second log's worth of `seq` to one session,
         which is the hazard, so the lease is the same file lock JSONL takes.
         """
-        await claim_file(scope, self._path_for(session_id), session_id)
+        await claim_session(scope, self.root, session_id)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.

@@ -24,7 +24,9 @@ import json
 import logging
 import os
 from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +40,7 @@ from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
-from .lease import claim_file
+from .lease import claim_session
 from .lineage import materialize
 from .protocol import SessionPersistence, StoredSession, attach, stored_row
 
@@ -104,6 +106,8 @@ class _Buffer:
     path: Path
     pending: list[SessionEvent] = field(default_factory=list)
     header_written: bool = False
+    writing: anyio.Lock = field(default_factory=anyio.Lock)
+    """One flush of this log at a time. See `JsonlSessionStore.flush`."""
 
 
 @dataclass(slots=True)
@@ -173,6 +177,17 @@ class JsonlSessionStore:
         and a second one that found the same events still queued would append
         them twice. Clearing first makes the concurrent flush a no-op.
 
+        **Serialized per log, because take-then-restore is only safe alone.**
+        Overlapping flushes were the case the clearing was *for*, and the restore
+        is what it could not survive: the earlier flush, canceled at the thread
+        hop, put its events back at the front of a queue the later one had
+        already taken from and written. The file then held higher seqs before
+        lower ones, and `header_written` was restored by whichever failed last —
+        so a log could end up with no header line at all, which `read_session`
+        refuses outright. A waiter canceled here has taken nothing, so the lock
+        costs a concurrent flush exactly what the clearing already cost it: it
+        finds the queue empty and does nothing.
+
         *Restored*, because clearing first is otherwise a way to lose them.
         `anyio.to_thread.run_sync` begins with a checkpoint, so a cancellation
         delivered as this flush enters the thread pool raises **before** the
@@ -192,22 +207,25 @@ class JsonlSessionStore:
         buffer = self._buffers.get(session.id)
         if buffer is None:
             return
-        records: list[dict[str, Any]] = []
-        header_owed = not buffer.header_written
-        if header_owed:
-            records.append({"type": HEADER_LINE_TYPE, "header": session.header.to_wire()})
-        owed = list(buffer.pending)
-        records.extend(event.to_wire(thaw=False) for event in owed)
-        if not records:
-            return
-        buffer.pending.clear()
-        buffer.header_written = True
-        try:
-            await anyio.to_thread.run_sync(_append_and_sync, buffer.path, records)
-        except BaseException:
-            buffer.pending[:0] = owed
-            buffer.header_written = not header_owed
-            raise
+        async with buffer.writing:
+            records: list[dict[str, Any]] = []
+            header_owed = not buffer.header_written
+            if header_owed:
+                records.append({"type": HEADER_LINE_TYPE, "header": session.header.to_wire()})
+            owed = list(buffer.pending)
+            records.extend(event.to_wire(thaw=False) for event in owed)
+            if not records:
+                return
+            buffer.pending.clear()
+            buffer.header_written = True
+            try:
+                await anyio.to_thread.run_sync(
+                    partial(_append_and_sync, buffer.path, records, fresh=header_owed)
+                )
+            except BaseException:
+                buffer.pending[:0] = owed
+                buffer.header_written = not header_owed
+                raise
 
     # ------------------------------------------------------------- reading --
     #
@@ -251,10 +269,16 @@ class JsonlSessionStore:
     def _path_for(self, session_id: str) -> Path:
         """This session's log, by what is known before what is on disk.
 
-        **Answers before the file exists**, which is what the lease needs: a
-        root is claimed *before* it is created. A tracked session's path is
-        already decided; anything else is searched for; and a session that is
-        neither is a root about to be written, whose family is its own id.
+        A tracked session's path is already decided; anything else is searched
+        for; and a session that is neither is answered with where a root *would*
+        go, whose family is its own id.
+
+        **That last one is a guess, and it used to be load-bearing**: the lease
+        was `<this path>.lock`, so a root claimed before creation locked the
+        guess while `create` filed the log somewhere else. The lease is keyed by
+        the session id now (`lease.claim_session`), which leaves this answering
+        only for `locate`, whose caller is asking where a log is rather than
+        holding one against another process.
         """
         buffer = self._buffers.get(session_id)
         if buffer is not None:
@@ -265,7 +289,7 @@ class JsonlSessionStore:
 
     async def claim(self, session_id: str, *, scope: Context) -> None:
         """Hold this log against every other writer for `scope`'s life (I-5)."""
-        await claim_file(scope, self._path_for(session_id), session_id)
+        await claim_session(scope, self.root, session_id)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
@@ -286,12 +310,35 @@ class JsonlSessionStore:
         self._buffers.pop(session_id, None)
 
 
-def _append_and_sync(path: Path, records: list[dict[str, Any]]) -> None:
+def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) -> None:
+    """Append these records and make them durable, file *and* directory.
+
+    The file's own `fsync` is what the barrier promises. It is not enough for the
+    first write to a new log: the bytes are durable and the directory entry
+    naming them may not be, so an unclean shutdown can leave a session that was
+    flushed and is not there. Syncing the directory is the cheap half of the
+    promise and only matters once per log.
+
+    `fresh` is told rather than sensed. `flush` already holds it — a header is
+    owed on exactly the write whose directory entry is new — and a `path.exists()`
+    here would pay a stat on every flush of every session forever to answer "yes"
+    once, while making a second statement of "is this log new" that can disagree
+    with `header_written`.
+    """
     payload = "".join(f"{dumps(record)}\n" for record in records)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
+    if fresh:
+        # Best effort: a filesystem that refuses a directory handle (some
+        # networked ones do) has already given us the file's own durability.
+        with suppress(OSError):
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
 
 def read_records(path: Path) -> Iterator[dict[str, Any]]:

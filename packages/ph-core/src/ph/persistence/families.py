@@ -40,6 +40,12 @@ def family_dirs(root: Path, *, tag: str = "") -> list[str]:
 
     A *tagless* directory — a session created with no cwd — is not matched by any
     tag, which is the honest answer: it belongs to no working directory.
+
+    **A dotted directory is not a lineage**, and saying so here is what keeps it
+    from being one. `lease.LEASES` is `.leases` under this same root, and an
+    unfiltered listing collected it as a family — harmless only because the
+    suffix filter downstream finds no logs in it, which is the kind of accident
+    that stops being one when somebody adds a second dot-directory.
     """
     prefix = f"{tag}-" if tag else ""
     try:
@@ -47,7 +53,9 @@ def family_dirs(root: Path, *, tag: str = "") -> list[str]:
             return [
                 entry.path
                 for entry in entries
-                if entry.is_dir() and (not prefix or entry.name.startswith(prefix))
+                if entry.is_dir()
+                and not entry.name.startswith(".")
+                and (not prefix or entry.name.startswith(prefix))
             ]
     except OSError:
         return []

@@ -11,11 +11,13 @@ the fake-provider options. Each was being re-declared per test module.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
+from filelock import FileLock
 
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
@@ -24,6 +26,7 @@ from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
+from ..persistence.lease import lease_path
 from ..seams.skills import SkillService
 from ..seams.workspace import (
     ACQUIRED,
@@ -462,6 +465,20 @@ def write_reference_fork(
         encoding="utf-8",
     )
     return path
+
+
+@contextmanager
+def hold_session(root: Path, session_id: str) -> Iterator[Path]:
+    """Hold one session's lease the way another process would; yields the log path.
+
+    Through `lease_path` rather than a hand-spelled lock file, for `stored_log`'s
+    reason one layer over: two suites each wrote `FileLock(f"{log}.lock")`, which
+    was where the lease lived until it stopped being derived from the log at all.
+    A test that spells the layout locks the wrong file the moment the layout
+    moves, and then tests nothing while still passing.
+    """
+    with FileLock(lease_path(root, session_id), thread_local=False):
+        yield stored_log(root, session_id)
 
 
 def stored_log(root: Path, session_id: str, *, family: str | None = None) -> Path:

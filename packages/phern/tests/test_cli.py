@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 import typer
 import yaml
-from filelock import FileLock
 from typer.testing import CliRunner
 
 import ph_app
@@ -26,7 +25,7 @@ from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.json import as_obj
 from ph.paths import resolve_roots
 from ph.session import SESSION_FORMAT_VERSION
-from ph.testing import ReapedHost, not_none, stored_log
+from ph.testing import ReapedHost, hold_session, not_none, stored_log
 from ph_app import profiles
 from ph_app.cli import app
 from ph_app.profiles import (
@@ -643,13 +642,12 @@ def test_print_mode_refuses_a_session_another_process_holds(
 ) -> None:
     """One sentence and exit 2, not a traceback — the daemon's own refusal (P5-03)."""
     monkeypatch.setenv("PH_HOME", str(tmp_path))
-    log_path = tmp_path / "sessions" / "held" / "held.jsonl"
-    holder = FileLock(f"{log_path}.lock", thread_local=False)
-    holder.acquire()
-    try:
+    # Through `hold_session` rather than a hand-spelled lock file: the lease is
+    # keyed by the session id, not derived from the log's path, and a test that
+    # spells either one stops locking what the store locks the next time the
+    # layout moves.
+    with hold_session(tmp_path / "sessions", "held") as log_path:
         result = runner.invoke(app, ["-p", "hello", "--session", "held"])
-    finally:
-        holder.release()
     assert result.exit_code == 2, result.output
     assert 'session "held" is already active in another process' in result.output
     assert "Traceback" not in result.output

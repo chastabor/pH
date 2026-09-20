@@ -93,14 +93,6 @@ class SpillStore:
     ctx: Context
     root: Path
     _claims: list[SpillClaim] = field(default_factory=list)
-    _staged: set[str] = field(default_factory=set)
-    """Staged paths this process still intends to commit.
-
-    Read by the sweep, which would otherwise collect a reservation in flight and
-    leave `commit` with nothing to rename — the same race one directory down.
-    Within a process this is exact; across processes the I-5 lease is what makes
-    anything else under `.staging` the leavings of a run that is over.
-    """
 
     def locator_for(self, *, owner: str, suggested_name: str, content: bytes) -> Path:
         """Where `content` will be written — derived, not written.
@@ -180,15 +172,7 @@ class SpillStore:
         """
         path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
         staged = self._staging_for(str(path))
-        # Recorded *before* the write, so the path is spoken for from before the
-        # instant it can exist until after `commit` renames it. Added after, a
-        # sweep looking in between finds a staged file nobody claims.
-        self._staged.add(str(staged))
-        try:
-            await anyio.to_thread.run_sync(_write, staged.parent, staged, content)
-        except BaseException:
-            self._staged.discard(str(staged))
-            raise
+        await anyio.to_thread.run_sync(_write, staged.parent, staged, content)
         return SpillRef(
             locator=str(path),
             bytes=len(content),
@@ -241,8 +225,6 @@ class SpillStore:
         except OSError:
             log.warning("ph.seams.spill: could not publish %s", ref.locator, exc_info=True)
             return False
-        finally:
-            self._staged.discard(str(staged))
         return True
 
     async def load_text(self, locator: str) -> str:
@@ -271,6 +253,22 @@ class SpillStore:
         One pass over the log and one thread hop for the whole thing: this runs
         on every session open, resume and fork, and a fold of a long log belongs
         off the event loop.
+
+        **It also finishes what a dead run started, and says what it cannot.**
+        The fold holds both halves of the comparison, so having used one of them
+        to find files nothing names, it uses the other for the two states a
+        crash can leave. A blob the log names that is still staged is *completed*
+        — the bytes are there and the log already says where they belong, so the
+        rename the dead run never reached is the repair. A blob the log names
+        that is nowhere is reported, because the alternative is the model being
+        handed a path that fails when it follows it.
+
+        Nothing is ever deleted from `.staging`. A reservation in flight is
+        indistinguishable from an abandoned one — neither is referenced yet, that
+        being the whole point of write-ahead — so collecting the second would
+        race the first, and the bookkeeping that told them apart bought less than
+        it cost. What is left behind instead is the leak this module's
+        `SpillClaim` already describes, one file per run that died mid-write.
         """
         claims = tuple(self._claims)
 
@@ -297,7 +295,16 @@ class SpillStore:
                         owners.add(owner)
             removed: list[str] = []
             for owner in sorted(owners):
-                removed.extend(_remove_unreferenced(self.root / owner, referenced, self._staged))
+                directory = self.root / owner
+                for completed in _complete_staged(directory, referenced):
+                    log.info("ph.seams.spill: completed an interrupted write of %s", completed)
+                removed.extend(_remove_unreferenced(directory, referenced))
+            for absent in sorted(one for one in referenced if not Path(one).exists()):
+                log.warning(
+                    "ph.seams.spill: session %s names a blob that is not there: %s",
+                    session.id,
+                    absent,
+                )
             return removed
 
         return await anyio.to_thread.run_sync(run)
@@ -314,19 +321,32 @@ def _abort(claim: SpillClaim, session: Session) -> list[str]:
     return []
 
 
-def _remove_unreferenced(directory: Path, referenced: set[str], staged: set[str]) -> list[str]:
+def _complete_staged(directory: Path, referenced: set[str]) -> list[str]:
+    """Publish staged blobs the log already names. Returns what it finished.
+
+    The recovery half of write-ahead ordering. A run that died between appending
+    a locator and renaming the bytes into place leaves the log naming a blob that
+    is not at its locator — and the bytes sitting one directory down, under the
+    name they were always going to take. Finishing that rename is the whole
+    repair, and it needs no record of what was in flight: the log is the record.
+    """
+    waiting = directory / STAGING
+    if not waiting.is_dir():
+        return []
+    completed: list[str] = []
+    for path in sorted(waiting.iterdir()):
+        final = directory / path.name
+        if path.is_file() and str(final) in referenced and not final.exists():
+            os.replace(path, final)
+            completed.append(str(final))
+    return completed
+
+
+def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
     """Delete the files in one owner directory that no claim references.
 
-    `.staging` is walked separately rather than skipped: a reservation this
-    process still means to commit is spared, and everything else in there
-    belongs to a run that ended between staging a blob and appending the event
-    naming it — which is the leak `SpillClaim` describes, now collectable
-    because a staged file is unambiguously nobody's.
-
-    **`staged` is the store's live set, read here rather than copied**, the way
-    this fold already reads a live `Session`: a reservation made after a copy was
-    taken would be swept by a fold that had every right to think it was garbage,
-    and a membership test is the whole of what runs on this thread.
+    `.staging` is passed over because it is a directory and this collects files.
+    Nothing in it is ever deleted; `sweep_session` says why.
     """
     if not directory.is_dir():
         return []
@@ -335,12 +355,6 @@ def _remove_unreferenced(directory: Path, referenced: set[str], staged: set[str]
         if path.is_file() and str(path) not in referenced:
             path.unlink(missing_ok=True)
             gone.append(str(path))
-    waiting = directory / STAGING
-    if waiting.is_dir():
-        for path in sorted(waiting.iterdir()):
-            if path.is_file() and str(path) not in staged:
-                path.unlink(missing_ok=True)
-                gone.append(str(path))
     return gone
 
 

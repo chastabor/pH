@@ -57,7 +57,7 @@ from typing import Any
 from ..json import as_int, as_obj, as_seq, as_str
 from ..seams.approval import INTERRUPTED, pending_approvals
 from ..seams.user_questions import pending_questions
-from ..session import SessionEvent
+from ..session import SessionEvent, is_in_place_rewrite
 from ..session.json import freeze_json_value
 
 __all__ = [
@@ -156,6 +156,18 @@ def interrupted_turn_closers(events: Sequence[SessionEvent]) -> list[SessionEven
             pending.clear()
             open_step = None
         elif event.type == "assistant/message":
+            if is_in_place_rewrite(event):
+                # A near-copy of a message already in the log — argument
+                # truncation is the one that does this — so its `tool-call`
+                # blocks are answered behind it and registering them again would
+                # have this fold write a second `tool/result` for one id.
+                #
+                # `is_in_place_rewrite` rather than `is_replacement_surface_event`:
+                # the narrower predicate is the one that means "not new work". A
+                # substitution putting a genuinely new assistant message in place
+                # of a range would carry calls that *do* need closing, and the
+                # coarse test would skip those too.
+                continue
             content = as_seq(as_obj(event.data.get("message")).get("content"))
             for block in (as_obj(one) for one in content):
                 if block.get("type") == "tool-call":

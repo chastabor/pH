@@ -45,7 +45,7 @@ from filelock import FileLock, Timeout
 if TYPE_CHECKING:
     from ..cordis import Context
 
-__all__ = ["SessionBusy", "claim_file"]
+__all__ = ["LEASES", "SessionBusy", "claim_session"]
 
 
 class SessionBusy(Exception):
@@ -60,13 +60,40 @@ class SessionBusy(Exception):
     code = "session_already_active"
 
 
-async def claim_file(scope: Context, path: Path, session_id: str) -> None:
-    """Hold `<path>.lock` for as long as `scope` lives, or raise `SessionBusy`."""
+LEASES = ".leases"
+"""The directory holding one lock file per session, under the sessions root.
+
+Dotted, and its own directory, so a lease is never mistaken for a lineage by
+anything listing what is stored — see `families.family_dirs`, which states the
+exclusion. `claim_session` has the argument for why a lease lives here at all
+rather than beside the log it guards.
+"""
+
+
+def lease_path(root: Path, session_id: str) -> Path:
+    """Where this session's lease lives. Derived from the id and nothing else."""
+    return root / LEASES / f"{session_id}.lock"
+
+
+async def claim_session(scope: Context, root: Path, session_id: str) -> None:
+    """Hold this session's lease for as long as `scope` lives, or raise `SessionBusy`.
+
+    **Keyed by the id, not by the log's path**, and that distinction is the
+    defect this replaces. The lock used to be `<log>.lock`, derived through the
+    store's `_path_for` — which answers with the *family* a log is filed under,
+    and a session's family is not known until it is created: a root claimed
+    before creation locked `<id>/<id>.jsonl.lock`, while `create` then filed the
+    log under `<cwd-tag>-<id>`. A second process, finding the log on disk, locked
+    the path beside it and was granted a lease the first process was not holding.
+    Two writers on one log, which is the one thing I-5 exists to refuse.
+
+    A store is free to move its files; this is the fixed point.
+    """
 
     def acquire() -> Callable[[], None]:
         # No mkdir: filelock's own `ensure_directory_exists` is the same
         # `parents=True, exist_ok=True` call on the same directory.
-        lock = FileLock(f"{path}.lock", timeout=0, thread_local=False)
+        lock = FileLock(lease_path(root, session_id), timeout=0, thread_local=False)
         try:
             lock.acquire()
         except Timeout as error:

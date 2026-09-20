@@ -134,15 +134,27 @@ def materialize(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
             code="TRUNCATED",
             session_id=session_id,
         )
-    if not events or events[0].seq == 0:
+    if events and events[0].seq == 0:
+        return header, events
+    if not events and not (header.parent_session and inherited):
+        # A root with nothing in it. A *fork* with nothing in it is the case
+        # below, and telling them apart is the header's job rather than the
+        # file's, because an empty file says the same thing either way.
         return header, events
 
     # Collect ancestors newest-first, taking from each only what the generation
     # below it still lacks. `owed` is always the next file's first seq, which is
     # both the count to take and the boundary the fork was made at.
+    #
+    # **A child that owns nothing still inherits everything**, and reading that
+    # as a complete empty log is how a fork lost its history. It happens for a
+    # forked-at-an-end-seed child: `Session.__init__` suppresses the
+    # `session/end-seed` marker when the seed already ends in one, so the child
+    # writes a header and no events at all. With no first event to read a
+    # boundary off, `seed_length` is the boundary — which is what it means.
     chain = [session_id]
     pieces = [events]
-    owed = events[0].seq
+    owed = events[0].seq if events else inherited
     parent = header.parent_session
     while owed > 0:
         if parent is None:

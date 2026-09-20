@@ -33,18 +33,15 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
-from filelock import FileLock
 
 from ph.cordis import Profile
 from ph.keys import SESSION_TELEMETRY
 from ph.persistence import SessionBusy, read_session
-from ph.testing import stored_log
+from ph.testing import hold_session, stored_log
 from ph_app.modes import render_transcript, run_json, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
 from ph_app.protocol import PROTOCOL_VERSION
@@ -222,24 +219,6 @@ async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
     assert frames[0]["id"] == 1
 
 
-@contextmanager
-def _held(session_id: str, tmp_path: Path) -> Iterator[Path]:
-    """Hold one session's log the way another process would, and yield its path.
-
-    Through `stored_log`, not a hand-spelled filename: it answers the path the
-    store *would* claim before the first flush, which is what these tests need,
-    and a test that spells the layout stops locking what the store locks the next
-    time the layout moves — the refusal then goes untested while still passing.
-    """
-    log_path = stored_log(tmp_path / "sessions", session_id)
-    holder = FileLock(f"{log_path}.lock", thread_local=False)
-    holder.acquire()
-    try:
-        yield log_path
-    finally:
-        holder.release()
-
-
 async def test_a_second_one_shot_run_on_one_session_resumes_it(
     profile: Profile, tmp_path: Path
 ) -> None:
@@ -273,7 +252,10 @@ async def test_a_one_shot_run_is_refused_a_session_another_process_holds(
     store's own, by name, so the CLI and the daemon protocol say one thing.
     Nothing is written: a refused run leaves no partial turn to explain.
     """
-    with _held("held", tmp_path) as log_path, pytest.raises(SessionBusy) as refused:
+    with (
+        hold_session(tmp_path / "sessions", "held") as log_path,
+        pytest.raises(SessionBusy) as refused,
+    ):
         await run_json(
             profile,
             "hello",
@@ -296,7 +278,7 @@ async def test_a_refused_open_leaves_an_ops_record(profile: Profile, tmp_path: P
     from ph_app.runtime import mounted, open_session
 
     seen: list[Any] = []
-    with _held("held", tmp_path):
+    with hold_session(tmp_path / "sessions", "held"):
         async with mounted(profile) as ctx:
             ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
             with pytest.raises(SessionBusy):

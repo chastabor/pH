@@ -28,7 +28,7 @@ from typing import Literal, TypeAlias, cast
 
 from pydantic import Field, NonNegativeInt, field_validator
 
-from ..json import JsonValue
+from ..json import JsonValue, as_str
 from ..llm.types import Message
 from ..selectors import matches_any, parse_all
 from ..wire import WireModel
@@ -109,7 +109,14 @@ class SessionHeader(WireModel):
     with a long conversation.
     """
     family: str = Field(
-        default_factory=lambda data: family_for(data["id"], data.get("cwd")), min_length=1
+        # `data.get`, not `data["id"]`: a stored header with no `id` at all is
+        # something a listing meets rather than something that cannot happen, and
+        # a `KeyError` out of a default factory is not a `ValidationError` — so
+        # it escaped every caller that was catching one, and one hand-edited line
+        # took the whole `stored()` listing down with it. Empty fails
+        # `min_length` instead, which is the refusal this field already has.
+        default_factory=lambda data: family_for(as_str(data.get("id")), data.get("cwd")),
+        min_length=1,
     )
     """Which lineage this log belongs to, and **where that lineage was worked**.
 

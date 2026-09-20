@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from types import MappingProxyType
 
 from ..json import PlainJsonValue, thaw_json
 from .events import (
@@ -221,15 +220,27 @@ def _assert_tool_result_rewrite(
 
 
 def _blank_result_content(data: object) -> PlainJsonValue:
-    """A `tool/result` payload with the result block's content blanked out."""
+    """A `tool/result` payload with every result block's content blanked out.
+
+    **Every block, and the list kept at its own length.** Blanking only the first
+    and collapsing the list to it compared two payloads by their first block
+    alone: a replacement could drop the blocks behind it, or add one carrying a
+    different `toolCallId` or `isError`, and still read as "content only". The
+    narrowing is what stops a spill rewriting what the model is told happened, so
+    it has to hold for the whole message rather than its opening block.
+    """
     plain = thaw_json(data)
     message = plain.get("message") if isinstance(plain, dict) else None
     if isinstance(message, dict):
         blocks = message.get("content")
-        if isinstance(blocks, list) and blocks:
-            first = blocks[0]
-            if isinstance(first, (dict, MappingProxyType)):
-                message["content"] = [{**dict(first), "content": None}]
+        if isinstance(blocks, list):
+            # `thaw_json` above rebuilds every mapping as a plain `dict`, so a
+            # proxy cannot reach here. A non-mapping element can, from a
+            # hand-edited log, and is kept rather than dropped: losing a block is
+            # the thing this comparison exists to catch.
+            message["content"] = [
+                {**block, "content": None} if isinstance(block, dict) else block for block in blocks
+            ]
     return plain
 
 
