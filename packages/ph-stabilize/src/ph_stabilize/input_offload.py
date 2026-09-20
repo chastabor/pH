@@ -115,7 +115,8 @@ async def apply(ctx: Context, config: Config) -> None:
         if session is None or pending is None:
             return await next_(proposal)
         event, text = pending
-        ref = await ctx.require(SPILL_STORE).try_save_text(
+        store = ctx.require(SPILL_STORE)
+        ref = await store.try_reserve_text(
             owner=session.id,
             source="pasted message",
             # Named by the seq it replaces rather than upstream's uuid: the
@@ -129,10 +130,16 @@ async def apply(ctx: Context, config: Config) -> None:
             # the content must not be the reason the model loses it. The seam
             # logs why.
             return await next_(proposal)
+        # Appended before the blob appears at `ref.locator`, which is the
+        # ordering the open-time sweep depends on: a file on disk that the log
+        # does not name is garbage by definition, so writing first left this
+        # blob indistinguishable from garbage for as long as it took to get
+        # here — and the sweep runs on another task.
         session.append(
             "offload/input-spilled",
             {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
         )
+        await store.commit(ref)
         preview = TOO_LARGE_HUMAN_MSG.format(
             file_path=ref.locator, content_sample=content_preview(text)
         )

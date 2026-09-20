@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Seque
 from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Final, TypeAlias, cast, overload
+from typing import Any, Final, Literal, TypeAlias, cast, overload
 from weakref import ref
 
 import anyio
@@ -264,6 +264,36 @@ become a process that will not exit — which is why this is a deadline and not 
 bare shield.
 """
 
+DRAIN_SECONDS = GRACE_SECONDS / 2
+"""How long `drain` waits on detached work before the unwind behind it starts.
+
+**Derived from `GRACE_SECONDS` rather than declared beside it**, because the two
+are spent back to back by a host tearing a mount down and the relation is the
+whole point: a listener still running here has already been told its scope is
+going, while the effects behind it are worktrees, leases and child processes
+that outlive the process if nobody hands them back. When both cannot be
+afforded, the unwind is the one that must run. Written as a literal, that
+sentence would stop being true the first time somebody raised the grace period.
+"""
+
+_UNWINDING: ContextVar[bool] = ContextVar("ph.cordis.unwinding", default=False)
+"""Whether the caller is already inside a shielded unwind.
+
+**Per task rather than per tree, and the distinction is the whole of it.** This
+was a field on `_Runtime`, which every scope in one tree shares, and it answered
+the nested case correctly: `dispose` recurses into children, and a second shield
+per layer costs 232% on a 341-scope tree for no guarantee the outer one is not
+already giving. What it could not tell apart was a *sibling* — two scopes of one
+tree disposed concurrently on two tasks — which found the flag set by the other
+and ran its whole unwind bare, so the first one's cancellation stranded the
+second one's effects. That is the shape a daemon reaches whenever a passivation
+overlaps a shutdown.
+
+A `ContextVar` answers the question that was being asked all along: is there a
+shield above *me*. A nested `dispose` inherits the value on the same task; a
+sibling on another task does not, and raises its own.
+"""
+
 ABANDONED_LEDGER = 64
 """How many cut-short unwinds one tree remembers.
 
@@ -342,6 +372,10 @@ class Abandoned:
         )
 
 
+ForkState: TypeAlias = Literal["unmounted", "failed", "active", "activating", "unwound", "waiting"]
+"""Where a mounted plugin stands. See `ForkScope.state`, which is the only producer."""
+
+
 @dataclass(slots=True)
 class _Provision:
     value: object
@@ -377,9 +411,26 @@ class _Dependent:
     a live reader of the topology is asking about."""
     scope: Context | None = None
     disposed: bool = False
+    failure: str | None = None
+    """Why this dependent's activation raised, or `None`. Set once; never retried.
+
+    **What stops the next `reconcile` running a failed `apply` again.**
+    `deactivate()` marks the tree dirty, so a dependent left `ready()` after its
+    `apply` raised was re-activated on the very next round — the same `apply`,
+    raising the same way, ahead of every row still waiting its turn in the list.
+    A profile with one broken row therefore mounted nothing behind it and re-ran
+    whatever that row had already done, once per `reconcile`, for the life of the
+    process.
+
+    A reason rather than a flag, for `Abandoned`'s reason: the state is reported
+    to a person — `phern doctor` prints it beside `waiting on` — and "failed" with
+    no sentence is a report that sends the reader to the logs. `None` rather than
+    an empty string so the test below is a comparison and not a truthiness that
+    happens to hold because the message is never blank.
+    """
 
     def ready(self) -> bool:
-        return self.ctx.active and not self.missing()
+        return self.ctx.active and self.failure is None and not self.missing()
 
     def missing(self) -> list[str]:
         """The inject keys not yet provided at this dependent's own scope.
@@ -418,17 +469,11 @@ class _Runtime:
     the tree — `GRACE_SECONDS` at every layer, which is exactly the failure
     `daemon/server.py` names when it insists on one shared number.
 
-    Set by whoever starts the unwind, or *before* it by `Context.unwind_by` —
+    Read by `drain` and by `dispose`, which spend it in that order. Set by
+    whoever starts the unwind, or *before* it by `Context.unwind_by` —
     which is how a caller holding several trees spends one budget across all of
     them. Cleared when that unwind ends.
     """
-    unwinding: bool = False
-    """Whether a shield is already up for this tree.
-
-    Separate from `unwind_deadline` because a pre-seeded budget is not the same
-    fact as an unwind in progress: with one field, `unwind_by` would look exactly
-    like a nested call and the outermost `dispose` would decline to raise the
-    shield at all."""
     abandoned: list[Abandoned] = field(default_factory=list)
     """Unwinds this tree could not finish, newest last, capped at
     `ABANDONED_LEDGER`. On the runtime rather than on the scope because the scope
@@ -478,6 +523,41 @@ class ForkScope:
     def ever_active(self) -> bool:
         """Whether it has activated at least once; with `active` false, it was unwound."""
         return self._dependent.ever_active
+
+    @property
+    def failure(self) -> str | None:
+        """Why this plugin's `apply` raised, or `None`. See `state`."""
+        return self._dependent.failure
+
+    @property
+    def state(self) -> ForkState:
+        """Where this fork stands, as one of six names.
+
+        **The set is closed, so it is a `Literal` and not a ladder each reader
+        rebuilds.** `Mount.topology` publishes this through the `topology` seam,
+        so it is a surface rather than a log line, and the printer that used to
+        derive it from five booleans owned the *ordering* as well — that `failed`
+        has to be answered before `waiting on`, because a row that raised may
+        also be missing a key and the reason it raised is the more useful
+        sentence. A second consumer deriving that for itself is a second chance
+        to get it wrong.
+
+        `failed` is the one state that does not resolve itself. A waiting row
+        comes up when its key arrives; a failed one stays down however the tree
+        settles, because `ready()` refuses to hand the same `apply` a second
+        chance. `activating` means every key is met and `reconcile` has not
+        reached it yet, which only a reader inside the fixpoint ever sees.
+        """
+        dependent = self._dependent
+        if dependent.disposed:
+            return "unmounted"
+        if dependent.failure is not None:
+            return "failed"
+        if dependent.active:
+            return "active"
+        if not dependent.missing():
+            return "activating"
+        return "unwound" if dependent.ever_active else "waiting"
 
     @property
     def unmounted(self) -> bool:
@@ -1187,11 +1267,45 @@ class Context:
         Every external artifact an agent takes — a child process, a worktree, a
         temp path, a lock — is acquired through here, so cleanup is structural
         rather than remembered (§4.9, invariant I2).
+
+        **An artifact acquired into a scope that died mid-acquire is released
+        here rather than leaked.** `enter()` is awaited, and a `dispose()` on
+        another task can land inside that await, so the registration below would
+        refuse a disposer for a thing that already exists — the one window where
+        I2's "everything unwinds" turned on timing. Releasing it at once is the
+        only answer left: this scope's effect list has already drained, so an
+        entry added to it now is an entry nothing will ever run.
+
+        **Shielded**, for `dispose`'s own reason one layer down. The cancellation
+        that disposed the scope is usually still pending, so an unshielded
+        release would strand precisely the artifact this branch exists to rescue.
+
+        A release that itself raises is logged and the refusal still raised, as
+        in `_unwind`: one situation answers with one exception, and the caller
+        can act on neither the disposer's failure nor this one.
+
+        The one property this cannot keep is LIFO order — the effects registered
+        before it have already run — so an artifact whose release depends on one
+        of them is released after that one is gone. Nothing better is available
+        once the scope is down, and it is still strictly ahead of the leak.
         """
         self._assert_active()
         dispose = await maybe_await(enter())
         if not callable(dispose):
             raise TypeError(f"effect {label or enter!r} did not return a disposer")
+        if not self._active:
+            with anyio.CancelScope(shield=True):
+                try:
+                    await maybe_await(dispose())
+                except Exception:
+                    log.exception(
+                        "ph.cordis: effect %r could not be released after its scope went away",
+                        label or enter,
+                    )
+            raise InactiveScopeError(
+                f"scope {self.path} was disposed while {label or enter!r} was being "
+                "acquired; the artifact was released rather than registered"
+            )
         return self.add_disposer(dispose, label=label)
 
     # --------------------------------------------------------------- scopes --
@@ -1288,7 +1402,13 @@ class Context:
                     with running(scope):
                         try:
                             await maybe_await(dependent.activate(scope))
-                        except BaseException:
+                        except BaseException as error:
+                            # Recorded *before* the unwind, so a `deactivate`
+                            # that fails in turn cannot lose the reason the
+                            # activation failed — and so `ready()` is already
+                            # false by the time `deactivate` marks the tree
+                            # dirty, which is what keeps this from being retried.
+                            dependent.failure = f"{type(error).__name__}: {error}"
                             await maybe_await(dependent.deactivate())
                             raise
                 elif not ready and dependent.active:
@@ -1348,15 +1468,19 @@ class Context:
         elif runtime.unwind_deadline is None:
             runtime.unwind_deadline = anyio.current_time() + GRACE_SECONDS
         budget = runtime.unwind_deadline
-        owns_budget = not runtime.unwinding
+        owns_budget = not _UNWINDING.get()
+        # Set unconditionally: `reset` restores whatever was there, so True over
+        # True is a no-op and `owns_budget` stays the one name for the decision.
+        token = _UNWINDING.set(True)
         try:
             if owns_budget:
-                runtime.unwinding = True
                 # **Entered once per unwind, not once per scope.** Every nested
                 # `dispose` already runs inside this scope with the same
                 # deadline, so its own would be a second shield against nothing —
                 # measured at +232% on a 341-scope tree, which is the ordinary
-                # shape of a mounted profile going away.
+                # shape of a mounted profile going away. `_UNWINDING` is what
+                # makes "nested" mean nested rather than merely "somewhere in
+                # this tree"; see its own note.
                 #
                 # `CancelScope(deadline=)` rather than `move_on_after(delay)`:
                 # the budget is an instant, and a nested call re-deriving a delay
@@ -1366,8 +1490,8 @@ class Context:
             else:
                 await self._unwind()
         finally:
+            _UNWINDING.reset(token)
             if owns_budget:
-                runtime.unwinding = False
                 runtime.unwind_deadline = None
             self._leave_tree()
 
@@ -1706,11 +1830,67 @@ class Context:
         self.detach(coro, label=f"listener for {event}")
 
     async def drain(self) -> None:
-        """Await every detached coroutine: async `emit` listeners, and `detach()`."""
+        """Await every detached coroutine: async `emit` listeners, and `detach()`.
+
+        **Shielded and bounded, exactly as `dispose` is and for its reason.** The
+        two are called as a pair by a host unwinding a mount, and `dispose`
+        raises its own shield before its first await — so a bare drain left that
+        pair with an unprotected first half, and a cancellation arriving during
+        it took the whole unwind with it. The protection belongs here rather than
+        around the call: `ph.resources` records what a caller's own scope buys
+        against a self-shielding callee, which is that the outer deadline is
+        inert, and the one host doing it by hand is how a rule gets two
+        spellings.
+
+        The bound is the other half of the same decision. Waiting on detached
+        work is waiting on somebody else's checkpoint, so a listener that never
+        reaches one would otherwise trade a skipped unwind for a shutdown that
+        never finishes.
+
+        **Its own share, or whatever is left of a budget somebody seeded for the
+        whole teardown, whichever ends sooner.** A shield is opaque to a deadline
+        outside it, so a drain that answered only to `DRAIN_SECONDS` would spend
+        that much *per tree* inside a caller's total — ten roots closing under one
+        ten-second bound could take fifty. `unwind_by` is how that total is
+        declared, and reading it here is what makes the two halves of a teardown
+        add up to it rather than to a multiple of it. The share still applies, so
+        a drain cannot eat an unwind's time either.
+
+        **`gather(return_exceptions=True)` for the distinction, not for
+        concurrency**: `detach` hands every one of these to `ensure_future`, so
+        they are already running and awaiting them in turn would not serialize
+        anything (measured identical). What `gather` adds is that a member's
+        failure or cancellation comes back as a *result* — awaiting each in turn
+        re-raised it, so one listener canceled on its own account ended the drain
+        for all of them. Failures are logged by the done callback `detach`
+        attached, so nothing is swallowed twice.
+        """
+        if not self._runtime.background:
+            # Nothing to wait on, so nothing to protect. The scope below costs a
+            # clock read and about 3 µs to guarantee an empty loop, and this runs
+            # once per unmount and some seventy times across the suite.
+            return
+        if _UNWINDING.get():
+            # Already inside a teardown's shield. That is `dispose`'s rule and
+            # this is its second reader: another scope here would be a shield
+            # against nothing, at the cost `_UNWINDING` records.
+            await self._settle()
+            return
+        share = anyio.current_time() + DRAIN_SECONDS
+        whole = self._runtime.unwind_deadline
+        token = _UNWINDING.set(True)
+        try:
+            budget = share if whole is None else min(share, whole)
+            with anyio.CancelScope(deadline=budget, shield=True):
+                await self._settle()
+        finally:
+            _UNWINDING.reset(token)
+
+    async def _settle(self) -> None:
+        """Await the detached pool until it is empty. `drain` is the only caller."""
         while self._runtime.background:
-            for task in list(self._runtime.background):
-                # Already logged by the done callback; awaiting here is only
-                # about knowing the task has settled.
-                with suppress(Exception):
-                    await task
-                self._runtime.background.discard(task)
+            settling = set(self._runtime.background)
+            await asyncio.gather(*settling, return_exceptions=True)
+            # Discarded here as well as by the done callback, so the loop ends on
+            # what this call awaited rather than on when `call_soon` ran them.
+            self._runtime.background -= settling

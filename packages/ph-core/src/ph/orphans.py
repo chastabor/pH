@@ -182,13 +182,20 @@ class OrphanJournal:
             # long-lived journal are dead by the time anyone sweeps.
             token = process_start_token(pid)
             recorded = record.get("startToken")
-            if recorded is not None and token is not None and recorded != token:
+            if token is None or recorded is None:
+                # No token now and no token recorded are one fact: there is no
+                # identity to match. The mismatch test below needs both sides, so
+                # this has to come first — ordered the other way, a record
+                # written without a token matched nothing and reached the kill
+                # unchecked, which is this module's rule inverted at the point it
+                # exists for. `record` writes `startToken: null` whenever `/proc`
+                # is unreadable at spawn, and a journal outlives a `SIGKILL`.
+                unverifiable.append(pid)
+                continue
+            if recorded != token:
                 # The pid came back as something else. Leaving it alone is the
                 # whole reason the token is recorded.
                 stale.append(pid)
-                continue
-            if token is None:
-                unverifiable.append(pid)
                 continue
             if _kill(pid):
                 killed.append(pid)

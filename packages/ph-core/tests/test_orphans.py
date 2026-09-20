@@ -119,6 +119,28 @@ def test_a_live_owners_children_are_left_alone(tmp_path: Path) -> None:
         child.wait()
 
 
+def _forged(journal: OrphanJournal, *, token: str | None) -> None:
+    """A journal naming *this* process, with a start token that is not its own.
+
+    Both restraint tests forge a record the same way and differ only in the
+    token: a wrong one, and none at all. This process is the pid in each because
+    that is what makes the assertion real — a sweep that killed it would take the
+    test runner with it rather than report a failure.
+    """
+    journal.path.write_text(
+        json.dumps(
+            {
+                "op": "spawn",
+                "pid": os.getpid(),
+                "startToken": token,
+                "argv": "x",
+                "namespace": "a",
+            }
+        )
+        + "\n"
+    )
+
+
 def test_a_reused_pid_is_spared(tmp_path: Path) -> None:
     """The whole reason a token is recorded at all.
 
@@ -127,15 +149,31 @@ def test_a_reused_pid_is_spared(tmp_path: Path) -> None:
     if the sweep killed it the test would not finish.
     """
     journal = _journal(tmp_path)
-    journal.path.write_text(
-        json.dumps(
-            {"op": "spawn", "pid": os.getpid(), "startToken": "0", "argv": "x", "namespace": "a"}
-        )
-        + "\n"
-    )
+    _forged(journal, token="0")
+
     report = journal.sweep()
+
     assert report.killed == ()
     assert os.getpid() in report.stale
+
+
+def test_a_record_with_no_token_is_reported_not_killed(tmp_path: Path) -> None:
+    """The other way a record has no identity, and it used to skip every check.
+
+    `test_a_reused_pid_is_spared` covers a token that *mismatches*; this covers
+    one that was never recorded, which `sweep` explains is the same fact and used
+    to treat as a wildcard. The restraint is the assertion either way.
+    """
+    journal = _journal(tmp_path)
+    _forged(journal, token=None)
+
+    report = journal.sweep()
+
+    assert report.killed == ()
+    assert os.getpid() in report.unverifiable
+    # Kept rather than compacted away: the next sweep may be able to read a
+    # token, and a record dropped here is a stray nobody will ever look for.
+    assert str(os.getpid()) in journal.path.read_text()
 
 
 def test_the_journal_is_compacted_to_what_is_outstanding(tmp_path: Path) -> None:

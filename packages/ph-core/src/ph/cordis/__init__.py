@@ -12,6 +12,7 @@ from __future__ import annotations
 from .context import (
     ABANDONED_LEDGER,
     DEPLOYMENT,
+    DRAIN_SECONDS,
     GRACE_SECONDS,
     Abandoned,
     Boundary,
@@ -19,6 +20,7 @@ from .context import (
     Deployment,
     Disposer,
     ForkScope,
+    ForkState,
     Hook,
     Listener,
     MaybeAwaitable,
@@ -63,6 +65,7 @@ from .plugin import PluginSpec, normalize_plugin, plugin
 __all__ = [
     "ABANDONED_LEDGER",
     "DEPLOYMENT",
+    "DRAIN_SECONDS",
     "ENTRY_POINT_GROUP",
     "GRACE_SECONDS",
     "Abandoned",
@@ -76,6 +79,7 @@ __all__ = [
     "EventModeError",
     "EventRegistry",
     "ForkScope",
+    "ForkState",
     "Hook",
     "InactiveScopeError",
     "Listener",

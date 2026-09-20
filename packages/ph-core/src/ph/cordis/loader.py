@@ -28,7 +28,7 @@ from functools import cache
 from importlib.metadata import entry_points
 from pathlib import Path
 from types import ModuleType
-from typing import NoReturn
+from typing import NoReturn, assert_never
 
 import yaml
 
@@ -457,25 +457,27 @@ def _entry_point_targets(group: str = ENTRY_POINT_GROUP) -> dict[str, str]:
 def _state(fork: ForkScope) -> str:
     """One fork's state, as `Mount.topology` prints it.
 
-    Five, and the middle three are what a *live* reader sees — `phern doctor` reads
-    after the fixpoint and meets only the first and the fourth. `activating`:
-    every key is met and `reconcile` has not reached it yet. `unwound · waiting
-    on <key>`: it was active and a key it injects went away — a provider swap took
-    it down, which is the case a running daemon is asked about. `waiting on
-    <key>`: it never came up. `unmounted`: `dispose()` retired it. A first draft
-    printed the second as `waiting on ` followed by nothing, and could not tell
-    the third from the fourth.
+    Formatting only: which of the six names applies is `ForkScope.state`'s to
+    answer, and the ordering that used to live in the ladder here — `failed`
+    ahead of `waiting on`, because a row that raised may also be missing a key —
+    lives with it. Two of the six take a phrase rather than the bare name, which
+    is the whole of what is left: `waiting on <key>` names what is missing, and
+    `unwound · waiting on <key>` says it was up and a provider swap took it down,
+    which is the case a running daemon is asked about.
     """
     injects = ", ".join(fork.injects) or "nothing"
-    if fork.unmounted:
-        return f"unmounted · injects {injects}"
-    if fork.active:
-        return f"active · injects {injects}"
-    missing = fork.waiting_on
-    if not missing:
-        return f"activating · injects {injects}"
-    verb = "unwound · waiting on" if fork.ever_active else "waiting on"
-    return f"{verb} {', '.join(missing)} · injects {injects}"
+    match fork.state:
+        case "failed":
+            return f"failed · {fork.failure} · injects {injects}"
+        case "waiting" | "unwound" as state:
+            lead = "unwound · " if state == "unwound" else ""
+            return f"{lead}waiting on {', '.join(fork.waiting_on)} · injects {injects}"
+        case "unmounted" | "active" | "activating" as state:
+            return f"{state} · injects {injects}"
+        case _ as unhandled:
+            # Named rather than captured, so a seventh `ForkState` is a build
+            # failure here instead of a row that formats as its own name.
+            assert_never(unhandled)
 
 
 def import_plugin_modules() -> list[ModuleType]:
@@ -739,8 +741,14 @@ class Mount:
         return fork
 
     def inactive(self) -> list[str]:
-        """Row ids whose plugin is not active — an unmet `inject` key."""
-        return [row_id for row_id, fork in self.forks.items() if not fork.active]
+        """Row ids whose plugin is not active, whatever is keeping it down.
+
+        Through `state` rather than `not fork.active`, because the two stopped
+        meaning the same thing when `failed` joined the set: this said "an unmet
+        `inject` key" and a row whose `apply` raised now lands in the same list
+        for a different reason. `_state` is where a caller reads which.
+        """
+        return [row_id for row_id, fork in self.forks.items() if fork.state != "active"]
 
     def topology(self) -> list[tuple[str, str]]:
         """What the mount *became*, row by row — the half `Profile.dump()` cannot show.

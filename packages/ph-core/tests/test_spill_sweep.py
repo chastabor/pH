@@ -148,3 +148,61 @@ async def test_a_withdrawn_claim_stops_contributing(tmp_path: Path) -> None:
     release()
 
     assert await store.sweep_session(session) == [ref.locator]
+
+
+# ---------------------------------------------- the ordering the sweep needs --
+
+
+async def test_a_reserved_blob_is_not_collected_before_its_event_lands(
+    tmp_path: Path,
+) -> None:
+    """The window a producer used to leave open, and the sweep walked into.
+
+    A blob is garbage exactly when the log does not name it, so a producer that
+    writes first and appends second is indistinguishable from a leak for as long
+    as that takes — and the open-time sweep folds the log on another task. This
+    is not hypothetical: it deleted the input offload's own history file often
+    enough to fail its test under load, before `reserve_bytes` existed.
+
+    `reserve` is the write and `commit` is the rename, so the blob never exists
+    at its locator unreferenced: the sweep either finds nothing there, or finds
+    it already named.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("producer", session.id))
+
+    ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
+
+    # The state a producer is in between the two calls: content on disk, log
+    # silent. The sweep must not read that as garbage.
+    assert await store.sweep_session(session) == []
+    assert not Path(ref.locator).exists(), "reserved, not yet published"
+
+    _named(session, SPILLED, ref.locator)
+    assert await store.commit(ref) is True
+    assert Path(ref.locator).read_text(encoding="utf-8") == "x"
+    assert await store.sweep_session(session) == [], "and it stays, now that the log names it"
+
+
+async def test_a_staged_blob_no_run_will_commit_is_collected(tmp_path: Path) -> None:
+    """The leak the staging directory would otherwise turn into a permanent one.
+
+    A run that ends between staging a blob and appending the event naming it
+    leaves a file nothing will ever publish — the crash `SpillClaim` describes,
+    which used to be uncollectable because an orphan at a real locator is
+    indistinguishable from a file somebody wants. Staged, it is unambiguous: no
+    live reservation claims it, so the next sweep takes it.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("producer", session.id))
+    ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
+    staged = store._staging_for(ref.locator)
+    assert staged.exists()
+
+    # The next run: the reservation belongs to a process that is gone.
+    store._staged.clear()
+
+    assert await store.sweep_session(session) == [str(staged)]
+    assert not staged.exists()

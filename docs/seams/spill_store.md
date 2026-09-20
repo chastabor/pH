@@ -12,10 +12,12 @@ harness never tells the model something is gone when it is on disk.**
 ## The surface
 
 ```text
-await ctx.spill_store.save_text(text, ...)      # -> SpillRef
-await ctx.spill_store.try_save_text(text, ...)  # -> SpillRef | None
-await ctx.spill_store.load_text(ref)            # -> str
-ctx.spill_store.locator_for(...)                # the name, before the write
+await ctx.spill_store.reserve_text(text, ...)      # -> SpillRef, staged
+await ctx.spill_store.try_reserve_text(text, ...)  # -> SpillRef | None
+await ctx.spill_store.commit(ref)                  # publish, after the append
+await ctx.spill_store.save_text(text, ...)         # -> SpillRef, unordered
+await ctx.spill_store.load_text(ref)               # -> str
+ctx.spill_store.locator_for(...)                   # the name, before the write
 ctx.spill_store.claim(...)
 await ctx.spill_store.sweep_session(session_id)
 ```
@@ -32,15 +34,39 @@ A `SpillRef` is three fields, and the third is the interesting one:
 rather than making the model guess. A locator with no hint is a reference the
 model has to reverse-engineer, and it will reverse-engineer it wrongly.
 
-`try_save_text` is the non-raising form: a spill that fails is an optimization
-that did not happen, and the caller keeps the content inline rather than losing
-the turn.
+`try_reserve_text` is the non-raising form: a spill that fails is an
+optimization that did not happen, and the caller keeps the content inline rather
+than losing the turn. It is the *write*, so that fallback is still on the table
+when it answers `None` — nothing has been logged yet.
 
-## `locator_for` before the write
+## Reserve, append, commit
 
-The name is derived before the bytes are written, which is what lets a caller
-record the reference and the content in one consistent step — the same
-"log first, act second" shape the tool pipeline uses for `tool/call`.
+A blob is garbage exactly when the log does not name it. That is what makes the
+sweep below safe, and it is a promise about **ordering** that only producers can
+keep: one that writes the file first and appends the locator second leaves its
+own blob indistinguishable from garbage for as long as that takes, and the sweep
+runs on another task. It collected a live history file often enough to fail a
+test under load.
+
+So a producer that records a locator writes in two steps:
+
+```python
+ref = await ctx.spill_store.try_reserve_text(
+    owner=session.id, source="tool result", suggested_name=name, content=text
+)
+if ref is None:
+    return None  # fail open; nothing has been logged
+session.append("offload/spilled", {"callId": call_id, "locator": ref.locator})
+await ctx.spill_store.commit(ref)  # the blob appears, already named
+```
+
+`reserve` stages the bytes where the sweep does not look; `commit` is a rename
+within the owner's directory, so the blob appears whole, at a locator the log
+already names, or not at all. `save_text` remains for a caller with no log entry
+to keep in step — a test planting a blob, or a producer that appends nothing.
+
+`locator_for` is the derivation underneath both, public for the same reason:
+a caller that must record a reference before writing needs the name first.
 
 ## Why this is not `ctx.attachments`
 

@@ -185,7 +185,8 @@ async def spill_tool_result(
     `None` is the fail-open path both callers need: an offload that cannot store
     the content must not be the reason the model loses it. The seam logs why.
     """
-    ref = await ctx.require(SPILL_STORE).try_save_text(
+    store = ctx.require(SPILL_STORE)
+    ref = await store.try_reserve_text(
         owner=session.id,
         source=source,
         suggested_name=f"large_tool_results/{call_id}",
@@ -197,10 +198,14 @@ async def spill_tool_result(
     # is the type's, not this call site's) — a reader that skips it loses the
     # forwarding address, not the conversation, because the replacement the model
     # saw is what `tool/result` carries.
+    # Before the blob appears at `ref.locator`. See `SpillStore.reserve_bytes`:
+    # a blob the log does not name is what the sweep collects, so writing first
+    # raced the sweep over this row's own output.
     session.append(
         "offload/spilled",
         {"callId": call_id, "locator": ref.locator, "bytes": ref.bytes},
     )
+    await store.commit(ref)
     return TOO_LARGE_TOOL_MSG.format(
         tool_call_id=call_id, file_path=ref.locator, content_sample=content_preview(text)
     )

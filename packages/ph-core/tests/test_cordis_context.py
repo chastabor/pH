@@ -553,3 +553,206 @@ async def test_a_canceled_child_does_not_strand_its_parent() -> None:
     assert scope_violations(root) == [], "a disposed scope was left reachable from the root"
     assert parent not in root.children and child not in parent.children
     assert not parent.active and not child.active
+
+
+async def test_drain_ignores_a_canceled_detached_task() -> None:
+    """A task canceled on its own account is not the drainer's cancellation.
+
+    `CancelledError` is a `BaseException`, so the `suppress(Exception)` this
+    replaces let it through and `drain` raised into a caller nobody had canceled.
+    That is only a lost teardown where something drains *before* it unwinds,
+    which is exactly `ph_app.runtime.mounted` — so the cost of getting it wrong
+    was a whole mounted profile left live because one listener had been stopped.
+
+    The second listener is the half that says the loop continues: a drain that
+    swallowed the first and then returned early would pass an assertion about
+    the exception alone.
+    """
+    root = Context()
+    settled: list[str] = []
+
+    async def stopped_by_somebody_else() -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        await anyio.sleep(30)
+
+    async def ordinary() -> None:
+        settled.append("ordinary")
+
+    root.detach(stopped_by_somebody_else(), label="stopped")
+    root.detach(ordinary(), label="ordinary")
+
+    await root.drain()
+
+    assert settled == ["ordinary"], "the drain carried on to the task that had not stopped"
+
+
+async def _acquired_into_a_dying_scope(disposer: Disposer) -> None:
+    """Take an artifact through `effect` while the scope is disposed under it.
+
+    The window `effect` has to answer for, in one place: `enter()` is awaited, a
+    `dispose()` on another task lands inside that await, and the disposer arrives
+    for a scope that is already down. Both tests below turn on what happens next
+    and differ only in what the disposer does, so the race belongs here rather
+    than spelled twice with one line changed.
+    """
+    scope = Context().scope("agent")
+    acquiring, finish = anyio.Event(), anyio.Event()
+
+    async def acquire() -> Disposer:
+        acquiring.set()
+        await finish.wait()
+        return disposer
+
+    async def take() -> None:
+        with pytest.raises(InactiveScopeError, match="was disposed while"):
+            await scope.effect(acquire, label="worktree")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(take)
+        await acquiring.wait()
+        await scope.dispose()
+        finish.set()
+
+
+async def test_an_effect_acquired_into_a_dead_scope_is_released() -> None:
+    """I2's one window: the artifact exists and its scope is already gone.
+
+    Registering the disposer anyway would be worse than refusing — the effect
+    list has already drained, so the entry would sit there with nothing left to
+    run it. Releasing at once is the only answer that keeps "everything unwinds"
+    from depending on timing. A worktree stands in for the artifact because that
+    is the case that cost something real: the directory is on disk, and nothing
+    that could have removed it knows it is there.
+    """
+    released: list[str] = []
+
+    await _acquired_into_a_dying_scope(partial(released.append, "worktree"))
+
+    assert released == ["worktree"], "the artifact outlived the scope that took it"
+
+
+async def test_a_row_that_failed_to_apply_does_not_block_the_rest() -> None:
+    """A failed `apply` is not retried, and does not stand in the queue.
+
+    See `_Dependent.failure` for why the retry happened at all. What this holds
+    is the consequence a reader cares about: one broken row used to mount nothing
+    behind it, because the next `reconcile` reached the same `apply` again before
+    any row still waiting its turn. A daemon that retries a mount is where that
+    was paid for.
+    """
+    root = Context()
+    applied: list[str] = []
+
+    @plugin("broken")
+    async def broken(ctx: Context, config: None) -> None:
+        applied.append("broken")
+        raise RuntimeError("boom")
+
+    @plugin("sound")
+    async def sound(ctx: Context, config: None) -> None:
+        applied.append("sound")
+        ctx.provide("sound", True)
+
+    bad, good = root.plugin(broken), root.plugin(sound)
+    with pytest.raises(RuntimeError, match="boom"):
+        await root.reconcile()
+
+    await root.reconcile()
+    await root.reconcile()
+
+    assert applied == ["broken", "sound"], "the failure ran once and stopped blocking the queue"
+    assert good.state == "active" and root.has("sound")
+    # `failed` rather than `waiting`: the one state that does not resolve itself,
+    # and the reason beside it so a report does not send its reader to the logs.
+    assert bad.state == "failed"
+    assert bad.failure == "RuntimeError: boom"
+
+
+async def test_two_siblings_disposing_at_once_are_both_shielded() -> None:
+    """The shield has to be per unwind, not per tree.
+
+    The flag this replaces lived on the runtime every scope in a tree shares. It
+    answered the *nested* case correctly — see `_UNWINDING` for what a shield per
+    layer costs — but it could not tell a nested call from a sibling on another
+    task, which then ran its whole unwind bare and had its effects stranded by
+    the first one's cancellation.
+
+    A passivation overlapping a shutdown is the daemon's spelling of this, and
+    the stranded effect is whatever the second root was holding: a lease, a
+    worktree, a kernel.
+    """
+    root = Context()
+    ran: list[str] = []
+
+    async def slow(name: str) -> None:
+        await anyio.sleep(0.05)
+        ran.append(f"{name}-slow")
+
+    for name in ("first", "second"):
+        child = root.scope(name)
+        child.add_disposer(partial(ran.append, f"{name}-after"), label=f"{name}-after")
+        child.add_disposer(partial(slow, name), label=f"{name}-slow")
+
+    with anyio.move_on_after(0.01):
+        async with anyio.create_task_group() as tasks:
+            for child in root.children:
+                tasks.start_soon(child.dispose)
+
+    assert sorted(ran) == ["first-after", "first-slow", "second-after", "second-slow"]
+    assert root.abandoned == (), "neither unwind was cut short"
+
+
+async def test_a_release_that_fails_after_the_scope_died_still_refuses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One situation, one exception, whatever the disposer does.
+
+    `_unwind` already answers a raising disposer this way — it ran, what it left
+    behind is its own business, and the traceback is the account of it — and a
+    caller here can act on neither failure. Letting the release's exception
+    through instead would make the error a caller sees depend on whether an
+    artifact it never registered came apart cleanly.
+    """
+    with caplog.at_level(logging.ERROR, logger="ph.cordis"):
+        await _acquired_into_a_dying_scope(raising(RuntimeError("the worktree was already gone")))
+
+    assert "could not be released" in caplog.text
+    assert "the worktree was already gone" in caplog.text
+
+
+async def test_a_seeded_budget_covers_the_drain_as_well_as_the_unwind() -> None:
+    """One declared total, not one per half and one per tree.
+
+    A shield is opaque to a deadline outside it, which is why `dispose` takes the
+    instant rather than being wrapped in it — and the drain ahead of it has the
+    same property, so answering only to `DRAIN_SECONDS` would spend that much
+    *per tree* inside a caller's total. `daemon/server.py` closes ten roots under
+    one ten-second bound; ten drains of five seconds is fifty.
+
+    `unwind_by` is the one declaration, so this asserts against it rather than
+    against a wall-clock guess: the listener below never settles, and the whole
+    teardown still ends when the seeded instant says it does.
+    """
+    root = Context()
+    released: list[str] = []
+    await root.effect(lambda: partial(released.append, "lease"), label="lease")
+
+    async def never() -> None:
+        await anyio.sleep(30)
+
+    root.detach(never(), label="a listener that will not settle")
+    root.unwind_by(anyio.current_time() + 0.02)
+
+    started = anyio.current_time()
+    # Patched like every budget test above, so a regression costs milliseconds
+    # here rather than a real `DRAIN_SECONDS` of suite. The seeded 0.02 still
+    # wins the `min`, which is the thing under test.
+    with patch.object(context_module, "DRAIN_SECONDS", 0.05):
+        await root.drain()
+        await root.dispose()
+    spent = anyio.current_time() - started
+
+    assert released == ["lease"], "the unwind still ran"
+    assert spent < 0.05, f"the drain spent its own share inside a smaller budget: {spent:.3f}s"

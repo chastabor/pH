@@ -40,7 +40,9 @@ from .cordis import GRACE_SECONDS as _GRACE_SECONDS
 from .cordis import Context, Disposer
 
 __all__ = [
+    "EXIT_SECONDS",
     "GRACE_SECONDS",
+    "SHUTDOWN_SECONDS",
     "install_lifecycle",
     "temporary_directory",
 ]
@@ -54,6 +56,28 @@ Re-exported from `ph.cordis`, which now owns the number because `Context.dispose
 applies it itself. The name stays here because three shutdown paths import it
 from this module, and because "how long shutdown may take" is a statement about
 this module's subject even when the enforcement moved down a layer."""
+
+EXIT_SECONDS = 5.0
+"""How long a process may take to leave once its roots are down.
+
+A literal rather than a share of something else, because it is not a share of
+anything: the socket closing, the last flush reaching disk and the interpreter
+exiting are not the unwind's work, and borrowing `DRAIN_SECONDS` for them — which
+this did — meant that widening the drain silently widened an observer's patience
+with a process that had stopped unwinding.
+"""
+
+SHUTDOWN_SECONDS = _GRACE_SECONDS + EXIT_SECONDS
+"""How long to allow a whole process to stop in, from the outside.
+
+The teardown's budget plus the leaving. Derived, because a third literal
+agreeing with the other two by inspection is how a bound stops being the one
+that fires — `daemon/server.py` names that hazard about its own pair.
+
+For a caller *waiting on* a shutdown rather than performing one, which is `phern
+shutdown` and nothing else today, so that "it has not stopped yet" means it
+rather than meaning the wait was shorter than the work.
+"""
 
 
 async def temporary_directory(ctx: Context, *, prefix: str = "ph-") -> Path:

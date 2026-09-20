@@ -50,7 +50,11 @@ async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIter
         yield ctx
     finally:
         # Disposal is structural: every registration and every acquired
-        # artifact unwinds with its scope, children first (invariant I2).
+        # artifact unwinds with its scope, children first (invariant I2). Each
+        # call shields itself and carries its own budget, which is what makes
+        # this `finally` a promise rather than an intention — a cancellation
+        # landing in the first used to take the second with it, and with it
+        # every lease, worktree and kernel the mount was holding.
         await ctx.drain()
         await ctx.dispose()
 

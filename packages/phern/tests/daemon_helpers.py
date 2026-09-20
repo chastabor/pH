@@ -34,7 +34,7 @@ from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
 from ph_app.daemon.server import DaemonServer, serve
-from ph_app.daemon.supervisor import Root
+from ph_app.daemon.supervisor import Root, Supervisor
 
 __all__ = [
     "PROFILE",
@@ -45,6 +45,7 @@ __all__ = [
     "running",
     "serving",
     "shut_down",
+    "supervised",
     "until",
 ]
 
@@ -197,6 +198,28 @@ async def until(done: Callable[[], bool], *, what: str, seconds: float = 10.0) -
                 await anyio.sleep(0.01)
     except TimeoutError:
         pytest.fail(f"timed out waiting for {what}")
+
+
+@asynccontextmanager
+async def supervised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, profile: Profile | None = None
+) -> AsyncIterator[Supervisor]:
+    """A bare `Supervisor` on its own task group, closed when the block ends.
+
+    For the tests whose subject is the supervisor rather than the wire: no
+    socket, no server, no client. `running` is the same shape one layer up, and
+    this exists for `until`'s reason — four tests wrote out the private runtime,
+    the task group and the two-line teardown, and the teardown is the half whose
+    omission fails as a hang rather than an assertion.
+    """
+    private_runtime(tmp_path, monkeypatch)
+    async with anyio.create_task_group() as tasks:
+        supervisor = Supervisor(profile=profile or PROFILE, tasks=tasks)
+        try:
+            yield supervisor
+        finally:
+            await supervisor.aclose()
+            tasks.cancel_scope.cancel()
 
 
 @asynccontextmanager

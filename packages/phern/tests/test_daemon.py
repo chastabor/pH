@@ -134,18 +134,28 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import PROFILE, break_the_provider, running
+from daemon_helpers import (
+    PROFILE,
+    break_the_provider,
+    private_runtime,
+    running,
+    supervised,
+    until,
+)
 
 from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
+from ph.cordis import Context, Profile
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.schedule import Schedule
+from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
 from ph.testing import ReapedHost, stored_log
 from ph_app.daemon import recovery, server
@@ -153,8 +163,9 @@ from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
-from ph_app.daemon.supervisor import Root, Supervisor
+from ph_app.daemon.supervisor import Root, RootStartAbandoned, Supervisor
 from ph_app.protocol import DaemonError
+from ph_app.runtime import mounted
 
 pytestmark = pytest.mark.anyio
 
@@ -699,15 +710,27 @@ async def test_two_clients_naming_one_new_root_share_it(
     test started two `session/new` calls concurrently and trusted the scheduler
     to overlap them. It did, for one commit — until the lease stopped hopping to
     a worker thread, which removed the suspension point that had been doing it,
-    and the test went on passing with the lock deleted. So the first caller is
-    now parked *inside* `_start`, past the membership check, and the second is
-    released only once it is there: without the lock the second must build a
-    second root, and there is no ordering left for luck to supply.
+    and the test went on passing with the ordering deleted. So the first caller
+    is now parked *inside* `_start`, past the membership check, and the second is
+    released only once it is there: unordered, the second must build a second
+    root, and there is no timing left for luck to supply.
+
+    What does the ordering is `_mounting` rather than a lock a caller holds —
+    `start` hands the build to the supervisor's task group and waits on the
+    record, so the second caller finds the first one's entry. `builds` is the
+    half that says so: the assertions below would also pass if the second caller
+    built its own root over the same log.
     """
     async with running(tmp_path) as daemon:
         supervisor = daemon.running.supervisor
         original = Supervisor._session_for
+        build = Supervisor._start
+        builds: list[str] = []
         parked, release = anyio.Event(), anyio.Event()
+
+        async def counted(self: Supervisor, root_id: str, *, cwd: str | None = None) -> Root:
+            builds.append(root_id)
+            return await build(self, root_id, cwd=cwd)
 
         # On the class: `Supervisor` is a `slots=True` dataclass, so an instance
         # attribute cannot be shadowed.
@@ -718,6 +741,7 @@ async def test_two_clients_naming_one_new_root_share_it(
             return await original(self, *args, **kwargs)
 
         monkeypatch.setattr(Supervisor, "_session_for", hold)
+        monkeypatch.setattr(Supervisor, "_start", counted)
         roots: list[Any] = []
 
         async with anyio.create_task_group() as both:
@@ -741,6 +765,7 @@ async def test_two_clients_naming_one_new_root_share_it(
         assert len(roots) == 2
         assert roots[0] is roots[1], "the second caller built a second root on one log"
         assert list(supervisor.roots) == ["contested"]
+        assert builds == ["contested"], "two callers, one mount"
 
 
 async def test_a_refused_start_leaves_nothing_behind(tmp_path: Path) -> None:
@@ -1686,6 +1711,130 @@ async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
         assert built.identity is None
         assert await built.check_reachable() == ""
         assert built.status().unreachable_since is None
+        tasks.cancel_scope.cancel()
+
+
+# --- P7-19: a root's lifetime is the daemon's --------------------------------
+
+
+async def test_a_client_that_leaves_mid_mount_still_gets_a_whole_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disconnect must not cancel a mount, because it cancels the teardown too.
+
+    `Supervisor.start` carries the argument; what this holds is the outcome — the
+    client leaves mid-build and the daemon still ends up with a whole root, lease
+    and all, rather than a half-taken one nothing released.
+
+    The mount is held open at the one instant that matters rather than raced
+    against a clock: what is under test is where the cancellation lands, and a
+    sleep would be the same test with a timer in the way.
+    """
+    entered, release = anyio.Event(), anyio.Event()
+
+    @asynccontextmanager
+    async def slow_mount(
+        profile: Profile, *, project: Path | None = None
+    ) -> AsyncIterator[Context]:
+        """`runtime.mounted`, held open at the instant the root is half-built."""
+        async with mounted(profile, project=project) as ctx:
+            entered.set()
+            await release.wait()
+            yield ctx
+
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        monkeypatch.setattr(supervisor_module, "mounted", slow_mount)
+        async with anyio.create_task_group() as client:
+            client.start_soon(supervisor.start, "left-early")
+            await entered.wait()
+            # The socket closed. Nothing about that is this root's business.
+            client.cancel_scope.cancel()
+            release.set()
+
+        # The caller is gone and the mount is not: it belongs to the supervisor's
+        # task group, so it finishes on its own.
+        await until(lambda: "left-early" in supervisor.roots, what="the mount to finish")
+        root = supervisor.roots["left-early"]
+        assert root.ctx.active, "the mount finished rather than being abandoned halfway"
+        assert root.session.id == "left-early"
+
+
+async def test_a_mount_that_fails_leaves_no_root_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-built root must not stay in the table, and its id must stay free.
+
+    The failure is placed *after* the root reaches `self.roots`, which is the one
+    window where the table can be left lying: the entry has to go in before
+    `resume_children`, because a readmitted child starts a drive job owned by
+    this root's scope and the resume looks the root up. An unwind that does not
+    take it back out leaves `start`'s fast path handing out a root with no task
+    behind it, forever.
+
+    `reached` is what stops this passing for the wrong reason: a mount that
+    failed earlier would never have put anything in the table to leave.
+    """
+    reached: list[str] = []
+
+    async def boom(self: object, parent: object, *, retry_limit: int) -> Sequence[str]:
+        reached.append("resume_children")
+        raise RuntimeError("the children could not be readmitted")
+
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        monkeypatch.setattr(SubagentService, "resume_children", boom)
+        with pytest.raises(RuntimeError, match="could not be readmitted"):
+            await supervisor.start("broken")
+
+        assert reached == ["resume_children"], "the mount failed after the root was in the table"
+        assert supervisor.roots == {}, "the half-built root did not stay in the table"
+        # And the id is free: the lease went back with the context it was taken on.
+        monkeypatch.undo()
+        root = await supervisor.start("broken")
+        assert root.ctx.active
+
+
+async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`aclose` releases `self.roots`, and a mount is by definition not in it yet.
+
+    Two windows, both opened by the mount being the supervisor's own task rather
+    than its caller's. A root finishing *after* the release loop holds a session
+    nothing flushes and a worktree nothing reclaims (F6) — the things teardown
+    exists for. And a handler outlives the start of teardown, so a client can ask
+    for a root while the ones already built are being unwound, which is work
+    nothing would ever release.
+    """
+    entered, release = anyio.Event(), anyio.Event()
+
+    @asynccontextmanager
+    async def slow_mount(
+        profile: Profile, *, project: Path | None = None
+    ) -> AsyncIterator[Context]:
+        async with mounted(profile, project=project) as ctx:
+            entered.set()
+            await release.wait()
+            yield ctx
+
+    private_runtime(tmp_path, monkeypatch)
+    async with anyio.create_task_group() as tasks:
+        supervisor = Supervisor(profile=PROFILE, tasks=tasks)
+        monkeypatch.setattr(supervisor_module, "mounted", slow_mount)
+        async with anyio.create_task_group() as client:
+            client.start_soon(supervisor.start, "in-flight")
+            await entered.wait()
+            client.cancel_scope.cancel()
+
+        async with anyio.create_task_group() as closing:
+            closing.start_soon(supervisor.aclose)
+            await until(lambda: supervisor._closing, what="aclose to take charge")
+            # Asked while the daemon is going: refused rather than built.
+            with pytest.raises(RootStartAbandoned, match="shutting down"):
+                await supervisor.start("too-late")
+            release.set()
+
+        assert supervisor.roots == {}, "the mount that finished under aclose was released"
+        assert "in-flight" not in supervisor._mounting
         tasks.cancel_scope.cancel()
 
 

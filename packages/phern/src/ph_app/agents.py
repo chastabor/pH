@@ -40,7 +40,7 @@ from rich.table import Table
 from ph.json import JsonObject, as_obj, as_str
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
-from ph.resources import GRACE_SECONDS
+from ph.resources import SHUTDOWN_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
 from ph.text import duration
@@ -686,8 +686,9 @@ def shutdown() -> None:
         await client.notify(verbs.SHUTDOWN, NoParams())
         # The same budget teardown itself is bounded by, plus room for the
         # unwinding around it: a daemon still inside its grace period has not
-        # failed to stop, it is stopping.
-        with anyio.move_on_after(GRACE_SECONDS + 5.0):
+        # failed to stop, it is stopping. Both halves are declared where they are
+        # spent, so this cannot drift from what the daemon actually allows.
+        with anyio.move_on_after(SHUTDOWN_SECONDS):
             await client.closed.wait()
         if not client.closed.is_set():
             fail("[yellow]shutdown sent; the daemon has not stopped yet[/yellow]")

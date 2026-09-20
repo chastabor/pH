@@ -26,6 +26,7 @@ journaling (P5-02), leases against a second daemon (P5-03), crash retries
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, suppress
@@ -95,7 +96,51 @@ from .recovery import (
     recovery_of,
 )
 
-__all__ = ["NON_GUARANTEES", "Root", "ScheduleUnavailable", "Supervisor"]
+__all__ = [
+    "NON_GUARANTEES",
+    "Root",
+    "RootStartAbandoned",
+    "ScheduleUnavailable",
+    "Supervisor",
+]
+
+
+class RootStartAbandoned(Refusal):
+    """The daemon stopped before it finished mounting this root.
+
+    Its own code for `ScheduleUnavailable`'s reason: "the process went away under
+    your request" is a different sentence from "the session is held elsewhere" or
+    "that profile has no such seam", and a client that cannot tell them apart
+    cannot decide whether retrying is sensible. It is, against the next daemon —
+    the mount unwound behind it, so nothing is left holding the session.
+
+    Reachable only through shutdown. A mount is a task of the *supervisor's*, so
+    the one thing that ends it early is the task group going away, and a caller
+    still waiting then is told rather than handed nothing.
+    """
+
+    code = "root_start_abandoned"
+
+
+@dataclass(slots=True)
+class _Mounting:
+    """One mount in flight, and the answer it will leave behind.
+
+    **The record is what makes two callers one mount.** `start` no longer holds a
+    lock across the build — the point of moving the build onto the supervisor's
+    task group is that a caller may leave without taking it down — so the
+    check-then-mount it used to serialize is serialized by this table instead:
+    the first caller registers, every later one finds the entry and waits on the
+    same event. Registering is two synchronous statements, so no second caller
+    can land between them.
+    """
+
+    done: anyio.Event = field(default_factory=anyio.Event)
+    root: Root | None = None
+    error: Exception | None = None
+    """What the mount raised, re-raised into every caller waiting on it. A
+    cancellation is not stored: it leaves through the task group, and the waiters
+    get `RootStartAbandoned` from the empty record instead."""
 
 
 class ScheduleUnavailable(Refusal):
@@ -665,33 +710,96 @@ class Supervisor:
     moves. What is *not* wired is written down in `DaemonServer.holds` (§5 rule
     6), where a reader would otherwise assume every term has an event."""
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
+    _mounting: dict[str, _Mounting] = field(default_factory=dict)
+    """Mounts in flight, by root id. See `_Mounting` and `start`."""
+    _closing: bool = False
+    """Whether `aclose` has begun. Set before it waits, so the set it waits on
+    cannot grow behind it."""
     _schedules: ScheduleIndex | None = None
     """The appointment index, built on first use. See `_index`."""
 
     async def start(self, root_id: str, *, cwd: str | None = None) -> Root:
         """Take the lease for this root, then mount it (I-5).
 
-        **Serialized per id**, because the check-then-mount below spans two awaits: two
-        clients asking for the same new root at once both pass the membership test, both
-        mount a profile, and both reach for the same session file — I-5's hazard exactly.
-        The store's own uniqueness check does not save it, because each root gets its own
-        `Context` and therefore its own `SessionStore`.
+        **The mount is the supervisor's work, not the caller's**, so it runs as a
+        task of `self.tasks` and this only waits for it. `Peer.serve` cancels
+        every in-flight handler the moment its client's socket hits EOF, and a
+        handler can be anywhere inside the build — the profile's rows, the I-5
+        claim, a worktree being cut, children being readmitted. Run inline, a
+        person closing their terminal mid-mount canceled the build *and* the
+        teardown of what it had already taken: an `AsyncExitStack` unwinding
+        under an already-canceled scope stops at its first await, so the lease
+        stayed held and every later `start` of that id answered
+        `session_already_active` until the daemon was restarted.
 
-        The lease would catch that pair as a *refusal*, which is the wrong answer to the
-        question these two clients asked: two clients naming one root want the same root,
-        and only a second *process* is a conflict. So the ordering is here and the
-        refusal is the store's `claim`, reached through `open_session`, and the second
-        racer gets the root the first one built.
+        **Owning the work rather than shielding it** is what keeps that from
+        costing anything elsewhere. A shield would have to be bounded, since a
+        shield with no deadline is a daemon that will not exit; the bound then
+        has to be guessed against the slowest legitimate mount, and a shutdown
+        arriving mid-mount waits the guess out. Here a cancellation lands on the
+        *await* — the caller leaves immediately, the daemon finishes the root it
+        started, and shutdown ends the mount through the task group like any
+        other task.
 
-        One lock rather than one per id, with a fast path that never reaches it —
-        `prompt` calls this on *every turn*. `_start` re-checks membership under it,
-        which is the ordinary double-checked build.
+        **Serialized per id by `_mounting`**, because the check-then-mount spans
+        awaits: two clients asking for the same new root at once both pass the
+        membership test, both mount a profile, and both reach for the same
+        session file — I-5's hazard exactly. The store's own uniqueness check
+        does not save it, because each root gets its own `Context` and therefore
+        its own `SessionStore`. The lease would catch the pair as a *refusal*,
+        which is the wrong answer to the question they asked: two clients naming
+        one root want the same root, and only a second *process* is a conflict.
+        So the second one waits on the first one's record and is handed what it
+        built.
+
+        A fast path that touches none of it, because `prompt` calls this on every
+        turn.
         """
         root = self.roots.get(root_id)
         if root is not None:
             return root
-        async with self._starting:
-            return await self._start(root_id, cwd=cwd)
+        if self._closing:
+            # Handlers outlive the start of teardown, so a client can still ask
+            # for a root while `aclose` is unwinding the ones it has. Building
+            # one now is work nothing would ever release.
+            raise RootStartAbandoned(f"the daemon is shutting down and will not mount {root_id}")
+        # Registered and spawned without awaiting, which is what lets two callers
+        # share one mount: nothing can interleave between the lookup and the
+        # assignment, so the loser of the race finds the winner's record.
+        pending = self._mounting.get(root_id)
+        if pending is None:
+            pending = self._mounting[root_id] = _Mounting()
+            self.tasks.start_soon(self._mount, root_id, cwd, pending)
+        await pending.done.wait()
+        if pending.error is not None:
+            raise pending.error
+        if pending.root is None:
+            raise RootStartAbandoned(
+                f"the daemon stopped before it finished mounting {root_id}; "
+                "nothing was left holding its session"
+            )
+        return pending.root
+
+    async def _mount(self, root_id: str, cwd: str | None, pending: _Mounting) -> None:
+        """Build one root on the supervisor's own task, and publish the answer.
+
+        `_starting` is held *here* rather than in `start`, which is the half that
+        keeps passivation honest: the lock orders a mount against `_passivate`,
+        and a caller that walked away must not take that ordering with it.
+
+        Only `Exception` is caught. A cancellation is the task group going away,
+        and it leaves through this task the way it would any other — storing it
+        would hand one task's `CancelledError` to another, which is how a
+        cancel-scope bookkeeping error is written.
+        """
+        try:
+            async with self._starting:
+                pending.root = await self._start(root_id, cwd=cwd)
+        except Exception as error:
+            pending.error = error
+        finally:
+            self._mounting.pop(root_id, None)
+            pending.done.set()
 
     async def _start(self, root_id: str, *, cwd: str | None = None) -> Root:
         """Mount a profile, create its agent, and give it its own task.
@@ -751,6 +859,26 @@ class Supervisor:
                 for event in session.events_from(0)
                 if event.type == COMMAND_ACCEPTED
             )
+
+            # On the stack rather than on a later line, because the entry has to
+            # go in *before* the awaits below: a readmitted child starts a drive
+            # job owned by this root's scope, and `resume_children` looks the
+            # root up. So whatever unwinds the stack takes the half-built root
+            # with it, rather than leaving an entry `start`'s fast path would
+            # hand out with no task behind it.
+            #
+            # Identity-checked, the way `ph.seams._registry.claim_key` is for a
+            # table owned by a `Context` — the owner here is the exit stack, whose
+            # ordering matters, so the check is spelled rather than borrowed.
+            # On the ordinary path this travels to `root.exits`
+            # and runs at *release*, and a passivation that pops its root and
+            # then releases it can overlap a fresh `start` of the same id, where
+            # a bare delete would evict the live replacement.
+            def forget() -> None:
+                if self.roots.get(root_id) is root:
+                    del self.roots[root_id]
+
+            exits.callback(forget)
             self.roots[root_id] = root
             # What this root's *children* are owed, once there is an agent for
             # them to hang off (P5-04). A daemon that stopped between a child's
@@ -1648,7 +1776,24 @@ class Supervisor:
         a fresh `GRACE_SECONDS`, and the caller's ten-second bound became ten
         seconds *per root*. Seeded rather than passed, because a root unwinds
         through its `AsyncExitStack` and there is no argument to thread.
+
+        **Mounts in flight are waited for first, and none is admitted after.**
+        `self.roots` is the set this can release, and a mount is by definition
+        not in it yet: a root finishing after the loop below would hold a session
+        nothing flushes and a worktree nothing reclaims (F6), which is what
+        teardown exists to prevent. The wait takes the same budget as the rest,
+        and a mount still building when it runs out is left to `serve`'s final
+        `tasks.cancel_scope.cancel()`, which ends it through the same shielded
+        `finally` every other unwind goes through — so the worst case is a root
+        that never existed rather than one left half-built.
         """
+        self._closing = True
+        if self._mounting:
+            log.info("ph_app.daemon: waiting for %d mount(s) in flight", len(self._mounting))
+            bound = math.inf if deadline is None else deadline
+            with anyio.CancelScope(deadline=bound, shield=True):
+                for pending in list(self._mounting.values()):
+                    await pending.done.wait()
         for root in self.roots.values():
             await root.wake.aclose()
         for root in list(self.roots.values()):

@@ -705,7 +705,13 @@ profile name ──► profile_or_exit ──► Profile.from_documents ──�
 ```
 
 `mounted()` (`ph_app/runtime.py`) wraps this and guarantees
-`await ctx.drain(); await ctx.dispose()` in an unconditional `finally`.
+`await ctx.drain(); await ctx.dispose()` in an unconditional `finally`. **Both
+shield themselves and carry their own budget** — `DRAIN_SECONDS` and
+`GRACE_SECONDS`, the first derived from the second — because an unconditional
+`finally` is not the same promise as one that survives being canceled: `dispose`
+raised its shield before its first await and the drain ahead of it did not, so a
+cancellation arriving there skipped the unwind entirely. The protection is in
+each call rather than around the pair, so a second host cannot get it wrong.
 `prompted()` adds the run: create session → ingest attachments → create agent →
 `followup` → `run()` → **flush**. Attachments are ingested *before* the agent
 exists so an unreadable file fails the command rather than a turn.
@@ -836,6 +842,7 @@ the tombstone is the record.
 | **Retry ladder** | any `Exception` from a root's task | `supervisor/retry` before each attempt; `supervisor/failed` on give-up; `supervisor/recovered` on success | the root stays **mounted** and still accepts wakes |
 | **Daemon unreachable** | socket `(st_dev, st_ino)` changed | `supervisor/unreachable`, to **every** root, each flushed | everything — **roots keep working** |
 | **Session lease (I-5)** | a second daemon opens a held log | **none** — an error frame, `session_already_active` | the first daemon is unaffected |
+| **Mount abandoned** | shutdown reaches a root still being built, or a client asks for one after `aclose` has begun | **none** — an error frame, `root_start_abandoned` | nothing of that root: it never reached `self.roots`, and the build unwinds itself |
 | **Agent cancellation** | `AgentCancelCause` | `turn/end{aborted}` | a partial `assistant/message` with `interrupted: true`; durable `tool/result` pairs for skipped calls |
 | **Subagent release** | parent teardown, or model `delete()` | `subagent/status{canceled}` + `subagent/deleted` | the child's **log**, always — it is a tombstone, not a deletion |
 | **Limits / breaker** | a configured ceiling | `limits/exceeded` or `limits/breaker-tripped` | everything — none of these stop a process |

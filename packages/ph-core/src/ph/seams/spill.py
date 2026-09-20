@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,9 @@ from ._registry import claim_entry
 __all__ = ["SpillClaim", "SpillRef", "SpillStore", "apply"]
 
 log = logging.getLogger("ph.seams.spill")
+
+STAGING = ".staging"
+"""Where `reserve_bytes` puts a blob until the log names it. See `_staging_for`."""
 
 
 class SpillRef(WireModel):
@@ -89,6 +93,14 @@ class SpillStore:
     ctx: Context
     root: Path
     _claims: list[SpillClaim] = field(default_factory=list)
+    _staged: set[str] = field(default_factory=set)
+    """Staged paths this process still intends to commit.
+
+    Read by the sweep, which would otherwise collect a reservation in flight and
+    leave `commit` with nothing to rename — the same race one directory down.
+    Within a process this is exact; across processes the I-5 lease is what makes
+    anything else under `.staging` the leavings of a run that is over.
+    """
 
     def locator_for(self, *, owner: str, suggested_name: str, content: bytes) -> Path:
         """Where `content` will be written — derived, not written.
@@ -122,7 +134,13 @@ class SpillStore:
     async def save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef:
-        """Write `content` as UTF-8 and return its reference."""
+        """Write `content` as UTF-8 and return its reference.
+
+        The unordered spelling, for a caller with no log entry to keep in step
+        with the write — a test planting a blob, or a producer that appends
+        nothing. Anything that records a locator wants `reserve_text` and
+        `commit` instead, in that order; `reserve_bytes` says why.
+        """
         return await self.save_bytes(
             owner=owner,
             source=source,
@@ -130,23 +148,76 @@ class SpillStore:
             content=content.encode("utf-8"),
         )
 
-    async def try_save_text(
+    def _staging_for(self, locator: str) -> Path:
+        """Where a reserved blob waits. Derived, so nothing has to remember it.
+
+        Under the owner's own directory so the rename that publishes it cannot
+        cross a filesystem, and in a *subdirectory* so the sweep walks past it:
+        `_remove_unreferenced` collects files, and this is a directory.
+        """
+        final = Path(locator)
+        return final.parent / STAGING / final.name
+
+    async def reserve_bytes(
+        self, *, owner: str, source: str, suggested_name: str, content: bytes
+    ) -> SpillRef:
+        """Stage `content` and return the reference it will have once committed.
+
+        **The write-ahead half of the ordering the sweep depends on** (§4.9). A
+        blob is garbage exactly when the log does not name it, so a producer that
+        writes first and appends second leaves a window in which its own blob is
+        indistinguishable from garbage — and the open-time sweep, which folds the
+        log on another task, deletes it. Reserving writes the bytes somewhere the
+        sweep does not look, so the producer can append the locator *before* the
+        file exists at it: from then on the blob is referenced from the moment it
+        appears.
+
+        Two calls rather than one because the failure has to stay on this side of
+        the append. Writing is what can fail, so it happens first and a caller
+        that cannot proceed without durability learns it before it has logged
+        anything; `commit` is a rename on the same filesystem, which is atomic
+        and, having got this far, all but certain.
+        """
+        path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
+        staged = self._staging_for(str(path))
+        # Recorded *before* the write, so the path is spoken for from before the
+        # instant it can exist until after `commit` renames it. Added after, a
+        # sweep looking in between finds a staged file nobody claims.
+        self._staged.add(str(staged))
+        try:
+            await anyio.to_thread.run_sync(_write, staged.parent, staged, content)
+        except BaseException:
+            self._staged.discard(str(staged))
+            raise
+        return SpillRef(
+            locator=str(path),
+            bytes=len(content),
+            retrieval_hint=f'read the file at "{path}" for the full {source}',
+        )
+
+    async def reserve_text(
+        self, *, owner: str, source: str, suggested_name: str, content: str
+    ) -> SpillRef:
+        """`reserve_bytes`, as UTF-8."""
+        return await self.reserve_bytes(
+            owner=owner,
+            source=source,
+            suggested_name=suggested_name,
+            content=content.encode("utf-8"),
+        )
+
+    async def try_reserve_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef | None:
-        """`save_text`, or `None` when the store could not take it.
+        """`reserve_text`, or `None` when the store could not take it.
 
-        The **fail-open** spelling, for the callers whose content is an
-        optimization rather than an obligation: an offload that cannot store the
-        text must not be the reason the model loses it. Written here because
-        three callers were each remembering the rule in their own `try`, and had
-        already drifted on which exception counts.
-
-        `| None` rather than a raised-and-caught exception, so the failure
-        branch is type-checked at every call site instead of remembered.
-        `save_text` stays for a caller that must not proceed without durability.
+        The fail-open spelling, for `try_save_text`'s reason and audience: an
+        offload that cannot store the text must not be the reason the model loses
+        it. Because the write happens here rather than at `commit`, that fallback
+        is still available — the caller has logged nothing yet.
         """
         try:
-            return await self.save_text(
+            return await self.reserve_text(
                 owner=owner, source=source, suggested_name=suggested_name, content=content
             )
         except Exception:
@@ -154,6 +225,25 @@ class SpillStore:
                 "ph.seams.spill: could not spill %s for %s", suggested_name, owner, exc_info=True
             )
             return None
+
+    async def commit(self, ref: SpillRef) -> bool:
+        """Publish a reserved blob at its locator. Call it *after* the append.
+
+        A rename within one directory, so the blob appears whole or not at all
+        and never appears unreferenced. `False` rather than a raise for the same
+        reason `_write_blob` in `ph_rlm.snapshot` accepts this shape: by now the
+        log names the locator, so the recoverable answer is a reader reporting a
+        blob it cannot find, not a turn that fails after the fact.
+        """
+        staged = self._staging_for(ref.locator)
+        try:
+            await anyio.to_thread.run_sync(os.replace, staged, Path(ref.locator))
+        except OSError:
+            log.warning("ph.seams.spill: could not publish %s", ref.locator, exc_info=True)
+            return False
+        finally:
+            self._staged.discard(str(staged))
+        return True
 
     async def load_text(self, locator: str) -> str:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_text(encoding="utf-8"))
@@ -207,7 +297,7 @@ class SpillStore:
                         owners.add(owner)
             removed: list[str] = []
             for owner in sorted(owners):
-                removed.extend(_remove_unreferenced(self.root / owner, referenced))
+                removed.extend(_remove_unreferenced(self.root / owner, referenced, self._staged))
             return removed
 
         return await anyio.to_thread.run_sync(run)
@@ -224,8 +314,20 @@ def _abort(claim: SpillClaim, session: Session) -> list[str]:
     return []
 
 
-def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
-    """Delete the files in one owner directory that no claim references."""
+def _remove_unreferenced(directory: Path, referenced: set[str], staged: set[str]) -> list[str]:
+    """Delete the files in one owner directory that no claim references.
+
+    `.staging` is walked separately rather than skipped: a reservation this
+    process still means to commit is spared, and everything else in there
+    belongs to a run that ended between staging a blob and appending the event
+    naming it — which is the leak `SpillClaim` describes, now collectable
+    because a staged file is unambiguously nobody's.
+
+    **`staged` is the store's live set, read here rather than copied**, the way
+    this fold already reads a live `Session`: a reservation made after a copy was
+    taken would be swept by a fold that had every right to think it was garbage,
+    and a membership test is the whole of what runs on this thread.
+    """
     if not directory.is_dir():
         return []
     gone: list[str] = []
@@ -233,6 +335,12 @@ def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
         if path.is_file() and str(path) not in referenced:
             path.unlink(missing_ok=True)
             gone.append(str(path))
+    waiting = directory / STAGING
+    if waiting.is_dir():
+        for path in sorted(waiting.iterdir()):
+            if path.is_file() and str(path) not in staged:
+                path.unlink(missing_ok=True)
+                gone.append(str(path))
     return gone
 
 
