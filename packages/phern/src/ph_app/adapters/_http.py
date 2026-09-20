@@ -17,19 +17,27 @@ client with its scope.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
 
 from ph.cordis import Context
+from ph.json import as_str
 from ph.keys import CREDENTIALS
 from ph.llm.adapter import LlmError
-from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, FILE_EXPIRED, LlmFailure
+from ph.llm.types import (
+    CONTEXT_WINDOW_EXCEEDED,
+    FILE_EXPIRED,
+    Finish,
+    FinishReason,
+    LlmFailure,
+)
 
 from .sse import iter_sse
 
-__all__ = ["HttpClient", "failure_from_status", "resolve_secret"]
+__all__ = ["HttpClient", "failure_from_status", "resolve_secret", "wire_error_finish"]
 
 TIMEOUT = httpx.Timeout(600.0, connect=15.0)
 
@@ -88,6 +96,56 @@ def failure_from_status(
     )
 
 
+@contextmanager
+def _classified_transport() -> Iterator[None]:
+    """Turn httpx's transport failures into the codes the retry policy routes on.
+
+    **The half of "the request failed" that never reaches a status.** A dropped
+    connection, a refused socket or a read that runs out of time raises out of
+    httpx rather than returning a response, so `failure_from_status` never sees
+    it and the error arrives at the retry policy as a bare exception with code
+    `UNKNOWN` — not transient, so the turn fails on the first hiccup. Both
+    `CONNECTION_ERROR` and `TIMEOUT` are in `TRANSIENT_CODES`, and before this
+    nothing in the codebase produced either: the two entries were dead and the
+    failure they were written for was the one being reported as fatal.
+
+    One `except` and a visible `isinstance`, rather than a clause per code:
+    `TimeoutException` is a *subclass* of `TransportError`, so two clauses would
+    make the classification depend on the order they are written in — a
+    correctness hazard with nothing but a comment holding it in place.
+    """
+    try:
+        yield
+    except httpx.TransportError as error:
+        code = "TIMEOUT" if isinstance(error, httpx.TimeoutException) else "CONNECTION_ERROR"
+        # The class name carries the diagnosis — `ConnectError`, `ReadTimeout`,
+        # `RemoteProtocolError` — and httpx's message for several of them is
+        # empty, so a bare `str(error)` would log a failure with no text at all.
+        detail = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+        raise LlmError(detail, code) from error
+
+
+def wire_error_finish(message: object) -> Finish:
+    """A provider's mid-stream error frame, as the chunk that ends the turn.
+
+    The other half of `failure_from_status`, and here for the same reason. Both
+    wires report a failed request *inside* a 200 — Anthropic as an `error`
+    event, the OpenAI-compatible wire as a top-level `error` object — so the
+    status classifier never sees it and each adapter built the `Finish` itself.
+    The two copies had drifted on the first commit they both existed: one read
+    the message through `str()`, which renders a non-string as `"None"` or
+    `"3"`, the other through `as_str`, which falls back to the default. That is
+    the drift this module's docstring gives as the reason it exists.
+
+    `PROVIDER_ERROR` is deliberately not in `TRANSIENT_CODES`: an error frame
+    says only that the request failed, and the `type` beside it is the wire's
+    own vocabulary rather than a status. Mapping those onto retryable codes is
+    worth doing and is not this function — it would change which turns retry.
+    """
+    failure = LlmFailure(message=as_str(message, "provider error"), code="PROVIDER_ERROR")
+    return Finish(reason=FinishReason(kind="error", failure=failure))
+
+
 class HttpClient:
     """A lazily-created, long-lived `httpx.AsyncClient` with one streaming shape."""
 
@@ -129,9 +187,10 @@ class HttpClient:
         none of the classification above (P7-03).
         """
         sending = {name: value for name, value in headers.items() if name != "Content-Type"}
-        response = await self._get().post(
-            url, headers=sending, files={field: (filename, content, mime)}, data=data or {}
-        )
+        with _classified_transport():
+            response = await self._get().post(
+                url, headers=sending, files={field: (filename, content, mime)}, data=data or {}
+            )
         if response.status_code >= 400:
             raise failure_from_status(
                 response.status_code,
@@ -165,7 +224,8 @@ class HttpClient:
         insisted on JSON would make the caller catch a decode error to discover
         success.
         """
-        response = await self._get().post(url, headers=headers, json=json, content=content)
+        with _classified_transport():
+            response = await self._get().post(url, headers=headers, json=json, content=content)
         if response.status_code >= 400:
             raise failure_from_status(response.status_code, response.text, is_overflow=is_overflow)
         try:
@@ -190,14 +250,16 @@ class HttpClient:
         stalls holds up plugin mount — and with it a TUI start and `phern doctor`.
         A request whose answer nobody is blocked on keeps the generous default.
         """
-        response = await self._get().get(
-            url,
-            headers=headers,
-            # httpx's own sentinel rather than a splat: "say nothing and take the
-            # client's" is a value here, and spreading a conditional dict past a
-            # keyword-typed signature is a hole the checker cannot see through.
-            timeout=httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT,
-        )
+        with _classified_transport():
+            response = await self._get().get(
+                url,
+                headers=headers,
+                # httpx's own sentinel rather than a splat: "say nothing and take
+                # the client's" is a value here, and spreading a conditional dict
+                # past a keyword-typed signature is a hole the checker cannot see
+                # through.
+                timeout=httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+            )
         if response.status_code >= 400:
             raise failure_from_status(response.status_code, response.text, is_overflow=is_overflow)
         parsed: dict[str, Any] = response.json()
@@ -217,15 +279,19 @@ class HttpClient:
         A non-2xx response is raised as a classified `LlmError` before any
         payload is yielded, so a consumer never sees a half-stream.
         """
-        async with self._get().stream("POST", url, headers=headers, json=json) as response:
-            if response.status_code >= 400:
-                body = (await response.aread()).decode("utf-8", errors="replace")
-                raise failure_from_status(
-                    response.status_code,
-                    body,
-                    is_overflow=is_overflow,
-                    is_missing_file=is_missing_file,
-                )
-            async for event, payload in iter_sse(response):
-                if isinstance(payload, dict):
-                    yield event, payload
+        with _classified_transport():
+            async with self._get().stream("POST", url, headers=headers, json=json) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    raise failure_from_status(
+                        response.status_code,
+                        body,
+                        is_overflow=is_overflow,
+                        is_missing_file=is_missing_file,
+                    )
+                # Inside the guard, not only around the connect: a stream that
+                # dies halfway through an answer is the common shape of this
+                # failure, and it raises here rather than at the `stream` call.
+                async for event, payload in iter_sse(response):
+                    if isinstance(payload, dict):
+                        yield event, payload

@@ -24,6 +24,7 @@ from ph import bundles
 from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.json import as_obj
 from ph.paths import resolve_roots
+from ph.persistence.jsonl import read_session
 from ph.session import SESSION_FORMAT_VERSION
 from ph.testing import ReapedHost, hold_session, not_none, stored_log
 from ph_app import profiles
@@ -686,13 +687,40 @@ def test_print_mode_answers_and_writes_a_readable_log(
     assert user["data"]["content"][0]["text"] == "what is a session log?"
 
     # And the harness can read its own log back into the same conversation.
-    from ph.persistence.jsonl import read_session
     from ph.session import Session
 
     header, restored = read_session(path)
     assert header.id == "demo"
     session = Session("demo", seed=restored, header=header)
     assert [m.role for m in session.derive_messages()] == ["user", "assistant"]
+
+
+def test_print_mode_exits_nonzero_on_an_error_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that failed must not report success (C5).
+
+    `-p` is what a script calls, and every failure inside a turn is *recorded*
+    rather than raised — the driver's `finally` writes `turn/end{error}` and the
+    run returns normally. So a provider outage, an exhausted retry budget or a
+    misspelled `--provider` printed whatever text had arrived and exited 0, and
+    the only way to tell an answer from a failure was to parse the log the run
+    had just written.
+
+    An unknown provider is the cheapest error turn there is, and the one a person
+    hits by typo. The message is asserted too: an exit code that says "something
+    went wrong" and nothing else is barely better than the zero.
+    """
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+    result = runner.invoke(app, ["-p", "hello", "--provider", "nope", "--session", "failed"])
+
+    assert result.exit_code == 1, result.output
+    assert 'no adapter is registered for provider "nope"' in result.output
+    assert "Traceback" not in result.output
+
+    _header, events = read_session(stored_log(tmp_path / "sessions", "failed"))
+    ended = [event for event in events if event.type == "turn/end"]
+    assert as_obj(ended[-1].data["reason"])["kind"] == "error", "and the log says so too"
 
 
 def test_each_mode_is_reachable_from_the_command_line(

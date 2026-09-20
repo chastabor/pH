@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import httpx
 import pytest
 
 from ph.cordis import Context
@@ -38,6 +39,7 @@ from ph.json import as_obj
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS
 from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
+from ph.llm.retry import is_transient
 from ph.llm.types import (
     Finish,
     GenerateOptions,
@@ -50,8 +52,8 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.seams.credentials import CredentialService
-from ph.testing import as_kind, block_text
-from ph_app.adapters._http import failure_from_status
+from ph.testing import anthropic_reply, as_kind, block_text
+from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.anthropic import (
     CACHE_BREAKPOINTS,
     CHECKPOINT_EVERY,
@@ -104,7 +106,8 @@ _CEILING_PROBE = WindowProbe(
 class _ServerStub:
     """A server that publishes some endpoints, 404s the rest, and can be slow.
 
-    The one `HttpClient` double in this file. It began as a pair — one that
+    The `get_json` `HttpClient` double in this file (`_WireStub` below is the
+    streaming one). It began as a pair — one that
     answered every URL with the same payload, one that answered by URL — and the
     first was a strict subset: a probe that reads one field off one endpoint is
     `_ServerStub({url: payload})`, and "the server is not there" is
@@ -1092,3 +1095,134 @@ async def test_caching_off_sends_the_shapes_the_route_always_sent() -> None:
 
     assert _markers(body) == []
     assert body["system"] == "sys"
+
+
+class _WireStub:
+    """An `HttpClient` that replays a scripted SSE stream and counts what was read.
+
+    `read` is the half that matters: a consumer that stops at the error leaves
+    the frames after it unread, and a stub that merely handed back every frame
+    could not tell "ignored them" from "never asked".
+    """
+
+    def __init__(self, events: list[tuple[str, dict[str, Any]]]) -> None:
+        self._events = events
+        self.read = 0
+
+    async def stream_sse(self, url: str, **_: object) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        for event, payload in self._events:
+            self.read += 1
+            yield event, payload
+
+
+_ANTHROPIC_ERROR_STREAM: list[tuple[str, dict[str, Any]]] = [
+    # The envelope through `anthropic_reply`, cut before its `content_block_stop`
+    # — the frames after the error are what this test is about, so the ones
+    # before it should be the shared spelling rather than a third copy.
+    *anthropic_reply("partial", usage={"input_tokens": 9})[:3],
+    ("error", {"type": "error", "error": {"type": "overloaded_error", "message": "overloaded"}}),
+    ("message_stop", {"type": "message_stop"}),
+]
+"""The shape Anthropic sends when a stream dies after the answer has begun."""
+
+_OPENAI_ERROR_STREAM: list[tuple[str, dict[str, Any]]] = [
+    ("", {"choices": [{"delta": {"content": "partial"}}]}),
+    ("", {"error": {"type": "overloaded_error", "message": "overloaded"}}),
+    ("", {"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+]
+"""And the OpenAI-compatible one — a 200 whose body carries the failure."""
+
+
+@pytest.mark.parametrize("wire", ["anthropic", "openai"])
+async def test_a_mid_stream_error_ends_the_turn_as_an_error(wire: str) -> None:
+    """A provider that fails mid-answer must not be recorded as having finished.
+
+    Both wires report this *inside* a 200 response, so `failure_from_status`
+    never sees it and the only signal is the frame itself. Anthropic's was read
+    and then overwritten — the adapter's end-of-stream cleanup appended a second
+    `Finish` saying "stop" — and the OpenAI-compatible one was not read at all.
+    Either way the turn was logged as a completed answer that stops mid-sentence,
+    with no failure for the retry policy to see and nothing to tell a person why
+    the reply is short.
+
+    The frame count is asserted as well as the reason: an adapter that consumed
+    the rest of the stream and merely discarded it is still holding a connection
+    open for a request that is over.
+    """
+    root = Context()
+    credentials = CredentialService(ctx=root)
+    credentials.provide_value("PH_TEST_WIRE_KEY", "sk-test")
+    root.provide("credentials", credentials)
+    adapter: AnthropicAdapter | OpenAiCompatibleAdapter
+    if wire == "anthropic":
+        adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig(api_key_env="PH_TEST_WIRE_KEY"))
+        events = _ANTHROPIC_ERROR_STREAM
+    else:
+        adapter = OpenAiCompatibleAdapter(
+            ctx=root, profile=ProviderProfile(provider="p", api_key_env="PH_TEST_WIRE_KEY")
+        )
+        events = _OPENAI_ERROR_STREAM
+    stub = _WireStub(events)
+    adapter.http = stub  # type: ignore[assignment]
+
+    assembler = BlockAssembler()
+    async for chunk in adapter.stream(
+        GenerateOptions(
+            provider="p",
+            model="m",
+            messages=(
+                create_user_message(
+                    content=[{"type": "text", "text": "?"}], source={"kind": "user"}
+                ),
+            ),
+        )
+    ):
+        assembler.push(chunk)
+
+    assert assembler.finish.kind == "error"
+    assert assembler.finish.failure is not None
+    assert assembler.finish.failure.message == "overloaded"
+    assert stub.read == len(events) - 1, "the stream was read past the frame that ended it"
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"),
+    [
+        (httpx.ConnectError("connection refused"), "CONNECTION_ERROR"),
+        (httpx.RemoteProtocolError("peer closed connection"), "CONNECTION_ERROR"),
+        (httpx.ReadTimeout(""), "TIMEOUT"),
+    ],
+)
+async def test_a_dropped_connection_is_transient(raised: Exception, code: str) -> None:
+    """The failures that never reach a status, classified so they can be retried.
+
+    `CONNECTION_ERROR` and `TIMEOUT` are both in `TRANSIENT_CODES` and neither
+    had a producer: httpx raises rather than returning a response, so the error
+    went past `failure_from_status` untouched and reached the retry policy as a
+    bare exception it had no code for. A model call that lost its socket — the
+    most ordinary failure there is on a long streamed answer — failed the turn on
+    the first try.
+
+    `ReadTimeout("")` is spelled with an empty message deliberately: httpx leaves
+    several of these blank, so the class name has to carry the diagnosis or the
+    log records a failure with no text in it.
+    """
+
+    def die(request: httpx.Request) -> httpx.Response:
+        raise raised
+
+    http = HttpClient()
+    http._client = httpx.AsyncClient(transport=httpx.MockTransport(die))
+
+    with pytest.raises(LlmError) as caught:
+        async for _event, _payload in http.stream_sse(
+            "http://provider/v1/chat/completions",
+            headers={},
+            json={},
+            is_overflow=lambda _body: False,
+        ):
+            pass
+
+    assert caught.value.code == code
+    assert is_transient(caught.value.failure), "so the next attempt gets made"
+    assert type(raised).__name__ in str(caught.value), "and a person can see which one it was"

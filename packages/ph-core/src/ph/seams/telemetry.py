@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal, TypeAlias
@@ -89,21 +90,34 @@ class _Sink:
     by: Running
 
 
+_EXPORTING: ContextVar[bool] = ContextVar("ph.seams.telemetry.exporting", default=False)
+"""Whether *this task* is already inside a fan-out, so a sink cannot feed itself.
+
+A sink that records what it just failed to ship — through `ops_record`, or any
+indirection reaching it — would re-enter `record` and fan out to itself, a loop
+with no floor. The rule was a docstring asking each future sink author to
+remember; this is the same rule where it cannot be forgotten. Dropping the
+nested record is the intended answer, not a cost: it is a record *about* the
+export path, made while that path is the thing failing.
+
+**Per task, and that is the whole correction.** It was an instance field, so the
+flag was raised for the *deployment* while any one record was in flight — and
+every record is shipped from its own task (`observe` is fired from the session
+firehose, `ops_record` from wherever the operation is). Two events a millisecond
+apart therefore raced, and the loser was dropped silently: exactly the bursts
+worth exporting — a turn's `step/start`, its first chunk, its `turn/end` —
+arrived as one record in three. Re-entrancy is a property of the call stack, so
+it is tracked where the call stack is. A task a sink spawns inherits the flag,
+which is right: it is still the export path.
+"""
+
+
 @dataclass(slots=True)
 class SessionTelemetry:
     """The service published as `ctx.session_telemetry`."""
 
     ctx: Context
     _sinks: list[_Sink] = field(default_factory=list)
-    _exporting: bool = False
-    """Whether a fan-out is already in flight, so a sink cannot feed itself.
-
-    A sink that records what it just failed to ship — through `ops_record`, or
-    any indirection reaching it — would re-enter `record` and fan out to itself,
-    a loop with no floor. The rule was a docstring asking each future sink author
-    to remember; this is the same rule where it cannot be forgotten. Dropping the
-    nested record is the intended answer, not a cost: it is a record *about* the
-    export path, made while that path is the thing failing."""
     _last_chunked_step: dict[str, tuple[int, int]] = field(default_factory=dict)
     """Per session, the step whose first chunk already shipped. One entry per
     session rather than one per step, so it does not grow with the conversation."""
@@ -126,9 +140,9 @@ class SessionTelemetry:
 
         answered = await self.ctx.waterfall("session-telemetry/record", record, inner=inner)
         redacted = settled_or_none("session-telemetry/record", answered, SessionTelemetryRecord)
-        if redacted is None or self._exporting:
+        if redacted is None or _EXPORTING.get():
             return
-        self._exporting = True
+        token = _EXPORTING.set(True)
         try:
             for sink in list(self._sinks):
                 try:
@@ -139,7 +153,7 @@ class SessionTelemetry:
                 except Exception:
                     log.exception("ph.seams.telemetry: a sink failed")
         finally:
-            self._exporting = False
+            _EXPORTING.reset(token)
 
     def wants(self, session: Session, event: SessionEvent) -> bool:
         """Whether this event ships — decided synchronously, so a dropped chunk

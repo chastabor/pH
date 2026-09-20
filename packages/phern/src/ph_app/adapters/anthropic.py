@@ -46,7 +46,6 @@ from ph.llm.types import (
     FinishKind,
     FinishReason,
     GenerateOptions,
-    LlmFailure,
     MediaBlock,
     Message,
     ReasoningBlock,
@@ -59,12 +58,13 @@ from ph.llm.types import (
     ToolCallDelta,
     ToolResultBlock,
     UsageChunk,
+    is_error_finish,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
 from ph.wire import WireModel
 
-from ._http import HttpClient, resolve_secret
+from ._http import HttpClient, resolve_secret, wire_error_finish
 from ._media import forget_named_handle, load_handles, load_media, media_pointer
 
 __all__ = ["AnthropicAdapter", "apply"]
@@ -377,6 +377,14 @@ class AnthropicAdapter:
             ):
                 for chunk in state.consume(event, payload):
                     yield chunk
+                    if is_error_finish(chunk):
+                        # The wire has reported the request failed, and this
+                        # stream is over. Returning here is what skips
+                        # `finish()`: it would close the half-written blocks and
+                        # append a second `Finish` saying "stop", which is how a
+                        # failed turn came to be recorded as a completed one
+                        # with a truncated answer.
+                        return
         except LlmError as error:
             # A handle this request referenced is gone — expired early, deleted
             # from another session, or never honored. **Forget it first, then
@@ -477,9 +485,7 @@ class _StreamState:
             if isinstance(raw, dict):
                 self.usage = _merge_usage(self.usage, raw)
         elif kind == "error":
-            detail = (payload.get("error") or {}).get("message", "provider error")
-            failure = LlmFailure(message=str(detail), code="PROVIDER_ERROR")
-            out.append(Finish(reason=FinishReason(kind="error", failure=failure)))
+            out.append(wire_error_finish((payload.get("error") or {}).get("message")))
         return out
 
     def finish(self) -> list[StreamChunk]:

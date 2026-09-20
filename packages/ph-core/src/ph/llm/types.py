@@ -67,6 +67,7 @@ __all__ = [
     "create_message",
     "create_tool_result_message",
     "create_user_message",
+    "is_error_finish",
     "is_token_delta",
     "new_message_id",
     "text_of",
@@ -635,6 +636,21 @@ def is_token_delta(chunk: StreamChunk) -> bool:
     if isinstance(chunk, ToolCallDelta):
         return chunk.arguments_delta != "" or chunk.name is not None
     return False
+
+
+def is_error_finish(chunk: StreamChunk) -> bool:
+    """Whether this chunk is a stream saying it failed — nothing after it counts.
+
+    Both wires report a failed request *inside* a 200 response, and an adapter
+    that kept reading past one went on to close its half-written blocks and
+    append a second `Finish` reading "stop", which is what the turn was then
+    recorded as. Each adapter carried a `failed` flag to notice; the flag was a
+    round trip through mutable state for a fact the chunk already states, and a
+    second code path emitting an error `Finish` would have had to remember to
+    set it. Derived here instead, once, for every adapter including ones this
+    repo does not own.
+    """
+    return isinstance(chunk, Finish) and chunk.reason.kind == "error"
 
 
 # ------------------------------------------------------------- request shape --

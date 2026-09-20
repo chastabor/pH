@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -726,6 +727,40 @@ async def test_a_failing_command_still_records_its_outcome() -> None:
     done = session.events[-1]
     assert done.data["outcome"] == "error"
     assert done.data["detail"] == "bad argument"
+
+
+async def test_a_canceled_command_is_not_recorded_as_ok() -> None:
+    """The outcome a `finally` must not default to (C5).
+
+    `except Exception` does not catch `asyncio.CancelledError`, so an
+    interrupted `/compact` left `outcome` at its initial `"ok"` and the log said
+    the command succeeded — the reading a person goes to `command/done` for, and
+    the one case where it was wrong. Cancellation is the ordinary way a long
+    command ends: the person presses escape.
+
+    The body parks so the cancel lands *inside* it, which is the only shape that
+    reproduces this; a cancel before dispatch never reaches the `finally` at all.
+    """
+    root = Context()
+    registry = CommandRegistry(ctx=root)
+    session = Session("s")
+    entered = anyio.Event()
+
+    async def parks(_arg: str, _ctx: object) -> str:
+        entered.set()
+        await anyio.sleep_forever()
+        return "never reached"
+
+    registry.register(CommandDefinition(name="slow", summary="parks", run=parks))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(partial(registry.dispatch, "/slow", session=session))
+        await entered.wait()
+        group.cancel_scope.cancel()
+
+    done = session.events[-1]
+    assert done.type == "command/done"
+    assert done.data["outcome"] == "canceled"
 
 
 async def test_a_job_runs_and_reports() -> None:

@@ -26,7 +26,7 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
-from ph.json import as_obj
+from ph.json import JsonObject, as_obj
 from ph.keys import AGENTS, LLM_FAKE, LLM_REPLAY, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import GenerateOptions, Message, ModelSource
 from ph.system_prompt.assembly import PromptContext, PromptSection
@@ -229,6 +229,33 @@ def test_recorded_steps_group_by_turn_and_step() -> None:
     steps = recorded_steps(session.events)
     assert [(step.turn, step.step) for step in steps] == [(1, 1), (1, 2), (2, 1)]
     assert all(len(step.chunks) == 2 for step in steps)
+
+
+def test_a_retried_step_replays_as_two_calls() -> None:
+    """Two attempts at one step are two recorded streams, not one long one.
+
+    A retry keeps the turn and the step it is retrying — that is how the log says
+    which call was repeated — so the attempts arrive here under one key. Merged,
+    the replay served both attempts to the *first* request: the failure vanished,
+    every later step shifted one call earlier, and the run ended in
+    `REPLAY_EXHAUSTED` blaming the loop for a request the grouping had eaten.
+    """
+    from ph.session import Session
+
+    session = Session("s")
+    attempts: list[JsonObject] = [
+        {"type": "text-delta", "index": 0, "text": "cut off"},
+        {"type": "finish", "reason": {"kind": "error"}},
+        {"type": "text-delta", "index": 0, "text": "the answer"},
+        {"type": "finish", "reason": {"kind": "stop"}},
+    ]
+    for chunk in attempts:
+        session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": chunk})
+
+    steps = recorded_steps(session.events)
+
+    assert [(step.turn, step.step) for step in steps] == [(1, 1), (1, 1)]
+    assert [len(step.chunks) for step in steps] == [2, 2]
 
 
 async def test_replay_refuses_to_invent_a_step(mount: MountProfile) -> None:

@@ -55,6 +55,7 @@ from ph.llm.types import (
     ToolCallDelta,
     ToolResultBlock,
     UsageChunk,
+    is_error_finish,
     text_of,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -62,7 +63,7 @@ from ph.seams.uploads import FileHandle
 from ph.session import now_ms
 from ph.wire import WireModel
 
-from ._http import HttpClient, resolve_secret
+from ._http import HttpClient, resolve_secret, wire_error_finish
 from ._media import forget_named_handle, load_handles, load_media, media_pointer
 
 __all__ = ["OpenAiCompatibleAdapter", "apply"]
@@ -390,6 +391,11 @@ class OpenAiCompatibleAdapter:
             ):
                 for chunk in state.consume(payload):
                     yield chunk
+                    if is_error_finish(chunk):
+                        # See the same return in the Anthropic adapter: the wire
+                        # has said the request failed, and `finish()` would
+                        # follow that with a second `Finish` reading "stop".
+                        return
         except LlmError as error:
             # A handle this request referenced is gone — expired early, deleted
             # from another session, or never honored. Forget it first, then let
@@ -430,6 +436,14 @@ class _StreamState:
         return index
 
     def consume(self, payload: dict[str, Any]) -> list[StreamChunk]:
+        # An error arrives here as an ordinary data frame — the response was a
+        # 200 and `failure_from_status` never saw it — so a stream that dies
+        # mid-answer looks exactly like one that ended early. Ignoring the frame
+        # meant the turn was recorded as a `stop` with whatever text had arrived,
+        # and no retry: the wire said "over capacity", and pH said "done".
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return [wire_error_finish(error.get("message"))]
         out: list[StreamChunk] = []
         raw_usage = payload.get("usage")
         if isinstance(raw_usage, dict):

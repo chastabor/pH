@@ -110,8 +110,15 @@ class BlockAssembler:
             case UsageChunk():
                 self._usage = chunk.usage
             case Finish():
-                self._finish = chunk.reason
-                self._replay_state = chunk.replay_state
+                # First finish wins, as `BlockEnd` above. A stream states its
+                # outcome once; an adapter that says "error" and then tidies up
+                # with a "stop" was overwriting the only record of the failure,
+                # and the turn was logged as completed with half an answer in it.
+                # Keeping the first makes that unrepresentable for every adapter,
+                # including ones this repo does not own.
+                if self._finish is None:
+                    self._finish = chunk.reason
+                    self._replay_state = chunk.replay_state
             case _ as unhandled:
                 _refuse(unhandled)
 

@@ -164,6 +164,25 @@ def test_interrupted_blocks_keep_only_visible_prefixes() -> None:
     assert [block_text(block) for block in kept] == ["said this"]
 
 
+def test_the_first_finish_wins() -> None:
+    """An adapter that reports a failure and then tidies up must not erase it.
+
+    Anthropic's wire sends an `error` event and pH's own reader then ran its
+    end-of-stream cleanup, which appended a second `Finish` reading "stop". The
+    last one landed, so a turn the provider had failed was recorded as completed
+    with whatever text had arrived before the error — no retry, no report, and a
+    truncated answer in the transcript.
+
+    Fixed in the adapter too, but pinned here: this is the one place every
+    adapter's stream passes through, including ones this repo does not own.
+    """
+    assembler = BlockAssembler()
+    failure = LlmFailure(message="overloaded", code="PROVIDER_ERROR")
+    assembler.push(Finish(reason=FinishReason(kind="error", failure=failure)))
+    assembler.push(Finish(reason=FinishReason(kind="stop")))
+    assert assembler.finish == FinishReason(kind="error", failure=failure)
+
+
 def test_missing_finish_defaults_to_stop() -> None:
     assert BlockAssembler().finish == FinishReason(kind="stop")
 

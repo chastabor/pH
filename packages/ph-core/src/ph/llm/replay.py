@@ -118,20 +118,36 @@ class RecordedStep:
 
 
 def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
-    """Group a log's `assistant/chunk` events into per-step streams, in order."""
-    grouped: dict[tuple[int, int], list[StreamChunk]] = {}
-    order: list[tuple[int, int]] = []
+    """Group a log's `assistant/chunk` events into per-model-call streams, in order.
+
+    **One recorded stream per *call*, not per `(turn, step)`.** A retried step
+    keeps its turn and step — that is what makes `llm/retry` legible in the log,
+    and `attempts_so_far` reads the pair — so grouping by the pair concatenated
+    every attempt into one stream with several `Finish` chunks in it. The replay
+    then served the whole concatenation to the first request and had one fewer
+    step left for the rest of the run: a recording of a turn that hit a rate
+    limit replayed as a *different* conversation, and ended by reporting that the
+    loop had made more requests than the recording contains — which is the one
+    thing `REPLAY_EXHAUSTED` exists to make impossible to miss, pointing at the
+    loop instead of at the grouping.
+
+    A `Finish` ends a stream, so it ends a group: the adapter that emitted one
+    has nothing further to say for that call.
+    """
+    calls: list[tuple[tuple[int, int], list[StreamChunk]]] = []
     for event in events:
         if event.type != "assistant/chunk":
             continue
         key = (as_int(event.data["turn"]), as_int(event.data["step"]))
-        if key not in grouped:
-            grouped[key] = []
-            order.append(key)
-        grouped[key].append(chunk_from_wire(as_obj(event.data["chunk"])))
+        chunk = chunk_from_wire(as_obj(event.data["chunk"]))
+        # A new call when the coordinates move, and also when the last one was
+        # closed — `calls[-1][1]` is never empty, because a group is only
+        # appended together with the chunk that opens it.
+        if not calls or calls[-1][0] != key or isinstance(calls[-1][1][-1], Finish):
+            calls.append((key, []))
+        calls[-1][1].append(chunk)
     return [
-        RecordedStep(turn=turn, step=step, chunks=tuple(grouped[(turn, step)]))
-        for turn, step in order
+        RecordedStep(turn=turn, step=step, chunks=tuple(chunks)) for (turn, step), chunks in calls
     ]
 
 

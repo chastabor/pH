@@ -268,6 +268,19 @@ class CommandRegistry:
             outcome = "error"
             detail = str(error)
             raise
+        except BaseException as error:
+            # **Cancellation is not a failure, and it is not an `Exception`.**
+            # `asyncio.CancelledError` is a `BaseException`, so a `/compact` the
+            # person interrupted — or one whose task group was torn down —
+            # unwound straight past the branch above, and the `finally` recorded
+            # the value `outcome` was initialized with: `ok`, with no detail. The
+            # log then said a command that never finished succeeded, which is the
+            # one question `command/done` exists to answer. The same reasoning
+            # covers `KeyboardInterrupt` and `SystemExit`: what is recorded is
+            # that the body did not complete.
+            outcome = "canceled"
+            detail = str(error) or type(error).__name__
+            raise
         finally:
             if session is not None:
                 data: dict[str, JsonValue] = {"name": name, "outcome": outcome}

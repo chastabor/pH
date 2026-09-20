@@ -27,8 +27,9 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
-from ph.json import as_obj, thaw_json
-from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT
+from ph.json import as_obj, as_str, thaw_json
+from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.llm.replay import RecordedStep, ReplayAdapter, text_chunks, tool_call_chunks
 from ph.llm.types import (
     BlockEnd,
     BlockStart,
@@ -44,7 +45,7 @@ from ph.llm.types import (
 from ph.session import SurfaceIntent
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import MountProfile, block_text, user_payload
+from ph.testing import MountProfile, block_text, simple_tool, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -423,3 +424,63 @@ async def test_an_inbox_splice_written_today_is_read_back_unchanged(
 
     payload = {**written[0], "futureKey": 1}
     assert "futureKey" not in InboxSplice.model_validate(payload).to_wire()
+
+
+async def test_a_tool_step_after_max_tokens_gets_a_model_call(mount: MountProfile) -> None:
+    """A cap on one step must not end a turn that has more to do.
+
+    `max-tokens` is sticky, and rightly: a turn whose answer was cut off has to
+    say so however tidily it finishes afterwards. But the sticky value was also
+    the deciding one — one variable answered both "what do we report" and "are we
+    done" — so once a step had been capped, the `None` that means *tools ran,
+    keep going* was discarded. The tool then ran, its result was logged, and the
+    turn ended with a `tool/result` the model was never shown.
+
+    A steer re-opens the turn here, which is the ordinary way a capped turn
+    continues. The control is the same script ending in `stop`: what the two must
+    share is the number of model calls, and what they must not share is the
+    reason.
+    """
+
+    async def drive(first: FinishReason) -> tuple[int, str]:
+        ctx = await mount()
+        adapter = ReplayAdapter(
+            steps=[
+                RecordedStep(
+                    turn=1, step=1, chunks=(*text_chunks("partial")[:-1], Finish(reason=first))
+                ),
+                RecordedStep(turn=1, step=2, chunks=tool_call_chunks("c1", "ping", "{}")),
+                RecordedStep(turn=2, step=1, chunks=text_chunks("done")),
+            ]
+        )
+        ctx.require(LLM).register_adapter(["scripted"], adapter)
+        ctx.require(TOOLS).register(simple_tool("ping"))
+
+        async def keep_alive(agent: Any, turn: int) -> None:  # noqa: ANN401
+            # **Exactly one steer, and only after the capped call.** This hook
+            # fires again when the turn really does stop, and steering there too
+            # would open a fourth call; steering on every firing re-opens a turn
+            # per step, which is what the bug did — so the test would pass either
+            # way. The adapter's own count says which firing this is.
+            if len(adapter.requests) == 1:
+                agent.steer(
+                    create_user_message(
+                        content=[{"type": "text", "text": "continue"}], source={"kind": "user"}
+                    )
+                )
+
+        ctx.on("agent/turn-stopping", keep_alive)
+        session = ctx.require(SESSIONS).create("s")
+        await (
+            ctx.require(AGENTS)
+            .create(session, AgentOptions(provider="scripted", model="m"))
+            .prompt("hello")
+        )
+        return len(adapter.requests), as_str(as_obj(session.events[-1].data["reason"])["kind"])
+
+    capped_calls, capped_reason = await drive(FinishReason(kind="max-tokens"))
+    plain_calls, plain_reason = await drive(FinishReason(kind="stop"))
+
+    assert capped_calls == plain_calls == 3, "the cap swallowed the tool continuation"
+    assert plain_reason == "completed"
+    assert capped_reason == "max-tokens", "and the cap is still what the turn reports"

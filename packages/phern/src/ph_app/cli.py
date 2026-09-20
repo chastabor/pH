@@ -345,6 +345,14 @@ def default(
     err.print(
         f"[dim]session {outcome.session_id} · {outcome.events} events · {outcome.log_path}[/dim]"
     )
+    if outcome.ended == "error":
+        # Whatever arrived before the failure is still printed above — it is in
+        # the log either way, and a truncated answer is worth seeing. What must
+        # not happen is exiting 0: a `-p` run is something scripts call, and a
+        # provider outage that reports success is indistinguishable from an
+        # answer. Only `error`: `blocked` and `max-tokens` are turns that ended
+        # the way they were asked to.
+        fail(f"[red]the turn failed:[/red] {detail(outcome.failure)}", code=1)
 
 
 NO_DIAGNOSTICS_ROW = "none — this profile mounts no `diagnostics` row, so no row can report"

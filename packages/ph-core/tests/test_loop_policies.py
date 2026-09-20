@@ -37,7 +37,7 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, user_payload
+from ph.testing import MountProfile, assistant_payload, text_chunks, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -121,6 +121,61 @@ async def test_retry_is_bounded(mount: MountProfile) -> None:
     # max_attempts=3: two retries, then the failure stands.
     assert attempts["count"] == 3
     assert as_obj(session.events[-1].data["reason"])["kind"] == "error"
+
+
+async def test_two_agents_do_not_share_a_retry_budget(mount: MountProfile) -> None:
+    """One row, many agents: the budget belongs to the step, not to the listener.
+
+    The row mounts once per root and every agent beneath it dispatches to the
+    same listener, so a count kept on the row was keyed by `turn:step` across all
+    of them. Two subagents both working their first step shared `1:1` — and the
+    entry was dropped only on give-up, so the first agent's *successful* retries
+    were still on the books when the second one failed. The second was then
+    refused a retry it had never used, which is precisely the storm this row
+    exists for.
+
+    Counted from the log instead, so the budget is per session by construction.
+    Sabotage: key `attempts_so_far` on anything but the session and the second
+    agent ends in `error` after one call.
+    """
+    ctx = await mount(FAST_RETRY)
+    calls: list[str] = []
+
+    class Flaky:
+        """Fails a set number of times per session, then answers."""
+
+        def __init__(self, plan: dict[str, int]) -> None:
+            self.left = dict(plan)
+
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            session_id = options.session_id or ""
+            calls.append(session_id)
+            if self.left.get(session_id, 0) > 0:
+                self.left[session_id] -= 1
+                yield Finish(
+                    reason=FinishReason(
+                        kind="error", failure=LlmFailure(message="429", code="RATE_LIMIT")
+                    )
+                )
+                return
+            for chunk in text_chunks("ok"):
+                yield chunk
+
+    # The first spends both its retries and recovers; the second needs one.
+    ctx.require(LLM).register_adapter(["flaky"], Flaky({"first": 2, "second": 1}))
+    options = AgentOptions(provider="flaky", model="m")
+    sessions = ctx.require(SESSIONS)
+    agents = ctx.require(AGENTS)
+    first, second = sessions.create("first"), sessions.create("second")
+
+    await agents.create(first, options).prompt("hi")
+    await agents.create(second, options).prompt("hi")
+
+    assert as_obj(first.events[-1].data["reason"])["kind"] == "completed"
+    assert as_obj(second.events[-1].data["reason"])["kind"] == "completed", (
+        "the second agent was refused a retry the first had spent"
+    )
+    assert calls.count("second") == 2, "one failure, one retry"
 
 
 async def test_an_overflow_reaches_the_turn_instead_of_being_retried(mount: MountProfile) -> None:

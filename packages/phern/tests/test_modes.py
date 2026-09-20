@@ -42,7 +42,7 @@ from ph.cordis import Profile
 from ph.keys import SESSION_TELEMETRY
 from ph.persistence import SessionBusy, read_session
 from ph.testing import hold_session, stored_log
-from ph_app.modes import render_transcript, run_json, run_rpc, run_transcript
+from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
 from ph_app.protocol import PROTOCOL_VERSION
 
@@ -77,6 +77,30 @@ async def test_json_mode_streams_the_logs_own_envelopes(profile: Profile) -> Non
     assert result.session_id == "demo"
     # Same count as the log, because it is the log.
     assert result.events == len(events)
+
+
+async def test_a_resumed_print_run_prints_only_the_new_answer(profile: Profile) -> None:
+    """`-p` prints what this run produced, not the conversation so far (G6).
+
+    A `--session` that already exists is resumed — that is P5-03's fix, and it is
+    right — but the text was read off `session.transcript()`, which is every
+    assistant message the session ever held. So the second run printed two
+    answers, the third printed three, and a script capturing stdout got a reply
+    that grew by a paragraph each time it asked a follow-up.
+
+    The whole log is still written and still readable; only what this invocation
+    puts on stdout is narrowed. `--mode transcript` is the mode that prints the
+    conversation, and it is unchanged.
+    """
+    first = await run_print(profile, "one", provider="fake", model="fake-1", session_id="resumed")
+    second = await run_print(profile, "two", provider="fake", model="fake-1", session_id="resumed")
+
+    assert first.text == "ok"
+    assert second.text == "ok", "the first run's answer was printed again"
+    # And the session really did continue rather than starting over: the second
+    # run's log holds both turns.
+    assert second.events > first.events
+    assert second.ended == "completed"
 
 
 async def test_transcript_mode_reads_what_a_person_saw(profile: Profile) -> None:

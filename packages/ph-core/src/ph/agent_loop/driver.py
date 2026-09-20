@@ -323,6 +323,15 @@ class ReactLoopAgent:
         self.session.append("turn/start", {"turn": turn})
         phase.turn = turn
         turn_ends: TurnEndReason | None = None
+        capped = False
+        """Whether any step in this turn stopped at `max_tokens`.
+
+        Kept beside `turn_ends` rather than inside it, because the two answer
+        different questions: what ends the turn, and what the person should be
+        told about it. Folding the second into the first made a `max-tokens` step
+        *end the turn* even where the loop had more to do — see where it is read
+        below.
+        """
         target: InboxTarget = "next-turn"
         try:
             while True:
@@ -350,10 +359,15 @@ class ReactLoopAgent:
                         )
                     assert decision.assembly is not None
                     step_end = await self._step(decision.assembly)
-                    # max-tokens stays sticky: a later completed step must not
-                    # downgrade the turn outcome.
-                    if turn_ends is None or turn_ends.kind != "max-tokens":
-                        turn_ends = step_end
+                    # **The outcome is sticky; the stopping is not.** A step that
+                    # hit `max_tokens` must still be reported as such at the end
+                    # of the turn, however the turn actually finishes — but a
+                    # `None` here means "tools ran, there is more to do", and
+                    # holding the earlier reason for it ended the turn with a
+                    # `tool/result` the model never saw. The two were one
+                    # variable, so the sticky answer was also the deciding one.
+                    capped = capped or (step_end is not None and step_end.kind == "max-tokens")
+                    turn_ends = step_end
                 finally:
                     self.session.append("step/end", {"turn": turn, "step": step})
                 self._throw_if_canceled()
@@ -385,7 +399,7 @@ class ReactLoopAgent:
         finally:
             self.session.append(
                 "turn/end",
-                {"turn": turn, "reason": (turn_ends or TurnEndReason(kind="completed")).to_wire()},
+                {"turn": turn, "reason": _turn_reason(turn_ends, capped).to_wire()},
             )
         if not self.inbox.has_pending:
             return False
@@ -607,6 +621,24 @@ def _error_chain(error: BaseException) -> str:
         parts.append(str(current) or type(current).__name__)
         current = current.__cause__ or current.__context__
     return ": ".join(parts)
+
+
+def _turn_reason(ends: TurnEndReason | None, capped: bool) -> TurnEndReason:
+    """What `turn/end` records, given how the loop left and what it passed through.
+
+    **A cap is not erased by finishing.** A step that hit `max_tokens` cut the
+    model off, and the turn may then have carried on — a steer, a tool call,
+    another step — and ended tidily. Reporting that as `completed` tells the
+    person their answer is whole when part of it was dropped, so `max-tokens`
+    outranks the two endings that mean "nothing went wrong".
+
+    It does not outrank the three that say more: `aborted`, `blocked` and
+    `error` each name something the reader has to act on, and a cap somewhere in
+    the turn is the smaller fact beside them.
+    """
+    if ends is None or ends.kind == "completed":
+        return TurnEndReason(kind="max-tokens" if capped else "completed")
+    return ends
 
 
 def _as_failure(error: Exception) -> LlmFailure:
