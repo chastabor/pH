@@ -66,6 +66,30 @@ FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
 """The options every test that drives the fake adapter uses."""
 
 
+async def settled(check: Callable[[], object], what: str) -> None:
+    """Poll until `check()` is true, or fail saying what was waited for.
+
+    **The fifth copy of this loop is why it is here.** Four suites had written
+    it out — `test_seams`, `test_subagents`, `daemon_helpers`, `test_daemon` —
+    under three names, and `daemon_helpers.until` already states the argument:
+    "a copy that gets missed fails as a *hang*, which is the least legible
+    failure a suite has". `ph.testing` is the declared home for scaffolding no
+    shipped module imports, and this is scaffolding.
+
+    `fail_after` alone raises a bare `TimeoutError` naming neither the wait nor
+    the reason, which is what `what` is for.
+    """
+    import anyio
+    import pytest
+
+    try:
+        with anyio.fail_after(5):
+            while not check():
+                await anyio.sleep(0.005)
+    except TimeoutError:
+        pytest.fail(f"timed out waiting for {what}")
+
+
 def simple_tool(
     name: str,
     execute: Callable[..., Any] | None = None,

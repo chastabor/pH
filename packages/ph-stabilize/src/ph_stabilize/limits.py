@@ -182,6 +182,23 @@ class ToolCallLimits(CallBudget):
     Upstream mounts one middleware instance per tool with its own limits; one
     table says the same thing without a row per tool."""
     exit: Literal["continue", "end", "error"] = "continue"
+    """What a call over the ceiling does. Three readings, and they differ in
+    *who is told* rather than in how hard they stop.
+
+    `continue` denies this call and lets the turn go on; the model reads a
+    denial, which is policy speaking, and may do something else. `end` denies it
+    and concludes the turn. `error` makes the call **fail** — the model reads
+    breakage rather than policy — and it keeps failing for every later call,
+    because the ceiling does not move within a turn.
+
+    **`error` does not end the turn, and the model-call setting of the same name
+    does** (D7). The two are not symmetric and the asymmetry is structural: a
+    model-call limit is enforced in `agent/pre-step`, where a raise unwinds the
+    turn, while this is enforced in `tools/pre-execute`, where the pipeline turns
+    any exception from a policy row into a failed result — deliberately, so a
+    broken row cannot take down the call it was asked about. Making the two agree
+    needs an exception the pipeline re-raises by contract, which ph-core does not
+    have; until it does, this is what the word means here."""
 
 
 class ChildLimits(CallBudget):
@@ -483,7 +500,14 @@ async def apply(ctx: Context, config: Config) -> None:
         if not exceeded:
             return _breaker(session, execution, current)
         if settings.exit == "error":
-            raise ToolCallLimitExceeded(f"'{name}' call limit reached: {', '.join(exceeded)}.")
+            # **Recorded before it is raised** (D7). Only the `end` path below
+            # wrote `limits/exceeded`, so the one posture that surfaces the
+            # breach most loudly to the model left no durable record of it at
+            # all — and `phern doctor`, a reviewer and a resumed session all read
+            # that record rather than the tool result.
+            message = f"'{name}' call limit reached: {', '.join(exceeded)}."
+            _record(session, "tool-calls", {"tool": name, "message": message})
+            raise ToolCallLimitExceeded(message)
         if settings.exit == "continue":
             return Deny(reason=TOOL_DENIAL.format(tool=name))
         if not _is_first_over(settings, current, name):

@@ -30,13 +30,16 @@ from typing import Any
 
 from pydantic import Field
 
-from ...cordis import Context, plugin
+from ...cancel import raced
+from ...cordis import Context, maybe_await, plugin
 from ...json import JsonObject, as_str
 from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
 from ...seams.subagents import (
     Access,
     SubagentRequest,
+    SubagentResult,
+    SubagentRun,
     SubagentSpawnError,
     SubagentStatus,
     downgrade_text,
@@ -169,7 +172,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 f"the {provider!r} subagent provider cannot be waited on; "
                 "this deployment needs the handle-and-collect tools instead"
             )
-        outcome = await handle.result()
+        outcome = await _collected(handle, run)
         if outcome.status != "done":
             # A failure, not a value with a sad field: a child that was canceled
             # or fell over did not answer the question, and a parent reading
@@ -188,6 +191,28 @@ async def apply(ctx: Context, config: Config) -> None:
             granted_access=handle.granted_access,
             note=downgrade_text(reason) if reason is not None else None,
         ).model_dump()
+
+    async def _collected(handle: SubagentRun, run: ToolRunContext) -> SubagentResult:
+        """Wait for the child, releasing it if this call is canceled (C7).
+
+        `delegate` observed nothing, so a parent interrupted mid-delegation went
+        on waiting for a child nobody had told to stop — and the child went on
+        spending model calls against the same budget, for a turn whose result
+        was already discarded.
+
+        `dispose` is the release the seam already provides for it ("releases the
+        child early"), so the cancel reaches the child through the path a
+        disposed parent would have used rather than through a second mechanism.
+        """
+        awaiter = handle.result
+        assert awaiter is not None  # the caller checked; this narrows it
+        collected = await raced(run.signal, awaiter)
+        if collected is not None:
+            return collected
+        # Cancelled. Released first, then reported — a parent that raises while
+        # its child is still running is the state this exists to prevent.
+        await maybe_await(handle.dispose() if handle.dispose is not None else None)
+        raise ValueError(f"the wait for subagent {handle.name} was canceled")
 
     def build_tool() -> ToolDefinition | None:
         """The tool, bound to the provider that will run it.

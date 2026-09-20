@@ -43,7 +43,7 @@ from ..cordis import (
     plugin,
     safe_yaml_load,
 )
-from ..json import as_str
+from ..json import as_str, dumps
 from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import (
@@ -692,6 +692,36 @@ def _parameter_schema(declared: object, path: Path) -> dict[str, Any] | None:
     return schema
 
 
+def _rendered_value(value: object) -> str:
+    """One declared argument, as the skill's text should read it (D1).
+
+    **`as_str` is the wrong narrowing here**, and its own contract says so: it
+    answers `""` for anything that is not a string, which is exactly right where
+    a non-string is a *malformed* value and wrong where it is a declared one. A
+    skill may declare `{"type": "number"}` or `{"type": "boolean"}`, and every
+    such parameter rendered as nothing — in the instructions the model reads and
+    in every step seeded into its plan, silently, so the author's `Retry
+    {{parameters.attempts}} times` became `Retry  times`.
+
+    Booleans are spelled the way the schema that declared them spells them:
+    `true` and `false`, not Python's `True`. An author writing
+    `--strict={{parameters.strict}}` means the JSON value they declared, and a
+    model reading `True` in a shell flag has been handed a bug to find.
+
+    `None` renders empty rather than `"None"`, which is what an author means by
+    a declared-but-null value and what `as_str` did for it before.
+    """
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    # Everything else by its JSON spelling, which is `dumps` and not four
+    # branches: it already renders `true`/`false` rather than Python's `True`,
+    # numbers without a repr's surprises, and a list or an object as the author
+    # declared it rather than with Python's single quotes.
+    return dumps(value)
+
+
 def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[str, list[str]]:
     """The skill's instructions *and* its steps, with its inputs filled in (P7-18).
 
@@ -757,7 +787,7 @@ def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[
         if name not in declared:
             missing.append(name)
             return found.group(0)
-        return as_str(values.get(name))
+        return _rendered_value(values.get(name))
 
     filled = PLACEHOLDER.sub(fill, body)
     steps = [PLACEHOLDER.sub(fill, step) for step in skill.steps]

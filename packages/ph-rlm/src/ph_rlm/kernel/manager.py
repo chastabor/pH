@@ -51,7 +51,7 @@ import anyio
 import anyio.abc
 
 from ph.agent.types import AgentHandle
-from ph.cancel import CancelToken, is_canceled
+from ph.cancel import POLL_SECONDS, CancelToken, is_canceled
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
@@ -114,15 +114,6 @@ The guest caps its own reads at the same number; this is the host's side of it,
 and the reason it exists is that the child can write whatever it likes onto
 fd 3 (C10). Sized to hold a `maxSnapshotBytes` payload with base64 and JSON
 overhead."""
-
-_CANCEL_POLL_SECONDS = 0.05
-"""How often `_watch` asks whether the caller has canceled.
-
-`CancelToken` is a polled flag, not an awaitable — it has to answer "was this
-canceled" at points where nothing is pending, which a cancel scope cannot do,
-and `ph.cancel` deliberately offers no awaitable form. So something has to
-sleep and re-ask. What changed with `_watch` is only *who*: the reader used to
-interrupt itself at this cadence, and now a task that holds nothing does."""
 
 
 class KernelLimits(WireModel):
@@ -591,7 +582,7 @@ class Kernel:
         """Read this run's frames until it settles. Nothing interrupts the read.
 
         **The scope it used to sit in was paid per frame, not per read.** The
-        body was wrapped in `move_on_after(_CANCEL_POLL_SECONDS)` so the loop
+        body was wrapped in `move_on_after(POLL_SECONDS)` so the loop
         could ask two questions between reads — has the caller canceled, and
         has the abort grace expired — neither of which is about the socket. But
         `_recv_line` returns straight out of its buffer whenever a frame is
@@ -666,7 +657,7 @@ class Kernel:
         termination test and invites the real one to be deleted as redundant.
         """
         while True:
-            await anyio.sleep(_CANCEL_POLL_SECONDS)
+            await anyio.sleep(POLL_SECONDS)
             if active.settled:
                 return
             if active.aborting_since is None:

@@ -175,6 +175,11 @@ SHELL_RULES: dict[str, tuple[ShellRule, ...]] = {
             flags=frozenset({"-f", "--force", "--force-with-lease"}),
         ),
         ShellRule(
+            "deletes a published branch or tag",
+            subcommand="push",
+            flags=frozenset({"--delete", "-d"}),
+        ),
+        ShellRule(
             "discards commits and working-tree changes",
             subcommand="reset",
             flags=frozenset({"--hard"}),
@@ -258,49 +263,175 @@ def _has_flag(argv: Sequence[str], flag: str) -> bool:
     return False
 
 
-def _simple_commands(text: str) -> Iterator[list[str]]:
-    """Each simple command in the text, split on newlines and shell operators."""
-    for line in text.splitlines():
-        if not line.strip():
+_WRAPPERS = frozenset(
+    {
+        "sudo",
+        "doas",
+        "env",
+        "nohup",
+        "nice",
+        "command",
+        "exec",
+        "time",
+        "stdbuf",
+        "setsid",
+        "timeout",
+    }
+)
+"""Commands whose *argument* is the command that matters (D3).
+
+The gate read `argv[0]` and nothing else, so one word in front of anything was a
+bypass: `sudo rm -rf /` was not an `rm` rule to it, and neither was `env`,
+`nohup`, `nice`, `exec` or a leading `FOO=1`. This is the human-in-the-loop
+gate, so a one-word prefix defeating it is the whole of the hole.
+
+`timeout` and `nice` take an argument of their own before the command, which is
+why unwrapping skips non-flag tokens for those two rather than stopping at the
+first word it does not recognize."""
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _basename(token: str) -> str:
+    """A command as its bare name: `/usr/bin/rm` is `rm`.
+
+    Named because it is the question six places here ask, and a bare
+    `.rsplit("/", 1)[-1]` reads as string surgery rather than as the question.
+    """
+    return token.rsplit("/", 1)[-1]
+
+
+def _rules_for(name: str) -> tuple[ShellRule, ...] | None:
+    """The rules a command name breaks, if any — `mkfs.ext4` is `mkfs`.
+
+    One lookup, because the two callers had already come apart: `_interesting`
+    treated *any* dotted head as a possible command while `_command_findings`
+    only unfolded `mkfs.`, so `sudo git.foo` unwrapped to a command the rules
+    then had nothing to say about.
+    """
+    return SHELL_RULES.get("mkfs" if name.startswith("mkfs.") else name)
+
+
+def _interesting(token: str) -> bool:
+    """Whether this token names a command any reader here has something to say about."""
+    name = _basename(token)
+    return _rules_for(name) is not None or name in _WRAPPERS or name in _SHELLS or name == "xargs"
+
+
+def _unwrapped(argv: list[str]) -> list[str]:
+    """The command a wrapper is wrapping — `sudo -u x env FOO=1 rm -rf` → `rm -rf`.
+
+    **Found by scanning for a command the tables know**, rather than by counting
+    a wrapper's flags and the values they take. That counting needs a table of
+    which flags carry an argument, per wrapper — `sudo -u nobody`, `nice -n 5`,
+    `timeout -s KILL` — and a table like that is wrong the day a wrapper grows an
+    option. Scanning cannot be wrong in the dangerous direction: an argument that
+    happens to spell a command name reports something a person then reads, while
+    a flag table that missed one reports nothing at all.
+
+    `[]` when nothing recognizable follows, which is the honest answer — there is
+    no rule here to break.
+    """
+    while argv:
+        if _ASSIGNMENT.match(argv[0]):
+            argv = argv[1:]
             continue
-        current: list[str] = []
-        for token in _tokenize(line):
-            if token in _OPERATORS:
-                if current:
-                    yield current
-                current = []
-            else:
-                current.append(token)
-        if current:
-            yield current
+        if _basename(argv[0]) not in _WRAPPERS:
+            return argv
+        rest = argv[1:]
+        found = next((index for index, token in enumerate(rest) if _interesting(token)), None)
+        if found is None:
+            return []
+        argv = rest[found:]
+    return argv
+
+
+def _nested(argv: list[str]) -> Iterator[list[str]]:
+    """Commands carried *inside* this one's arguments (D3).
+
+    Two shapes, both of which the gate read as one opaque word: `sh -c "rm -rf
+    x"`, where the command is a quoted string, and `xargs rm -rf`, where it is
+    the rest of the argv. Neither is exotic — they are how a model writes a
+    command that needs a shell, and how it writes one that needs a list.
+    """
+    head = _basename(argv[0])
+    if head in _SHELLS:
+        for index, token in enumerate(argv[1:], start=1):
+            if token == "-c" and index + 1 < len(argv):
+                yield from _simple_commands(argv[index + 1])
+                return
+    if head == "xargs":
+        rest = argv[1:]
+        while rest and rest[0].startswith("-"):
+            # `xargs -0 -n1 rm -rf` — its own flags, then the command whole.
+            # Filtering every dashed token instead would hand `rm` on its own to
+            # the rules, and `rm` without `-rf` breaks none of them.
+            rest = rest[1:]
+        if rest:
+            yield rest
+
+
+def _simple_commands(text: str) -> Iterator[list[str]]:
+    """Each simple command in the text, split on newlines and shell operators.
+
+    A pipeline's members, ungrouped. `|` is one of `_OPERATORS`, so this is
+    exactly `_pipelines` flattened — written that way rather than as a second
+    scanner, because two loops that must agree about how a line tokenizes are
+    two places to edit when `;;` is added or a bare `&` changes meaning.
+    """
+    for group in _pipelines(text):
+        yield from group
 
 
 def _shell_findings(text: str) -> list[Finding]:
-    commands = list(_simple_commands(text))
+    # Tokenized once: the groups answer both questions — what each command does,
+    # and what one feeds into.
+    groups = list(_pipelines(text))
     found: list[Finding] = []
-    for argv in commands:
-        found.extend(_command_findings(argv))
-    found.extend(_pipeline_findings(text, commands))
+    for group in groups:
+        for argv in group:
+            found.extend(_command_findings(argv))
+    found.extend(_pipeline_findings(groups))
     return found
 
 
 def _command_findings(argv: list[str]) -> Iterator[Finding]:
-    name = argv[0].rsplit("/", 1)[-1]
-    rules = SHELL_RULES.get(name)
-    if rules is None:
-        rules = SHELL_RULES.get(name.split(".", 1)[0]) if name.startswith("mkfs.") else None
-    if rules is not None:
-        positional = [token for token in argv[1:] if not token.startswith("-")]
-        subcommand = positional[0] if positional else ""
-        for rule in rules:
-            if rule.subcommand and rule.subcommand != subcommand:
-                continue
-            if rule.flags and not any(_has_flag(argv, flag) for flag in rule.flags):
-                continue
-            if not rule.always and not rule.flags and not rule.subcommand:
-                continue
-            yield Finding("shell", " ".join(argv[:3]), rule.reason)
-            break
+    """Every rule this one command breaks — the command, not its wrapper (D3).
+
+    **Unwrapping decides which *name* to look up, never whether the argv is
+    read.** It decided both for a while, and that opened a hole worse than the
+    one it closed: `_unwrapped` answers `[]` when nothing after the wrapper is in
+    a table, so `sudo cat x.iso > /dev/sda` returned before the redirect reader
+    ran and reported nothing, while the bare `cat x.iso > /dev/sda` reported. A
+    gate that catches the plain spelling and not the `sudo` one is the worst
+    shape it can have — `sudo` is what a model writes when it expects
+    resistance.
+    """
+    inner = _unwrapped(argv)
+    for nested in _nested(inner or argv):
+        # Reported as itself: a person approving `sh -c "rm -rf /"` is being
+        # asked about the `rm`, and naming the `sh` would hide it.
+        yield from _command_findings(nested)
+    if inner:
+        # Built once: the rule loop reads the first of them as a subcommand, and
+        # the refspec reader reads the rest of them as refspecs.
+        positional = [token for token in inner[1:] if not token.startswith("-")]
+        yield from _refspec_findings(inner, positional)
+        rules = _rules_for(_basename(inner[0]))
+        if rules is not None:
+            subcommand = positional[0] if positional else ""
+            for rule in rules:
+                if rule.subcommand and rule.subcommand != subcommand:
+                    continue
+                if rule.flags and not any(_has_flag(inner, flag) for flag in rule.flags):
+                    continue
+                if not rule.always and not rule.flags and not rule.subcommand:
+                    continue
+                yield Finding("shell", " ".join(argv[:3]), rule.reason)
+                break
+    # The shape readers run over the *original* argv, whatever the name lookup
+    # made of it: a redirect belongs to the command line rather than to the
+    # command, and `sudo` does not consume it.
     for index, token in enumerate(argv):
         if token in _REDIRECTS and index + 1 < len(argv):
             target = argv[index + 1]
@@ -308,13 +439,73 @@ def _command_findings(argv: list[str]) -> Iterator[Finding]:
                 yield Finding("shell", f"{token} {target}", "writes directly to a block device")
 
 
-def _pipeline_findings(text: str, commands: list[list[str]]) -> Iterator[Finding]:
-    """A network fetch piped into a shell — the shape no single command shows."""
-    if "|" not in text:
+def _refspec_findings(argv: list[str], positional: list[str]) -> Iterator[Finding]:
+    """The two destructive pushes that are spelled as *arguments* (D14).
+
+    `git push origin :branch` deletes the remote branch — pushing nothing to it
+    — and `git push origin +main` forces. Neither carries a flag, so the rule
+    table cannot see them: it matches subcommands and flags, which is the right
+    shape for almost everything and the wrong one for a refspec. Read here for
+    the same reason the raw-device redirect below is: the danger is in the
+    argument's shape.
+    """
+    if _basename(argv[0]) != "git" or not positional or positional[0] != "push":
         return
-    names = [argv[0].rsplit("/", 1)[-1] for argv in commands if argv]
-    if any(name in _FETCHERS for name in names) and any(name in _SHELLS for name in names):
-        yield Finding("shell", " | ".join(names), "runs code fetched from the network")
+    for token in positional[1:]:
+        if token.startswith(":"):
+            yield Finding("shell", f"git push {token}", "deletes a published branch or tag")
+        elif token.startswith("+") and ":" in token:
+            yield Finding("shell", f"git push {token}", "rewrites published history")
+
+
+def _pipelines(text: str) -> Iterator[list[list[str]]]:
+    """Each `|`-connected run of commands, as a group of its own.
+
+    `_simple_commands` splits on every operator, `|` included, which is right for
+    asking what each command does and wrong for asking what one *feeds into*.
+    """
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        group: list[list[str]] = []
+        current: list[str] = []
+        for token in _tokenize(line):
+            if token == "|":
+                if current:
+                    group.append(current)
+                current = []
+            elif token in _OPERATORS:
+                if current:
+                    group.append(current)
+                if group:
+                    yield group
+                group, current = [], []
+            else:
+                current.append(token)
+        if current:
+            group.append(current)
+        if group:
+            yield group
+
+
+def _pipeline_findings(groups: Sequence[Sequence[list[str]]]) -> Iterator[Finding]:
+    """A network fetch piped into a shell — the shape no single command shows.
+
+    **Per pipeline, not per text** (D14). The test was "does this text contain a
+    `|`, a fetcher anywhere, and a shell anywhere" — so a script that downloaded
+    a file on one line, counted something with `wc` on another and ran an
+    unrelated `bash` on a third was reported as piping the network into a shell.
+    A false finding on the human-in-the-loop gate is not free: it is what teaches
+    a person to approve without reading.
+    """
+    for group in groups:
+        if len(group) < 2:
+            continue
+        # Unwrapped, for `_unwrapped`'s reason: `curl x | sudo bash` is the shape
+        # this exists to catch, and reading `sudo` as the command name missed it.
+        names = [_basename(inner[0]) for argv in group if (inner := _unwrapped(argv))]
+        if any(name in _FETCHERS for name in names) and any(name in _SHELLS for name in names):
+            yield Finding("shell", " | ".join(names), "runs code fetched from the network")
 
 
 # -------------------------------------------------------------------- sql --
@@ -333,7 +524,17 @@ the parser has already decided this is SQL and SQL keywords are not case-bound."
 
 _SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
 _SQL_LITERAL = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
-_SQL_LEAD = re.compile(r"^\s*([A-Za-z]+)")
+_SQL_LEAD = re.compile(r"^\s*([A-Za-z]+)(?=\s|$)")
+r"""The leading keyword — a **whole word**, not an alphabetic prefix (D2).
+
+`^\s*([A-Za-z]+)` took the letters off the front of anything, so `create_app()`
+led with `CREATE` and `select_all()` with `SELECT`: both were read as SQL, and
+the Python that followed them — `shutil.rmtree(x)`, `os.remove(x)` — was never
+looked at by any reader that knows what those do. The same prefix read made
+`update_config()` produce a confident SQL finding about a function call.
+
+A keyword is a word, so the match ends at whitespace or at the end of the
+statement; `create_app` is neither."""
 _SQL_KEYWORDS = frozenset(SQL_STATEMENTS) | {"SELECT", "INSERT", "CREATE", "WITH", "REPLACE"}
 
 
@@ -414,6 +615,41 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
+def _imported(nodes: Sequence[ast.AST]) -> tuple[dict[str, str], dict[str, str]]:
+    """What the names in this cell actually refer to (D4).
+
+    Two maps: local module name → real module (`import os as o`), and local
+    function name → dotted path (`from os import remove`). Both are how a cell
+    ordinarily writes an import, and the gate matched the *written* name — so
+    `o.remove(x)` and a bare `remove(x)` were unknown to it while `os.remove(x)`
+    was caught, which is a rule anybody can step around by accident.
+
+    Takes the already-walked nodes rather than the tree. This runs inside the
+    `tools/pre-execute` gate, on the event loop and on every string a call
+    carries — a `write` hands it the whole file content as one leaf — and its
+    own `ast.walk` was a second full traversal of what the caller was about to
+    walk anyway: a third of the reader's cost on a 14 KB cell, for nothing.
+    """
+    modules: dict[str, str] = {}
+    names: dict[str, str] = {}
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                names[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return modules, names
+
+
+def _resolved(name: str, modules: dict[str, str], names: dict[str, str]) -> str:
+    """A written call target as the dotted path it names."""
+    if name in names:
+        return names[name]
+    head, _, rest = name.partition(".")
+    return f"{modules[head]}.{rest}" if rest and head in modules else name
+
+
 def _python_findings(text: str) -> list[Finding]:
     try:
         tree = ast.parse(text)
@@ -422,11 +658,14 @@ def _python_findings(text: str) -> list[Finding]:
         # gate — but say nothing rather than falling through to another reader,
         # which would tokenize Python as shell and invent findings.
         return []
+    nodes = list(ast.walk(tree))
+    modules, names = _imported(nodes)
     found: list[Finding] = []
-    for node in ast.walk(tree):
+    for node in nodes:
         if not isinstance(node, ast.Call):
             continue
-        name = _dotted(node.func)
+        written = _dotted(node.func)
+        name = _resolved(written, modules, names)
         reason = PYTHON_CALLS.get(name) or PYTHON_METHODS.get(name.rsplit(".", 1)[-1])
         if reason is not None:
             found.append(Finding("python", f"{name}(...)", reason))
@@ -442,6 +681,19 @@ def _escaped_shell(node: ast.Call) -> Iterator[Finding]:
     first = node.args[0]
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         yield from _shell_findings(first.value)
+    elif isinstance(first, ast.JoinedStr):
+        # An f-string: the literal parts are the command, and the interpolations
+        # are its arguments. `subprocess.run(f"rm -rf {d}", shell=True)` is how a
+        # cell writes a parameterized command, and reading only `ast.Constant`
+        # meant the most ordinary spelling of a shell escape was the one that
+        # went ungated.
+        literal = "".join(
+            part.value
+            for part in first.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+        if literal.strip():
+            yield from _shell_findings(literal)
     elif isinstance(first, ast.List | ast.Tuple):
         argv = [
             element.value
@@ -458,7 +710,6 @@ _PYTHON_MARKERS = (
     ast.Import,
     ast.ImportFrom,
     ast.Call,
-    ast.Attribute,
     ast.Assign,
     ast.AugAssign,
     ast.FunctionDef,

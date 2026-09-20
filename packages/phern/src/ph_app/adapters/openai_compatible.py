@@ -238,9 +238,37 @@ class Config(WireModel):
     profiles: list[ProviderProfile] = field(default_factory=list)
 
 
+_OVERFLOW_PHRASES = (
+    "context length",
+    "context window",
+    "context size",
+    "exceeds the available context",
+    "exceed context",
+    "too many tokens",
+)
+"""How the servers on this wire say the request did not fit (G5).
+
+Phrases rather than "context" plus one of two words. That conjunction read as a
+general rule and was in fact a list of two spellings written apart: llama.cpp
+says *"the request exceeds the available context size"*, which contains
+"context" and neither "length" nor "window", so the shipped `llama` profile
+never produced `CONTEXT_WINDOW_EXCEEDED` — and that code is the one thing
+standing between an overlong conversation and a turn that fails every attempt,
+because compaction is what it triggers.
+
+Spelled out, because a miss and a false positive cost differently and both are
+expensive: a missed overflow retries a request that cannot work, and a false one
+compacts a conversation that fit. `failure_from_status`'s own docstring makes
+that argument for keeping the judgement per wire.
+
+Not verified against a live llama.cpp — `./test.sh smoke` is the gate that would,
+and the phrase is taken from the server's source rather than from a session.
+"""
+
+
 def _is_overflow(body: str) -> bool:
     lowered = body.lower()
-    return "context" in lowered and ("length" in lowered or "window" in lowered)
+    return any(phrase in lowered for phrase in _OVERFLOW_PHRASES)
 
 
 _MISSING_FILE_PHRASES = ("no such file", "file_not_found", "not_found", "not found")

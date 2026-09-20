@@ -396,15 +396,31 @@ class FsService:
             return str(resolved)
 
     def resolve(self, path: str | Path, *, agent: AgentHandle | None = None) -> Path:
-        """Resolve against the agent's workspace root.
+        """Resolve against the agent's workspace root, **with `..` collapsed** (J1).
 
         A relative path is the agent's business; an absolute one is passed
         through, because refusing it here would be a confinement claim this
         layer cannot make (N2) — which is also why the `worktree` tier bounds a
         relative write and not an absolute one.
+
+        **The bound is lexical, so the path has to be too.** `is_under` is a
+        separator-aware prefix compare and says so; joining an unnormalized
+        relative path onto the root produced `<root>/../../../etc/cron.d/x`,
+        which *starts with* the root and therefore passed every check the
+        `worktree` tier makes — no `workspace-write-scope` prompt, the write
+        landing outside the tree, and the log recording the relative spelling
+        that hid it. Collapsing here fixes it once for every caller, because
+        every caller comes through this method.
+
+        `normpath` and **not** `resolve()`: this is a pure string operation, so
+        the symlink question stays exactly where `is_under`'s docstring puts it —
+        with the caller that needs symlink-safety — rather than being half
+        answered here by a syscall that would also make a relative path's
+        meaning depend on what is on disk.
         """
         candidate = Path(path).expanduser()
-        return candidate if candidate.is_absolute() else (self.root_for(agent) / candidate)
+        joined = candidate if candidate.is_absolute() else (self.root_for(agent) / candidate)
+        return Path(os.path.normpath(joined))
 
     # ------------------------------------------------------------------ read --
 
@@ -946,20 +962,57 @@ def _compiled(pattern: str) -> re.Pattern[str]:
             parts.append("[^/]")
             index += 1
         elif pattern[index] == "[":
-            close = pattern.find("]", index + 1)
+            # Where the class ends, read the way `fnmatch` reads it: a `!` right
+            # after the bracket negates, and a `]` right after *that* is a member
+            # rather than the end. Searching from `index + 1` instead made `[]`,
+            # `[!]` and `[]abc]` produce `[]`, `[^]` and `[]abc]` — none of which
+            # is a regex, so `re.compile` raised out of a policy check that
+            # promises it cannot (D5).
+            close = index + 1
+            if close < len(pattern) and pattern[close] == "!":
+                close += 1
+            if close < len(pattern) and pattern[close] == "]":
+                close += 1
+            close = pattern.find("]", close)
             if close == -1:
                 # An unbalanced bracket is a literal, not a syntax error: a
                 # pattern typed by a model must not raise out of a policy check.
+                # `[]` and `[!]` reach this too, and are literals for the same
+                # reason `fnmatch` makes them one — there is no class in them.
                 parts.append(re.escape("["))
                 index += 1
             else:
-                inner = pattern[index + 1 : close].replace("\\", "\\\\")
-                parts.append(f"[{'^' + inner[1:] if inner.startswith('!') else inner}]")
+                parts.append(_character_class(pattern[index + 1 : close]))
                 index = close + 1
         else:
             parts.append(re.escape(pattern[index]))
             index += 1
-    return re.compile("".join(parts) + r"\Z")
+    source = "".join(parts) + r"\Z"
+    try:
+        return re.compile(source)
+    except re.error:
+        # **The promise, kept whatever the scanner missed.** Every shape above is
+        # handled, and this is here because the shapes are the ones somebody
+        # thought of: a pattern is a string a model typed, and `permissions-fs`
+        # evaluates it first-match-wins on the read path. A pattern that will not
+        # compile matches itself and nothing else, which is inert rather than
+        # wrong — where a raise takes down the call that was being checked.
+        log.warning("ph.seams.fs: %r is not a usable glob; matching it literally", pattern)
+        return re.compile(re.escape(pattern) + r"\Z")
+
+
+def _character_class(inner: str) -> str:
+    """One glob `[...]`, as a regex character class — all four rules in one place.
+
+    `!` negates, the way `fnmatch` spells it; `]` and `\\` have to be escaped or
+    they end the class and start an escape; a leading `^` has to be escaped or it
+    negates one the author did not write.
+    """
+    negated = inner.startswith("!")
+    body = (inner[1:] if negated else inner).replace("\\", "\\\\").replace("]", "\\]")
+    if body.startswith("^"):
+        body = f"\\{body}"
+    return f"[{'^' if negated else ''}{body}]"
 
 
 def _greppable(path: Path) -> bool:

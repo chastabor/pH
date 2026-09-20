@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.types import AgentHandle
+from ..cancel import Cancellation
 from ..cordis import Context, plugin
 from ..keys import FS, SANDBOX, SHELL, SUBPROCESS
 from .sandbox import ConfinedArgv, SandboxPolicy
@@ -75,6 +76,7 @@ class ShellService:
         timeout_ms: int | None = None,
         policy: SandboxPolicy | None = None,
         scope: Context | None = None,
+        signal: Cancellation | None = None,
     ) -> ShellResult:
         """Run one command. `policy` requests confinement and fails if it cannot.
 
@@ -86,6 +88,13 @@ class ShellService:
         agent's workspace, or the tier bounds the tools and nothing else.
 
         `cwd` overrides, for a caller that means somewhere specific.
+
+        `signal` is how a *person* stops a command (C7). `timeout_ms` is a number
+        chosen before the command ran; this is the decision made while watching
+        it, and without it `bash sleep 3600` could not be interrupted at all.
+
+        `Cancellation`, not `CancelToken`, for `AgentHandle.signal`'s reason: a
+        seam may ask whether the work is still wanted and may not end it.
         """
         subprocess_service = self.ctx.require(SUBPROCESS)
         argv = (*platform_shell(), command)
@@ -134,7 +143,7 @@ class ShellService:
             if workspace and workspace.env
             else None,
         )
-        outcome = await subprocess_service.run(spec, scope=scope)
+        outcome = await subprocess_service.run(spec, scope=scope, signal=signal)
         if confined is not None and outcome.exit_code != 0:
             # stderr first: that is where these sentences come from, and passing the
             # streams separately avoids joining up to 16 MiB per confined command.

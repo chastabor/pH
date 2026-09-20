@@ -361,17 +361,33 @@ class CodeGraphStore:
     def _forget(self, connection: sqlite3.Connection, paths: Sequence[str]) -> int:
         gone = 0
         for path in paths:
-            # The FTS rows first, by the id they were inserted under: a
+            # The FTS rows first, **with the values they were inserted under**: a
             # contentless table cannot be asked which rows belong to a path, so
-            # the ids come from `symbols` while it still has them.
-            ids = [
-                row["id"]
-                for row in connection.execute("SELECT id FROM symbols WHERE path = ?", (path,))
+            # they come from `symbols` while it still has them (X1).
+            #
+            # The columns and not just the rowid, because that is what FTS5's
+            # `'delete'` command needs: it re-derives the postings to remove from
+            # the values it is given, and three empty strings therefore remove
+            # *nothing*. SQLite reports no error for it. Every posting of every
+            # re-indexed symbol stayed, and `symbols.id` has no `AUTOINCREMENT` —
+            # so the next insert took the dead row's id and the stale posting
+            # started pointing at a different symbol. `search` joins the rowid
+            # back to `symbols`, so the old name returned the new symbol: worse
+            # than a miss, because it reads like an answer.
+            #
+            # `doc or ""` mirrors the insert below: `symbols.doc` may be NULL
+            # where the FTS row was given `""`, and a value that differs by one
+            # NULL deletes as little as three empty strings did.
+            stale = [
+                (row["id"], row["name"], row["doc"] or "", row["path"])
+                for row in connection.execute(
+                    "SELECT id, name, doc, path FROM symbols WHERE path = ?", (path,)
+                )
             ]
             connection.executemany(
                 "INSERT INTO symbols_fts(symbols_fts, rowid, name, doc, path) "
-                "VALUES ('delete', ?, '', '', '')",
-                [(one,) for one in ids],
+                "VALUES ('delete', ?, ?, ?, ?)",
+                stale,
             )
             connection.execute("DELETE FROM symbols WHERE path = ?", (path,))
             connection.execute("DELETE FROM refs WHERE path = ?", (path,))

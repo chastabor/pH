@@ -26,6 +26,8 @@ from typing import Any
 
 import pytest
 
+from ph.cancel import CancelToken
+from ph.cordis import DEPLOYMENT
 from ph.keys import TOOLS
 from ph.llm.types import Message, create_user_message
 from ph.testing import (
@@ -457,6 +459,51 @@ async def test_a_timeout_budget_is_enforced_by_its_row(mount: MountProfile) -> N
     assert result.error is not None
     assert result.error.info == {"name": "Timeout", "code": "TIMEOUT"}
     assert "50 ms" in result.error.message
+
+
+async def test_a_timed_out_body_is_told_so_through_its_own_signal(
+    mount: MountProfile,
+) -> None:
+    """The child token exists to be *handed over*, and was not (C6).
+
+    `ToolExecution.signal` says a `tools/execute` wrapper "may replace it for its
+    delegated lifetime — with a child token, so it can narrow but never widen".
+    The timeout row minted exactly that child, cancelled it on expiry, and never
+    passed it to the body — so a cooperative tool polling `raise_if_canceled`
+    was watching the *parent*, which the timeout never touches. Cancellation was
+    a no-op: the body ran on, and the budget bounded the caller's wait alone.
+
+    Asserted on the token the body was handed rather than on a body that manages
+    to outlive its own cancellation. A coroutine body is cancelled by the scope
+    whatever it is watching, and a thread body does not abandon on cancel — so
+    every way of *observing* the effect is a property of the body rather than of
+    the row. What the row owes is the child, and that is what this reads.
+    """
+    import anyio
+
+    ctx = await mount()
+    seen: list[CancelToken | None] = []
+
+    async def slow(_args: object, run: ToolRunContext) -> str:
+        seen.append(run.signal)
+        await anyio.sleep(1.0)
+        return "late"
+
+    ctx.require(TOOLS).register(simple_tool("slow-signal", slow, timeout_ms=50))
+    parent = CancelToken()
+
+    result = await ctx.require(TOOLS).execute(
+        ToolExecutionInput(
+            call_id="c1", name="slow-signal", arguments={}, scope=DEPLOYMENT, cancel=parent
+        )
+    )
+
+    assert result.is_error, "the caller still stops waiting at the budget"
+    handed = seen[0]
+    assert handed is not None and handed is not parent, "the body was handed the parent's token"
+    assert handed.parent is parent, "narrowed, and still under the caller's own cancellation"
+    assert handed.canceled, "the timeout never reached the body"
+    assert not parent.canceled, "and it must not widen to the caller's"
 
 
 async def test_unknown_tool_error_is_routable() -> None:

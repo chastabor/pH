@@ -450,6 +450,46 @@ def test_the_readmes_example_is_a_skill_this_build_can_load() -> None:
     assert steps[-1].startswith("Run uv run pytest -q"), "and a declared default fills itself in"
 
 
+def test_a_non_string_parameter_renders_as_its_value(tmp_path: Path) -> None:
+    """A declared `number` or `boolean` is not "not a string" (D1).
+
+    `as_str`'s contract is that anything which is not a string is `""`, which is
+    right where a non-string means a *malformed* value and wrong here, where the
+    author declared it. Every numeric and boolean parameter rendered as nothing —
+    in the instructions the model reads and in every step seeded into its plan,
+    with no error anywhere — so `Retry {{parameters.attempts}} times` became
+    `Retry  times` and a skill quietly lost the number that made it a procedure.
+
+    Booleans render the way the schema that declared them spells them. An author
+    writing `--strict={{parameters.strict}}` means the JSON value, and a model
+    handed Python's `True` in a shell flag has been given a bug to find.
+    """
+    declared = Skill(
+        name="tuned",
+        description="renders its inputs",
+        parameters={
+            "type": "object",
+            "properties": {
+                "attempts": {"type": "number"},
+                "strict": {"type": "boolean"},
+                "ratio": {"type": "number"},
+                "label": {"type": "string"},
+            },
+        },
+        steps=["Retry {{parameters.attempts}} times"],
+    )
+    body = (
+        "Run with --strict={{parameters.strict}} at {{parameters.ratio}} for {{parameters.label}}"
+    )
+
+    filled, steps = rendered_skill(
+        body, declared, {"attempts": 3, "strict": False, "ratio": 0.5, "label": "x"}
+    )
+
+    assert filled == "Run with --strict=false at 0.5 for x"
+    assert steps == ["Retry 3 times"], "the step the model is asked to follow"
+
+
 async def test_a_listener_that_fails_does_not_fail_the_read(
     mount: MountProfile, tmp_path: Path
 ) -> None:

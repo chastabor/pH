@@ -61,6 +61,7 @@ from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.diagnostics import Diagnostic, contribute
+from ph.seams.fs import FsService
 from ph.seams.skills import discover_skills
 from ph.text import count_of
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -422,6 +423,29 @@ class IndexValue(ToolModel):
     total_chunks: int
 
 
+def _scoped(fs: FsService, paths: list[str] | None, run: ToolRunContext) -> list[str] | None:
+    """The `paths` filter, in the spelling the records are stored under (X2).
+
+    `index_tool` stores documents as `fs.collect` returns them, which is
+    `fs.named()` — workspace-relative posix, because an absolute path in a
+    stored record puts the machine and the run into the conversation. The filter
+    was matched raw, exactly as the model typed it, so `["."]`, `["./docs"]` and
+    any absolute path matched nothing at all and the reply said "among 0 indexed
+    passages" — a wrong answer that reads like an empty index rather than like a
+    filter that missed.
+
+    **`.` and `""` mean the workspace, which is no filter.** `named(".")` is
+    `"."`, and no document is stored under that name, so the obvious way to say
+    "search everything" excluded everything. Dropping them leaves the unfiltered
+    search, which is what the model meant and what the count then describes.
+    """
+    if paths is None:
+        return None
+    named = [fs.named(one, agent=run.agent) for one in paths]
+    kept = [one for one in named if one not in ("", ".")]
+    return kept or None
+
+
 class SearchArgs(ToolModel):
     query: str = Field(description="What you are looking for, in your own words.")
     k: int = Field(5, ge=1, le=50, description="How many passages to return.")
@@ -603,8 +627,9 @@ async def apply(ctx: Context, config: Config) -> None:
         # O(chunks) passes per filtered query (7.5 ms against a 0.22 ms
         # unfiltered search on a 10 000-chunk index).
         allowed: list[int] | None = None
-        if args.paths is not None:
-            allowed = await anyio.to_thread.run_sync(store.ids_under, args.paths)
+        scope = _scoped(ctx.require(FS), args.paths, run)
+        if scope is not None:
+            allowed = await anyio.to_thread.run_sync(store.ids_under, scope)
             searched = len(allowed)
         else:
             searched = int(store.stats()["chunks"])

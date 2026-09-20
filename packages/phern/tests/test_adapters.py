@@ -67,6 +67,7 @@ from ph_app.adapters.openai_compatible import (
     OpenAiCompatibleAdapter,
     ProviderProfile,
     WindowProbe,
+    _is_overflow,
     _StreamState,
     _to_openai,
     _to_usage,
@@ -369,6 +370,34 @@ async def test_sse_events_survive_a_boundary_mid_chunk() -> None:
     assert seen == [{"a": 1}, {"b": 2}]
 
 
+async def test_sse_reads_a_crlf_stream(tmp_path: Path) -> None:
+    """The spec allows `\r\n`, and pH read only `\n\n` (G7).
+
+    A gateway or proxy that terminates with CRLF produced a buffer that never
+    contained the boundary this looked for — so the reader yielded *nothing at
+    all*, for the whole of a turn, and the adapter above it saw a stream that
+    ended without a single chunk.
+    """
+    response = _Response(['data: {"a": 1}\r\n\r\ndata: {"b": 2}\r\n\r\n'])
+    assert [payload async for _event, payload in iter_sse(response)] == [{"a": 1}, {"b": 2}]
+
+
+async def test_the_last_event_survives_a_stream_that_just_ends() -> None:
+    """A server that closes without a trailing blank line still said something.
+
+    The final block sat in the buffer and was dropped. On a short reply that is
+    the entire answer; on a long one it is the `finish` that settles the turn,
+    so the turn ended with no reason and the text it had already streamed.
+
+    A trailing *fragment* is still not an event — a block with no `data:` line
+    carries nothing — so a stream truncated mid-frame yields only what it
+    completed.
+    """
+    assert [payload async for _e, payload in iter_sse(_Response(['data: {"a": 1}']))] == [{"a": 1}]
+    partial = _Response(['data: {"a": 1}\n\nevent: ping\n'])
+    assert [payload async for _e, payload in iter_sse(partial)] == [{"a": 1}]
+
+
 async def test_sse_stops_at_the_done_sentinel() -> None:
     response = _Response(['data: {"a": 1}\n\ndata: [DONE]\n\ndata: {"never": 1}\n\n'])
     seen = [payload async for _event, payload in iter_sse(response)]
@@ -640,6 +669,38 @@ async def test_the_openai_request_body_carries_tools_and_the_system_slot() -> No
     assert body["stream"] is True
     # Usage is requested explicitly, because D15 makes it authoritative.
     assert body["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.parametrize(
+    ("body", "overflow"),
+    [
+        ("the request exceeds the available context size", True),
+        ("This model's maximum context length is 8192 tokens", True),
+        ("context window exceeded", True),
+        ("too many tokens in the prompt", True),
+        ("no such file or directory", False),
+        # The word alone is not the finding: a false overflow compacts a
+        # conversation that fit, which costs the person their context for nothing.
+        ("the context parameter is required", False),
+        ("invalid request: bad length", False),
+    ],
+)
+def test_the_overflow_phrases_are_the_ones_these_servers_say(body: str, overflow: bool) -> None:
+    """G5: llama.cpp's sentence did not match, so the shipped profile never
+    compacted.
+
+    The old rule was "context" plus "length" or "window", which reads as a
+    general test and is really two spellings written as a conjunction.
+    llama.cpp's *"exceeds the available context size"* contains the first word
+    and neither of the others, so `CONTEXT_WINDOW_EXCEEDED` — the code that
+    triggers compaction, and the one failure a retry can never fix by itself —
+    was unreachable on that route.
+
+    The negative cases are the other half: the conjunction was over-broad in its
+    own way, and a phrase list has to be checked against prose that merely
+    mentions a context.
+    """
+    assert _is_overflow(body) is overflow
 
 
 def test_status_classification_is_shared_and_overflow_is_per_wire() -> None:

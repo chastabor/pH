@@ -245,6 +245,32 @@ async def test_continue_denies_the_call_and_keeps_the_turn(mount: MountProfile) 
     assert not events_of(session, "limits/exceeded"), "continue is not a turn-ending breach"
 
 
+async def test_error_records_the_breach_it_raises_about(mount: MountProfile) -> None:
+    """`exit: error` left no durable record, and that is what a reviewer reads (D7).
+
+    Only `end` wrote `limits/exceeded`, so the posture that surfaces a breach
+    most loudly to the *model* was the one that said nothing to anybody else:
+    `phern doctor`, a reviewer and a resumed session all fold that event, and for
+    this setting there was nothing to fold.
+
+    The turn continuing is the documented reading of the word here, not an
+    oversight — `ToolCallLimits.exit` says why it cannot match the model-call
+    setting of the same name without a pipeline contract ph-core does not have —
+    so it is asserted rather than left implied.
+    """
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
+    session = ctx.require(SESSIONS).create("tool-error")
+
+    await run_tool_calls(ctx, session, bash_call("c1"))
+    await run_tool_calls(ctx, session, bash_call("c2"), step=2)
+
+    breaches = events_of(session, "limits/exceeded")
+    assert [str(one.data.get("limit")) for one in breaches] == ["tool-calls"]
+    assert "call limit reached" in str(breaches[0].data.get("message"))
+    # The call fails rather than being denied: breakage, not policy.
+    assert "Error" in result_text(session, "c2")
+
+
 async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: MountProfile) -> None:
     """One table where upstream mounts one middleware per tool."""
     ctx = await mount(

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ import anyio
 import anyio.abc
 from pydantic import Field
 
+from ..cancel import Cancellation, raced
 from ..cordis import Context, Disposer, maybe_await, plugin
 from ..keys import SUBPROCESS
 from ..orphans import OrphanJournal, host_journal
@@ -318,24 +320,57 @@ class SubprocessHandle:
         """Await exit and reap. Idempotent."""
         return int(await self.process.wait())
 
+    def _signal(self, *, kill: bool) -> None:
+        """Signal the child's whole process group, or the child alone (J4).
+
+        The group, because `spawn` made this child a group leader precisely so
+        that there is one: a shell command is usually more than one process, and
+        signalling the shell leaves the pipeline it started running.
+
+        The fallback is not a formality. `killpg` is POSIX-only, and a child that
+        has already exited has no group to signal — in both cases the direct
+        child is the honest best effort, and it is what this did before there
+        were groups at all.
+        """
+        pid = self.pid
+        if pid is not None and hasattr(os, "killpg"):
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL if kill else signal.SIGTERM)
+            except OSError:
+                pass  # No group: already reaped, or it changed its own.
+            else:
+                return
+        if kill:
+            self.process.kill()
+        else:
+            self.process.terminate()
+
     async def terminate(self) -> None:
         """Ask, wait out the grace, then insist — and always reap.
 
         The `wait()` in the finally is what keeps a zombie from accumulating
         (F4): a child that exited but was never awaited stays in the table for
         as long as the parent lives.
+
+        **Shielded as a whole, and bounded** (J4). Only the reap used to be, so a
+        caller cancelled during the grace — which is the ordinary way a timeout
+        arrives — unwound straight past the `kill()`, and a child that ignores
+        `SIGTERM` went on holding the disposer, and its scope, until it chose to
+        exit. The escalation *is* the point of this method, so it has to survive
+        the cancellation that asked for it; the grace is what keeps that from
+        being an unbounded wait.
         """
-        try:
-            if self.process.returncode is None:
-                self.process.terminate()
-                with anyio.move_on_after(self.spec.grace_ms / 1000):
-                    await self.process.wait()
-            if self.process.returncode is None:
-                self.process.kill()
-        except ProcessLookupError:  # pragma: no cover - already gone
-            pass
-        finally:
-            with anyio.CancelScope(shield=True):
+        with anyio.CancelScope(shield=True):
+            try:
+                if self.process.returncode is None:
+                    self._signal(kill=False)
+                    with anyio.move_on_after(self.spec.grace_ms / 1000):
+                        await self.process.wait()
+                if self.process.returncode is None:
+                    self._signal(kill=True)
+            except ProcessLookupError:  # pragma: no cover - already gone
+                pass
+            finally:
                 try:
                     # `aclose`, not `wait`: it closes the child's pipes *and*
                     # reaps. A timeout cancels `pump` mid-read, so the drains let
@@ -457,6 +492,18 @@ class SubprocessService:
                 stdout=_stdio(spec.stdio),
                 stderr=_stdio(spec.stdio),
                 stdin=None,
+                # **Its own process group, so the whole command can be stopped**
+                # (J4). `terminate` signalled the direct child, which for
+                # `sh -c 'build | tee log'` is the shell: the pipeline's other
+                # members kept the CPU, kept the pipes and outlived the timeout
+                # that was supposed to end them. A leader of its own group is
+                # what makes `killpg` mean "this command".
+                #
+                # It also detaches the child from the controlling terminal, which
+                # is wanted: a Ctrl-C in the person's shell is for pH, and a child
+                # pH is managing should be ended by pH's own ladder rather than by
+                # a signal that reaches it from the side.
+                start_new_session=True,
             )
             child = SubprocessHandle(spec=spec, process=process, cap=cap)
             handle["child"] = child
@@ -493,7 +540,11 @@ class SubprocessService:
         return child
 
     async def run(
-        self, spec: SubprocessSpawnSpec, *, scope: Context | None = None
+        self,
+        spec: SubprocessSpawnSpec,
+        *,
+        scope: Context | None = None,
+        signal: Cancellation | None = None,
     ) -> SubprocessResult:
         """Spawn, drain, and await — the common case as one call, both bounds applied.
 
@@ -503,13 +554,25 @@ class SubprocessService:
         path a disposal uses, so the grace and the reap are not a second story —
         and what it managed to print is still returned, because a command that
         hung after saying something useful should not lose the useful part.
+
+        **`signal` is the third bound, and the only one a person can reach**
+        (C7). A timeout is a number chosen in advance; escape is a decision made
+        while watching. Without it `bash sleep 3600` with no `timeout_ms` could
+        not be interrupted at all — the cancel reached the tool pipeline and
+        stopped there, because nothing between it and the child was watching.
+        Terminated by the same path as a timeout, so there is one story about
+        how a child ends.
         """
         child = await self.spawn(spec, scope=scope)
         seconds = None if spec.timeout_ms is None else spec.timeout_ms / 1000
         try:
-            with anyio.move_on_after(seconds) as bound:
+
+            async def drain() -> int:
                 await child.pump()
-                await child.wait()
+                return await child.wait()
+
+            with anyio.move_on_after(seconds) as bound:
+                await raced(signal, drain)
         finally:
             # **Released, not merely reaped.** Reaping in a `finally` is the
             # point (F4) — an exception between spawn and wait must not leave the

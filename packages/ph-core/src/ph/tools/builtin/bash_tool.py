@@ -89,7 +89,15 @@ async def apply(ctx: Context, config: None) -> None:
         # workspace environment from it, so this tool states who is running
         # rather than re-deriving where (D21, E2).
         result = await ctx.require(SHELL).run(
-            args.command, agent=run.agent, timeout_ms=args.timeout_ms
+            args.command,
+            agent=run.agent,
+            timeout_ms=args.timeout_ms,
+            # **The call's own cancellation, handed down** (C7). Nothing between
+            # the pipeline and the child was watching it, so a command with no
+            # `timeout_ms` ran to completion however loudly it was interrupted —
+            # and `tools/timeout`'s child token, which exists to narrow exactly
+            # this, had nowhere to arrive.
+            signal=run.signal,
         )
         return {
             "command": args.command,

@@ -19,7 +19,7 @@ import pytest
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
 from ph.json import as_str
-from ph.keys import AGENTS, MOUNT, SANDBOX, SESSIONS, SHELL, WORKSPACE
+from ph.keys import AGENTS, MOUNT, PERMISSION_PRESETS, SANDBOX, SESSIONS, SHELL, WORKSPACE
 from ph.paths import canonical
 from ph.seams.sandbox import (
     DEFAULT_HOSTS,
@@ -118,6 +118,42 @@ def test_read_only_takes_no_extra_directories(tmp_path: Path) -> None:
     """The session said nothing is writable; a deployment's cache is not an exception."""
     seam = _seam(paths=[str(tmp_path)])
     assert seam.effective(SandboxPolicy(mode="read-only")).writable_extra is None
+
+
+async def test_the_read_only_preset_reaches_the_shell_policy(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A preset's sandbox half was vocabulary the backend never heard (J2).
+
+    `apply_preset` logs `sandbox/mode`, and the only thing that read it back was
+    the footer's `mode_reading`. `workspace_policy` hard-codes `workspace-write`,
+    and both confinement callers — `ctx.shell` and the RLM kernel — passed that
+    through unchanged. So a person who chose `read-only` was *shown* `read-only`
+    in the status bar while every confined command was handed a policy that said
+    the workspace was writable: the visible half of the posture and the enforced
+    half disagreeing, with the wrong one on screen.
+
+    Read through `effective`, which is the single place both callers meet — and
+    the reason the fix is one change rather than one per confiner.
+    """
+    ctx = await mount(_allow(paths=[str(tmp_path)]))
+    sandbox = ctx.require(SANDBOX)
+    session = ctx.require(SESSIONS).create("posture")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
+    asked = SandboxPolicy(mode="workspace-write", workspace_root="/w")
+
+    assert sandbox.effective(asked, agent=agent.id).mode == "workspace-write"
+
+    ctx.require(PERMISSION_PRESETS).apply_preset("read-only", session)
+
+    applied = sandbox.effective(asked, agent=agent.id)
+    assert applied.mode == "read-only", "the posture stopped at the status bar"
+    # And the mode's own consequence follows from it: `read-only` means nothing
+    # is writable, deployment allowances included.
+    assert applied.writable_extra is None
+    # An agent with no logged posture is unchanged — a policy built for a probe
+    # or a test still means what it says.
+    assert sandbox.effective(asked).mode == "workspace-write"
 
 
 def test_the_callers_own_extras_are_kept_and_not_duplicated(tmp_path: Path) -> None:

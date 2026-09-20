@@ -189,6 +189,28 @@ def test_a_path_matches_by_either_spelling() -> None:
     assert policy.decide("read", Path("/w/src/.env.example")) is None
 
 
+def test_a_dot_dot_spelling_cannot_slip_past_a_deny() -> None:
+    """A rule matches a path string, so the string has to be the real one (D6).
+
+    Nothing collapsed `..`, so `deny read secrets/**` was bypassed by
+    `public/../secrets/key`: the relative spelling offered to the matcher was the
+    one with the `..` still in it, and `secrets/**` does not match
+    `public/../secrets/key`. The file read is the same file either way — only the
+    name it was asked for differed, which is the whole of the bypass.
+
+    Both spellings are checked, because both are offered: the absolute one a
+    rule like `/etc/**` uses, and the workspace-relative one a rule like
+    `secrets/**` does.
+    """
+    policy = _policy(Rule(operations=("read",), paths=("secrets/**",), mode="deny"))
+
+    assert policy.decide("read", Path("/w/secrets/key")) is not None, "the plain spelling"
+    assert policy.decide("read", Path("/w/public/../secrets/key")) is not None
+    assert policy.decide("read", Path("/w/./secrets/key")) is not None
+    # And a path that genuinely is elsewhere still is.
+    assert policy.decide("read", Path("/w/public/key")) is None
+
+
 # --------------------------------------------------------- recursive delete --
 
 

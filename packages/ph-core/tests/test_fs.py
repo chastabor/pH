@@ -60,6 +60,7 @@ is matched against directory names, so a file called `dist` stays visible.
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,7 @@ import pytest
 from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.keys import AGENTS, FS, SESSIONS
+from ph.paths import is_under
 from ph.seams.fs import (
     Config as FsConfig,
 )
@@ -114,6 +116,58 @@ async def _mounted(tmp_path: Path, **config: Any) -> FsService:  # noqa: ANN401
     await apply(root, FsConfig(root=str(tmp_path), **config))
     service: FsService = root.require(FS)
     return service
+
+
+@pytest.mark.parametrize("pattern", ["[]", "[!]", "[]abc]", "[", "a[b", "[^x]", "[]]"])
+def test_a_bracket_a_model_typed_cannot_raise_out_of_a_policy_check(pattern: str) -> None:
+    """The promise `matches_glob` makes, kept for the shapes that broke it (D5).
+
+    `permissions-fs` evaluates these patterns first-match-wins on every gated
+    read, and the matcher's own docstring says a pattern typed by a model must
+    not raise. Three shapes did: the scanner took the first `]` as the end of the
+    class, so `[]` became the regex `[]`, `[!]` became `[^]` and `[]abc]` became
+    `[]abc]` — none of which compiles, and each one raised `re.error` out of the
+    check rather than answering it.
+
+    `fnmatch` is the oracle because the docstring names it: two glob dialects in
+    one harness is a rule somebody writes once and is then wrong about forever.
+    A leading `]` is a member of the class, and a bracket with nothing in it is
+    a literal.
+    """
+    for candidate in (pattern, "a", "]", "^", "abc"):
+        assert matches_glob(candidate, pattern) == fnmatch.fnmatchcase(candidate, pattern), (
+            f"{pattern!r} against {candidate!r} disagrees with fnmatch"
+        )
+
+
+def test_a_dot_dot_write_at_the_worktree_tier_is_refused(tmp_path: Path) -> None:
+    """`..` is collapsed here, because every boundary above is lexical (J1).
+
+    `is_under` is a separator-aware prefix compare and says so — it resolves
+    nothing, deliberately, because resolving would answer a different question
+    than a security check means to ask. That makes it exactly as good as the path
+    it is handed, and joining an unnormalized relative path onto the root handed
+    it `<root>/../../../etc/cron.d/x`, which *starts with* the root. Every check
+    the `worktree` tier makes passed: no `workspace-write-scope` prompt, the
+    write landing outside the tree, and the log recording the relative spelling
+    that concealed it.
+
+    An absolute path is still passed through — refusing one here would be a
+    confinement claim this layer cannot make (N2) — and that is why the escape
+    had to be spelled relatively to work at all.
+    """
+    _root, service = _fs(tmp_path)
+
+    escaped = service.resolve("../../../etc/cron.d/x")
+
+    assert ".." not in escaped.parts, "the spelling that hid the escape"
+    assert not is_under(escaped, tmp_path), "and it is no longer inside the tree"
+    # An ordinary relative path is untouched, and so is an absolute one.
+    assert service.resolve("src/main.py") == tmp_path / "src/main.py"
+    assert service.resolve("/etc/hosts") == Path("/etc/hosts")
+    # `.` and a doubled separator collapse too — they are the same lexical hole
+    # with a friendlier face.
+    assert service.resolve("./src/../src/main.py") == tmp_path / "src/main.py"
 
 
 async def test_write_intent_fires_before_the_write_and_a_veto_prevents_it(

@@ -712,7 +712,7 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
 ) -> None:
     """The reason the stop ladder's clock is a sibling task.
 
-    `_pump` used to sit in `move_on_after(_CANCEL_POLL_SECONDS)` so it could ask
+    `_pump` used to sit in `move_on_after(POLL_SECONDS)` so it could ask
     between reads whether the caller had canceled. The cost was not one scope
     per socket read but **one per frame**: `_recv_line` returns straight out of
     its buffer whenever a frame is already there, and a 64 KiB read of a chatty
@@ -734,11 +734,11 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     callback. Canceling it was always safe.
 
     Sabotage: put the `move_on_after` back around the read, and `canceled`
-    counts roughly `duration / _CANCEL_POLL_SECONDS`.
+    counts roughly `duration / POLL_SECONDS`.
     """
     import anyio
 
-    from ph_rlm.kernel.manager import _CANCEL_POLL_SECONDS
+    from ph.cancel import POLL_SECONDS
 
     original = anyio.wait_readable
     canceled = 0
@@ -757,7 +757,7 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
 
     kernel = await make_kernel()
     # Long enough that the old poll would have fired many times over.
-    slept = 12 * _CANCEL_POLL_SECONDS
+    slept = 12 * POLL_SECONDS
     result = await kernel.run(f"import asyncio\nawait asyncio.sleep({slept})\n'done'", (), None)
 
     assert result.value == "done", result.error

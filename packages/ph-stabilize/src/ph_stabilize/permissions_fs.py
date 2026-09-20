@@ -54,6 +54,7 @@ time.
 from __future__ import annotations
 
 import logging
+import posixpath
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -270,8 +271,11 @@ class FsPermissions:
     def decide(
         self, operation: Operation, path: Path, agent: AgentHandle | None = None
     ) -> Rule | None:
-        """The first rule that matches, or `None` for the default allow."""
-        posix = path.as_posix()
+        """The first rule that matches, or `None` for the default allow.
+
+        Normalized here, where a caller's own `Path` arrives — see `_spellings`.
+        """
+        posix = posixpath.normpath(path.as_posix())
         return self._decide_from(self._spellings(posix, agent), operation, posix, agent)
 
     def _decide_from(
@@ -329,8 +333,10 @@ class FsPermissions:
         is the question all three consumers actually ask. One spelling, because
         three hand-written `rule is not None and rule.mode != "allow"` checks are
         three edit sites the day `Decision` grows a fourth member.
+
+        Normalized here, where a caller's own `Path` arrives — see `_spellings`.
         """
-        posix = path.as_posix()
+        posix = posixpath.normpath(path.as_posix())
         return self._objection_to(self._spellings(posix, agent), operation, posix, agent)
 
     def conceals(self, path: Path, agent: AgentHandle | None = None) -> bool:
@@ -546,6 +552,16 @@ class FsPermissions:
         immediately made of one and what both callers already hold: `decide` has
         a `Path` and spends one `as_posix()`, while `screen` is handed the string
         by the walk (P6-17's finding, applied to the seam's own contract).
+
+        **Not normalized here** (D6). A rule matches the string as given, and
+        nothing collapsed `..` — so `deny read secrets/**` was bypassed by
+        `public/../secrets/key`, whose relative spelling never matches the
+        pattern. The collapse belongs at the two entry points that take a
+        caller's `Path`, and not in this function: `screen` is the third caller
+        and runs *per walked file*, on strings `os.walk` built from an already
+        resolved base, which can never carry a `..` — so normalizing here was
+        guaranteed dead work on the one path hot enough for `_prefix_of` to be
+        cached for.
         """
         prefix = self._prefix(agent)
         if absolute.startswith(prefix):

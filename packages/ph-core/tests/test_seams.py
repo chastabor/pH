@@ -60,7 +60,7 @@ from ph.seams.subprocess import (
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session
-from ph.testing import StubAgent, noted
+from ph.testing import StubAgent, noted, settled
 
 pytestmark = pytest.mark.anyio
 
@@ -684,20 +684,6 @@ async def test_a_disposed_renderer_leaves_an_absence_not_a_fallback() -> None:
 # ---------------------------------------------------------- commands and jobs --
 
 
-async def _settled(done: Any, what: str) -> None:  # noqa: ANN401
-    """Poll until `done()`, or fail saying what was waited for.
-
-    A slot test's failure mode is a wait that never ends, and `fail_after` alone
-    raises a bare `TimeoutError` naming neither the job nor the reason.
-    """
-    try:
-        with anyio.fail_after(5):
-            while not done():
-                await anyio.sleep(0.005)
-    except TimeoutError:
-        pytest.fail(f"timed out waiting for {what}")
-
-
 async def test_a_command_dispatches_without_opening_a_turn() -> None:
     root = Context()
     registry = CommandRegistry(ctx=root)
@@ -876,7 +862,7 @@ async def test_a_slot_queues_the_overflow_rather_than_refusing_it() -> None:
     jobs = [
         await service.start(kind="test", label=f"j{n}", run=body, slot=("k", 1)) for n in range(3)
     ]
-    await _settled(lambda: len(ran) == 1, "the first job to start")
+    await settled(lambda: len(ran) == 1, "the first job to start")
 
     assert [job.state for job in jobs] == ["running", "queued", "queued"]
     gate.set()
@@ -898,7 +884,7 @@ async def test_a_failed_job_frees_its_slot() -> None:
     # Bounded: a slot the failure kept is a `drain()` that never returns, and a
     # test that reports this bug as a hung suite is the least legible failure
     # there is — `daemon_helpers.until` makes the same argument for its own copy.
-    await _settled(lambda: second.state == "done", "the second job to take the freed slot")
+    await settled(lambda: second.state == "done", "the second job to take the freed slot")
     await root.drain()
 
     assert first.state == "failed"
@@ -929,11 +915,11 @@ async def test_canceling_a_queued_job_stops_the_wait_and_takes_no_slot() -> None
 
     first = await service.start(kind="test", label="holds", run=body, slot=("k", 1))
     queued = await service.start(kind="test", label="waits", run=body, slot=("k", 1))
-    await _settled(lambda: len(ran) == 1, "the first job to take the slot")
+    await settled(lambda: len(ran) == 1, "the first job to take the slot")
     assert state_of(queued) == "queued"
 
     service.cancel(queued.id)
-    await _settled(
+    await settled(
         lambda: state_of(queued) == "canceled",
         "the canceled job to leave the queue while the slot is still held",
     )
@@ -961,13 +947,13 @@ async def test_on_queued_fires_only_when_there_is_a_wait() -> None:
     first = await service.start(
         kind="test", label="first", run=body, slot=("k", 1), on_queued=lambda: waited.append("a")
     )
-    await _settled(lambda: len(ran) == 1, "the first job to start")
+    await settled(lambda: len(ran) == 1, "the first job to start")
     assert waited == [], "nothing was in its way"
 
     await service.start(
         kind="test", label="second", run=body, slot=("k", 1), on_queued=lambda: waited.append("b")
     )
-    await _settled(lambda: waited == ["b"], "the second job to report waiting")
+    await settled(lambda: waited == ["b"], "the second job to report waiting")
 
     gate.set()
     await root.drain()
@@ -1009,7 +995,7 @@ async def test_a_deployment_cap_bounds_a_kind_across_every_producer() -> None:
     first = await service.start(kind="child", label="a", run=body)
     second = await service.start(kind="child", label="b", run=body)
     loose = await service.start(kind="other", label="c", run=lambda _job: "free")
-    await _settled(lambda: len(ran) == 1 and loose.state == "done", "the capped kind to start")
+    await settled(lambda: len(ran) == 1 and loose.state == "done", "the capped kind to start")
 
     assert (first.state, second.state) == ("running", "queued")
     assert loose.state == "done", "an uncapped kind waits for nothing"
@@ -1038,7 +1024,7 @@ async def test_a_producers_slot_is_taken_before_the_deployments() -> None:
     await service.start(kind="child", label="a1", run=body, slot=("A", 1))
     await service.start(kind="child", label="a2", run=body, slot=("A", 1))
     await service.start(kind="child", label="b1", run=body, slot=("B", 1))
-    await _settled(lambda: len(ran) == 2, "both parents' first children to start")
+    await settled(lambda: len(ran) == 2, "both parents' first children to start")
 
     assert sorted(ran) == ["a1", "b1"], "one parent's queue took the other's capacity"
 
@@ -1066,11 +1052,11 @@ async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
 
     holder = await service.start(kind="t", label="holds", run=body, slot=("k", 1), scope=owner)
     queued = await service.start(kind="t", label="waits", run=body, slot=("k", 1), scope=owner)
-    await _settled(lambda: len(ran) == 1, "the first job to take the slot")
+    await settled(lambda: len(ran) == 1, "the first job to take the slot")
     assert state_of(queued) == "queued"
 
     await owner.dispose()
-    await _settled(lambda: state_of(queued) == "canceled", "the queued job to be abandoned")
+    await settled(lambda: state_of(queued) == "canceled", "the queued job to be abandoned")
     assert ran == [holder.id], "a job whose owner went away ran anyway"
 
     gate.set()
@@ -1116,7 +1102,7 @@ async def test_one_producers_slot_key_cannot_collide_with_anothers() -> None:
 
     await service.start(kind="alpha", label="a", run=body, slot=("shared", 1))
     await service.start(kind="beta", label="b", run=body, slot=("shared", 1))
-    await _settled(lambda: len(ran) == 2, "both producers to run under one key")
+    await settled(lambda: len(ran) == 2, "both producers to run under one key")
 
     assert sorted(ran) == ["alpha", "beta"]
     gate.set()

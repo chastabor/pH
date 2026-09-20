@@ -539,6 +539,48 @@ async def test_an_edit_is_picked_up_and_replaces_the_old_rows(
     assert here.value["symbols"], "the new symbol was not indexed"
 
 
+async def test_a_renamed_symbol_is_not_found_under_its_old_name(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The full-text index has to forget too, and it was not (X1).
+
+    `symbols_fts` is contentless, and a contentless FTS5 table cannot be asked
+    which postings belong to a row — the `'delete'` command needs the column
+    values the row was *inserted* with, and it was being handed three empty
+    strings. SQLite takes that quietly and removes nothing, so every posting for
+    every symbol ever re-indexed stayed in the index.
+
+    Stale postings would be merely wasteful if the rowids were retired; they are
+    not. `symbols.id` has no `AUTOINCREMENT`, so the next insert reuses the id
+    the deleted symbol had, and the old posting now points at a *different*
+    symbol. `search` joins the FTS rowid back to `symbols`, so asking for the old
+    name returns the new symbol — which is worse than a miss, because it reads
+    like an answer.
+
+    `define` was already covered by the sibling test above and passes either way:
+    it queries `symbols` directly and never touches the FTS table. `search` is
+    the mode that goes through it, which is why the defect survived.
+    """
+    # **One file, and that is load-bearing.** `symbols.id` is reused only when
+    # the deleted row held the highest one; with a second file indexed after it,
+    # the stale posting points at an id nothing has taken back and the join in
+    # `search` drops it, hiding the defect behind a miss.
+    _tree(tmp_path)
+    ctx = await _indexed(mount, tmp_path)
+    agent = _agent(ctx)
+    await run_tool(ctx, "code_index", {"paths": ["pkg/helpers.py"]}, agent=agent)
+
+    (tmp_path / "pkg" / "helpers.py").write_text(
+        "def gamma(value):\n    return value\n", encoding="utf-8"
+    )
+    await run_tool(ctx, "code_index", {"paths": ["pkg/helpers.py"]}, agent=agent)
+
+    stale = await run_tool(ctx, "code_graph", {"mode": "search", "query": "shared"}, agent=agent)
+    assert stale.value["symbols"] == [], "the old name still has postings in the index"
+    found = await run_tool(ctx, "code_graph", {"mode": "search", "query": "gamma"}, agent=agent)
+    assert [one["name"] for one in found.value["symbols"]] == ["gamma"]
+
+
 async def test_forget_removes_a_path_from_the_index(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)

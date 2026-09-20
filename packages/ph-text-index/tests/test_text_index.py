@@ -437,6 +437,47 @@ async def test_a_paths_filter_narrows_the_search(mount: MountProfile, tmp_path: 
     assert found.value["searched"] < ctx.require(TEXT_INDEX)._index.stats()["chunks"]
 
 
+async def test_the_spellings_a_model_writes_for_a_path_all_work(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The filter is matched against stored names, so it has to be one (X2).
+
+    `index_tool` stores documents as `fs.collect` returns them — `fs.named()`,
+    workspace-relative — while `paths` were matched exactly as the model typed
+    them. So `["./docs"]` and an absolute path matched nothing and the reply
+    said "among 0 indexed passages": not an error, not an empty result set from
+    a real filter, but a wrong answer wearing the shape of an empty index.
+
+    `["."]` is the one worth its own case. It is how a model says "everywhere",
+    no document is stored under that name, and it therefore excluded everything
+    — the opposite of what it asks for.
+    """
+    for directory in ("docs", "notes"):
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "w.md").write_text(DOCUMENT, encoding="utf-8")
+    ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
+    agent = _agent(ctx)
+    await run_tool(ctx, "text_index", {"paths": ["docs", "notes"]}, agent=agent)
+    everything = int(ctx.require(TEXT_INDEX)._index.stats()["chunks"])
+
+    async def search(paths: list[str]) -> Any:  # noqa: ANN401
+        found = await run_tool(
+            ctx, "text_search", {"query": "containment tier", "paths": paths, "k": 10}, agent=agent
+        )
+        return found.value
+
+    dotted = await search(["./notes"])
+    assert {hit["path"] for hit in dotted["hits"]} == {"notes/w.md"}
+
+    absolute = await search([str(tmp_path / "notes")])
+    assert {hit["path"] for hit in absolute["hits"]} == {"notes/w.md"}
+
+    # `.` is the workspace, which is every document rather than none of them.
+    here = await search(["."])
+    assert here["searched"] == everything
+    assert {hit["path"] for hit in here["hits"]} == {"docs/w.md", "notes/w.md"}
+
+
 async def test_forget_removes_a_document_through_the_tool(
     mount: MountProfile, tmp_path: Path
 ) -> None:

@@ -575,17 +575,27 @@ class SandboxSeam:
             self.ctx.running_for(scope), self, "egress", bridge, label="sandbox.egress"
         )
 
+    def logged_mode(self, session: Session | None) -> SandboxMode | None:
+        """The posture this session recorded, or `None` if it never set one.
+
+        Separate from `resolve_mode` because the *absence* is what `effective`
+        needs: a caller's policy states a mode, and only a posture somebody
+        actually chose may overrule it. Collapsed into the default, "nobody said"
+        and "the deployment says workspace-write" are the same answer, and
+        `effective` would overwrite every caller's mode with the default.
+        """
+        if session is None:
+            return None
+        event = session.latest("sandbox/mode")
+        if event is None:
+            return None
+        return SANDBOX_MODES.get(as_str(event.data.get("mode")))
+
     def resolve_mode(
         self, session: Session | None = None, *, explicit: SandboxMode | None = None
     ) -> SandboxMode:
         """Explicit beats the log; the log beats the deployment default."""
-        if explicit is not None:
-            return explicit
-        if session is not None:
-            event = session.latest("sandbox/mode")
-            if event is not None:
-                return SANDBOX_MODES.get(as_str(event.data.get("mode")), self.default_mode)
-        return self.default_mode
+        return explicit or self.logged_mode(session) or self.default_mode
 
     def set_mode(self, session: Session, mode: SandboxMode) -> None:
         session.append("sandbox/mode", {"mode": mode})
@@ -702,12 +712,23 @@ class SandboxSeam:
         mounted — `allowlist` without one is no network, which is the closed
         direction and what `network_posture` reports.
         """
+        # **The posture the session chose, applied here** (J2). `apply_preset`
+        # logs `sandbox/mode` and nothing read it back: `workspace_policy`
+        # hard-codes `workspace-write`, both confinement callers passed that
+        # through unchanged, and `resolve_mode`'s only reader was the footer. So
+        # `read-only` and `danger-full-access` were reported as in force by the
+        # status bar while the backend was handed `workspace-write` either way —
+        # the two halves of a preset disagreeing, with the visible half wrong.
+        #
+        # Only a mode somebody actually logged overrules the caller: a policy
+        # built for a probe, or by a test, still means what it says.
+        mode = self.logged_mode(self._session_of(agent)) or policy.mode
         extra = list(policy.writable_extra or ())
-        if policy.mode != "read-only":
+        if mode != "read-only":
             extra += [str(path) for path in self.allowed_paths() if str(path) not in extra]
         allowed = self._allowed.network
         network, egress = False, None
-        if policy.mode == "danger-full-access":
+        if mode == "danger-full-access":
             network = True
         elif policy.refuse_network:
             pass
@@ -716,7 +737,12 @@ class SandboxSeam:
         elif allowed.mode == "allowlist" and self.egress is not None:
             egress = self.egress.model_copy(update={"agent": agent})
         return policy.model_copy(
-            update={"writable_extra": extra or None, "network": network, "egress": egress}
+            update={
+                "mode": mode,
+                "writable_extra": extra or None,
+                "network": network,
+                "egress": egress,
+            }
         )
 
     # --------------------------------------------------------------- confine --
@@ -807,6 +833,17 @@ class SandboxSeam:
         session.append(DENIED, denial.record(agent))
 
     def _session_of(self, agent: str | None) -> Session | None:
+        """The session an agent's records and posture belong to.
+
+        Two readers now: `report_denial`, which records where a person will look
+        for it, and `effective`, which reads the mode that session chose (J2).
+        The second is why the lookup is here rather than threaded through every
+        caller — `confine` already takes the agent id, because a denial has to
+        land in that agent's transcript, and the mode is a fact about the same
+        session. A `session=` parameter would have to be added to
+        `ShellService.run`, to the kernel's confiner and to everything that
+        builds one, to carry something the seam can already ask for.
+        """
         agents = self.ctx.get(AGENTS)
         if agents is None or not agent:
             return None

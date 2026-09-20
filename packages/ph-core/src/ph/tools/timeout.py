@@ -14,6 +14,8 @@ a deployment that wants a different timeout policy swaps the row.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import anyio
 
 from ..cordis import Context, Next, plugin
@@ -42,9 +44,20 @@ async def apply(ctx: Context, config: None) -> None:
         # The body observes the same cancellation the pipeline does, narrowed:
         # a child token can be canceled by the timeout or by anything above it,
         # but cannot outlive its parent's cancellation.
+        #
+        # **And the body is handed it** (C6). The child was minted and cancelled
+        # and never passed on, so `ToolExecution.signal`'s own contract — "a
+        # `tools/execute` wrapper may replace it for its delegated lifetime" —
+        # was written for a replacement that did not happen. A cooperative tool
+        # polling `raise_if_canceled` saw the *parent*, which the timeout never
+        # touches, so cancellation was a no-op: a thread-bound body ran to
+        # completion and its result was discarded by the scope above it, which is
+        # the budget bounding the caller's wait and nothing else.
         child = execution.signal.child() if execution.signal is not None else None
         with anyio.move_on_after(budget / 1000) as scope:
-            result = await next_()
+            # `replace` unconditionally: with no parent there is no child, and
+            # `signal=None` is the field's value either way.
+            result = await next_(replace(execution, signal=child))
         if scope.cancelled_caught:
             if child is not None:
                 child.cancel("timeout")
