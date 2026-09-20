@@ -69,6 +69,7 @@ import pytest
 from ph.json import as_int
 from ph.seams.schedule import (
     CANCELED,
+    CREATED,
     TICK,
     Schedule,
     ScheduleKind,
@@ -295,16 +296,81 @@ def test_an_unusable_cron_declines_rather_than_raising() -> None:
 
     The daemon fires every root's schedules from one loop, so an expression a
     person typed wrong must not take the others with it.
+
+    Appended directly, because `create` now refuses this — and the two are not in
+    tension: the fold reads logs written by builds that are not the one reading
+    them, so tolerating a row an older pH accepted is a separate obligation from
+    declining to write a new one. Same split as the interval pair below.
     """
-    session, _, made = _sched("cron", "not a cron")
+    session = Session("sched")
+    session.append(
+        CREATED, Schedule(id="s1", kind="cron", spec="not a cron", prompt="go").to_wire()
+    )
+    made = schedules(session)["s1"].created_at
+
     assert due_at(schedules(session)["s1"], now=made + HOUR) is None
 
 
-@pytest.mark.parametrize("spec", ["0", "-30", "nonsense"])
-def test_a_nonsensical_interval_never_fires(spec: str) -> None:
-    """Zero would be a busy loop and negative would fire forever."""
-    session, _, made = _sched("interval", spec)
+@pytest.mark.parametrize("spec", ["0", "-30", "nonsense", "1e400", "inf"])
+def test_a_nonsensical_interval_in_a_log_never_fires(spec: str) -> None:
+    """Zero would be a busy loop and negative would fire forever.
+
+    Appended directly rather than through `create`, which now refuses these
+    (below) — and the fold still has to tolerate them, because a log is read by
+    builds that are not the one that wrote it. A row an older pH accepted must
+    read as "never fires" rather than taking the healthy schedules on that root
+    down with it: `_int` raised `OverflowError` for `1e400` and `inf`, which
+    escaped the fold itself, so `reindex` failed for the whole session.
+    """
+    session = Session("sched")
+    session.append(CREATED, Schedule(id="s1", kind="interval", spec=spec, prompt="go").to_wire())
+    made = schedules(session)["s1"].created_at
+
     assert due_at(schedules(session)["s1"], now=made + HOUR) is None
+    assert next_at(schedules(session)["s1"], now=made + HOUR) is None
+    # And the fold answers at all, which is the half that was breaking.
+    assert set(schedules(session)) == {"s1"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "spec"),
+    [
+        ("interval", "0"),
+        ("interval", "-30"),
+        ("interval", "nonsense"),
+        ("interval", "1e400"),
+        ("once", "inf"),
+        ("once", "nonsense"),
+        # Cron comes for free now that the check is the fold's own answer, where
+        # the first draft skipped it rather than grow a second parser.
+        ("cron", "not a cron"),
+    ],
+)
+def test_a_schedule_that_can_never_fire_is_refused_rather_than_written(
+    kind: ScheduleKind, spec: str
+) -> None:
+    """The log is the state, so a row that cannot be read must not become one (K2).
+
+    `create` appended and *then* reindexed, so an unreadable spec left a
+    `schedule/created` behind and came back on every resume. Refused before the
+    append, the caller sees the problem and the session never carries it.
+
+    The refusal is the fold's own answer (`next_at(...) is None`) rather than a
+    list of bad specs written out beside it: a second rulebook would have to be
+    kept in step with `due_at`, and the first draft of one already was not — it
+    refused a `once` at a negative epoch, which `due_at` treats as overdue and
+    fires immediately. That row is the control below.
+    """
+    service = ScheduleService()
+    session = Session("sched")
+
+    with pytest.raises(ValueError, match="s1"):
+        service.create(session, Schedule(id="s1", kind=kind, spec=spec, prompt="go"))
+
+    assert not [event for event in session.events_from(0) if event.type == CREATED]
+    # A `once` in the past is overdue, not unfireable — the fold fires it at the
+    # next tick, so refusing it here would be the validator contradicting it.
+    assert service.create(session, Schedule(id="ok", kind="once", spec="-1", prompt="go"))
 
 
 def test_a_log_with_no_schedules_is_not_walked() -> None:

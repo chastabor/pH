@@ -1189,6 +1189,40 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
     assert not child_is_live(row), "a root cannot be passivated while this reads live"
 
 
+async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """K4 — a readmit that *raises* used to be logged and then dropped.
+
+    A readmit re-derives the ceiling from the admission record against what the
+    parent holds **now**, so a deployment that stopped mounting a skill refuses
+    the child that was narrowed to it. That refusal is correct — the sibling test
+    above is why the narrowing is logged at all. What was wrong is what followed:
+    the exception was logged and the loop moved on, leaving the row `queued`,
+    which `child_is_live` reads as waiting for a slot. The parent then waits for
+    a child nothing will ever drive, and the root can never be passivated.
+
+    Distinct from the no-provider case below it: there the sweep *decides* it
+    cannot recover the child, here a readmit it fully intended threw on the way.
+    The two reached the log differently and only one of them reached it at all.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    ctx.require(SKILLS).register(skill("review"))
+    await _spawn(ctx, parent, "first")
+    narrowed = await _spawn(ctx, parent, "second", skills=("review",))
+    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await _persisted(ctx, session)
+
+    # The deployment no longer mounts `review`, so the parent does not hold it
+    # and `check_grant` refuses the child that was admitted with it.
+    _revived_ctx, revived, _parent = await _restart(mount, session.id, concurrent=2)
+
+    row = subagent_roster(revived)[narrowed.id]
+    assert row["status"] == "error"
+    assert "could not be resumed" in row["detail"]
+    assert not child_is_live(row), "a root cannot be passivated while this reads live"
+
+
 # ------------------------------------------------- a child asked a second thing --
 
 

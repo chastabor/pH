@@ -281,6 +281,43 @@ class FileTooLarge(HarnessError):
         super().__init__(message, "FILE_TOO_LARGE")
 
 
+def _decode(raw: bytes) -> tuple[str, bool]:
+    """A file's text, and whether anything was lost getting there.
+
+    One decode policy for `read` and `edit`, which had two: `read` replaced and
+    `edit` was strict, so a file the model could read raised a bare
+    `UnicodeDecodeError` out of the edit — a failure naming an encoding, for a
+    file the harness had just shown it (J7).
+
+    Strict first and lenient only on failure, rather than `errors="replace"`
+    outright: the common file decodes once either way, and the flag is what lets
+    `edit` refuse a file whose bytes it would otherwise quietly rewrite. A
+    binary file belongs in `read_bytes`, which never comes through here.
+    """
+    try:
+        return raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace"), True
+
+
+def _read_decoded(target: Path) -> tuple[str, bool]:
+    """`_decode` of the file's bytes, as one hop off the event loop."""
+    return _decode(target.read_bytes())
+
+
+READ_MAX_BYTES = 8 * 1024 * 1024
+"""Default cap on a `read`, in bytes.
+
+Generous on purpose — it is not a policy about what an agent may look at, it is
+the line past which a file is not source and reading it whole was an accident:
+a checked-in database, a minified bundle, a log. The window a caller asks for
+bounds what comes *back*; this bounds what it costs, which `limit` never did.
+
+The difference between this door and `skip_reason`'s is a raise and a skip, and
+it is the one `skip_reason` explains.
+"""
+
+
 @dataclass(slots=True)
 class FsService:
     """The service published as `ctx.fs`.
@@ -506,24 +543,55 @@ class FsService:
         scope: Boundary,
         offset: int = 0,
         limit: int | None = 2_000,
+        max_bytes: int | None = READ_MAX_BYTES,
         agent: AgentHandle | None = None,
         session: Session | None = None,
     ) -> FileSlice:
-        """Read a line window, after `fs/read-intent` allows it."""
+        """Read a line window, after `fs/read-intent` allows it.
+
+        **The window keeps its line endings** (J7). Splitting on line boundaries
+        and re-joining with `"\n"` rewrote every CRLF file into LF on the way
+        out, and the text a model got back was then text it could not edit with:
+        `edit` matches against what is on disk, so an `old_text` copied out of a
+        read of a CRLF file matched nothing, and the model was told "no
+        occurrence of the target text" about a line it had just been shown.
+        `keepends` costs nothing, and `lines`/`total_lines` still count lines.
+
+        **Bounded, like `read_bytes`** — the decode below is of the *whole* file
+        however narrow the window, so `limit=2_000` bounded what came back and
+        not what it cost. `max_bytes=None` is for a caller that means it, and the
+        indexers are it: each has already asked `skip_reason` with its own,
+        smaller bound, because a bulk walk wants to report what it passed over
+        rather than stop.
+
+        **A whole-file window is handed back as it was read.** With `keepends`,
+        `"".join(text.splitlines(keepends=True))` *is* `text` — so the slice and
+        the join rebuild a string already in hand, at **26.9 µs per file against
+        the 10.0 µs read they wrap**, which is 2.7x the useful work and ~539 ms
+        over a 20 000-file tree. The old `"\n".join` was not identity, so the
+        round trip had a job; `keepends` removed the job and left the work. The
+        line list is still built, because `total_lines` is a count of lines.
+        """
         target = self.resolve(path, agent=agent)
         await self._gate(
             "fs/read-intent",
             ReadIntent(path=target, agent=agent, scope=boundary_of(scope, self.ctx)),
         )
-        text = await anyio.to_thread.run_sync(
-            lambda: target.read_text(encoding="utf-8", errors="replace")
+        self._refuse_oversize(target, max_bytes, agent)
+        # Read *and* decoded in the thread: the bytes die there rather than
+        # staying alive beside the `str` for the life of this frame — one extra
+        # copy of the file at the 8 MiB ceiling — and a 913 µs decode does not
+        # land on the event loop for a file at that size.
+        text, _lossy = await anyio.to_thread.run_sync(_read_decoded, target)
+        all_lines = text.splitlines(keepends=True)
+        whole = offset == 0 and (limit is None or limit >= len(all_lines))
+        window = (
+            all_lines if whole else all_lines[offset : None if limit is None else offset + limit]
         )
-        all_lines = text.splitlines()
-        window = all_lines[offset:] if limit is None else all_lines[offset : offset + limit]
         self._observe(target, session, agent)
         return FileSlice(
             path=self.named(target, agent=agent),
-            text="\n".join(window),
+            text=text if whole else "".join(window),
             offset=offset,
             lines=len(window),
             total_lines=len(all_lines),
@@ -558,11 +626,7 @@ class FsService:
         and a `bytes | FileSlice` return would move that branch into every caller.
         What the two genuinely share is the gate, and that is one call here.
 
-        `max_bytes` is answered from the file's own size **before it is opened**,
-        so refusing a 2 GB video costs a `stat` rather than 2 GB of resident
-        memory. A `stat` that fails is not treated as a refusal — the read below
-        is about to raise the real `OSError`, and inventing a size limit for a
-        file that does not exist would report the wrong thing.
+        `max_bytes` is `_refuse_oversize`'s, which says why it is a `stat`.
 
         Recorded through `_observe` like every other read: what the read-before-edit
         rule and `fs/observed` are about is *this file was seen*, and a binary one
@@ -573,19 +637,36 @@ class FsService:
             "fs/read-intent",
             ReadIntent(path=target, agent=agent, scope=boundary_of(scope, self.ctx)),
         )
-        if max_bytes is not None:
-            try:
-                size: int | None = target.stat().st_size
-            except OSError:
-                size = None
-            if size is not None and size > max_bytes:
-                raise FileTooLarge(
-                    f"{self.named(target, agent=agent)} is {size} bytes, over the "
-                    f"{max_bytes}-byte limit for this call"
-                )
+        self._refuse_oversize(target, max_bytes, agent)
         content = await anyio.to_thread.run_sync(target.read_bytes)
         self._observe(target, session, agent)
         return content
+
+    def _refuse_oversize(
+        self, target: Path, max_bytes: int | None, agent: AgentHandle | None
+    ) -> None:
+        """Raise `FileTooLarge` if the file is over the caller's cap.
+
+        Answered from the file's own size **before it is opened**, so refusing a
+        2 GB video costs a `stat` rather than 2 GB of resident memory. A `stat`
+        that fails is not treated as a refusal — the read that follows is about
+        to raise the real `OSError`, and inventing a size limit for a file that
+        does not exist would report the wrong thing.
+
+        Synchronous and inline for `skip_reason`'s reason: a `to_thread` hop is
+        60.6 µs against a ~2 µs syscall.
+        """
+        if max_bytes is None:
+            return
+        try:
+            size = target.stat().st_size
+        except OSError:
+            return
+        if size > max_bytes:
+            raise FileTooLarge(
+                f"{self.named(target, agent=agent)} is {size} bytes, over the "
+                f"{max_bytes}-byte limit for this call"
+            )
 
     def _observe(
         self, target: Path, session: Session | None, agent: AgentHandle | None = None
@@ -636,7 +717,7 @@ class FsService:
         )
         await self._gate("fs/write-intent", intent)
         written = await anyio.to_thread.run_sync(_write_text, target, content)
-        self._observe(target, session)
+        self._observe(target, session, agent)
         self.ctx.emit("fs/changed", target, contained=True)
         return Written(path=target, created=intent.creating, bytes=written)
 
@@ -666,18 +747,34 @@ class FsService:
             scope=boundary_of(scope, self.ctx),
         )
         await self._gate("fs/edit-intent", intent)
-        original = await anyio.to_thread.run_sync(lambda: target.read_text(encoding="utf-8"))
+        original, lossy = await anyio.to_thread.run_sync(_read_decoded, target)
+        if lossy:
+            # `read` hands this file back with U+FFFD in it, so the model can be
+            # holding text that looks editable. Writing the edit would encode
+            # those replacements over the bytes they stood in for — a
+            # single-character change that silently rewrites every undecodable
+            # byte in the file. Refused here rather than papered over, because
+            # the two decodes agreeing is what makes an `old_text` copied out of
+            # a read mean anything at all (J7).
+            raise ValueError(
+                f"{self.named(target, agent=agent)} is not valid UTF-8; editing it "
+                "would rewrite the bytes that could not be decoded"
+            )
+        # `named`, not `target`: these are the two messages a model reads most
+        # often, and they were echoing the absolute worktree path — the same
+        # non-replayable spelling J8 took out of `fs/observed`, one line away.
+        named = self.named(target, agent=agent)
         count = original.count(old_text)
         if count == 0:
-            raise ValueError(f"no occurrence of the target text in {target}")
+            raise ValueError(f"no occurrence of the target text in {named}")
         if count > 1 and not replace_all:
             raise ValueError(
-                f"{count} occurrences of the target text in {target}; pass replace_all "
+                f"{count} occurrences of the target text in {named}; pass replace_all "
                 "or include more surrounding context to make it unique"
             )
         updated = original.replace(old_text, new_text, -1 if replace_all else 1)
         await anyio.to_thread.run_sync(_write_text, target, updated)
-        self._observe(target, session)
+        self._observe(target, session, agent)
         self.ctx.emit("fs/changed", target, contained=True)
         return count if replace_all else 1
 

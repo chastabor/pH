@@ -52,7 +52,7 @@ from typing import Literal, TypeAlias
 
 import anyio
 
-from ..cordis import Context, plugin
+from ..cordis import Context, plugin, releasing
 from ..keys import SUBPROCESS, WORKSPACE
 from ..paths import default_home_path
 from ..wire import WireModel
@@ -73,6 +73,7 @@ from .workspace_git import (
     COMMIT_AS_PH,
     delete_branch,
     git,
+    git_lines,
     list_branches,
     merge_branch,
 )
@@ -93,6 +94,7 @@ __all__ = [
 ]
 
 log = logging.getLogger("ph.seams.workspace_agentfs")
+
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 """AgentFS refuses an id that is not alphanumeric, hyphen or underscore.
@@ -270,9 +272,10 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
     except Exception as error:  # pragma: no cover - a host that fails in a new way
         return OverlayProbe(False, f"{type(error).__name__}: {error}")
     finally:
-        if await is_mount(mount):
-            await unmount(ctx, mount)
-        await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
+        with releasing():
+            if await is_mount(mount):
+                await unmount(ctx, mount)
+            await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
 
 
 @dataclass(slots=True)
@@ -420,9 +423,8 @@ class AgentFsProvider:
         """
         if not await anyio.to_thread.run_sync((base / ".git").exists):
             return
-        code, out, _ = await git(self.ctx, base, "rev-parse", "--show-toplevel", "HEAD")
-        lines = out.split()
-        if code != 0 or len(lines) != 2:
+        lines = await git_lines(self.ctx, base, "rev-parse", "--show-toplevel", "HEAD")
+        if len(lines) != 2:
             return
         await anyio.to_thread.run_sync(
             lambda: (store / ORIGIN).write_text("\n".join(lines), encoding="utf-8")
@@ -621,7 +623,14 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
             "to root a branch at",
             reason="no-base-commit",
         )
-    recorded = (await anyio.to_thread.run_sync(origin.read_text)).split()
+    # Line-wise, matching how `_record_base` writes it — and refusing rather
+    # than raising `IndexError` on a file some older build truncated (J5).
+    recorded = (await anyio.to_thread.run_sync(origin.read_text)).splitlines()
+    if len(recorded) != 2:
+        raise ExportRefused(
+            f"the origin recorded for this overlay is unreadable ({origin})",
+            reason="no-base-commit",
+        )
     repo, commit = Path(recorded[0]), recorded[1]
 
     code, _, _ = await git(ctx, repo, "rev-parse", "--show-toplevel")
@@ -659,7 +668,8 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
         try:
             await anyio.to_thread.run_sync(lambda: _apply(changes, mount, tree))
         finally:
-            await unmount(ctx, mount)
+            with releasing():
+                await unmount(ctx, mount)
 
         await git(ctx, tree, "add", "-A")
         await git(ctx, tree, *COMMIT_AS_PH, "-m", f"{ref}: overlay export")
@@ -667,7 +677,8 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
         # The worktree goes, the branch stays — the branch *is* the deliverable,
         # and a checkout left behind is both a second copy of work that now lives
         # in git and a registration that wedges the branch.
-        await git(ctx, repo, "worktree", "remove", "--force", str(tree))
+        with releasing():
+            await git(ctx, repo, "worktree", "remove", "--force", str(tree))
     return ref
 
 

@@ -110,7 +110,10 @@ async def jj(
     `finally` (F4), and a bare `subprocess.run` here would opt this module out of
     both for no gain.
 
-    `LC_ALL=C` for the same reason it is there: pH reads what the tool says.
+    `LC_ALL=C` for the same reason it is there: pH reads what the tool says. The
+    inherited git location is dropped by the seam (`subprocess.LOCATION`), which
+    matters here too: jj shells out to git for a colocated repository, so a
+    `GIT_DIR` pH was started with would redirect that backend just as surely.
 
     **`cwd` is never incidental.** jj commits the workspace the command runs in and
     no other, so which directory a call is made from decides whose work the command

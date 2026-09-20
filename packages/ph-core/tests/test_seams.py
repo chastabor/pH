@@ -278,6 +278,41 @@ def test_a_broken_config_family_is_dropped_whole_rather_than_half() -> None:
     assert kept == {"PATH": "/usr/bin"}, "a family survived in part"
 
 
+def test_an_inherited_repository_location_does_not_outrank_a_childs_cwd() -> None:
+    """J10 — `COHERENT`'s argument one step further.
+
+    The test this scrub applies is not "is this a secret" — `GIT_CONFIG_COUNT` is
+    not — it is "would a child misbehave on inheriting this", and `GIT_DIR`,
+    `GIT_WORK_TREE` and `GIT_INDEX_FILE` have the worst answer of any name pH can
+    be started with: git resolves them *before* `cwd`, so a pH launched from a
+    `git rebase --exec` or a pre-commit hook hands every child a repository that
+    has nothing to do with the workspace it was given. An agent's worktree staged
+    into the person's own index, checkpoints written to their object store, and a
+    `git commit` the model typed landing on their branch.
+
+    Here rather than in `workspace_git` because there are three spawners —
+    `git()`, `jj()` and `shell.run`, which is the one a model drives directly —
+    and a rule written at one of them reached two.
+    """
+    kept = EnvScrub().apply(
+        {
+            "PATH": "/usr/bin",
+            "GIT_DIR": "/elsewhere/.git",
+            "GIT_WORK_TREE": "/elsewhere",
+            "GIT_INDEX_FILE": "/elsewhere/.git/index",
+        }
+    )
+
+    assert kept == {"PATH": "/usr/bin"}, "a child inherited somebody else's repository"
+    # And the escape hatch is the one that already exists: `extra` is applied
+    # after the scrub, so a caller with a reason still gets through. `tree_hash`
+    # is that caller — its whole method is staging against a scratch index.
+    asked = EnvScrub().apply(
+        {"GIT_DIR": "/elsewhere/.git"}, extra={"GIT_INDEX_FILE": "/scratch/index"}
+    )
+    assert asked == {"GIT_INDEX_FILE": "/scratch/index"}
+
+
 def test_a_deployment_can_keep_a_configuration_name_that_looks_like_a_secret() -> None:
     """`keep` is the override the breadth needs, and it is exact-match on purpose.
 

@@ -47,6 +47,7 @@ from ph.llm.types import (
 )
 from ph.seams.compaction import CompactionError, CompactionNote
 from ph.session import Session, SurfaceIntent, derive_event_message
+from ph.session.events import SurfaceReplace
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
@@ -57,6 +58,7 @@ from ph.testing import (
     StubAgent,
     assistant_payload,
     not_none,
+    plugin_payload,
     tool_result_payload,
     user_payload,
 )
@@ -545,6 +547,41 @@ async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: Mo
     assert TRUNCATION_TEXT in arguments
     assert body not in arguments, "the model is still being shown the body"
     assert body in json.dumps(thaw_json(session.events[rewritten[0]].data)), "the log lost it"
+
+
+async def test_the_replacement_does_not_announce_a_step_that_already_ended(
+    mount: MountProfile,
+) -> None:
+    """D8 — the elision runs between steps and appends at the tail of the log.
+
+    Copying the original's payload wholesale carried its `turn` and `step` along
+    with it, so the newest `assistant/message` in the log named a step that had
+    already closed. Every reader keyed on "the latest assistant message" then
+    read a finished step as the open one — the crash repair built its closers
+    around those coordinates, which is B3, fixed on the repair side and caused
+    here.
+
+    The same argument `usage` is dropped for, one step further, and asserted
+    beside it: both are facts about the request that produced the original, and
+    the original still holds them. What the replacement carries instead is
+    `SurfaceReplace(replaces=…)`, which names the node rather than describing it.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = _long_write_session("coordinates", "x" * (MAX_ARG_LENGTH + 1))
+
+    (rewritten,) = _truncate(ctx, session)
+
+    original = session.events[rewritten]
+    assert (original.data["turn"], original.data["step"]) == (1, 1), "the original lost them"
+    replacement = next(
+        event
+        for event in reversed(session.events)
+        if event.type == "assistant/message" and event.seq != rewritten
+    )
+    assert "turn" not in replacement.data, "a closed step is the newest thing in the log"
+    assert "step" not in replacement.data
+    assert "usage" not in replacement.data
+    assert replacement.source_event_seqs == (rewritten,), "and it still names what it stands for"
 
 
 async def test_an_argument_at_the_limit_is_left_alone(mount: MountProfile) -> None:
@@ -1358,3 +1395,63 @@ def test_the_retention_fraction_is_smaller_than_the_trigger() -> None:
     worth restating: retaining more than the threshold means every compaction
     leaves the session still over it, and the next step compacts again."""
     assert KEEP_FRACTION < TRIGGER_FRACTION
+
+
+# ----------------------------------------------- compacting what was compacted --
+
+
+def _summarized(session_id: str, tail: str, *, compacted: bool = True) -> Session:
+    """A session with a tail that alone fills the retention budget.
+
+    `compacted` decides whether a previous summary sits above it, which is the
+    only thing the two halves of the test below differ by — written as one
+    fixture so the control cannot drift into testing a different shape.
+
+    Built by hand rather than by running `/compact` twice, because the shape is
+    the point and it is a narrow one: the surface is a previous summary followed
+    by a live turn big enough that the retention budget asks for a cutoff of 1.
+    The replacement is written with `plugin_payload`, which is how `_land` writes
+    it — the plugin, the form and the `SurfaceReplace` are what the reader under
+    test keys on.
+    """
+    session = _windowed(session_id)
+    first = session.append(
+        "user/message", user_payload("the question", "m1"), SurfaceIntent("append")
+    )
+    second = session.append(
+        "assistant/message", assistant_payload("the answer", "m2"), SurfaceIntent("append")
+    )
+    if compacted:
+        shadowed = (first.seq, second.seq)
+        session.append(
+            "user/message",
+            plugin_payload(
+                "Earlier conversation, summarized.",
+                "m-sum",
+                plugin="compaction-summarize",
+                form="compaction",
+                summary="2 messages summarized",
+            ),
+            SurfaceIntent(surface_op=SurfaceReplace(replaces=shadowed), source_event_seqs=shadowed),
+        )
+    session.append("user/message", user_payload(tail, "m3"), SurfaceIntent("append"))
+    return session
+
+
+async def test_a_summary_is_not_summarized_again(mount: MountProfile) -> None:
+    """D9 — `_plan` says why; this is the shape that reaches it.
+
+    A retained tail one pair over `keep_fraction` keeps pressure up, so the
+    pre-step trigger fires again and the only thing above the cutoff is the
+    paragraph the previous call wrote.
+
+    The control is the same session without that paragraph: it still plans, so
+    this declines the re-compaction rather than declining whenever the budget is
+    tight.
+    """
+    ctx = await mount(profile=PROFILE)
+    engine = _engine(ctx)
+    tail = "the live turn " * 400
+
+    assert engine._plan(_summarized("recompaction", tail)) is None
+    assert engine._plan(_summarized("ordinary", tail, compacted=False)) is not None

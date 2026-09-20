@@ -819,6 +819,23 @@ class WorkspaceSeam:
     records durably.
     """
 
+    _reclaiming: dict[str, anyio.Event] = field(default_factory=dict)
+    """Agent ids whose leaked tree is being torn down right now (J6).
+
+    Reconciliation is detached — `emit` schedules it and does not wait — and it
+    runs a `git worktree remove --force` per leaked tree. The first `acquire`
+    after a resume asks the provider for the *same* agent id, so on a warm
+    resume the provider was handed a root the reclaim was in the middle of
+    deleting: the agent came up in a directory that then vanished under it, or
+    the reclaim failed halfway and left a registration pointing at a tree the
+    agent was using.
+
+    Keyed by agent id rather than by root because that is the identity both
+    sides already have — `acquire` knows it before the provider computes a root,
+    and a record carries it — so the wait can happen *before* the tree is built
+    rather than after.
+    """
+
     def of(self, agent_id: str) -> Workspace | None:
         """The workspace this agent holds, if it has acquired one. `None` is a real answer
         and the common one: nothing acquires until the agent lifecycle does (P4-08).
@@ -996,6 +1013,10 @@ class WorkspaceSeam:
         one boundary (E6, `writable_roots`).
         """
         base = canonical(base)
+        # Before anything is built: a reclaim in flight for this agent owns its
+        # tree until it is done with it (J6).
+        while (reclaim := self._reclaiming.get(agent_id)) is not None:
+            await reclaim.wait()
         scratch = await self._scratch_for(session_id, agent_id)
         chosen = self._chosen_tier(session) if tier is None else tier
         workspace = None
@@ -1292,9 +1313,11 @@ class WorkspaceSeam:
         * `open` — an unclosed pair is a live process or a crash, and either way not
           this mechanism's to settle. Listed in `survivors` so an enumeration can show
           it; never collected.
-        * `held` — this process holds the tree, matched by **root path** for `live()`'s
-          reason: `sanitize_ref` is lossy, so an id that does not sanitize to itself
-          would read as unheld and lose the refusal that protects it.
+        * `held` — this process holds the tree, matched by **root path** and not by
+          agent id: an agent that retained a tree and then acquired another is the
+          ordinary case, and an id match would refuse to collect the first one for
+          as long as the agent lives. `_reclaim`'s `_is_held` is deliberately the
+          stricter pair — it guards a teardown, where over-refusing is free.
         * `recent` — inside the age bound, dated from `touched`. A session id *absent*
           from `touched` is refused as `recent` rather than collected: "I could not date
           this" and "this is old" are different answers and only one may delete a
@@ -1551,6 +1574,21 @@ class WorkspaceSeam:
             )
         return None
 
+    def _is_held(self, record: WorkspaceRecord) -> bool:
+        """Whether this process is using the tree this record names, either way round.
+
+        **The strict pair, and only `_reclaim` wants it.** Its two siblings ask
+        narrower questions on purpose: `reconcile` folds leaks per agent, so the
+        id is the identity there, and `collectable` matches roots because an agent
+        that retained one tree and acquired another must not keep the first one
+        alive. This is the door that *deletes*, where refusing one tree too many
+        costs a directory somebody can remove by hand and refusing one too few
+        costs the work in it.
+        """
+        if record.agent_id in self._held:
+            return True
+        return any(held.workspace.root == record.root for held in self._held.values())
+
     async def _reclaim(
         self, provider: ReclaimingProvider, record: WorkspaceRecord, verb: str
     ) -> bool | None:
@@ -1562,13 +1600,34 @@ class WorkspaceSeam:
 
         `verb` reaches the log only, telling an operator whether a warning came from a
         reconciliation at session open or from a `gc` they typed.
+
+        **Both callers decided this tree was nobody's, and then awaited something**
+        (J6): `reconcile` folds its leaks before starting a task per tree, and
+        `collect` asks `collectable` before it removes any of them. An `acquire`
+        landing in that gap gets a tree this is about to delete, so the question
+        is asked again here — where "again" is worth something, because it is the
+        last line before the removal. `_reclaiming` closes the other direction,
+        making the next `acquire` wait rather than race.
         """
+        if self._is_held(record):
+            log.info(
+                "ph.seams.workspace: not reclaiming %s — an agent took it while the "
+                "%s was being prepared",
+                record.root,
+                verb,
+            )
+            return None
+        settled = anyio.Event()
+        self._reclaiming[record.agent_id] = settled
         try:
             with running(self.provider_by):
                 return await provider.reclaim(record)
         except Exception:
             log.warning("ph.seams.workspace: could not %s %s", verb, record.root, exc_info=True)
             return None
+        finally:
+            self._reclaiming.pop(record.agent_id, None)
+            settled.set()
 
 
 WorkspaceOutcome: TypeAlias = Literal["leaked", "kept", "retained"]

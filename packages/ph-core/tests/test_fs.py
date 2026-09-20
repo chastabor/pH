@@ -76,6 +76,7 @@ from ph.seams.fs import (
 )
 from ph.seams.fs import (
     EditIntent,
+    FileTooLarge,
     FsDenied,
     FsService,
     WalkDecision,
@@ -788,3 +789,113 @@ async def test_the_root_ladder_is_config_then_project_then_cwd(tmp_path: Path) -
     assert await root(project=project) == project, "the project the mount was given"
     assert await root(project=project, root=str(stated)) == stated, "a deployment outranks it"
     assert await root() == Path.cwd(), "and with neither, the process's own directory"
+
+
+# ------------------------------------------ what a read hands back, and its cost --
+
+
+async def test_a_crlf_file_can_be_edited_with_the_text_a_read_returned(tmp_path: Path) -> None:
+    """J7 — the round trip is the contract, and the join was breaking it.
+
+    `read` split on line boundaries and re-joined with `"\\n"`, so every CRLF
+    file came back rewritten as LF. `edit` matches against the bytes on disk, so
+    an `old_text` copied out of that read matched nothing: the model was told
+    "no occurrence of the target text" about a line the harness had just shown
+    it, with no way to see the difference and nothing in the message naming it.
+
+    The assertion is deliberately made the way a model would use the tool —
+    paste a window back — rather than by inspecting `text` for `\\r`, because
+    that is the use the guarantee exists for.
+    """
+    _root, fs = _fs(tmp_path)
+    target = tmp_path / "windows.txt"
+    target.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+
+    window = await fs.read("windows.txt", offset=1, limit=1, scope=DEPLOYMENT)
+
+    assert window.total_lines == 3, "the line count stopped counting lines"
+    assert await fs.edit("windows.txt", window.text, "delta\r\n", scope=DEPLOYMENT) == 1
+    assert target.read_bytes() == b"alpha\r\ndelta\r\ngamma\r\n", "the edit rewrote the endings"
+
+
+async def test_a_file_that_is_not_utf8_is_refused_by_name_rather_than_by_encoding(
+    tmp_path: Path,
+) -> None:
+    """J7's other half: one decode policy, and what it lets `edit` say.
+
+    `read` replaced undecodable bytes and `edit` decoded strictly, so a file the
+    harness would happily show raised a bare `UnicodeDecodeError` out of the
+    edit — an error about a codec, for a file the model had just been handed.
+
+    Sharing the decode is not enough on its own, which is why the refusal is
+    here too: `errors="replace"` and a write-back would encode U+FFFD over every
+    byte it stood in for, turning a one-word edit into silent corruption of the
+    rest of the file. Read it, and the replacements are visible; edit it, and
+    the seam says which file and why.
+    """
+    _root, fs = _fs(tmp_path)
+    target = tmp_path / "latin.txt"
+    target.write_bytes(b"caf\xe9\nsecond\n")
+
+    window = await fs.read("latin.txt", scope=DEPLOYMENT)
+    assert "�" in window.text, "the read decoded strictly after all"
+
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        await fs.edit("latin.txt", "second", "third", scope=DEPLOYMENT)
+    assert target.read_bytes() == b"caf\xe9\nsecond\n", "the refusal still wrote"
+
+
+async def test_a_read_is_bounded_by_bytes_and_not_only_by_lines(tmp_path: Path) -> None:
+    """J7 — `limit` bounded what came back, never what it cost.
+
+    The whole file is decoded before a window is taken, so `limit=2_000` on a
+    checked-in database or a minified bundle still meant reading and decoding
+    every byte of it into this process. `read_bytes` has had a cap since P7-01;
+    this is the same guard, and it is now literally the same code.
+
+    `FileTooLarge` rather than a truncation, for the reason that class carries:
+    nobody denied anything, the caller named a bound and the file is over it, so
+    a model reading this should pick a smaller file rather than ask permission.
+    """
+    _root, fs = _fs(tmp_path)
+    (tmp_path / "big.txt").write_text("x" * 5_000, encoding="utf-8")
+
+    with pytest.raises(FileTooLarge, match=r"big\.txt"):
+        await fs.read("big.txt", max_bytes=1_000, scope=DEPLOYMENT)
+
+    # And a caller that means it still gets the whole thing — the indexers pass
+    # their own, much smaller bound to `skip_reason` instead.
+    assert len((await fs.read("big.txt", max_bytes=None, scope=DEPLOYMENT)).text) == 5_000
+
+
+async def test_a_write_records_the_workspace_relative_name_too(tmp_path: Path) -> None:
+    """J8 — `_observe` was called without the agent on the two writing paths.
+
+    `read` passed it and `write`/`edit` did not, so with an agent rebased onto a
+    worktree the `fs/observed` a write appended named
+    `/tmp/ph-w-7/notes.md` where the read beside it named `notes.md`. Both go in
+    the same log: the same file under two spellings, one of which describes a
+    directory that will not exist the next time this session runs — so
+    read-before-edit does not recognize it after a workspace is rebuilt, and the
+    absolute form is in a record the sibling test exists to keep it out of.
+
+    The rebase is what makes the two spellings differ at all, which is why it is
+    set up by hand here: without one the service root *is* the agent's root, and
+    a missing `agent` argument is invisible.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "notes.md").write_text("hello\n", encoding="utf-8")
+    root, fs = _fs(tmp_path / "process")
+    (tmp_path / "process").mkdir()
+    fs.rebase(lambda _agent: worktree)
+    session = Session("observed")
+    agent = StubAgent(ctx=root, session=session)
+
+    await fs.read("notes.md", scope=DEPLOYMENT, agent=agent, session=session)
+    await fs.write("fresh.md", "x\n", scope=DEPLOYMENT, agent=agent, session=session)
+    await fs.edit("notes.md", "hello", "goodbye", scope=DEPLOYMENT, agent=agent, session=session)
+
+    observed = [one.data["path"] for one in session.events if one.type == "fs/observed"]
+    assert observed == ["notes.md", "fresh.md", "notes.md"]
+    assert str(worktree) not in repr([one.data for one in session.events])

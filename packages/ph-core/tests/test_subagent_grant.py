@@ -28,6 +28,7 @@ came back holding the deployment-wide set.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,16 @@ from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams._restriction import NameFilter
 from ph.seams.skills import SkillRestriction
-from ph.seams.subagents import Grant, SubagentRequest, SubagentSpawnError
+from ph.seams.subagents import (
+    ADMITTED,
+    Grant,
+    SubagentRequest,
+    SubagentRun,
+    SubagentSpawnError,
+    admission_payload,
+    child_is_live,
+    subagent_roster,
+)
 from ph.system_prompt import render_prompt
 from ph.testing import (
     FAKE_OPTIONS,
@@ -663,3 +673,58 @@ async def test_a_guard_refuses_before_the_provider_is_asked(mount: MountProfile)
 
     await policy.dispose()
     await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="no", parent=parent))
+
+
+# --------------------------------------------- a spawn the seam decides against --
+
+
+@dataclass(slots=True)
+class _RealisticProvider:
+    """`StubSubagentProvider`, plus what the two real providers do before `start`
+    returns: the admission in the parent's log, and a disposer somebody holds.
+
+    A wrapper rather than a second `SubagentRun` builder — the stub already
+    argues where a child's scope nests (P6-27) and which fields a run carries,
+    and a copy re-decides both silently. Its `root=None` default is the
+    fail-closed no-scope case `_enforce` refuses, which is exactly what this
+    test needs.
+    """
+
+    inner: StubSubagentProvider = field(default_factory=StubSubagentProvider)
+    released: list[str] = field(default_factory=list)
+
+    async def start(self, request: SubagentRequest) -> SubagentRun:
+        run = await self.inner.start(request)
+        run.dispose = lambda: self.released.append(run.id)
+        session = request.parent.session
+        assert session is not None, "a spawn is made by an agent, and an agent has a log"
+        session.append(ADMITTED, admission_payload(run, request))
+        return run
+
+
+async def test_a_spawn_the_ceiling_refuses_leaves_no_child_behind(mount: MountProfile) -> None:
+    """K3 — `start` says why the check cannot move ahead of the spawn.
+
+    What this pins is the three things that are already true when it refuses: a
+    disposer only the provider holds, a run the seam has not taken, and an
+    admission in the parent's roster. Raising alone left all three, and the
+    third is the one with no bound — the parent reads that row as live for the
+    rest of its life.
+
+    The refusal itself is asserted first: a cleanup that swallowed it would be a
+    worse bug than the leak.
+    """
+    ctx, parent = await _granted(mount, "review", "deploy")
+    provider = _RealisticProvider()
+    ctx.require(SUBAGENTS).register_provider("realistic", provider)
+
+    with pytest.raises(SubagentSpawnError, match="cannot be bounded"):
+        await ctx.require(SUBAGENTS).start(
+            "realistic", SubagentRequest(prompt="go", parent=parent, skills=("review",))
+        )
+
+    assert provider.released == ["run-1"], "the child was left running"
+    assert ctx.require(SUBAGENTS).get("run-1") is None, "a refused spawn is not a live run"
+    row = subagent_roster(parent.session)["run-1"]
+    assert row["status"] == "error"
+    assert not child_is_live(row), "the parent cannot passivate while this reads live"

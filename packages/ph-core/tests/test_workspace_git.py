@@ -926,3 +926,96 @@ async def test_a_provisioned_secret_is_not_committed_to_the_branch(
     assert code == 0 and out == "the agent did this\n", "the work was not committed"
     code, _, _ = await git(ctx, base, "show", "ph/s1/a1:secret.env")
     assert code != 0, "a provisioned credential was committed to a branch somebody merges"
+
+
+# ------------------------------------------ what git is told, and where it looks --
+
+
+async def test_a_gitignored_provisioned_path_does_not_cost_the_agent_its_checkpoints(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """J3 — the two stagers that handed `add` its own exclusions.
+
+    `git add -A -- . ':(exclude)deps'` exits 1 when `deps` is gitignored: naming
+    an ignored path in a pathspec is a request to add it, and `:(exclude)` does
+    not exempt it from that check. `_commit` has narrowed after the add since it
+    was written; `tree_hash` and `restore_tree` did not, and `tree_hash` reads
+    the exit code — so on the ordinary deployment (a provisioned `node_modules`
+    or `.venv`, gitignored by nearly every project that has one) every
+    checkpoint returned `None` and the agent silently had no restore points.
+
+    The narrowing still has to hold, which is the second assertion: the point of
+    excluding a provisioned path is that it is not the agent's work, and a `.env`
+    the project does not ignore must not reach a tree pH writes. Both halves in
+    one test because a fix that got either alone would be worse than the defect.
+    """
+    ctx = await mount(TIER_ROW, PROVISION_ROW)
+    base = await _repo_with_materials(ctx, tmp_path / "repo")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    assert workspace.provisioned == (".env", "deps"), "the materials never arrived"
+    (workspace.root / "work.txt").write_text("the agent's own\n", encoding="utf-8")
+
+    hashed = await tree_hash(ctx, workspace)
+
+    assert hashed, "a worktree holding gitignored materials could not be fingerprinted"
+    _, listing, _ = await git(ctx, workspace.root, "ls-tree", "-r", "--name-only", hashed)
+    names = listing.split()
+    assert "work.txt" in names, "the agent's work is not in its own checkpoint"
+    assert ".env" not in names, "a provisioned secret reached a tree pH wrote"
+    assert "deps/lib.py" not in names
+
+
+async def test_a_repository_whose_path_holds_a_space_is_still_a_checkout(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """J5 — `rev-parse` answers one path per line, and a path may hold a space.
+
+    `_git_dir` asks for `--git-dir` and `--show-toplevel` together and split the
+    reply on *whitespace*, so under `~/My Projects` the two lines became three
+    tokens, the length check failed, and the function reported "not a git
+    checkout". Everything above it believed that: no checkpoints, and a
+    `/revert` that raises `FileNotFoundError` — on a machine where nothing is
+    wrong except the name of a directory.
+
+    The space is in the base repository's own name rather than in a file, because
+    that is what reaches `--show-toplevel`; the worktree root is derived from
+    `$PH_HOME` and would not have shown it.
+    """
+    ctx = await mount(TIER_ROW)
+    base = await git_repo(ctx, tmp_path / "My Projects" / "repo")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    assert workspace.kind == "worktree", "the tier declined, so this proves nothing"
+
+    assert await tree_hash(ctx, workspace), "a space in the path lost the checkout"
+
+
+async def test_an_inherited_git_dir_does_not_redirect_the_workspace(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J10 reaching git, which is what the seam-level rule is *for*.
+
+    `subprocess.LOCATION` is where the rule lives and `test_seams.py` is where it
+    is stated; this is the half that would still be worth having if the rule ever
+    moved — every call in this module passes `cwd` and none passes `--git-dir`,
+    so all of them depended on the inherited location being gone.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    outer = await git_repo(ctx, tmp_path / "outer")
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+
+    code, answer, _ = await git(ctx, base, "rev-parse", "--path-format=absolute", "--git-dir")
+
+    assert code == 0
+    assert Path(answer.strip()).resolve() != (outer / ".git").resolve(), (
+        "the inherited GIT_DIR redirected a call that named its own cwd"
+    )
+    # And a caller who means it still gets through: `GIT_INDEX_FILE` is how
+    # `tree_hash` keeps its staging out of the agent's own index.
+    index = tmp_path / "scratch.index"
+    await git(ctx, base, "add", "-A", env={"GIT_INDEX_FILE": str(index)})
+    assert index.exists(), "an explicitly passed location was dropped with the inherited ones"

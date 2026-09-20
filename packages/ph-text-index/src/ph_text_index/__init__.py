@@ -757,6 +757,9 @@ async def _passages(
         # over a truncated document would answer confidently about the first two
         # thousand lines and silently about the rest.
         limit=None,
+        # And `skip_reason` above is this walk's bound: a skip that reports what
+        # it passed over, where `read`'s own default would raise.
+        max_bytes=None,
         scope=run.scope,
         agent=run.agent,
         session=run.session,

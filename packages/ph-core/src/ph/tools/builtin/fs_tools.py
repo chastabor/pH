@@ -104,10 +104,12 @@ class GrepValue(ToolModel):
 def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     first = value["offset"] + 1
     last = value["offset"] + value["lines"]
-    body = value["text"]
-    if value["truncated"]:
-        body += f"\n\n[truncated; re-read with offset={last}]"
-    return text_content(f"{value['path']} (lines {first}-{last} of {value['total_lines']})\n{body}")
+    # The marker goes in the header, which is already unambiguously the harness
+    # talking. Appended to the body it abutted the file's own last byte —
+    # terminator included since J7 — so this had to know where the window ended.
+    more = f"; re-read with offset={last}" if value["truncated"] else ""
+    header = f"{value['path']} (lines {first}-{last} of {value['total_lines']}{more})"
+    return text_content(f"{header}\n{value['text']}")
 
 
 def _render_write(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401

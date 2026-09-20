@@ -74,6 +74,7 @@ __all__ = [
     "apply",
     "delete_branch",
     "git",
+    "git_lines",
     "list_branches",
     "merge_branch",
     "pre_run_ref",
@@ -97,6 +98,12 @@ async def git(
     `GIT_INDEX_FILE` is the caller with a reason, and a git that inherited
     nothing else would not find its own configuration.
 
+    **The inherited git location is dropped by the seam** (J10,
+    `subprocess.LOCATION`), so a pH started from a hook does not hand every call
+    here a repository that outranks the `cwd` above. The seam's job and not this
+    function's, because `shell.run` spawns git too — the git a *model* types — and
+    a rule written here would not have reached it.
+
     `LC_ALL=C` because pH reads what git says. `--porcelain` is stable by
     contract, but stderr is gettext-translated and `ctx.subprocess` passes
     `LANG` through — so without this a decline reason, and anything else read
@@ -109,6 +116,62 @@ async def git(
     )
     outcome = await ctx.require(SUBPROCESS).run(spec)
     return outcome.exit_code, outcome.stdout, outcome.stderr
+
+
+async def git_lines(
+    ctx: Context, cwd: Path, *args: str, env: Mapping[str, str] | None = None
+) -> list[str]:
+    """git's answer, one line per line — never `split()` (J5).
+
+    A path may hold a space, and `rev-parse --git-dir --show-toplevel` answers
+    with two of them. Split on whitespace, a workspace under `~/My Projects`
+    turned two lines into three tokens: the length check failed, `_git_dir`
+    reported "not a git checkout", and everything above it believed that — no
+    checkpoints, a `/revert` that raises, an overlay that refuses
+    `no-base-commit`. Nothing was wrong on that machine except the name of a
+    directory.
+
+    Named rather than left as `out.splitlines()` at each reader because it was
+    written by hand at three sites and got it wrong at all three. Position is
+    meaning here, which is why this is not `subprocess.first_line`'s neighbour:
+    that one strips and drops blanks, and a blank line in a `rev-parse` reply has
+    to *shift* the line after it rather than vanish.
+
+    A non-zero exit answers `[]`, so a caller checks the shape it expected once
+    instead of checking a code and then a length.
+    """
+    code, out, _ = await git(ctx, cwd, *args, env=env)
+    return [] if code != 0 else out.splitlines()
+
+
+def _staging_steps(pathspec: Sequence[str]) -> list[tuple[str, ...]]:
+    """`add -A`, then narrow — never naming a provisioned path *to* `add` (J3).
+
+    `git add -A -- . ':(exclude)deps'` exits 1 with "the following paths are
+    ignored by one of your .gitignore files": naming an ignored path in a
+    pathspec is a request to add it, and `:(exclude)` does not exempt it from
+    that check. It stages the rest anyway, so tolerating the failure would work
+    and would also swallow every real one. `reset` narrows without ever naming a
+    path to `add`, and is a no-op for a provisioned entry the project already
+    ignores.
+
+    **The narrowing is also what keeps a secret off a checkpoint.** A provisioned
+    `.env` the project does *not* gitignore is the case: `add -A` alone would
+    hash it into every tree pH writes, and `_commit` would publish it to a ref
+    somebody merges.
+
+    Shared by all three stagers rather than written out in `_commit` alone, which
+    is where it was. `tree_hash` and `restore_tree` handed the exclusions
+    straight to `add` and so returned `None` — no checkpoint, and a `/revert`
+    that raises — for exactly the deployment that provisions a gitignored path,
+    which is the ordinary one: a provisioned `node_modules` or `.venv` is
+    gitignored by nearly every project that has one.
+    """
+    provisioned = [one[len(EXCLUDE) :] for one in pathspec if one.startswith(EXCLUDE)]
+    steps: list[tuple[str, ...]] = [("add", "-A")]
+    if provisioned:
+        steps.append(("reset", "--quiet", "--", *provisioned))
+    return steps
 
 
 COMMIT_AS_PH = (
@@ -548,30 +611,14 @@ class GitWorktreeProvider:
         tree, which is the pre-branch behavior and the right fallback: an orphan is
         worse than a clean disposal and better than a deletion.
 
-        **Staged wide and then narrowed**, rather than by handing `add` the same
-        exclusions `_dirty` reads. `git add -A -- . ':(exclude)deps'` exits 1 with "the
-        following paths are ignored by one of your .gitignore files": naming an ignored
-        path in a pathspec is a request to add it, and `:(exclude)` does not exempt it
-        from that check. It stages the rest anyway, so tolerating the failure would
-        work and would also swallow every real one. `reset` narrows without ever
-        naming a path *to* `add`, and is a no-op for a provisioned entry the project
-        already ignores.
-
-        **The narrowing is what keeps a secret off the branch.** A provisioned `.env`
-        the project does *not* gitignore is the case: it was dirt the old policy could
-        only mistake for the agent's work, and it is a file `add -A` would now publish
-        to a ref somebody merges.
+        **Staged wide and then narrowed** by `_staging_steps`, which says why.
 
         `--no-verify` and `--no-gpg-sign` because this commit is a save, not a
         contribution: a pre-commit hook that fails, or a signing prompt with no
         terminal to answer it, would strand the work on disk over a check that belongs
         on the merge.
         """
-        provisioned = [one[len(EXCLUDE) :] for one in pathspec if one.startswith(EXCLUDE)]
-        steps: list[tuple[str, ...]] = [("add", "-A")]
-        if provisioned:
-            steps.append(("reset", "--quiet", "--", *provisioned))
-        steps.append((*COMMIT_AS_PH, "-m", f"{ref}: work at disposal"))
+        steps = [*_staging_steps(pathspec), (*COMMIT_AS_PH, "-m", f"{ref}: work at disposal")]
         for args in steps:
             code, _, err = await self._git(path, *args)
             if code != 0:
@@ -720,7 +767,8 @@ async def restore_tree(ctx: Context, workspace: Workspace, tree: str) -> tuple[s
 
     checkpoint_index = await _checkpoint_index(git_dir)
     environ = {"GIT_INDEX_FILE": str(checkpoint_index)}
-    await git(ctx, workspace.root, "add", "-A", "--", *workspace.agent_work_pathspec(), env=environ)
+    for args in _staging_steps(workspace.agent_work_pathspec()):
+        await git(ctx, workspace.root, *args, env=environ)
     index = git_dir / "ph-restore-index"
     await anyio.to_thread.run_sync(lambda: shutil.copyfile(checkpoint_index, index))
     environ = {"GIT_INDEX_FILE": str(index)}
@@ -785,11 +833,10 @@ async def _git_dir(ctx: Context, root: Path) -> Path | None:
     Both paths are resolved before comparing, because git answers with a real path
     and `$PH_HOME` is often reached through a symlink.
     """
-    code, out, _ = await git(
+    lines = await git_lines(
         ctx, root, "rev-parse", "--path-format=absolute", "--git-dir", "--show-toplevel"
     )
-    lines = out.split()
-    if code != 0 or len(lines) != 2:
+    if len(lines) != 2:
         return None
     git_dir, toplevel = Path(lines[0]), Path(lines[1])
     # `root` is canonical by construction — every workspace root and provider root
@@ -832,11 +879,11 @@ async def tree_hash(ctx: Context, workspace: Workspace) -> str | None:
         return None
     index = await _checkpoint_index(git_dir)
     environ = {"GIT_INDEX_FILE": str(index)}
-    pathspec = workspace.agent_work_pathspec()
-    code, _, err = await git(ctx, workspace.root, "add", "-A", "--", *pathspec, env=environ)
-    if code != 0:
-        log.warning("ph.seams.workspace_git: could not stage %s (%s)", workspace.root, err)
-        return None
+    for args in _staging_steps(workspace.agent_work_pathspec()):
+        code, _, err = await git(ctx, workspace.root, *args, env=environ)
+        if code != 0:
+            log.warning("ph.seams.workspace_git: could not stage %s (%s)", workspace.root, err)
+            return None
     code, out, err = await git(ctx, workspace.root, "write-tree", env=environ)
     if code != 0:
         log.warning("ph.seams.workspace_git: could not write a tree (%s)", err)

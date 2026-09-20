@@ -241,3 +241,39 @@ async def test_the_row_provides_the_store(mount: MountProfile, tmp_path: Path) -
 
     assert store.root == tmp_path / "attachments"
     assert store.root != ctx.require(SPILL_STORE).root
+
+
+async def test_an_interrupted_write_does_not_become_the_stored_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K5 — `_write` says why; this is what makes the damage *permanent*.
+
+    The retry at the end is the half worth a test of its own. A truncated blob is
+    bad; a truncated blob that every later save of the same bytes walks past —
+    because `exists()` is what makes this store cheap — is a session reading a
+    short file for an attachment it wrote correctly twice.
+
+    The failure is injected at `write_bytes` rather than by killing anything,
+    because "interrupted between the first byte and the last" is the whole
+    hypothesis and a signal would only reach it by luck.
+    """
+    store = _store(tmp_path)
+    ref = AttachmentRef(attachment_id=digest_of(PNG), mime="image/png", bytes=len(PNG))
+    whole = Path.write_bytes
+
+    def truncated(self: Path, data: bytes) -> int:
+        whole(self, data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_bytes", truncated)
+    with pytest.raises(OSError, match="No space"):
+        await store.save_bytes(content=PNG, mime="image/png")
+    monkeypatch.undo()
+
+    # The stronger statement: nothing at the final name *and* no temp left over,
+    # which the sweeper would read as a blob of that digest.
+    assert list((tmp_path / "attachments").iterdir()) == []
+    assert not store.exists(ref)
+
+    again = await store.save_bytes(content=PNG, mime="image/png")
+    assert store.path_for(again).read_bytes() == PNG, "the retry was swallowed by the wreckage"

@@ -61,9 +61,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import GRACE_SECONDS, Context, releasing
 from ph.keys import AGENTS, COMMANDS, CONTAINMENT, SESSIONS, WORKSPACE
 from ph.seams.containment import TIERS
 from ph.seams.workspace import (
@@ -629,3 +630,45 @@ async def test_the_seam_exports_an_overlay_without_knowing_which_tier_it_is(
     assert ref == f"ph/{SESSION}/a6"
     code, _, _ = await git(ctx, base, "rev-parse", "--verify", f"refs/heads/{ref}")
     assert code == 0, "the export left a real branch behind"
+
+
+# -------------------------------------------------------- giving the host back --
+
+
+async def test_a_release_outlives_the_cancel_that_asked_for_it(tmp_path: Path) -> None:
+    """J11 — `cordis.releasing` says why; this is that it reaches this module.
+
+    Three `finally` blocks here hand a kernel resource back — the probe's unmount,
+    and the export's unmount and worktree deregistration — and both callers are
+    reachable under raw cancellation: the probe runs at mount, inside whatever
+    scope the profile is being applied in, and the export under a `/workspaces
+    export` a person can interrupt.
+
+    Tested on the scope rather than through `probe_overlay`, because the probe
+    needs a working overlay and most hosts — including every runner this has run
+    on — do not have one, so a test that went through it would skip exactly where
+    a regression would land. The deadline is asserted rather than waited out.
+    """
+    released: list[str] = []
+
+    async with anyio.create_task_group() as tasks:
+
+        async def mounted() -> None:
+            try:
+                await anyio.sleep_forever()
+            finally:
+                with releasing():
+                    # A real unmount is a subprocess; what matters is that it is
+                    # an `await` reached while the caller is already cancelled.
+                    await anyio.sleep(0.01)
+                    released.append("unmounted")
+
+        tasks.start_soon(mounted)
+        await anyio.sleep(0.01)
+        tasks.cancel_scope.cancel()
+
+    assert released == ["unmounted"], "the cancel skipped the release"
+
+    assert releasing().deadline <= anyio.current_time() + GRACE_SECONDS, (
+        "a shield with no bound is a process nothing can kill"
+    )

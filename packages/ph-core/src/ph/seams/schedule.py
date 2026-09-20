@@ -304,10 +304,43 @@ def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
 
 
 def _int(value: str) -> int | None:
+    """A spec as milliseconds, or `None` when it is not a number (K2).
+
+    `OverflowError` as well as `ValueError`, because `int(float(...))` raises the
+    first for `1e400` and `inf` — which a client can send, and which every
+    numeric reader here goes through. Unhandled it escaped the *fold* itself, so
+    one bad row took every healthy schedule on that root down with it.
+    """
     try:
         return int(float(value))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
+
+
+def _refuse_unfireable(schedule: Schedule, *, now: int) -> None:
+    """Refuse a schedule the fold will never fire (K2).
+
+    **Asked of the fold rather than restated.** `create` appended and *then*
+    reindexed, so an unreadable spec left a `schedule/created` behind and came
+    back on every resume; refusing before the append is the fix. Writing out
+    *which* specs never fire would be the second half of the fix and a second
+    rulebook — and the first draft of it had already drifted: it refused a `once`
+    at a negative epoch, where `due_at` treats that as overdue and fires it
+    immediately. Two answers about one row, on day one.
+
+    Folding a throwaway state and asking `next_at` costs one `int(float(...))`
+    for the numeric kinds and one `croniter` construction for a cron, and it
+    cannot disagree with the tick, because it *is* what the tick asks. It also
+    covers cron for free — an expression `croniter` cannot read yields nothing
+    for ever, which is the same row sitting in the log looking live — where the
+    first draft deliberately skipped cron rather than grow a second parser.
+    """
+    probe = ScheduleState(schedule=schedule, created_at=now)
+    if next_at(probe, now=now) is None:
+        raise ValueError(
+            f"schedule {schedule.id!r} has spec {schedule.spec!r}, which a "
+            f"{schedule.kind!r} schedule can never fire from"
+        )
 
 
 @dataclass(slots=True)
@@ -357,7 +390,15 @@ class ScheduleService:
         return self._states.stale(sessions)
 
     def create(self, session: Session, schedule: Schedule) -> Schedule:
-        """Record a schedule. It is live from the moment the event lands."""
+        """Record a schedule. It is live from the moment the event lands.
+
+        **Checked before it is written** (K2). `create` appended and *then*
+        reindexed, so a spec the fold could not read left a `schedule/created` in
+        the log with nothing able to fold it — and the log is the state, so the
+        bad row came back on every resume. Refusing first means a schedule that
+        can never fire never becomes a fact about the session.
+        """
+        _refuse_unfireable(schedule, now=now_ms())
         session.append(CREATED, schedule.to_wire())
         self.reindex(session)
         return schedule

@@ -96,7 +96,14 @@ from ph.llm.types import (
 from ph.seams.compaction import CompactionError, CompactionResult, CompactionTrigger
 from ph.seams.spill import SpillClaim
 from ph.seams.token_meter import TokenBaseline
-from ph.session import EpochHeader, Session, SessionEvent, SurfaceIntent, derive_event_message
+from ph.session import (
+    EpochHeader,
+    Session,
+    SessionEvent,
+    SurfaceIntent,
+    derive_event_message,
+    is_replacement_surface_event,
+)
 from ph.session.events import SurfaceReplace
 from ph.text import block_marker, count_of
 from ph.wire import WireModel
@@ -521,6 +528,16 @@ def truncated_assistant_payload(
     compaction trigger the session had shrunk. The TUI's own footer reads the
     last usage it sees and would have shown the same stale number. The usage
     belongs to the request that produced the original, which still has it.
+
+    **`turn` and `step` go with it, for the same reason one step further** (D8).
+    This pass runs *between* steps and appends at the tail, so a replacement that
+    kept them announced a finished step as the newest thing in the log: every
+    reader keyed on "the latest `assistant/message`" then read a step that had
+    already closed as the open one, and the crash repair built its closers around
+    those coordinates (B3, repaired on its own side; this is the source). The
+    coordinates belong to the original, which still has them, and the replacement
+    names it — `SurfaceReplace(replaces=(at,))` is a stronger link than a pair of
+    integers a reader has to match up.
     """
     blocks = as_seq(as_obj(event.data.get("message")).get("content"))
     elisions = {
@@ -542,7 +559,8 @@ def truncated_assistant_payload(
     rewritten = cast("list[dict[str, Any]]", message["content"])
     for index, (shorter, _before) in elisions.items():
         rewritten[index] = {**rewritten[index], "arguments": shorter}
-    plain.pop("usage", None)
+    for derived in ("usage", "turn", "step"):
+        plain.pop(derived, None)
     return plain, saved
 
 
@@ -611,6 +629,27 @@ def _instruction_message(text: str) -> Message:
 
 
 # ------------------------------------------------------------------- the row --
+
+
+def _is_prior_summary(event: SessionEvent) -> bool:
+    """Whether this surface node is a summary an earlier compaction wrote.
+
+    The pair of tests is what makes it specific: `form="compaction"` separates it
+    from an offloaded paste, which is also a plugin-authored `user/message`, and
+    the replacement test separates it from a row that merely says it came from
+    this row. Both are how `_land` writes it.
+
+    `data["source"]`, not `data["message"]["source"]`: a `user/message` event's
+    payload *is* the message, where an `assistant/message` wraps one. An
+    assistant node therefore has no top-level source and answers `False` here,
+    which is the right answer for it.
+    """
+    source = as_obj(event.data.get("source"))
+    return (
+        is_replacement_surface_event(event)
+        and source.get("kind") == "plugin"
+        and source.get("form") == "compaction"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -791,11 +830,29 @@ class SummarizeEngine:
         cutoff = safe_cutoff(projected, self._retention_cutoff(session, projected))
         if cutoff == 0:
             return None
-        shadowed = tuple(one for one in projected[:cutoff] if one is not None)
-        if not shadowed:
+        above = [
+            (seq, message)
+            for seq, message in zip(nodes[:cutoff], projected[:cutoff], strict=True)
+            if message is not None
+        ]
+        if not above:
             # A range of nodes that all project to nothing — the empty-content
             # assistant message again. Summarizing it would spend a model call
             # to shadow silence with a paragraph about silence.
+            return None
+        shadowed = tuple(message for _, message in above)
+        if all(_is_prior_summary(events[seq]) for seq, _ in above):
+            # Nothing here but the last summary (D9). The retained tail can sit
+            # one pair over `keep_fraction` and stay there: pressure never drops,
+            # so the pre-step trigger fires again at the next step, and the only
+            # thing above the cutoff is the paragraph the previous call wrote.
+            # Summarizing a summary shortens nothing and costs a model call —
+            # once per step, for as long as the turn runs.
+            #
+            # Declining is the honest answer rather than a floor on the range:
+            # the tail is genuinely too big for the budget, and the caller that
+            # can do something about that is `clip_overflow_tail`, which runs
+            # before this and reports separately.
             return None
         meter = self.ctx.require(TOKEN_METER)
         return _Plan(

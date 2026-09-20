@@ -264,6 +264,37 @@ become a process that will not exit — which is why this is a deadline and not 
 bare shield.
 """
 
+
+def releasing() -> anyio.CancelScope:
+    """A cleanup scope that survives the cancel that sent it, but not for ever.
+
+    The `finally` that hands a kernel resource back — an overlay unmount, a
+    worktree deregistration, a child's disposer — is reachable under raw
+    cancellation, and unshielded its `await` is simply skipped: a live FUSE mount
+    nobody unmounted, a registration that makes `git branch -D` refuse the branch
+    an export just produced, a subagent still spending tokens for a turn that was
+    abandoned.
+
+    **Shielded with a deadline, not shielded.** An unmount that hangs because the
+    backend is wedged is the other way to lose a process, and a shield with no
+    bound makes it unkillable — which is the failure `dispose` already argues
+    against. `GRACE_SECONDS` is what the rest of the tree unwinds in, so a
+    cleanup does not get to be slower than the runtime that owns it; if it
+    expires the cleanup is abandoned, which is where this started, the difference
+    being that it has been tried.
+
+    Here rather than in the seam that first needed it, because the pattern was
+    already written out inline at six sites across the tree and the seventh
+    author would have written a seventh. It does **not** consult
+    `_Runtime.unwind_deadline`: a cleanup reached during an unwind takes a fresh
+    budget on top of the tree's, which is the "ten roots, ten budgets" shape
+    `unwind_by` exists to prevent. Folding the two is the right next change and
+    needs its own test; the sites using this today are cleanups that run inside
+    an *operator's* call rather than inside a dispose.
+    """
+    return anyio.CancelScope(deadline=anyio.current_time() + GRACE_SECONDS, shield=True)
+
+
 DRAIN_SECONDS = GRACE_SECONDS / 2
 """How long `drain` waits on detached work before the unwind behind it starts.
 

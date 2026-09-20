@@ -54,6 +54,7 @@ from .diagnostics import Diagnostic, contribute
 __all__ = [
     "COHERENT",
     "DEFAULT_SCRUB",
+    "LOCATION",
     "MAX_OUTPUT",
     "SECRET_PATTERN",
     "EnvScrub",
@@ -130,6 +131,28 @@ credential; dropping it whole is what this does.
 """
 
 
+LOCATION = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"})
+"""Variables that outrank `cwd` for the tool that reads them (J10).
+
+`COHERENT`'s argument, one step further. The test this seam actually applies is
+not "is this a secret" — `GIT_CONFIG_COUNT` is not — it is **would a child
+misbehave on inheriting this**, and these three have the worst answer of any name
+pH can be started with. git resolves them before `cwd`, so a pH launched from a
+`git rebase --exec`, a pre-commit hook or a `git bisect run` hands every child an
+answer to "which repository" that has nothing to do with the workspace it was
+given: an agent's worktree staged into the person's own index, checkpoints
+written to their object store, and a `git commit` the *model* typed landing on
+their branch.
+
+Dropped here rather than at each spawner because there are three and the third
+was missed: `workspace_git.git`, `workspace_jj.jj` and `shell.run`, which is the
+one a model drives directly. A caller that means one passes it in `extra`, which
+is applied after this and therefore survives — `tree_hash` keeps its
+`GIT_INDEX_FILE`, and that is the whole escape hatch, the same one `keep` is for
+a credential-shaped name an operator wants back.
+"""
+
+
 def _family(name: str) -> tuple[str, ...] | None:
     """The coherent family `name` belongs to, if any."""
     for family in COHERENT:
@@ -168,7 +191,8 @@ class EnvScrub:
     def apply(
         self, base: Mapping[str, str] | None = None, *, extra: Mapping[str, str] | None = None
     ) -> dict[str, str]:
-        """The parent environment minus the credentials, minus broken families."""
+        """The parent environment minus the credentials, the broken families and
+        the inherited tool locations."""
         source = os.environ if base is None else base
         dropped = {name for name in source if self.drops(name)}
         # A family loses every member as soon as it loses one, so a child never
@@ -177,7 +201,9 @@ class EnvScrub:
         kept = {
             name: value
             for name, value in source.items()
-            if name not in dropped and _family(name) not in broken
+            # `LOCATION` is not routed through `drops`: that predicate answers
+            # "is this a credential", and these are not. See `LOCATION`.
+            if name not in dropped and name not in LOCATION and _family(name) not in broken
         }
         if extra:
             kept.update(extra)

@@ -30,13 +30,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
 from ..agent.types import AgentDriver, AgentHandle
-from ..cordis import Context, Disposer, Running, plugin, running
+from ..cordis import Context, Disposer, Running, maybe_await, plugin, releasing, running
 from ..json import JsonValue, as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ..session import Session, SessionEvent, SessionFoldCache
@@ -761,6 +762,48 @@ class SubagentService:
             brief=(_brief_text(skills, named, target) if named and skills is not None else ""),
         )
 
+    def _settle_unadmitted(
+        self,
+        session: Session | None,
+        run_id: str,
+        detail: str,
+        *,
+        status: SubagentStatus = "error",
+        session_id: JsonValue = None,
+    ) -> None:
+        """Write the terminal status for a child the seam is giving up on.
+
+        **A child with an admission and no ending is one nothing can release.**
+        The provider has already logged `subagent/admitted`, so the roster has a
+        row; a fold reads it as live, `child_is_live` stays true, and the parent
+        is held out of passivation by a child that no longer exists (K3, K4).
+        The row has to *end*, and only the log can end it.
+
+        One writer, because `resume_children` was already writing this row inline
+        and the two had already disagreed: it carries `sessionId` so a person
+        looking for the work can still find the child's transcript, and the K3/K4
+        rows were dropping it — the same fact under two shapes in one log.
+        """
+        if session is None:
+            return
+        session.append(
+            STATUS,
+            {"runId": run_id, "status": status, "detail": detail, "sessionId": session_id},
+        )
+
+    async def _abandon(self, run: SubagentRun) -> None:
+        """Release a child this seam has decided not to admit (K3).
+
+        Best-effort: the refusal is what the caller has to see, and a disposer
+        that throws must not replace it with its own exception. `releasing`
+        rather than a bare shield for the reason it gives — a disposer that hangs
+        must not make the refusal unkillable.
+        """
+        if run.dispose is None:
+            return
+        with releasing(), suppress(Exception):
+            await maybe_await(run.dispose())
+
     def _enforce(
         self,
         grant: Grant,
@@ -840,7 +883,19 @@ class SubagentService:
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider.
         run.owner = name
-        self._enforce(grant, run, held, boundary)
+        try:
+            self._enforce(grant, run, held, boundary)
+        except SubagentSpawnError as refused:
+            # **The child is already running by here** (K3). `_enforce` needs
+            # `run.scope`, which only the provider can produce, so the check
+            # cannot move ahead of the spawn — and a refusal that merely raised
+            # left the child driving: unbounded, absent from `_runs`, with no
+            # disposer anybody holds and an admission in the log that nothing
+            # would ever close. That is precisely the outcome `_enforce` exists
+            # to prevent, arriving through the path meant to prevent it.
+            await self._abandon(run)
+            self._settle_unadmitted(request.parent.session, run.id, str(refused))
+            raise
         self._runs[run.id] = run
         return run
 
@@ -957,16 +1012,14 @@ class SubagentService:
             elif not recoverable:
                 detail = UNRECOVERABLE_DETAIL
             row["status"] = "queued" if resumable else "error"
-            session.append(
-                STATUS,
-                {
-                    "runId": run_id,
-                    "status": row["status"],
-                    "detail": detail,
-                    # What it was doing, kept where a person looking for the work
-                    # will find it: the child's own transcript is still on disk.
-                    "sessionId": row.get("sessionId"),
-                },
+            self._settle_unadmitted(
+                session,
+                run_id,
+                detail,
+                # Not always terminal here — a resumable child goes back on the
+                # ladder — which is why the status is the caller's to state.
+                status="queued" if resumable else "error",
+                session_id=row.get("sessionId"),
             )
         return await self._readmit_children(parent, roster)
 
@@ -1009,8 +1062,20 @@ class SubagentService:
                 continue
             try:
                 run = await self._readmit_one(parent, run_id, row)
-            except Exception:
+            except Exception as error:
+                # **Logged *and* settled** (K4). Skipping alone left the row
+                # `queued`, which `child_is_live` reads as waiting for a slot —
+                # so a `check_grant` refusal after a profile edit, or any
+                # provider error, held the parent out of passivation for good.
+                # One child that cannot be rebuilt must not hold a root, and the
+                # honest way to say that is in the log the roster folds.
                 log.exception("ph.seams.subagents: %s could not be readmitted", run_id)
+                self._settle_unadmitted(
+                    parent.session,
+                    run_id,
+                    f"this child could not be resumed: {error}",
+                    session_id=row.get("sessionId"),
+                )
                 continue
             if run is not None:
                 revived.append(run_id)

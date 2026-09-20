@@ -616,6 +616,11 @@ async def apply(ctx: Context, config: Config) -> None:
                 slice_ = await fs.read(
                     path,
                     limit=None,
+                    # `skip_reason` above is this walk's bound, and it is a skip
+                    # rather than a raise on purpose: an indexing pass must not
+                    # fail because it found a minified bundle. `read`'s own
+                    # default would be a second, larger bound that raises.
+                    max_bytes=None,
                     scope=run.scope,
                     agent=run.agent,
                     session=run.session,
