@@ -85,6 +85,7 @@ __all__ = [
     "apply",
     "enforcement_of",
     "host_allowed",
+    "narrower",
     "writable_paths",
 ]
 
@@ -100,6 +101,36 @@ _MODE_READINGS: dict[str, StatusReading] = {
 }
 """One reading per mode, built once: there are three of them and the field is
 read on every footer refresh."""
+
+_MODE_RANK: Mapping[SandboxMode, int] = {
+    "read-only": 0,
+    "workspace-write": 1,
+    "danger-full-access": 2,
+}
+"""How much each mode permits, so two of them can be compared (N1).
+
+Written out rather than derived from `SandboxMode`'s order, because a `Literal`'s
+order is a declaration detail and this is a claim about what the kernel allows.
+`literal_lookup` below keeps the two exhaustive over the same alias."""
+
+
+def narrower(requested: SandboxMode | None, resolved: SandboxMode) -> SandboxMode:
+    """The more restrictive of what a caller asked for and what the session has.
+
+    **A request can only ever narrow** — `SandboxPolicy.refuse_network` already
+    states that rule for the network, and this is the same rule for the mode. It
+    was not being kept: `effective` read the session's posture and *replaced* the
+    caller's with it, so a logged `danger-full-access` widened a policy that said
+    `read-only`. That is the one direction a confinement seam must never be
+    wrong in, and nothing but the callers' own uniformity was stopping it.
+
+    `None` is a caller with no opinion, which takes the posture whole. See
+    `SandboxPolicy.mode`.
+    """
+    if requested is None:
+        return resolved
+    return min(requested, resolved, key=_MODE_RANK.__getitem__)
+
 
 SANDBOX_MODES: Mapping[str, SandboxMode] = literal_lookup(SandboxMode)
 """Every `SandboxMode` by its own spelling — the read-side check for a value
@@ -204,7 +235,27 @@ class Egress(WireModel):
 class SandboxPolicy(WireModel):
     """The complete per-call confinement request."""
 
-    mode: SandboxMode = "read-only"
+    mode: SandboxMode | None = None
+    """The caller's ceiling, or `None` for whatever the session resolved.
+
+    **Two facts in one field, and `effective` is where they meet.** On the way in
+    this is what the caller will accept at most; on the way out it is what the
+    backend enforces, because `effective` replaces it with `narrower(mode,
+    resolve_mode(session))`. A request can only narrow, which is
+    `refuse_network`'s rule two fields down.
+
+    `None` rather than a default of `read-only`, because "no opinion" and "the
+    tightest opinion" are not the same answer and a default made them one.
+    `workspace_policy` is the caller with no opinion, and that is the shape of
+    N1: it used to guess `workspace-write`, which capped a person who typed
+    `/sandbox danger-full-access` at workspace-write *and* floored a deployment
+    that set `defaultMode: read-only` at workspace-write — wrong in both
+    directions from one guess, with the footer reporting the posture that was
+    not in force.
+
+    A policy that reaches a backend without passing through the seam keeps
+    `None`, and `writable_paths` answers it with the extras alone — the closed
+    direction, for `network`'s reason."""
     workspace_root: str | None = None
     """The one writable root under `workspace-write`."""
     writable_extra: list[str] | None = None
@@ -253,10 +304,13 @@ def writable_paths(policy: SandboxPolicy) -> list[str]:
     `redirection_env` already points the toolchain's scratch at one that was.
     `danger-full-access` returns nothing here because it is not a *set* of writable
     paths — it is "everything", which each backend spells its own way.
+
+    `None` is a policy that never passed through `effective`, which resolves the
+    mode; it answers with the extras alone for the same reason `read-only` does.
     """
     extra = list(policy.writable_extra or ())
     match policy.mode:
-        case "read-only" | "danger-full-access":
+        case None | "read-only" | "danger-full-access":
             return extra
         case "workspace-write":
             roots = [policy.workspace_root] if policy.workspace_root else []
@@ -714,15 +768,21 @@ class SandboxSeam:
         """
         # **The posture the session chose, applied here** (J2). `apply_preset`
         # logs `sandbox/mode` and nothing read it back: `workspace_policy`
-        # hard-codes `workspace-write`, both confinement callers passed that
+        # hard-coded `workspace-write`, both confinement callers passed that
         # through unchanged, and `resolve_mode`'s only reader was the footer. So
         # `read-only` and `danger-full-access` were reported as in force by the
         # status bar while the backend was handed `workspace-write` either way —
         # the two halves of a preset disagreeing, with the visible half wrong.
         #
-        # Only a mode somebody actually logged overrules the caller: a policy
-        # built for a probe, or by a test, still means what it says.
-        mode = self.logged_mode(self._session_of(agent)) or policy.mode
+        # **Bounded, not replaced** (N1). Replacing it was wrong in the widening
+        # direction — a logged `danger-full-access` overruled a policy that said
+        # `read-only` — and it is `resolve_mode` rather than `logged_mode`
+        # because the deployment's own default is a posture too: J2's
+        # disagreement survived for `defaultMode: read-only` with no preset
+        # chosen, where the footer said `read-only` and the backend got
+        # `workspace-write`. A caller that states nothing takes the posture
+        # whole; a caller that states something can only ask for less.
+        mode = narrower(policy.mode, self.resolve_mode(self._session_of(agent)))
         extra = list(policy.writable_extra or ())
         if mode != "read-only":
             extra += [str(path) for path in self.allowed_paths() if str(path) not in extra]

@@ -30,11 +30,14 @@ from ph.seams.sandbox import (
     DenialReader,
     Egress,
     NetworkAllowance,
+    SandboxMode,
     SandboxPolicy,
     SandboxSeam,
     host_allowed,
+    writable_paths,
 )
 from ph.seams.sandbox_local import Bubblewrap, LocalBackend, Seatbelt, local_backend
+from ph.seams.workspace import Workspace, workspace_policy
 from ph.testing import MountProfile, StubSandboxProvider, not_none, report_section
 
 pytestmark = pytest.mark.anyio
@@ -44,8 +47,22 @@ def _allow(**config: object) -> dict[str, Any]:
     return {"id": "sandbox-allow", "config": config}
 
 
-def _seam(**kwargs: Any) -> SandboxSeam:  # noqa: ANN401
-    seam = SandboxSeam(ctx=Context())
+WRITABLE: dict[str, Any] = {"id": "sandbox", "config": {"defaultMode": "workspace-write"}}
+"""A deployment that permits workspace writes, patched onto `ph-base`'s row.
+
+Said rather than assumed since N1: `effective` bounds a caller's mode by the
+deployment's resolved one, so the shipped default of `read-only` now refuses a
+`workspace-write` policy — which is the point, and which a test that states no
+posture gets silently."""
+
+
+def _seam(*, default_mode: SandboxMode = "workspace-write", **kwargs: Any) -> SandboxSeam:  # noqa: ANN401
+    """A seam over a stub backend, and the posture its callers are bounded by.
+
+    `workspace-write` rather than the library's `read-only` default, because
+    almost every test here asks what a *writable* deployment does with an
+    allowance; the read-only cases say so."""
+    seam = SandboxSeam(ctx=Context(), default_mode=default_mode)
     seam.register_provider(StubSandboxProvider())
     if kwargs:
         seam.register_allowances(Allowances(**kwargs))
@@ -136,7 +153,7 @@ async def test_the_read_only_preset_reaches_the_shell_policy(
     Read through `effective`, which is the single place both callers meet — and
     the reason the fix is one change rather than one per confiner.
     """
-    ctx = await mount(_allow(paths=[str(tmp_path)]))
+    ctx = await mount(_allow(paths=[str(tmp_path)]), WRITABLE)
     sandbox = ctx.require(SANDBOX)
     session = ctx.require(SESSIONS).create("posture")
     agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
@@ -218,7 +235,10 @@ def test_allowlist_without_a_bridge_is_no_network_and_says_so() -> None:
 
 
 def test_danger_full_access_means_the_network_too() -> None:
-    seam = _seam(network=NetworkAllowance(mode="off"))
+    # The posture has to be the *deployment's* since N1: a caller cannot widen
+    # past it, so asking for `danger-full-access` under a narrower one is
+    # answered with the narrower one and no network.
+    seam = _seam(default_mode="danger-full-access", network=NetworkAllowance(mode="off"))
     assert seam.effective(SandboxPolicy(mode="danger-full-access")).network is True
 
 
@@ -371,7 +391,7 @@ async def test_the_allowed_paths_are_settled_once_where_they_are_registered(
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real)
-    ctx = await mount(_allow(paths=[str(link)]))
+    ctx = await mount(_allow(paths=[str(link)]), WRITABLE)
 
     assert ctx.require(SANDBOX).allowances is not None
     assert not_none(ctx.require(SANDBOX).allowances).paths == [str(real)], (
@@ -460,3 +480,76 @@ async def test_the_shell_does_not_blame_the_sandbox_for_an_outage_under_full_net
     await ctx.require(SHELL).run(f"echo '{OUTAGE[backend.backend]}' >&2; exit 1", agent=agent)
 
     assert not [one for one in session.events if one.type == DENIED]
+
+
+async def test_a_session_posture_bounds_the_caller_rather_than_replacing_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """N1 — the one direction a confinement seam must never be wrong in.
+
+    `effective` read the session's logged mode and *replaced* the caller's with
+    it, so the arithmetic went both ways: a logged `danger-full-access` widened a
+    policy that said `read-only`, and a caller's `workspace-write` overruled a
+    deployment that said `read-only`. It was latent only because every live
+    caller happened to say `workspace-write` — `workspace_policy` guessed it,
+    which is why that guess is gone too.
+
+    Both directions are asserted, because a seam that clamped everything to
+    `read-only` would pass the widening half while being unusable.
+
+    Sabotage: `logged_mode(...) or policy.mode` in place of `narrower(...)` and
+    the first assertion reports `danger-full-access`.
+    """
+    ctx = await mount(_allow(paths=[str(tmp_path)]), WRITABLE)
+    sandbox = ctx.require(SANDBOX)
+    session = ctx.require(SESSIONS).create("posture")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="f"))
+    sandbox.set_mode(session, "danger-full-access")
+
+    # The caller wants less than the person allowed, and gets less.
+    careful = sandbox.effective(SandboxPolicy(mode="read-only"), agent=agent.id)
+    assert careful.mode == "read-only", "a caller's own ceiling was widened by the session"
+    assert careful.writable_extra is None, "and the allowances came with it"
+
+    # The caller has no opinion, and gets the posture whole — which is what
+    # `workspace_policy` now is.
+    asking = sandbox.effective(SandboxPolicy(workspace_root="/w"), agent=agent.id)
+    assert asking.mode == "danger-full-access"
+
+
+async def test_the_deployment_default_reaches_the_backend_it_is_shown_for(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """N1, J2's other half — a posture nobody logged is still a posture.
+
+    `effective` consulted `logged_mode`, so "nobody chose" and "the deployment
+    says read-only" were the same answer and the caller's mode stood. The footer
+    reads `resolve_mode`, which falls back to `defaultMode` — so a deployment
+    shipping `read-only` showed `read-only` while handing every confined command
+    a policy that said the workspace was writable, which is exactly the
+    disagreement J2 set out to end, surviving on the path nobody had logged.
+
+    Driven through `workspace_policy`, which is the caller that had the guess in
+    it — asserting on a hand-built policy would leave the half that mattered
+    untested, since the guess is what the deployment default had to beat.
+
+    Sabotage: put `mode="workspace-write"` back in `workspace_policy` **and**
+    `logged_mode(...) or policy.mode` back in `effective` — it takes both,
+    because either half alone still answers `read-only`, and the defect was the
+    guess and the replacement together.
+    """
+    ctx = await mount()
+    sandbox = ctx.require(SANDBOX)
+    assert sandbox.default_mode == "read-only", "ph-base's shipped posture"
+    workspace = Workspace(
+        root=tmp_path, scratch=tmp_path / "scratch", kind="worktree", repo_writable=True
+    )
+
+    # Exactly what `ctx.shell` hands the seam for an agent with a workspace.
+    resolved = sandbox.effective(workspace_policy(workspace))
+
+    assert resolved.mode == sandbox.resolve_mode(None), "the footer and the backend disagree"
+    # The consequence, not just the label: under `read-only` the tree itself is
+    # out of the writable set. `scratch` stays in it, which is the kind's own
+    # rule and not this posture's — see `Workspace.scratch`.
+    assert str(tmp_path) not in writable_paths(resolved), "the repo was writable after all"

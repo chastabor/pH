@@ -85,6 +85,15 @@ ROW = {"id": "sandbox-local", "disabled": False}
 """The row ships in `ph-base`; the `mount` fixture turns it off for the suite, and
 this turns it back on for the tests that are about it."""
 
+WRITABLE = {"id": "sandbox", "config": {"defaultMode": "workspace-write"}}
+"""And the posture a workspace write needs, said rather than assumed (N1).
+
+`SandboxSeam.effective` bounds a caller's mode by the deployment's resolved one
+now, so the library default of `read-only` refuses a `workspace-write` policy —
+correctly, and invisibly to a test that never stated a posture. `tui.yaml` and
+the RLM profile both set this; a test that confines a real write is a deployment
+that allows one."""
+
 
 def _policy(root: str = "/w", **extra: Any) -> SandboxPolicy:  # noqa: ANN401
     return SandboxPolicy(mode="workspace-write", workspace_root=root, **extra)
@@ -348,7 +357,7 @@ async def _run(ctx: Context, argv: tuple[str, ...], cwd: Path) -> tuple[int, str
 
 async def _enforcing(mount: MountProfile, tmp_path: Path) -> tuple[Any, Path]:
     """A mounted row over a host whose kernel enforces, and a workspace, or a skip."""
-    ctx = await mount(ROW)
+    ctx = await mount(ROW, WRITABLE)
     if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
     workspace = tmp_path / "work"

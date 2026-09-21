@@ -21,14 +21,17 @@ the generic code**, in the row whose entire purpose is telling an operator why.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from ph.cordis import Context
 from ph.keys import SESSIONS, SUBPROCESS, WORKSPACE
+from ph.seams import workspace_git
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import redirection_env, workspace_survivors
 from ph.seams.workspace_git import sanitize_ref, tree_hash
@@ -1019,3 +1022,106 @@ async def test_an_inherited_git_dir_does_not_redirect_the_workspace(
     index = tmp_path / "scratch.index"
     await git(ctx, base, "add", "-A", env={"GIT_INDEX_FILE": str(index)})
     assert index.exists(), "an explicitly passed location was dropped with the inherited ones"
+
+
+async def test_a_checkpoint_stages_in_one_command_and_asks_git_to_apply_the_rule(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """L9 — the narrowing was a second process undoing part of the first.
+
+    `add -A` then `reset -- <provisioned>` stages everything and then spawns
+    another git to take part of it back. For a path the project already
+    gitignores the `reset` removed nothing at all — the ordinary case, a
+    provisioned `node_modules` or `.venv` — and it still cost ~2.5 ms of a
+    ~14 ms checkpoint on the path a code cell takes before every run.
+
+    The rule is now stated to git instead: `core.excludesFile` for the untracked
+    materials and `--skip-worktree` for any the repo tracks, which is what
+    `workspace_jj.auto_track` already does on the other tier. One `add` answers
+    what two commands used to, and git re-reads the exclude file every
+    invocation — so there is nothing for pH to remember and nothing to go stale.
+
+    Counted in spawns rather than in seconds: the wall clock here is git's, and
+    a timing assertion on it is a flake waiting for a loaded machine.
+
+    Sabotage: return `[("add", "-A"), ("reset", ...)]` from `_staging_steps` and
+    `reset` is back in the verbs.
+    """
+    ctx = await mount(TIER_ROW, PROVISION_ROW)
+    base = await _repo_with_materials(ctx, tmp_path / "repo")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    assert workspace.provisioned == (".env", "deps"), "the materials never arrived"
+    await tree_hash(ctx, workspace)
+
+    verbs: list[str] = []
+    real = workspace_git.git
+
+    async def counting(
+        ctx_: Context, cwd: Path, *args: str, env: Mapping[str, str] | None = None
+    ) -> tuple[int, str, str]:
+        # The verb, not the flags — and `-c <config>` rides in front of it, so
+        # the value has to be stepped over rather than read as the command.
+        rest = list(args)
+        while rest[:1] == ["-c"]:
+            rest = rest[2:]
+        verbs.append(next((one for one in rest if not one.startswith("-")), ""))
+        return await real(ctx_, cwd, *args, env=env)
+
+    with patch.object(workspace_git, "git", counting):
+        (workspace.root / "work.txt").write_text("the agent's own\n", encoding="utf-8")
+        hashed = await tree_hash(ctx, workspace)
+
+    assert hashed, "the checkpoint stopped working"
+    assert "reset" not in verbs, f"the narrowing is still a second command: {verbs}"
+    assert verbs.count("add") == 1, f"staging took more than one add: {verbs}"
+    assert "ls-files" not in verbs, "the tracked set is the index's to remember, not ours"
+    # And the rule really is the exclude file, not an accident of the pathspec.
+    assert "check-ignore" not in verbs, "pH is re-deriving what git already applies"
+
+
+async def test_a_provisioned_path_the_repo_tracks_is_excluded_too(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """L9's other half — an exclude governs untracked files and nothing else.
+
+    `core.excludesFile` cannot speak about a path already in the index, so a
+    provisioned `config.yaml` the project has *committed* would have its
+    overwritten content staged by `add -A` — where the old `reset` dropped it.
+    Swapping one mechanism for the other without this would have traded a spawn
+    for a credential on a branch.
+
+    `--skip-worktree` is the index's own way to say the same thing, set once
+    when pH seeds its index, so no checkpoint has to ask again.
+
+    Both directions: the committed content survives in the tree pH writes, and
+    the agent's own work beside it is still captured.
+
+    Sabotage: drop the `_mark_tracked` call from `_checkpoint_index` and the
+    checkpoint holds `SECRET=leaked`.
+    """
+    ctx = await mount(
+        TIER_ROW,
+        {"id": "workspace-lifecycle", "config": {"provision": [{"source": "config.yaml"}]}},
+    )
+    base = await git_repo(ctx, tmp_path / "repo")
+    # The repository tracks this path, and the seam provisions over it.
+    (base / "config.yaml").write_text("COMMITTED=ok\n", encoding="utf-8")
+    await git(ctx, base, "add", "config.yaml")
+    await git(ctx, base, "commit", "-m", "the project tracks its own config")
+    (base / "config.yaml").write_text("SECRET=leaked\n", encoding="utf-8")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    assert workspace.provisioned == ("config.yaml",), "the material never arrived"
+    assert (workspace.root / "config.yaml").read_text(encoding="utf-8") == "SECRET=leaked\n"
+    (workspace.root / "work.txt").write_text("the agent did this\n", encoding="utf-8")
+
+    hashed = await tree_hash(ctx, workspace)
+
+    assert hashed, "the checkpoint stopped working"
+    _, captured, _ = await git(ctx, workspace.root, "show", f"{hashed}:config.yaml")
+    assert captured == "COMMITTED=ok\n", "a provisioned secret reached a tree pH wrote"
+    _, work, _ = await git(ctx, workspace.root, "show", f"{hashed}:work.txt")
+    assert work == "the agent did this\n", "the agent's work is not in its own checkpoint"

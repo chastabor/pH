@@ -38,6 +38,12 @@ class ShellResult:
     """Bytes the child printed past the seam's cap and nobody kept (P7-13)."""
     timed_out: bool = False
     """Whether `timeout_ms` ended it rather than the command finishing."""
+    canceled: bool = False
+    """Whether the caller's `signal` ended it rather than the command finishing.
+
+    Carried rather than folded into `timed_out`: see `SubprocessResult.canceled`.
+    A caller that conflates them reports "the command timed out" to a person who
+    pressed stop."""
     cap: int = 0
     """The per-stream ceiling that did the dropping, for the sentence that says so."""
 
@@ -157,6 +163,7 @@ class ShellService:
             stderr=outcome.stderr,
             dropped=outcome.dropped,
             timed_out=outcome.timed_out,
+            canceled=outcome.canceled,
             cap=subprocess_service.max_output,
             argv=argv,
             cwd=str(cwd),

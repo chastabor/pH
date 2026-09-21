@@ -32,7 +32,9 @@ import pytest
 from ph.cancel import CancelToken
 from ph.cordis import Context
 from ph.seams.subprocess import SubprocessHandle, SubprocessService, SubprocessSpawnSpec
-from ph.testing import settled
+from ph.session import Session
+from ph.testing import StubAgent, run_tool, settled, tool_runtime
+from ph.tools import TOOL_ABORTED
 
 pytestmark = [
     pytest.mark.anyio,
@@ -213,8 +215,11 @@ async def test_a_cancel_token_stops_a_running_child(tmp_path: Path) -> None:
 
     assert result.exit_code != 0, "the child was not stopped"
     # Not a timeout: nothing timed out, somebody asked. A caller that reported
-    # `timed_out` for a cancel would be telling the model the wrong story.
+    # `timed_out` for a cancel would be telling the model the wrong story — and
+    # for a while there was no third answer to give instead, so a caller could
+    # only tell this apart from an ordinary non-zero exit by not asking (N3).
     assert not result.timed_out
+    assert result.canceled, "a cancel was indistinguishable from a command that failed"
 
 
 def test_the_handle_signals_the_group_before_the_process(tmp_path: Path) -> None:
@@ -247,3 +252,51 @@ def test_the_handle_signals_the_group_before_the_process(tmp_path: Path) -> None
     handle._signal(kill=False)
 
     assert process.terminated, "no group, and the child was not signalled either"
+
+
+async def test_a_canceled_command_is_an_abort_rather_than_an_exit_code() -> None:
+    """N3 — the cancel reached the child and stopped at the seam's vocabulary.
+
+    `run` applies three bounds and reported two, so a child killed because
+    somebody pressed stop came back as an ordinary `ShellResult` with
+    `timed_out=False` and whatever exit code the kill produced. The tool then
+    returned a *value*: `dispatch` has no post-hoc signal check — the only one is
+    before the body runs — so the pipeline recorded a successful call whose
+    rendered text was `[exit -15]`, and a model reading that sees a command that
+    failed on its own rather than a turn the person ended.
+
+    Driven through a stub shell rather than a real cancel race, because the claim
+    is the translation, not the killing: `test_the_child_is_stopped_when_the_caller_cancels`
+    one file up already pins that the signal reaches the child.
+
+    Sabotage: drop the `result.canceled` branch from `bash_tool` and the call
+    comes back `is_error=False` carrying the kill's exit code.
+    """
+    from ph.keys import SHELL
+    from ph.seams.shell import ShellResult
+    from ph.tools.builtin import bash_tool
+
+    root, _runtime = tool_runtime()
+
+    class _Stopped:
+        async def run(self, command: str, **_: object) -> ShellResult:
+            # What the seam now answers for a child the signal ended: a
+            # terminated child's status, and the field that says why.
+            return ShellResult(
+                exit_code=-15, stdout="", stderr="", argv=("sh", "-c", command), canceled=True
+            )
+
+    root.provide(SHELL, _Stopped())
+    await bash_tool.apply(root, None)
+    agent = StubAgent(ctx=root, session=Session("bash-cancel"))
+
+    result = await run_tool(root, "bash", {"command": "sleep 30"}, agent=agent)
+
+    assert result.is_error, "a canceled command was reported as one that ran"
+    assert result.error is not None
+    assert result.error.kind == "aborted", (
+        f"a person's interrupt was reported to the model as {result.error.kind}"
+    )
+    # After dispatch, not before: the child ran, so the call is not safe to retry
+    # blind — which is the distinction `aborted_result` keeps two codes for.
+    assert (result.error.info or {}).get("code") == TOOL_ABORTED

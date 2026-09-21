@@ -804,6 +804,49 @@ class SubagentService:
         with releasing(), suppress(Exception):
             await maybe_await(run.dispose())
 
+    async def _admit(
+        self,
+        run: SubagentRun,
+        *,
+        owner: str,
+        grant: Grant,
+        held: tuple[tuple[str, ...], tuple[str, ...]],
+        boundary: Context,
+        session: Session | None,
+        session_id: JsonValue = None,
+    ) -> SubagentRun:
+        """Bind a child a provider has already started, or release it (K3, L6).
+
+        **The sequence, in one place, because both spawners need all of it.**
+        `_enforce` reads `run.scope`, which only the provider can produce, so the
+        check cannot move ahead of the spawn — and by the time it refuses there
+        is a child driving. Three things then have to happen and no two of them
+        are optional: the child is released, its admission is *ended* in the log,
+        and the refusal reaches the caller.
+
+        `start` had all three and `_readmit_one` had none of them: it called
+        `_enforce` bare, so a `check_grant` refusal after a profile edit left the
+        child running unbounded and undisposed while `resume_children`'s
+        `except` closed its roster row — the K3 shape arriving through the path
+        K4 had already been written for. Two spawners with one admission each
+        was the defect; one admission both call is the fix.
+
+        `session_id` because a readmitted child has a transcript somebody may
+        want to read, and the ending is the only place left to name it.
+        """
+        # Stamped here rather than trusted from the provider: the service is what
+        # knows which name the caller asked for, and `rehydrate` has to be able
+        # to find its way back to the same provider.
+        run.owner = owner
+        try:
+            self._enforce(grant, run, held, boundary)
+        except SubagentSpawnError as refused:
+            await self._abandon(run)
+            self._settle_unadmitted(session, run.id, str(refused), session_id=session_id)
+            raise
+        self._runs[run.id] = run
+        return run
+
     def _enforce(
         self,
         grant: Grant,
@@ -879,25 +922,14 @@ class SubagentService:
         # `Grant`'s subject rather than this binding's.
         with running(entry.by):
             run = await entry.provider.start(request)
-        # Stamped here rather than trusted from the provider: the service is what
-        # knows which name the caller asked for, and `rehydrate` has to be able
-        # to find its way back to the same provider.
-        run.owner = name
-        try:
-            self._enforce(grant, run, held, boundary)
-        except SubagentSpawnError as refused:
-            # **The child is already running by here** (K3). `_enforce` needs
-            # `run.scope`, which only the provider can produce, so the check
-            # cannot move ahead of the spawn — and a refusal that merely raised
-            # left the child driving: unbounded, absent from `_runs`, with no
-            # disposer anybody holds and an admission in the log that nothing
-            # would ever close. That is precisely the outcome `_enforce` exists
-            # to prevent, arriving through the path meant to prevent it.
-            await self._abandon(run)
-            self._settle_unadmitted(request.parent.session, run.id, str(refused))
-            raise
-        self._runs[run.id] = run
-        return run
+        return await self._admit(
+            run,
+            owner=name,
+            grant=grant,
+            held=held,
+            boundary=boundary,
+            session=request.parent.session,
+        )
 
     def roster(self, session: Session) -> dict[str, dict[str, Any]]:
         """`subagent_roster(session)`, folded at most once per appended event.
@@ -1077,8 +1109,23 @@ class SubagentService:
                     session_id=row.get("sessionId"),
                 )
                 continue
-            if run is not None:
-                revived.append(run_id)
+            if run is None:
+                # **A provider that declines is still an ending** (L6). This fell
+                # through the `is not None` it used to be guarded by and left the
+                # row `queued`, which `child_is_live` reads as waiting for a
+                # slot — the third path to the state K4 exists to end, after the
+                # two the `except` above closes. `_readmitter` is asked before a
+                # row is queued, so reaching here means the provider itself
+                # declined, or the profile changed under a log written by
+                # another one.
+                self._settle_unadmitted(
+                    parent.session,
+                    run_id,
+                    "the provider that owns this child could not resume it",
+                    session_id=row.get("sessionId"),
+                )
+                continue
+            revived.append(run_id)
         return revived
 
     async def _readmit_one(
@@ -1125,10 +1172,15 @@ class SubagentService:
             )
         if run is None:
             return None
-        run.owner = name or ""
-        self._enforce(grant, run, held, boundary)
-        self._runs[run.id] = run
-        return run
+        return await self._admit(
+            run,
+            owner=name or "",
+            grant=grant,
+            held=held,
+            boundary=boundary,
+            session=parent.session,
+            session_id=row.get("sessionId"),
+        )
 
     def _readmitter(self, row: Mapping[str, Any]) -> _Registered | None:
         """The provider that could put this child back, or `None` if none can.

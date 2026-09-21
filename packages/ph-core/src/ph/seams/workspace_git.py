@@ -144,34 +144,102 @@ async def git_lines(
     return [] if code != 0 else out.splitlines()
 
 
-def _staging_steps(pathspec: Sequence[str]) -> list[tuple[str, ...]]:
-    """`add -A`, then narrow — never naming a provisioned path *to* `add` (J3).
+EXCLUDE_FILE = "ph-provisioned-exclude"
+"""Where the seam writes what it provisioned, for git to read as excludes (L9)."""
+
+
+async def _excludes(git_dir: Path, provisioned: Sequence[str]) -> Path:
+    """The seam's materials, written where `core.excludesFile` will find them.
+
+    **Told to git rather than undone afterwards** (L9). Staging used to be
+    `add -A` and then `reset -- <provisioned>`: stage everything, then spawn a
+    second git to take part of it back. For a path the project already
+    gitignores that `reset` removed nothing at all — the ordinary case, since a
+    provisioned `node_modules` or `.venv` is gitignored by nearly every project
+    that has one — and it still cost a process, measured at ~2.5 ms of a ~14 ms
+    checkpoint on the path a code cell takes before every run.
+
+    `core.excludesFile` is the same door `workspace_jj.auto_track` already uses
+    on the other tier: state the rule in the tool's own vocabulary, once, and let
+    the tool apply it. One `add` now answers what two commands used to — and git
+    re-reads this file on every invocation, so unlike anything pH could remember
+    the answer cannot go stale.
+
+    **Not `info/exclude`**, which `ProvisionReport.provisioned` rejects for a
+    reason that still holds: git resolves it against the *common* directory, so
+    writing it would hide these paths in every other worktree and in the
+    person's own checkout. This is per workspace, read per invocation, and
+    mutates nothing.
+
+    Rewritten on each call rather than seeded once: it is one short file in the
+    git dir against a spawn that costs orders of magnitude more, and a file that
+    is always written cannot disagree with `workspace.provisioned`.
+    """
+    path = git_dir / EXCLUDE_FILE
+    # Anchored with a leading `/`, because these are paths relative to the
+    # workspace root rather than patterns: a provisioned `deps` must not also
+    # exclude `src/deps`. Anchoring is also what makes the escaping unnecessary
+    # — a leading `#` or `!` would read as a comment or a negation, and cannot
+    # be leading once a `/` is in front of it.
+    body = "".join(f"/{entry.lstrip('/')}\n" for entry in provisioned)
+    await anyio.to_thread.run_sync(lambda: path.write_text(body, encoding="utf-8"))
+    return path
+
+
+async def _mark_tracked(
+    ctx: Context, root: Path, provisioned: Sequence[str], env: Mapping[str, str]
+) -> None:
+    """`--skip-worktree` for a provisioned path the repository already tracks.
+
+    **The one thing an exclude cannot do.** `core.excludesFile` governs untracked
+    files, so a provisioned path the project has committed — a `config.yaml` the
+    seam overwrites with real credentials — would still have its modification
+    staged by `add -A`. That is the case the old `reset` covered, and the one an
+    exclude on its own would quietly regress.
+
+    `skip-worktree` says the same thing to git in the index's own vocabulary:
+    this path's worktree content is not yours to look at. The flag lives in the
+    index being staged into, so it is set once per index rather than re-derived
+    per checkpoint — git's state, in git's own file, which is the point of the
+    change.
+
+    `ls-files` first, because `update-index --skip-worktree` exits 128 on a path
+    the index does not already hold. A provisioned path is almost never tracked,
+    so the ordinary answer is empty and the second command never runs.
+    """
+    tracked = await _lines(ctx, root, "ls-files", "-z", "--", *provisioned, env=env)
+    if not tracked:
+        return
+    code, _, err = await git(ctx, root, "update-index", "--skip-worktree", "--", *tracked, env=env)
+    if code != 0:
+        log.warning(
+            "ph.seams.workspace_git: could not exclude %d tracked provisioned path(s) in %s (%s)",
+            len(tracked),
+            root,
+            err.strip() or f"git exited {code}",
+        )
+
+
+def _staging_steps(excludes: Path) -> list[tuple[str, ...]]:
+    """One `add`, with the seam's materials excluded by git itself (J3, L9).
 
     `git add -A -- . ':(exclude)deps'` exits 1 with "the following paths are
-    ignored by one of your .gitignore files": naming an ignored path in a
-    pathspec is a request to add it, and `:(exclude)` does not exempt it from
-    that check. It stages the rest anyway, so tolerating the failure would work
-    and would also swallow every real one. `reset` narrows without ever naming a
-    path to `add`, and is a no-op for a provisioned entry the project already
-    ignores.
+    ignored by one of your .gitignore files": naming a path in a pathspec is a
+    request to add it, and `:(exclude)` does not exempt it from that check. It
+    exits 1 even when the exclusion *worked*, because some other named path was
+    ignored — so the exclusions cannot be handed to `add` as a pathspec at all,
+    which is what J3 found and answered with a second `reset` command.
 
-    **The narrowing is also what keeps a secret off a checkpoint.** A provisioned
-    `.env` the project does *not* gitignore is the case: `add -A` alone would
-    hash it into every tree pH writes, and `_commit` would publish it to a ref
-    somebody merges.
+    They can be handed to it as **excludes**, which is what this does: nothing is
+    named to `add`, nothing has to be undone afterwards, and the rule is applied
+    by the thing that owns it. `_excludes` and `_mark_tracked` are the two
+    halves; this is only the shape of the command.
 
-    Shared by all three stagers rather than written out in `_commit` alone, which
-    is where it was. `tree_hash` and `restore_tree` handed the exclusions
-    straight to `add` and so returned `None` — no checkpoint, and a `/revert`
-    that raises — for exactly the deployment that provisions a gitignored path,
-    which is the ordinary one: a provisioned `node_modules` or `.venv` is
-    gitignored by nearly every project that has one.
+    **What the exclusion is for**: a provisioned `.env` the project does not
+    gitignore. `add -A` alone would hash it into every tree pH writes, and
+    `_commit` would publish it to a ref somebody merges.
     """
-    provisioned = [one[len(EXCLUDE) :] for one in pathspec if one.startswith(EXCLUDE)]
-    steps: list[tuple[str, ...]] = [("add", "-A")]
-    if provisioned:
-        steps.append(("reset", "--quiet", "--", *provisioned))
-    return steps
+    return [("-c", f"core.excludesFile={excludes}", "add", "-A")]
 
 
 COMMIT_AS_PH = (
@@ -618,7 +686,19 @@ class GitWorktreeProvider:
         terminal to answer it, would strand the work on disk over a check that belongs
         on the merge.
         """
-        steps = [*_staging_steps(pathspec), (*COMMIT_AS_PH, "-m", f"{ref}: work at disposal")]
+        provisioned = [one[len(EXCLUDE) :] for one in pathspec if one.startswith(EXCLUDE)]
+        git_dir = await _git_dir(self.ctx, path)
+        if git_dir is None:  # pragma: no cover - `_release` only reaches a checkout
+            return False
+        # The same two halves the checkpoint path uses, against this worktree's
+        # own index rather than pH's: the tree is removed immediately after, so
+        # the flag dies with it, and the commit is the one thing that must not
+        # carry a provisioned secret onto a branch somebody merges.
+        await _mark_tracked(self.ctx, path, provisioned, {})
+        steps = [
+            *_staging_steps(await _excludes(git_dir, provisioned)),
+            (*COMMIT_AS_PH, "-m", f"{ref}: work at disposal"),
+        ]
         for args in steps:
             code, _, err = await self._git(path, *args)
             if code != 0:
@@ -731,18 +811,28 @@ def pre_run_ref(branch: str, tree: str) -> str:
     return f"refs/{branch}/pre-run/{tree}"
 
 
-async def _checkpoint_index(git_dir: Path) -> Path:
-    """pH's index, seeded once from the worktree's own so the first cell is cheap."""
+async def _checkpoint_index(
+    ctx: Context, root: Path, git_dir: Path, provisioned: Sequence[str]
+) -> Path:
+    """pH's index, seeded once from the worktree's own so the first cell is cheap.
+
+    **And marked once, while it is new** (L9). `_mark_tracked` is a property of
+    an index rather than of a checkpoint, so the moment this file comes into
+    existence is the one time it has to be asked — every later `add -A` against
+    it reads the flag git already holds.
+    """
     index = git_dir / _INDEX
 
-    def seed() -> None:
+    def seed() -> bool:
         if index.exists():
-            return
+            return False
         live = git_dir / "index"
         if live.exists():
             shutil.copyfile(live, index)
+        return True
 
-    await anyio.to_thread.run_sync(seed)
+    if await anyio.to_thread.run_sync(seed) and provisioned:
+        await _mark_tracked(ctx, root, provisioned, {"GIT_INDEX_FILE": str(index)})
     return index
 
 
@@ -765,9 +855,10 @@ async def restore_tree(ctx: Context, workspace: Workspace, tree: str) -> tuple[s
     if git_dir is None:
         raise FileNotFoundError(f"{workspace.root} is not a git checkout")
 
-    checkpoint_index = await _checkpoint_index(git_dir)
+    checkpoint_index = await _checkpoint_index(ctx, workspace.root, git_dir, workspace.provisioned)
     environ = {"GIT_INDEX_FILE": str(checkpoint_index)}
-    for args in _staging_steps(workspace.agent_work_pathspec()):
+    excludes = await _excludes(git_dir, workspace.provisioned)
+    for args in _staging_steps(excludes):
         await git(ctx, workspace.root, *args, env=environ)
     index = git_dir / "ph-restore-index"
     await anyio.to_thread.run_sync(lambda: shutil.copyfile(checkpoint_index, index))
@@ -877,9 +968,10 @@ async def tree_hash(ctx: Context, workspace: Workspace) -> str | None:
     git_dir = await _git_dir(ctx, workspace.root)
     if git_dir is None:
         return None
-    index = await _checkpoint_index(git_dir)
+    index = await _checkpoint_index(ctx, workspace.root, git_dir, workspace.provisioned)
     environ = {"GIT_INDEX_FILE": str(index)}
-    for args in _staging_steps(workspace.agent_work_pathspec()):
+    excludes = await _excludes(git_dir, workspace.provisioned)
+    for args in _staging_steps(excludes):
         code, _, err = await git(ctx, workspace.root, *args, env=environ)
         if code != 0:
             log.warning("ph.seams.workspace_git: could not stage %s (%s)", workspace.root, err)

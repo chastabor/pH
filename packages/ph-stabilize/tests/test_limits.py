@@ -202,7 +202,16 @@ async def test_the_session_limit_outlives_the_turn(mount: MountProfile) -> None:
 
 async def test_error_raises_instead_of_ending(mount: MountProfile) -> None:
     """`exit: error`. The turn does not end quietly — a deployment that would
-    rather crash than truncate gets to say so."""
+    rather crash than truncate gets to say so.
+
+    **And it records the breach before it raises** (N2). D7 made this move on
+    the tool-call limit and left its sibling behind: a raise out of
+    `agent/pre-step` unwinds the turn, and an unwound turn appends nothing — so
+    the posture that shouts loudest at the deployment was the one that left
+    nothing for `phern doctor`, a reviewer or a resumed session to fold.
+
+    Sabotage: put the raise back above `_record` and the event is gone.
+    """
     ctx = await mount(row("limits", modelCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("raising")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -214,6 +223,10 @@ async def test_error_raises_instead_of_ending(mount: MountProfile) -> None:
     with pytest.raises(ModelCallLimitExceeded):
         await _pre_step(ctx, agent, turn=2, step=1)
     assert engine is None, "the row provides no service; it is listeners only"
+
+    breaches = events_of(session, "limits/exceeded")
+    assert [str(one.data.get("limit")) for one in breaches] == ["model-calls"]
+    assert str(breaches[0].data.get("posture")) == "error"
 
 
 async def test_no_limit_is_the_default(mount: MountProfile) -> None:
@@ -233,7 +246,18 @@ async def test_no_limit_is_the_default(mount: MountProfile) -> None:
 
 async def test_continue_denies_the_call_and_keeps_the_turn(mount: MountProfile) -> None:
     """`exit: continue`, the default. The model is told, in upstream's own
-    words, not to call that tool again — and the turn goes on."""
+    words, not to call that tool again — and the turn goes on.
+
+    **Recorded all the same** (N2). This wrote nothing, on the reading that a
+    breach which does not end the turn is not worth a record — which had it
+    backwards: `continue` is the shipped default, so it is the posture a
+    deployment is most likely to be running when a budget first bites, and the
+    turn carrying on is exactly what makes the denial easy to miss. `posture` is
+    what tells the three readings apart now, where the event name alone used to
+    mean two of them and omit the third.
+
+    Sabotage: drop the `_record` from the `continue` branch and the log is silent.
+    """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("tool-capped")
 
@@ -242,7 +266,9 @@ async def test_continue_denies_the_call_and_keeps_the_turn(mount: MountProfile) 
 
     assert "exit status" not in result_text(session, "c1"), "the first call ran"
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
-    assert not events_of(session, "limits/exceeded"), "continue is not a turn-ending breach"
+    breaches = events_of(session, "limits/exceeded")
+    assert [str(one.data.get("posture")) for one in breaches] == ["continue"]
+    assert not events_of(session, "turn/end"), "and the turn is still going"
 
 
 async def test_error_records_the_breach_it_raises_about(mount: MountProfile) -> None:
@@ -254,9 +280,8 @@ async def test_error_records_the_breach_it_raises_about(mount: MountProfile) -> 
     this setting there was nothing to fold.
 
     The turn continuing is the documented reading of the word here, not an
-    oversight — `ToolCallLimits.exit` says why it cannot match the model-call
-    setting of the same name without a pipeline contract ph-core does not have —
-    so it is asserted rather than left implied.
+    oversight — `ToolCallLimits.exit` says why the two postures are meant to
+    differ — so it is asserted rather than left implied.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("tool-error")
@@ -266,6 +291,7 @@ async def test_error_records_the_breach_it_raises_about(mount: MountProfile) -> 
 
     breaches = events_of(session, "limits/exceeded")
     assert [str(one.data.get("limit")) for one in breaches] == ["tool-calls"]
+    assert str(breaches[0].data.get("posture")) == "error"
     assert "call limit reached" in str(breaches[0].data.get("message"))
     # The call fails rather than being denied: breakage, not policy.
     assert "Error" in result_text(session, "c2")

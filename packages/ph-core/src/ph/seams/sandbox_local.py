@@ -75,7 +75,7 @@ from urllib.parse import quote
 
 import anyio
 
-from ..cordis import Context, plugin
+from ..cordis import Context, plugin, releasing
 from ..keys import SANDBOX, SUBPROCESS
 from ..paths import default_home_path, resolve_roots
 from ..resources import temporary_directory
@@ -704,7 +704,12 @@ async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> S
     except Exception as error:  # pragma: no cover - a host that fails in a new way
         return SandboxProbe(False, f"{type(error).__name__}: {error}")
     finally:
-        await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
+        # `releasing`, because this `await` is skipped outright under raw
+        # cancellation (L10) — a mount abandoned mid-probe would leave the probe
+        # tree under `$PH_HOME` for the next one to trip over, and a probe that
+        # finds its own leftovers is a probe whose verdict is about them.
+        with releasing():
+            await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
 
 
 async def probe_egress(
@@ -750,7 +755,12 @@ async def probe_egress(
     except Exception as error:  # pragma: no cover - a host that fails in a new way
         return SandboxProbe(False, f"{type(error).__name__}: {error}")
     finally:
-        await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
+        # `releasing`, because this `await` is skipped outright under raw
+        # cancellation (L10) — a mount abandoned mid-probe would leave the probe
+        # tree under `$PH_HOME` for the next one to trip over, and a probe that
+        # finds its own leftovers is a probe whose verdict is about them.
+        with releasing():
+            await anyio.to_thread.run_sync(lambda: shutil.rmtree(work, ignore_errors=True))
 
 
 _SOCKETS = count(1)

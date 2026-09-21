@@ -193,13 +193,19 @@ class ToolCallLimits(CallBudget):
     because the ceiling does not move within a turn.
 
     **`error` does not end the turn, and the model-call setting of the same name
-    does** (D7). The two are not symmetric and the asymmetry is structural: a
-    model-call limit is enforced in `agent/pre-step`, where a raise unwinds the
-    turn, while this is enforced in `tools/pre-execute`, where the pipeline turns
-    any exception from a policy row into a failed result — deliberately, so a
-    broken row cannot take down the call it was asked about. Making the two agree
-    needs an exception the pipeline re-raises by contract, which ph-core does not
-    have; until it does, this is what the word means here."""
+    does** (D7). The asymmetry is where each is enforced: a model-call limit sits
+    in `agent/pre-step`, where a raise unwinds the turn, while this sits in
+    `tools/pre-execute`, where the pipeline turns any exception from a policy row
+    into a failed result — deliberately, so a broken row cannot take down the
+    call it was asked about.
+
+    **What it would take to make them agree is one field, not a new exception
+    contract** (N2). An earlier reading of this said the pipeline would have to
+    re-raise by contract; it would not. The loop already ends a turn at a policy
+    row's word — `end` does it, through `Deny(concludes_turn=True)` — so all
+    `error` adds over `end` is the `FailureKind` the model reads. The two are
+    kept apart because the *readings* are meant to differ, not because the
+    stronger one is out of reach."""
 
 
 class ChildLimits(CallBudget):
@@ -434,8 +440,17 @@ def _over(budget: CallBudget | None, turn: int, session: int, *, noun: str = "ca
     ]
 
 
-def _record(session: Session, kind: str, detail: dict[str, Any]) -> None:
-    session.append("limits/exceeded", {"limit": kind, **detail})
+def _record(session: Session, kind: str, posture: str, detail: dict[str, Any]) -> None:
+    """One breach, durably (D7/N2).
+
+    **`posture` is not decoration.** `limits/exceeded` had come to mean two
+    different things — a breach that ended the turn and one that did not — with
+    nothing on the event to tell them apart, while the third posture wrote
+    nothing at all. A reviewer, `phern doctor` and a resumed session all read
+    this record rather than the tool result, and "the ceiling was hit" is a
+    different fact from "and here is what happened next".
+    """
+    session.append("limits/exceeded", {"limit": kind, "posture": posture, **detail})
 
 
 @plugin("limits", inject=[SESSIONS], config=Config)
@@ -463,13 +478,20 @@ async def apply(ctx: Context, config: Config) -> None:
         if not exceeded:
             return await next_(request)
         message = MODEL_LIMIT_MESSAGE.format(limits=", ".join(exceeded))
-        if settings.exit == "error":
-            raise ModelCallLimitExceeded(message)
+        # **Recorded before it is raised** (N2). D7 made this move on the tool
+        # limit twelve lines down and left its sibling as it was, so the one
+        # posture that surfaces the breach most loudly to the model was still
+        # the one that left no durable trace of it — a raise out of
+        # `agent/pre-step` unwinds the turn, and an unwound turn appends
+        # nothing.
         _record(
             session,
             "model-calls",
+            settings.exit,
             {"turn": current.turn_steps, "session": current.session_steps, "message": message},
         )
+        if settings.exit == "error":
+            raise ModelCallLimitExceeded(message)
         # Vetoed: returning without `next_` is how a policy row owns this
         # decision, and it stops every later listener doing work for a step that
         # will not happen.
@@ -506,9 +528,24 @@ async def apply(ctx: Context, config: Config) -> None:
             # all — and `phern doctor`, a reviewer and a resumed session all read
             # that record rather than the tool result.
             message = f"'{name}' call limit reached: {', '.join(exceeded)}."
-            _record(session, "tool-calls", {"tool": name, "message": message})
+            _record(session, "tool-calls", settings.exit, {"tool": name, "message": message})
             raise ToolCallLimitExceeded(message)
         if settings.exit == "continue":
+            # **And the quietest posture is still a breach** (N2). This one
+            # denies the call and lets the turn go on, so it is the posture a
+            # deployment is most likely to be running when a budget starts
+            # biting — and it was the only one that wrote nothing, which made
+            # "the ceiling is doing something" invisible in exactly the case
+            # where nothing else says so.
+            _record(
+                session,
+                "tool-calls",
+                settings.exit,
+                {
+                    "tool": name,
+                    "message": f"'{name}' tool call limit reached: {' and '.join(exceeded)}.",
+                },
+            )
             return Deny(reason=TOOL_DENIAL.format(tool=name))
         if not _is_first_over(settings, current, name):
             # A sibling of the call that breached, told apart by arithmetic
@@ -520,6 +557,7 @@ async def apply(ctx: Context, config: Config) -> None:
         _record(
             session,
             "tool-calls",
+            settings.exit,
             {
                 "tool": name,
                 "message": f"'{name}' tool call limit reached: {' and '.join(exceeded)}.",
@@ -618,9 +656,13 @@ async def apply(ctx: Context, config: Config) -> None:
         if not exceeded:
             return None
         message = CHILD_DENIAL.format(limits=" and ".join(exceeded))
+        # `refuse`, which is the only posture this budget has: a child that is
+        # not created cannot be continued past or raised about, so `ChildLimits`
+        # carries no `exit` and the field says so rather than being left off.
         _record(
             session,
             "children",
+            "refuse",
             {
                 "turn": current.turn_children,
                 "session": current.session_children,

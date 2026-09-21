@@ -24,14 +24,14 @@ from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session
+from ph.session import Session, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import (
     join_context_sections,
     render_context_sections,
     render_prompt,
 )
-from ph.testing import MountProfile, StubAgent
+from ph.testing import MountProfile, StubAgent, assistant_payload
 from ph.tools.code_mode import CodeDispatchRef
 from ph_stabilize import BUNDLE
 from ph_stabilize.todo import (
@@ -41,6 +41,7 @@ from ph_stabilize.todo import (
     TOOL_NAME,
     WRITE_TODOS_SYSTEM_PROMPT,
     WriteTodosArgs,
+    _parallel_write_todos,
     blocked_by,
     render_todo_list,
     todos_of,
@@ -591,3 +592,63 @@ async def test_work_inside_a_code_cell_counts_as_work(mount: MountProfile) -> No
     (done,) = [one for one in todos_of(session) if one["status"] == "completed"]
     assert done["worked"] == 3, "the dispatches inside the cell were not counted"
     assert unevidenced(todos_of(session)) == []
+
+
+def _assistant(calls: list[ToolCallBlock], message_id: str) -> dict[str, Any]:
+    """An `assistant/message` payload carrying these calls, and nothing else."""
+    return assistant_payload(
+        "", message_id, content=[call.model_dump(mode="json", by_alias=True) for call in calls]
+    )
+
+
+def test_the_parallel_rule_reads_the_message_being_executed_not_a_rewrite() -> None:
+    """L12 — `SurfaceReplace` appends, so the newest event is not the newest work.
+
+    The rule asked `Session.latest("assistant/message")`, which answers with the
+    most recently *appended* one. `compaction._clip` rewrites messages at the
+    **front** of the conversation (`nodes[:cutoff]`) and appends each rewrite at
+    the end, so after a clip the newest `assistant/message` in the log is a
+    near-copy of something answered many steps ago.
+
+    Latent in the harness as it stands — nothing appends a rewrite between a
+    message and its own tool dispatch, and argument elision preserves the
+    `write_todos` blocks it counts — and fixed at the reader rather than left to
+    the first producer that drops a block or interleaves, because the failure it
+    would cause is silent in the permissive direction: the gate stops denying.
+
+    Asserted on the reader directly. A test that drove the loop would be
+    asserting that the harness does not currently interleave, which is the thing
+    that could change.
+
+    Sabotage: `session.latest("assistant/message")` in place of the projection
+    and the two-call message is read as the one-call rewrite.
+    """
+    session = Session("rewritten")
+    old = session.append(
+        "assistant/message",
+        _assistant([todo_call("c0", _todos(("early", "completed")))], "m1"),
+        SurfaceIntent("append"),
+    )
+    # The message actually in flight: two calls, which the rule exists to refuse.
+    session.append(
+        "assistant/message",
+        _assistant(
+            [
+                todo_call("c1", _todos(("first", "in_progress"))),
+                todo_call("c2", _todos(("second", "pending"))),
+            ],
+            "m2",
+        ),
+        SurfaceIntent("append"),
+    )
+    assert _parallel_write_todos(session), "the baseline: two calls in one message"
+
+    # A clip lands, rewriting the *first* message in place. It is now the newest
+    # `assistant/message` event in the log, and it is not new work.
+    session.append(
+        "assistant/message",
+        _assistant([todo_call("c0", _todos(("early", "completed")))], "m3"),
+        SurfaceIntent(SurfaceReplace(replaces=(old.seq,)), (old.seq,)),
+    )
+
+    assert _parallel_write_todos(session), "a rewrite of an older message answered for this one"

@@ -51,8 +51,8 @@ from pydantic import Field
 from ph.cordis import Context, Next, plugin
 from ph.json import as_int, as_seq, as_str, thaw_json
 from ph.keys import SYSTEM_PROMPT, TOOLS
-from ph.llm.types import ToolCallBlock
-from ph.session import Session, SessionEvent, derive_event_message
+from ph.llm.types import Message, ToolCallBlock
+from ph.session import Session, SessionEvent, derive_event_message, is_in_place_rewrite
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,
@@ -635,6 +635,28 @@ def _witnessed(
     return todos
 
 
+def _executing_message(event: SessionEvent) -> Message | None:
+    """One `assistant/message` event as the message a batch would run from (L12).
+
+    **A rewrite is not new work.** `SurfaceReplace` appends, so an in-place
+    rewrite of an *older* message — argument elision is the one that does this —
+    becomes the newest `assistant/message` in the log while the message actually
+    executing is further back. A reader asking only for the latest gets a
+    near-copy of something answered several steps ago.
+
+    `is_in_place_rewrite` rather than `is_replacement_surface_event`, for
+    `persistence.repair`'s reason one package over: the narrow predicate is the
+    one that means "not new work", and a substitution putting a genuinely new
+    message in place of a range carries calls that do need counting.
+
+    A module-level function because `Session.projection` keys its fold on
+    `(type, parse)` — a lambda here would build a fold per call.
+    """
+    if is_in_place_rewrite(event):
+        return None
+    return derive_event_message(event)
+
+
 def _parallel_write_todos(session: Session | None) -> bool:
     """Whether the assistant message now being executed asked for two writes.
 
@@ -643,7 +665,7 @@ def _parallel_write_todos(session: Session | None) -> bool:
     The assistant message is committed before any of its tool calls runs, so
     every sibling gets this same answer before the first body executes — which
     is what makes "every one of them fails" true rather than "all but the first".
-    `Session.latest` and `derive_event_message` own the scan and the payload
+    `Session.projection` and `derive_event_message` own the scan and the payload
     shape; a third reader spelling either by hand is how they drift.
 
     Native transport only, and deliberately. The rule exists because two
@@ -653,8 +675,7 @@ def _parallel_write_todos(session: Session | None) -> bool:
     dispatches serialize) — so there the last write wins by the program's own
     statement, and refusing would punish a cell for being unambiguous.
     """
-    event = session.latest("assistant/message") if session is not None else None
-    message = derive_event_message(event) if event is not None else None
+    message = session.projection("assistant/message", _executing_message) if session else None
     if message is None:
         return False
     calls = sum(

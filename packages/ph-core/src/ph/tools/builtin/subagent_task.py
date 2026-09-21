@@ -30,7 +30,7 @@ from typing import Any
 
 from pydantic import Field
 
-from ...cancel import raced
+from ...cancel import Canceled, raced
 from ...cordis import Context, maybe_await, plugin
 from ...json import JsonObject, as_str
 from ...keys import SUBAGENTS, TOOLS
@@ -212,7 +212,12 @@ async def apply(ctx: Context, config: Config) -> None:
         # Cancelled. Released first, then reported — a parent that raises while
         # its child is still running is the state this exists to prevent.
         await maybe_await(handle.dispose() if handle.dispose is not None else None)
-        raise ValueError(f"the wait for subagent {handle.name} was canceled")
+        # **`Canceled`, not `ValueError`** (N3). `registry._failure` already maps
+        # this class to `aborted_result`; a `ValueError` took the other branch
+        # and told the model the `task` tool had *failed*, so a person's own
+        # interrupt read as the harness breaking — and a model that reads
+        # breakage retries.
+        raise Canceled(f"the wait for subagent {handle.name} was canceled")
 
     def build_tool() -> ToolDefinition | None:
         """The tool, bound to the provider that will run it.

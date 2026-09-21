@@ -728,3 +728,107 @@ async def test_a_spawn_the_ceiling_refuses_leaves_no_child_behind(mount: MountPr
     row = subagent_roster(parent.session)["run-1"]
     assert row["status"] == "error"
     assert not child_is_live(row), "the parent cannot passivate while this reads live"
+
+
+@dataclass(slots=True)
+class _ReadmittingProvider(_RealisticProvider):
+    """`_RealisticProvider`, able to put an admitted child back (P5-04).
+
+    Its `start` builds a scope under the parent so the first admission is
+    accepted; its `readmit` deliberately does not, which is the fail-closed
+    no-scope case `_enforce` refuses — the same refusal the sibling test drives
+    through `start`, arriving through the other spawner.
+    """
+
+    async def readmit(
+        self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
+    ) -> SubagentRun | None:
+        run = await self.inner.start(request)
+        run.id, run.session_id, run.scope = run_id, session_id, None
+        run.dispose = lambda: self.released.append(run.id)
+        return run
+
+
+@dataclass(slots=True)
+class _DecliningProvider(_RealisticProvider):
+    """A readmitting provider that answers `None` — its documented decline."""
+
+    async def readmit(
+        self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
+    ) -> SubagentRun | None:
+        return None
+
+
+async def test_a_readmit_the_ceiling_refuses_leaves_no_child_behind(
+    mount: MountProfile,
+) -> None:
+    """L6 — K3's sequence, on the spawner that never got it.
+
+    `_enforce` reads `run.scope`, so it cannot run before the provider has
+    produced a child. `start` has had the whole answer to that since K3: release
+    the child, *end* its admission, re-raise. `_readmit_one` called `_enforce`
+    bare, and `resume_children`'s `except` closed the roster row and nothing
+    else — so the row ended (K4 saw to that) while the child it described kept
+    driving, unbounded, with a disposer only the provider held. Two spawners with
+    one admission each; the fix is one `_admit` both call.
+
+    The row's own ending is asserted too, because a fix that released the child
+    and dropped the record would swap this defect for the one K4 closed.
+
+    Sabotage: call `_enforce` directly in `_readmit_one` and `released` is empty.
+    """
+    ctx = await mount()
+    for name in ("review", "deploy"):
+        ctx.require(SKILLS).register(skill(name))
+    provider = _ReadmittingProvider(inner=StubSubagentProvider(root=ctx))
+    # The only provider mounted, so the roster row's absent `owner` still
+    # resolves back to it — `resolve` refuses to guess between two.
+    ctx.require(SUBAGENTS).register_provider("realistic", provider)
+    parent = _agent(ctx)
+    run = await ctx.require(SUBAGENTS).start(
+        "realistic", SubagentRequest(prompt="go", parent=parent, skills=("review",))
+    )
+    assert provider.released == [], "the first admission stands"
+    # What a daemon restart finds: the child admitted, never driven, and nothing
+    # in memory. `resume_children` skips ids it already holds.
+    ctx.require(SUBAGENTS)._runs.pop(run.id)
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    assert provider.released == [run.id], "the readmitted child was left running"
+    assert ctx.require(SUBAGENTS).get(run.id) is None, "a refused readmit is not a live run"
+    row = subagent_roster(parent.session)[run.id]
+    assert row["status"] == "error"
+    assert not child_is_live(row), "the parent cannot passivate while this reads live"
+
+
+async def test_a_provider_that_declines_a_readmit_ends_the_row_it_cannot_revive(
+    mount: MountProfile,
+) -> None:
+    """L6 — the third way to leave a row `queued`, after the two K4 closed.
+
+    `readmit` answering `None` is the provider declining one child without
+    failing the sweep, which is its documented contract. `resume_children` read
+    that through `if run is not None` and simply moved on, so the row stayed
+    `queued` — and `child_is_live` reads `queued` as waiting for a slot, which
+    holds the root out of passivation for good. The two paths that *raise* had
+    been closed; the one that answers politely had not.
+
+    Sabotage: restore `if run is not None: revived.append(run_id)` and the row
+    is still `queued`.
+    """
+    ctx = await mount()
+    provider = _DecliningProvider(inner=StubSubagentProvider(root=ctx))
+    ctx.require(SUBAGENTS).register_provider("declining", provider)
+    parent = _agent(ctx)
+    run = await ctx.require(SUBAGENTS).start(
+        "declining", SubagentRequest(prompt="go", parent=parent)
+    )
+    ctx.require(SUBAGENTS)._runs.pop(run.id)
+
+    revived = await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    assert revived == [], "nothing came back"
+    row = subagent_roster(parent.session)[run.id]
+    assert row["status"] == "error"
+    assert not child_is_live(row), "the parent cannot passivate while this reads live"

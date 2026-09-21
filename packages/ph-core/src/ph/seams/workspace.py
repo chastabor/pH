@@ -261,10 +261,16 @@ def workspace_policy(workspace: Workspace) -> SandboxPolicy:
 
     Derived from `writable_roots` rather than restating it, so `ctx.shell`'s
     enforced boundary and `workspace-write-scope`'s prompt boundary cannot drift.
+
+    **No mode** (N1). This knows *where* the agent writes, not whether the person
+    allowed writing at all — and saying `workspace-write` answered the second
+    question as well as the first, which capped a logged `danger-full-access` and
+    floored a `defaultMode: read-only`. `SandboxSeam.effective` fills it from the
+    session's resolved posture; the roots stand whatever that turns out to be,
+    because `writable_paths` consults them only under `workspace-write`.
     """
     first, *extra = writable_roots(workspace)
     return SandboxPolicy(
-        mode="workspace-write",
         workspace_root=str(first),
         writable_extra=[str(path) for path in extra],
     )

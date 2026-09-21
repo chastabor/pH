@@ -76,6 +76,7 @@ __all__ = [
     "WriteIntent",
     "Written",
     "apply",
+    "glob_error",
     "literal_head",
     "matches_glob",
     "read_before_edit",
@@ -1101,6 +1102,28 @@ def matches_glob(candidate: str, pattern: str) -> bool:
     return _compiled(pattern).match(candidate) is not None
 
 
+def glob_error(pattern: str) -> str | None:
+    """Why `pattern` is not a usable glob, or `None` when it is (N6).
+
+    **Because there are two populations of patterns and one matcher.** A `glob`
+    argument is typed by a model, and `matches_glob`'s fallback is right for it:
+    a pattern that will not compile matches itself and nothing else, which is
+    inert rather than an exception out of a policy check. A `permissions-fs`
+    rule is written by an operator, and inert is exactly wrong — a `deny` whose
+    glob does not compile silently guards nothing, which is the one direction an
+    ACL must never fail in.
+
+    So the fallback stays where the model can reach it, and config asks this
+    first. Returned rather than raised, so the caller decides whether an
+    unusable pattern is a config error or a warning.
+    """
+    try:
+        re.compile(_glob_source(pattern))
+    except re.error as error:
+        return str(error)
+    return None
+
+
 @lru_cache(maxsize=512)
 def _compiled(pattern: str) -> re.Pattern[str]:
     """One glob, as a regex. Cached, because a walk asks per candidate file.
@@ -1109,6 +1132,23 @@ def _compiled(pattern: str) -> re.Pattern[str]:
     well as from config, so an LRU is what keeps a session that greps a thousand
     different patterns from holding a thousand compiled regexes forever.
     """
+    source = _glob_source(pattern)
+    try:
+        return re.compile(source)
+    except re.error:
+        # **The promise, kept whatever the scanner missed.** Every shape in
+        # `_glob_source` is handled, and this is here because the shapes are the
+        # ones somebody thought of: a pattern is a string a model typed, and
+        # `permissions-fs` evaluates it first-match-wins on the read path. A
+        # pattern that will not compile matches itself and nothing else, which is
+        # inert rather than wrong — where a raise takes down the call that was
+        # being checked. Config does not rely on this; see `glob_error`.
+        log.warning("ph.seams.fs: %r is not a usable glob; matching it literally", pattern)
+        return re.compile(re.escape(pattern) + r"\Z")
+
+
+def _glob_source(pattern: str) -> str:
+    """One glob, as regex source. Separate so `glob_error` can try it too."""
     parts: list[str] = []
     index = 0
     while index < len(pattern):
@@ -1152,18 +1192,7 @@ def _compiled(pattern: str) -> re.Pattern[str]:
         else:
             parts.append(re.escape(pattern[index]))
             index += 1
-    source = "".join(parts) + r"\Z"
-    try:
-        return re.compile(source)
-    except re.error:
-        # **The promise, kept whatever the scanner missed.** Every shape above is
-        # handled, and this is here because the shapes are the ones somebody
-        # thought of: a pattern is a string a model typed, and `permissions-fs`
-        # evaluates it first-match-wins on the read path. A pattern that will not
-        # compile matches itself and nothing else, which is inert rather than
-        # wrong — where a raise takes down the call that was being checked.
-        log.warning("ph.seams.fs: %r is not a usable glob; matching it literally", pattern)
-        return re.compile(re.escape(pattern) + r"\Z")
+    return "".join(parts) + r"\Z"
 
 
 def _character_class(inner: str) -> str:

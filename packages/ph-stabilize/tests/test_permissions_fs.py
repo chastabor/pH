@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from stabilize_helpers import (
     PROFILE,
     answer_approvals,
@@ -58,7 +59,7 @@ from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT
 from ph.keys import AGENTS, FS, SANDBOX, SESSIONS, SPILL_STORE, WORKSPACE
 from ph.llm.types import ToolCallBlock
-from ph.seams.fs import FsDenied
+from ph.seams.fs import FsDenied, matches_glob
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -1062,3 +1063,27 @@ def test_a_recursive_delete_of_the_workspace_root_sees_relative_rules() -> None:
     assert absolute.deletion_reason(Path("/w"), recursive=True) is not None
     # And a tree the rule cannot reach is still deletable.
     assert relative.deletion_reason(Path("/w/build"), recursive=True) is None
+
+
+def test_a_rule_whose_glob_cannot_compile_is_refused_rather_than_inert() -> None:
+    """N6 — the literal fallback is right for a model's `glob` and wrong for an ACL.
+
+    `matches_glob` answers a pattern it cannot compile by matching it literally,
+    because a `glob` argument is a string the model typed and a policy check must
+    not raise out from under the call it is checking. For a `deny` rule the same
+    answer is the one failure direction an ACL must never have: `[z-a]/**` is a
+    bad character range, so the rule stopped covering `secrets/**` and started
+    covering the seven literal characters nobody will name a file.
+
+    Both populations are asserted, because the fix is that they diverge: config
+    is refused, and the matcher still falls back for everyone else.
+
+    Sabotage: drop `Rule._usable_globs` and the rule is accepted, guarding nothing.
+    """
+    with pytest.raises(ValidationError) as caught:
+        Rule(operations=("read",), paths=("secrets/**", "[z-a]/**"), mode="deny")
+    assert "not a usable glob" in str(caught.value)
+
+    # The matcher itself is unchanged: inert, and it says so in the log.
+    assert not matches_glob("secrets/key.pem", "[z-a]/**")
+    assert matches_glob("[z-a]/**", "[z-a]/**")

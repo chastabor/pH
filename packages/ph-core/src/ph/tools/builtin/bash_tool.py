@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import Field
 
+from ...cancel import Canceled
 from ...cordis import Context, plugin
 from ...json import JsonObject, as_str
 from ...keys import SHELL, TOOLS
@@ -99,6 +100,14 @@ async def apply(ctx: Context, config: None) -> None:
             # this, had nowhere to arrive.
             signal=run.signal,
         )
+        if result.canceled:
+            # **The pipeline's own word for this** (N3). The child was killed
+            # because somebody pressed stop, and returning a value would report
+            # whatever exit code the kill produced as the command's own —
+            # `[exit -15]` rendered to the model as a command that failed.
+            # `registry._failure` maps `Canceled` to `aborted_result`, which is
+            # the vocabulary the rest of the loop already reads.
+            raise Canceled(f"{args.command!r} was canceled")
         return {
             "command": args.command,
             "exit_code": result.exit_code,

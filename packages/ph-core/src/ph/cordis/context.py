@@ -285,14 +285,19 @@ def releasing() -> anyio.CancelScope:
 
     Here rather than in the seam that first needed it, because the pattern was
     already written out inline at six sites across the tree and the seventh
-    author would have written a seventh. It does **not** consult
-    `_Runtime.unwind_deadline`: a cleanup reached during an unwind takes a fresh
-    budget on top of the tree's, which is the "ten roots, ten budgets" shape
-    `unwind_by` exists to prevent. Folding the two is the right next change and
-    needs its own test; the sites using this today are cleanups that run inside
-    an *operator's* call rather than inside a dispose.
+    author would have written a seventh.
+
+    **Inside an unwind it takes the tree's deadline, not a fresh one** (L10). It
+    used to take `GRACE_SECONDS` unconditionally, so a cleanup reached *during* a
+    dispose opened a second budget inside the tree's — "ten roots, ten budgets",
+    the shape `unwind_by` exists to prevent, one layer down. `_UNWIND_BUDGET`
+    carries the instant the shield above this task expires, so the whole teardown
+    still finishes by the number its caller chose. Outside one there is nothing
+    to inherit and this is the first budget, which is the original behavior.
     """
-    return anyio.CancelScope(deadline=anyio.current_time() + GRACE_SECONDS, shield=True)
+    budget = _UNWIND_BUDGET.get()
+    deadline = anyio.current_time() + GRACE_SECONDS if budget is None else budget
+    return anyio.CancelScope(deadline=deadline, shield=True)
 
 
 DRAIN_SECONDS = GRACE_SECONDS / 2
@@ -306,6 +311,19 @@ that outlive the process if nobody hands them back. When both cannot be
 afforded, the unwind is the one that must run. Written as a literal, that
 sentence would stop being true the first time somebody raised the grace period.
 """
+
+_UNWIND_BUDGET: ContextVar[float | None] = ContextVar("ph.cordis.unwind-budget", default=None)
+"""The instant the shield above this task expires, or `None` outside one (L10).
+
+`_UNWINDING`'s companion, and set in the same two places for the same reason: that
+one answers *whether* there is a shield above me, this one answers *until when*.
+Split rather than folded into one optional float, because `drain` shields to
+`min(share, whole)` while `dispose` shields to the whole — two different instants
+for one boolean fact, and a reader asking "am I nested" should not have to know
+which one it got.
+
+Read only by `releasing`, which is the cleanup that has to fit inside whatever is
+already running."""
 
 _UNWINDING: ContextVar[bool] = ContextVar("ph.cordis.unwinding", default=False)
 """Whether the caller is already inside a shielded unwind.
@@ -1546,6 +1564,7 @@ class Context:
         # Set unconditionally: `reset` restores whatever was there, so True over
         # True is a no-op and `owns_budget` stays the one name for the decision.
         token = _UNWINDING.set(True)
+        budget_token = _UNWIND_BUDGET.set(budget)
         try:
             if owns_budget:
                 # **Entered once per unwind, not once per scope.** Every nested
@@ -1564,6 +1583,7 @@ class Context:
             else:
                 await self._unwind()
         finally:
+            _UNWIND_BUDGET.reset(budget_token)
             _UNWINDING.reset(token)
             if owns_budget:
                 runtime.unwind_deadline = None
@@ -1985,11 +2005,13 @@ class Context:
         share = anyio.current_time() + DRAIN_SECONDS
         whole = self._runtime.unwind_deadline
         token = _UNWINDING.set(True)
+        budget = share if whole is None else min(share, whole)
+        budget_token = _UNWIND_BUDGET.set(budget)
         try:
-            budget = share if whole is None else min(share, whole)
             with anyio.CancelScope(deadline=budget, shield=True):
                 await self._settle()
         finally:
+            _UNWIND_BUDGET.reset(budget_token)
             _UNWINDING.reset(token)
 
     async def _settle(self) -> None:

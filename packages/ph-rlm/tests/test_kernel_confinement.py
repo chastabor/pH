@@ -55,6 +55,14 @@ pytestmark = pytest.mark.anyio
 
 SANDBOX_ROW: dict[str, Any] = {"id": "sandbox-local", "disabled": False}
 
+WRITABLE_ROW: dict[str, Any] = {"id": "sandbox", "config": {"defaultMode": "workspace-write"}}
+"""The posture a cell needs to write its own workspace, said rather than assumed.
+
+`SandboxSeam.effective` bounds a caller's mode by the deployment's resolved one
+since N1, and `workspace_policy` no longer guesses `workspace-write` — so
+`ph-base`'s shipped `read-only` default now reaches the kernel, correctly, and a
+test that states no posture gets a read-only cell. The RLM profile sets this."""
+
 needs_backend = pytest.mark.skipif(
     local_backend()[0] is None, reason="no local confinement backend on this host"
 )
@@ -128,7 +136,7 @@ async def _confined(mounted_runtime: MountedRuntime, tmp_path: Path) -> tuple[An
     *registered* a provider, which is what a probe against this host decided, not
     whether a binary is on PATH.
     """
-    ctx, session, agent = await mounted_runtime(extra_rows=[SANDBOX_ROW])
+    ctx, session, agent = await mounted_runtime(extra_rows=[SANDBOX_ROW, WRITABLE_ROW])
     if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
     workspace = await _agent_with_workspace(ctx, session, agent, tmp_path / "project")

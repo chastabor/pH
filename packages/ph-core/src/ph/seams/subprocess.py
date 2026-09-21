@@ -409,6 +409,15 @@ class SubprocessResult:
     dropped: int = 0
     """Bytes past the cap that nobody kept, across both streams."""
     timed_out: bool = False
+    canceled: bool = False
+    """Whether `signal` ended it rather than the command finishing (N3).
+
+    **A third bound needs a third answer.** `run` applies three — the timeout, a
+    disposal, and the person's cancel — and reported only two, so a child killed
+    because somebody pressed stop came back as an ordinary result with
+    `timed_out=False` and whatever exit code the kill produced. That is
+    indistinguishable from a command that exited on its own, which is the one
+    reading a caller must not make: a cancel is not a result."""
 
     @property
     def truncated(self) -> bool:
@@ -575,6 +584,7 @@ class SubprocessService:
         """
         child = await self.spawn(spec, scope=scope)
         seconds = None if spec.timeout_ms is None else spec.timeout_ms / 1000
+        canceled = False
         try:
 
             async def drain() -> int:
@@ -582,7 +592,12 @@ class SubprocessService:
                 return await child.wait()
 
             with anyio.move_on_after(seconds) as bound:
-                await raced(signal, drain)
+                # `raced` answers `None` for "the signal won", and `drain`
+                # answers an exit code — so `None` here is unambiguous. A
+                # timeout takes the other path: `move_on_after` cancels the
+                # body, this line never finishes, and `cancelled_caught` is
+                # what says so.
+                canceled = await raced(signal, drain) is None
         finally:
             # **Released, not merely reaped.** Reaping in a `finally` is the
             # point (F4) — an exception between spawn and wait must not leave the
@@ -601,6 +616,7 @@ class SubprocessService:
             stderr=child.stderr.decode("utf-8", errors="replace"),
             dropped=child.dropped,
             timed_out=bound.cancelled_caught,
+            canceled=canceled,
         )
 
 

@@ -21,12 +21,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import anyio
 import pytest
 
+from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
+from ph.seams.subagents import SubagentResult
 from ph.testing import FAKE_OPTIONS, MountProfile, StubSubagentProvider, run_tool
+from ph.tools.definition import ToolExecutionInput
 
 pytestmark = pytest.mark.anyio
 
@@ -162,3 +166,64 @@ async def test_a_named_provider_settles_the_ambiguity(mount: MountProfile) -> No
     result = await run_tool(ctx, "task", {"prompt": "go"}, agent=_agent(ctx))
 
     assert "the right one" in text_of(result.content)
+
+
+async def test_a_canceled_wait_is_an_abort_rather_than_a_tool_failure(
+    mount: MountProfile,
+) -> None:
+    """N3 — the cancel reached the child and then took the wrong exit.
+
+    C7 gave `task` a cancel that releases the child; what it reported afterwards
+    was a bare `ValueError`, so `registry._failure` took the `HarnessError`
+    branch and told the model the tool had **failed**. `Canceled` has been mapped
+    to `aborted_result` there all along — a person's own interrupt read as the
+    harness breaking, and a model that reads breakage retries what it was just
+    told to stop.
+
+    The token is cancelled from *inside* the child's wait on purpose: cancelled
+    beforehand, `prepare` answers `aborted` before the body ever runs, and the
+    test would pass against the defect.
+
+    Sabotage: raise `ValueError` again and the kind is `failed`.
+    """
+    released: list[bool] = [False]
+    token = CancelToken()
+
+    class _Parks(StubSubagentProvider):
+        async def start(self, request: Any) -> Any:  # noqa: ANN401
+            run = await super().start(request)
+
+            async def park() -> SubagentResult:
+                token.cancel("the person pressed stop")
+                await anyio.sleep_forever()
+                raise AssertionError("unreachable: the cancel wins")
+
+            def release() -> None:
+                released[0] = True
+
+            run.result = park
+            run.dispose = release
+            return run
+
+    ctx = await _mounted(mount, ("stub", _Parks()))
+    agent = _agent(ctx)
+
+    with anyio.fail_after(10):
+        result = await ctx.require(TOOLS).execute(
+            ToolExecutionInput(
+                call_id="call-1",
+                name="task",
+                arguments={"prompt": "do the thing"},
+                scope=agent.ctx,
+                session=agent.session,
+                agent=agent,
+                cancel=token,
+            )
+        )
+
+    assert released[0], "the child was left running"
+    assert result.is_error
+    assert result.error is not None
+    assert result.error.kind == "aborted", (
+        f"a person's interrupt was reported to the model as {result.error.kind}"
+    )

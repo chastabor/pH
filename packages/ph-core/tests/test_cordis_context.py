@@ -25,6 +25,7 @@ from ph.cordis import (
     ServiceConflictError,
     ServiceNotFoundError,
     plugin,
+    releasing,
 )
 from ph.cordis import context as context_module
 from ph.seams.scope_invariant import violations as scope_violations
@@ -389,6 +390,56 @@ async def test_a_tree_handed_no_budget_takes_its_own() -> None:
     spent = anyio.current_time() - start
 
     assert 0.04 < spent < 0.2, f"it spent its own grace, not somebody else's: {spent:.3f}s"
+
+
+async def test_a_cleanup_inside_an_unwind_does_not_open_a_budget_of_its_own() -> None:
+    """L10 — `releasing` was a fresh `GRACE_SECONDS` however deep it was reached.
+
+    The disposer's `finally` is the ordinary shape: an unmount, a worktree
+    deregistration, a child's release. `releasing` shields it so a raw cancel
+    cannot skip the `await` — and it bounded that shield by its own full grace,
+    so a cleanup reached *during* a dispose spent the tree's budget and then
+    started a second one inside it. That is "ten roots, ten budgets" one layer
+    down, in the one place a caller has no way to pass a deadline to.
+
+    Asserted on the clock rather than on the scope, because the cost is time: the
+    tree is given 0.05s and the cleanup wants 30, so the whole dispose must still
+    come in near the budget its caller chose.
+
+    Sabotage: `anyio.current_time() + GRACE_SECONDS` unconditionally in
+    `releasing` and this takes two budgets instead of one.
+    """
+    root = Context()
+
+    async def hands_back() -> None:
+        try:
+            await anyio.sleep(30)
+        finally:
+            with releasing():
+                await anyio.sleep(30)
+
+    root.add_disposer(hands_back, label="cleans up after itself")
+
+    start = anyio.current_time()
+    with patch.object(context_module, "GRACE_SECONDS", 0.05):
+        await root.dispose()
+    spent = anyio.current_time() - start
+
+    assert spent < 0.05 * 1.8, f"the cleanup took a budget of its own: {spent:.3f}s"
+
+
+async def test_a_cleanup_outside_an_unwind_still_takes_the_full_grace() -> None:
+    """`releasing`'s falsifiability: there is nothing above it to inherit.
+
+    Its callers are mostly cleanups inside an *operator's* call — an agentfs
+    release, a subagent abandon — where the budget is this one and clamping it
+    to something tighter would be the opposite mistake.
+    """
+    with patch.object(context_module, "GRACE_SECONDS", 0.05):
+        scope = releasing()
+
+    assert scope.deadline is not None
+    assert scope.deadline > anyio.current_time(), "a cleanup with no shield above it got no time"
 
 
 async def test_a_cut_short_unwind_is_recorded_where_something_can_read_it() -> None:

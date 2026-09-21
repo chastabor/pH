@@ -61,6 +61,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+from pydantic import field_validator
+
 from ph.agent.types import AgentHandle
 from ph.cordis import Context, Next, ServiceKey, plugin
 from ph.keys import APPROVAL, FS
@@ -71,6 +73,7 @@ from ph.seams.fs import (
     FsIntent,
     FsService,
     WalkDecision,
+    glob_error,
     literal_head,
     matches_glob,
 )
@@ -154,6 +157,30 @@ class Rule(WireModel):
     `.env` and `/etc/**` both be written the obvious way. Empty matches nothing,
     because a rule with no paths is far more likely to be unfinished config than
     a deliberate match-everything."""
+
+    @field_validator("paths")
+    @classmethod
+    def _usable_globs(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+        """Refuse a pattern `matches_glob` could only match literally (N6).
+
+        **The matcher's fallback is right for a model and wrong for a rule.** A
+        glob that will not compile matches itself and nothing else, because a
+        pattern the model typed must not raise out of the policy check it is
+        being fed through. Here that same fallback turns a `deny` into a rule
+        that guards nothing — `[z-a]/**` is a bad character range, so it stops
+        matching `secrets/key.pem` and starts matching the seven literal
+        characters nobody will ever name a file.
+
+        Refused at config time rather than warned about at mount, because the
+        two populations meet here and this is the one that an operator can
+        still fix before anything relies on it.
+        """
+        for pattern in paths:
+            because = glob_error(pattern)
+            if because is not None:
+                raise ValueError(f"{pattern!r} is not a usable glob pattern: {because}")
+        return paths
+
     scope: Scope = "anywhere"
     """Which paths this rule is *eligible* for, before its globs are consulted.
 
