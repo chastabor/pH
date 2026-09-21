@@ -94,18 +94,35 @@ class ReasoningBlock(WireModel):
 
     type: Literal["reasoning"] = "reasoning"
     text: str
-    signature: str | None = None
-    """The provider's attestation that it produced this reasoning (G8).
+    provider_state: dict[str, Any] | None = None
+    """Whatever the producing adapter must send back with this block (G8).
 
-    Anthropic signs every thinking block and **rejects a conversation that sends
-    one back without its signature**, which makes this the difference between a
-    session with extended thinking that continues and one whose every later
-    request fails. It has to live on the block rather than in the adapter,
-    because the log is the state: a resumed session rebuilds its history from
-    these events, and a signature the adapter held in memory is gone by then.
+    `dict[str, Any]` rather than `JsonObject`, which `ph.json` rules out as a
+    pydantic annotation: the alias expands eagerly and never finishes building
+    its validator. This is the boundary that module names as the one place the
+    `Any` stays.
 
-    `None` for every other provider and for reasoning that predates this field —
-    the adapter that needs one decides what to do without it, which for
+    **Opaque, and read only by the adapter that wrote it** — the same contract
+    `ModelSource.replay_state` states, one level down, because this is per-*block*
+    state and that one is per-message. A single assistant message can hold several
+    thinking blocks, so a map beside them would need an index, and that index
+    desynchronizes the moment the list is filtered: `blocks()` drops tool calls
+    under max-tokens and `interrupted_blocks()` keeps a prefix.
+
+    It has to live on the block rather than in the adapter because the log is the
+    state: a resumed session rebuilds its history from these events, and anything
+    the adapter held in memory is gone by then. Anthropic signs every thinking
+    block and **rejects a conversation that sends one back without its
+    signature**, which makes this the difference between a session with extended
+    thinking that continues and one whose every later request fails.
+
+    A dict rather than a named `signature` field so the next provider costs
+    nothing here: Gemini's `thought_signature` and the OpenAI Responses API's
+    `encrypted_content` are the same shape of secret, and naming each one on this
+    neutral type would make every other adapter learn to ignore it.
+
+    `None` for a provider that needs nothing back, and for reasoning logged
+    before this existed — the adapter decides what to do without it, which for
     Anthropic is to leave the block out rather than have the request refused.
     """
     redacted: bool = False
@@ -113,8 +130,11 @@ class ReasoningBlock(WireModel):
 
     Anthropic sends `redacted_thinking` when its own safety systems withhold the
     reasoning; the payload is ciphertext that only it can read, and it must still
-    be passed back for the conversation to continue. Rendering it as ordinary
-    text put a wall of base64 in front of the model as something it had said.
+    be passed back for the conversation to continue.
+
+    **Not adapter-private, which is why it is a named field and not part of
+    `provider_state`:** it is the one thing a *neutral* reader has to know.
+    Readers show `ph.text.redacted_marker`, which says why.
     """
 
 

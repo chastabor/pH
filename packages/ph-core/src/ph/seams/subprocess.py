@@ -33,7 +33,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import signal
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -47,7 +46,7 @@ from pydantic import Field
 from ..cancel import Cancellation, raced
 from ..cordis import Context, Disposer, maybe_await, plugin
 from ..keys import SUBPROCESS
-from ..orphans import OrphanJournal, host_journal
+from ..orphans import OrphanJournal, host_journal, signal_group
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 
@@ -65,6 +64,7 @@ __all__ = [
     "apply",
     "first_line",
     "scrub_env",
+    "signal_group",
 ]
 
 log = logging.getLogger("ph.seams.subprocess")
@@ -347,25 +347,9 @@ class SubprocessHandle:
         return int(await self.process.wait())
 
     def _signal(self, *, kill: bool) -> None:
-        """Signal the child's whole process group, or the child alone (J4).
-
-        The group, because `spawn` made this child a group leader precisely so
-        that there is one: a shell command is usually more than one process, and
-        signalling the shell leaves the pipeline it started running.
-
-        The fallback is not a formality. `killpg` is POSIX-only, and a child that
-        has already exited has no group to signal — in both cases the direct
-        child is the honest best effort, and it is what this did before there
-        were groups at all.
-        """
-        pid = self.pid
-        if pid is not None and hasattr(os, "killpg"):
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL if kill else signal.SIGTERM)
-            except OSError:
-                pass  # No group: already reaped, or it changed its own.
-            else:
-                return
+        """Signal the child's whole process group, or the child alone (J4)."""
+        if signal_group(self.pid, kill=kill):
+            return
         if kill:
             self.process.kill()
         else:

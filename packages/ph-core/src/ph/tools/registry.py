@@ -709,6 +709,28 @@ class ToolRuntime:
     def names(self, *, scope: Boundary) -> list[str]:
         return sorted(self.view(scope).visible)
 
+    def path_tools(self, *, scope: Boundary) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The visible reader and searchers, by what they declare (G8/P4-02).
+
+        **Here rather than at the row that wanted it**, because the question is
+        about the registry: which visible tools declare `reads_paths` and
+        `searches_paths`. A policy row matching names could not know — a
+        deployment renames its tools and an MCP server adds its own, which is
+        the argument `ToolDefinition.self_limits` makes one file over.
+
+        **Both sets whole, and no tiebreak.** An earlier cut returned the first
+        reader, which pushed a *wording* decision — which of several names to
+        put in a sentence — into the tool table, and showed as an asymmetric
+        return. Picking one is the caller's, and the next question it asks
+        ("name two", "prefer the one that paginates") then costs it nothing
+        here. Sorted, so a deployment with two readers is deterministic rather
+        than dependent on registration order.
+        """
+        visible = self.view(scope).visible
+        reads = tuple(sorted(name for name, one in visible.items() if one.reads_paths))
+        searches = tuple(sorted(name for name, one in visible.items() if one.searches_paths))
+        return (reads, searches)
+
     def schemas(self, *, scope: Boundary) -> list[ToolSchema]:
         """The model-facing schemas for one scope.
 

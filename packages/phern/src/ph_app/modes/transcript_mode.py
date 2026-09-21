@@ -25,7 +25,7 @@ from ph.llm.types import (
     ToolResultBlock,
     text_of,
 )
-from ph.text import block_marker
+from ph.text import block_marker, redacted_marker
 
 from ..runtime import prompted
 
@@ -60,7 +60,9 @@ def render_transcript(messages: tuple[Message, ...]) -> str:
                     )
                     lines.append(f"{speaker}: {block.text}")
                 case ReasoningBlock():
-                    lines.append(f"pH (thinking): {block.text}")
+                    # Ciphertext is not something the assistant said (G8).
+                    said = redacted_marker() if block.redacted else block.text
+                    lines.append(f"pH (thinking): {said}")
                 case ToolCallBlock():
                     lines.append(f"pH → {block.name}({block.arguments})")
                 case ToolResultBlock():

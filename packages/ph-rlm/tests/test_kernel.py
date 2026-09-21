@@ -42,15 +42,19 @@ replies were enough to "kill" a perfectly healthy kernel**.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
+import anyio
 import pytest
 from runtime_helpers import namespace
 
+from ph.orphans import process_alive
 from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
+from ph.testing import settled
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph_rlm.kernel.manager import RESET_NOTICE
 from ph_runtime.cell import MAGIC_HINT
@@ -173,7 +177,6 @@ async def test_a_cpu_bomb_on_a_worker_thread_costs_the_cell_and_not_the_guest(
     task when the answer is "not here". Both routes report the same `cpu` error;
     what differs is what they are allowed to interrupt.
     """
-    import anyio
 
     kernel = await make_kernel(cpu_seconds=1)
 
@@ -222,7 +225,6 @@ async def test_cancel_aborts_a_waiting_cell_and_the_next_run_succeeds(
     make_kernel: MakeKernel,
 ) -> None:
     """D5. No control-channel workaround: fd 3 is not the channel the run occupies."""
-    import anyio
 
     from ph.cancel import CancelToken
 
@@ -252,7 +254,6 @@ async def test_a_spinning_cell_is_killed_after_the_grace_period(
     being asserted is the *honesty* of the outcome: the namespace is gone and the
     result says so, rather than the kernel wedging until the turn times out.
     """
-    import anyio
 
     from ph.cancel import CancelToken
 
@@ -294,7 +295,6 @@ async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
     grace expires on schedule whatever the channel is doing. Under `fail_after`
     because the regression is a hang: without the fix nothing here ever returns.
     """
-    import anyio
 
     from ph.cancel import CancelToken
 
@@ -389,7 +389,6 @@ async def test_a_task_a_cell_left_behind_cannot_call_into_the_next_run(
     same binding once. What must reach the second run is its own call and nothing
     else.
     """
-    import anyio
 
     seen: list[str] = []
 
@@ -497,7 +496,6 @@ async def test_a_binding_call_round_trips_through_the_host(make_kernel: MakeKern
 
 async def test_concurrent_binding_calls_overlap(make_kernel: MakeKernel) -> None:
     """`asyncio.gather` in a cell is what makes fan-out cheaper than N native calls."""
-    import anyio
 
     async def slow(**arguments: object) -> Any:  # noqa: ANN401
         await anyio.sleep(0.1)
@@ -736,7 +734,6 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     Sabotage: put the `move_on_after` back around the read, and `canceled`
     counts roughly `duration / POLL_SECONDS`.
     """
-    import anyio
 
     from ph.cancel import POLL_SECONDS
 
@@ -815,7 +812,6 @@ async def test_a_channel_closed_mid_frame_is_reported_as_a_closure(
     deterministically, instead of leaving it to a race that reproduces on one
     platform.
     """
-    import anyio
 
     from ph_rlm.kernel.manager import _CHANNEL_GONE
 
@@ -874,3 +870,54 @@ async def test_a_path_argument_reaches_the_host_as_a_path(make_kernel: MakeKerne
     assert arguments["path"] == "notes.md", arguments["path"]
     assert arguments["when"] == "2026-09-20T00:00:00", arguments["when"]
     assert arguments["tags"] == ["a"]
+
+
+async def test_the_guest_runs_in_a_session_of_its_own(make_kernel: MakeKernel) -> None:
+    """J9 — no controlling terminal for the process that runs model-authored code.
+
+    Why that matters is on `_start`'s `open_process` call. Asserted on the guest
+    rather than on the sandbox argv because the property is "every guest is a
+    session leader", which bwrap's `--new-session` gives on one backend of
+    three.
+
+    Sabotage: drop `start_new_session=True` from `open_process` and the sid is
+    the host's.
+    """
+    kernel = await make_kernel()
+
+    result = await kernel.run("import os\n(os.getsid(0), os.getpid())", (), None)
+
+    sid, pid = result.value
+    assert sid == pid, "the guest is not a session leader"
+    assert sid != os.getsid(0), "the guest shares the host's session"
+
+
+async def test_a_subprocess_a_cell_started_dies_with_the_kernel(
+    make_kernel: MakeKernel,
+) -> None:
+    """J9's other half: the session the guest got has to be killed as a group.
+
+    Why the two belong together is on `ph.orphans.signal_group`. Measured here
+    on the path that has no other backstop — a clean `aclose`, where the guest
+    exits by itself and only the sweep is left looking.
+
+    Sabotage: `process.kill()` in place of `_kill_group` and the grandchild is
+    still alive after the kernel is gone.
+    """
+    kernel = await make_kernel()
+    started = await kernel.run(
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "child.pid",
+        (),
+        None,
+    )
+    grandchild = int(started.value)
+    assert process_alive(grandchild), "the cell's subprocess never started"
+
+    await kernel.aclose()
+
+    # Polled, not asserted outright: the grandchild is killed inside `aclose`
+    # and lingers for a tick as a zombie awaiting reparenting, which `kill(0)`
+    # still answers `True` for.
+    await settled(lambda: not process_alive(grandchild), "the cell's subprocess to be reaped")

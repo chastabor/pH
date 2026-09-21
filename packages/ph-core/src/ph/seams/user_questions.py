@@ -8,8 +8,8 @@ behaviors onto the other.
 
 **A question is logged only when it is actually put to a person** (P7-09). That
 is the one rule here that is not obvious, and it follows from the failure mode
-above rather than from tidiness: since "nobody could answer" resolves instantly
-to `None`, appending around it would write a question-and-refusal pair into the
+above rather than from tidiness: since "nobody could answer" resolves instantly,
+appending around it would write a question-and-refusal pair into the
 log of every unattended run — an `/autonomous` turn inside an interactive
 profile, a `phern -p` against a profile that armed the row — for an exchange that
 never happened. The log would then say a person was asked and declined, which is
@@ -37,7 +37,7 @@ import logging
 import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
@@ -48,12 +48,49 @@ from ..wire import WireModel
 from ._registry import claim_entry
 
 __all__ = [
+    "AskOutcome",
+    "AskResolution",
     "PendingQuestion",
     "UserQuestion",
     "UserQuestionService",
     "apply",
     "pending_questions",
 ]
+
+AskResolution = Literal["answered", "unattended", "declined", "canceled", "failed"]
+"""Every way one question can end. Closed, because a caller renders each.
+
+`ask` used to fold all four failures into `None`, and the caller then guessed
+which it had been by sampling `attended` — a *live* probe, read at a different
+moment from the one this seam checked. A cancelled ask still reads as attended,
+so the guess said "somebody was asked and declined" about a question nobody was
+put (K7, and the same false-story class K7 set out to remove)."""
+
+
+@dataclass(frozen=True, slots=True)
+class AskOutcome:
+    """What became of one question, decided here rather than reconstructed.
+
+    Every distinction this carries is one the seam already made internally and
+    then threw away: attendance is checked before anything is recorded,
+    cancellation before that, and a raising answerer is caught and logged. The
+    caller could not re-derive any of them afterwards, which is the whole reason
+    it is a value rather than a `str | None`.
+    """
+
+    resolution: AskResolution
+    answer: str | None = None
+    """The person's words, and only ever set when `resolution` is `answered` —
+    so a caller that reads this without checking cannot mistake a refusal for an
+    empty answer."""
+
+    def __post_init__(self) -> None:
+        # The docstring above is a promise, and one line makes it one: an
+        # `AskOutcome("declined", "hi")` would put words in the mouth of
+        # somebody who declined.
+        if (self.answer is None) == (self.resolution == "answered"):
+            raise ValueError(f"an answer belongs to `answered` alone: {self}")
+
 
 log = logging.getLogger("ph.seams.user_questions")
 
@@ -187,8 +224,12 @@ class UserQuestionService:
         *,
         session: Session | None = None,
         cancel: Cancellation | None = None,
-    ) -> str | None:
-        """Ask, and return the answer or `None` when nobody could answer.
+    ) -> AskOutcome:
+        """Ask, and say what became of the question.
+
+        An `AskOutcome` rather than `str | None` because the four ways to get no
+        answer are four different things to tell a model, and this is the only
+        place that can tell them apart — see `AskResolution`.
 
         `cancel` is the caller's cancellation, and a canceled ask is not put to
         anybody — the rule `ApprovalService.request` states for the other seam
@@ -204,8 +245,10 @@ class UserQuestionService:
         beside it, so there is one place a caller can put it and one place every
         route — the log record, the wire frame, a re-posed ask — reads it from.
         """
-        if is_canceled(cancel) or not self.attended:
-            return None
+        if is_canceled(cancel):
+            return AskOutcome("canceled")
+        if not self.attended:
+            return AskOutcome("unattended")
         # Minted only when the caller had no natural key of its own. `ask_user`
         # passes the tool call id, which is the string the rest of the log
         # already joins the exchange by; a counter would restart at 1 after a
@@ -224,16 +267,22 @@ class UserQuestionService:
         try:
             raw = await self.ctx.waterfall("user-question/ask", asked, inner=inner)
             answer = settled_or_none("user-question/ask", raw, str)
+            # Delivered and unanswered is a *person* declining; the failure below
+            # is the machinery not reaching one. Both close the log pair, and
+            # they are told apart here because nothing downstream can.
+            outcome = (
+                AskOutcome("answered", answer) if answer is not None else AskOutcome("declined")
+            )
         except Exception:
             # Inside the `try` on purpose: an answerer that raises and one that
             # answers the wrong shape are the same failure to this seam, and
             # either way the ask below has to be closed in the log — the
             # `asked`/`answered` pair is what `pending_questions` folds.
             log.exception("ph.seams.user_questions: an answerer failed")
-            answer = None
+            outcome = AskOutcome("failed")
         if session is not None:
-            self._record_answered(session, asked, answer)
-        return answer
+            self._record_answered(session, asked, outcome)
+        return outcome
 
     def _record_asked(self, session: Session, question: UserQuestion) -> None:
         """The ask, as the log keeps it.
@@ -247,16 +296,32 @@ class UserQuestionService:
         session.append("question/asked", question.to_wire())
 
     def _record_answered(
-        self, session: Session, question: UserQuestion, answer: str | None
+        self, session: Session, question: UserQuestion, outcome: AskOutcome
     ) -> None:
-        data: dict[str, Any] = {"askId": question.ask_id}
-        if answer is None:
-            # Asked and *not* answered: somebody was there and declined, or the
-            # answerer failed. Distinct from never being asked, which appends
-            # nothing at all, and recorded so the fold stops calling it pending.
-            data["declined"] = True
+        """Close the pair, and say *how* it closed.
+
+        **The resolution reaches the log, not just the model.** `declined` alone
+        was the same collapse `AskResolution` exists to undo: a front end that
+        fell over mid-ask recorded "asked and not answered", and the transcript
+        renders that as *"No answer given."* — a person choosing not to answer a
+        question they were never shown. `ph.persistence.repair` goes out of its
+        way to write `interrupted` rather than `declined` for exactly this
+        reason, so the log's vocabulary already knows the distinction is
+        load-bearing; this seam had stopped supplying it.
+
+        `declined` is kept beside it for every non-answer, because logs written
+        before `resolution` existed carry only that — so the *reader* still has
+        to fold on it, and writing both keeps one reader rather than two.
+        (`pending_questions` needs neither: it pops on the event type.)
+        """
+        data: dict[str, Any] = {"askId": question.ask_id, "resolution": outcome.resolution}
+        if outcome.resolution == "answered":
+            data["answer"] = outcome.answer
         else:
-            data["answer"] = answer
+            # Asked and *not* answered. Distinct from never being asked, which
+            # appends nothing at all, and recorded so the fold stops calling it
+            # pending.
+            data["declined"] = True
         session.append("question/answered", data)
 
 

@@ -1364,7 +1364,15 @@ class SummarizeEngine:
 async def apply(ctx: Context, config: Config) -> None:
     """Register the engine and arm the two automatic triggers."""
     ctx.require(SPILL_STORE).claim(
-        SpillClaim.under_session("compaction-summarize", "compaction/summarized")
+        SpillClaim.under_session(
+            # `REPLACEMENT_WITH_PATH` tells the model the history "has been saved
+            # to {file_path} should you need to refer back to it", which is the
+            # definition of a handed path — so a `deny read outside-workspace`
+            # rule must not refuse the file this row just pointed at.
+            "compaction-summarize",
+            "compaction/summarized",
+            hands_paths=True,
+        )
     )
 
     engine = SummarizeEngine(ctx=ctx, config=config)

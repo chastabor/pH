@@ -66,6 +66,12 @@ dev = [
     "types-PyYAML>=6.0",
     "types-croniter>=3.0",
     "pytest-textual-snapshot>=1.0",
+    # Not a runtime dependency of any member: `ph.locks` is the only shipped
+    # module that may import it and a gate enforces that. Two suites reach
+    # for it directly to stand in for another process, and declaring it here
+    # is what keeps that honest — arriving only through `ph-core` would
+    # break them the day `ph.locks` moves to bare `fcntl.flock`.
+    "filelock>=3.15",
     # The extras themselves, not their contents: pinning the distributions here
     # too would let CI green on a version the package does not allow.
     "ph-core[otel]",

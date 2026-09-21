@@ -697,11 +697,12 @@ async def test_a_question_from_the_daemon_reaches_this_screen(tmp_path: Path) ->
         _front_end, host = await _front(daemon)
         root = daemon.running.supervisor.roots["remote"]
 
-        answer = await root.ctx.require(USER_QUESTIONS).ask(
+        outcome = await root.ctx.require(USER_QUESTIONS).ask(
             UserQuestion(question="which port?", ask_id="q1"), session=root.session
         )
 
-        assert answer == "42"
+        assert outcome.resolution == "answered"
+        assert outcome.answer == "42"
         assert [one.question for one in host.questions] == ["which port?"]
         assert [one.type for one in root.session.events].count("question/asked") == 1
 

@@ -32,7 +32,7 @@ from pydantic import Field
 from ...cordis import Context, plugin
 from ...json import as_str
 from ...keys import TOOLS, USER_QUESTIONS
-from ...seams.user_questions import UserQuestion
+from ...seams.user_questions import AskResolution, UserQuestion
 from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ..presentation import ToolCallView, ToolResultView
 
@@ -76,15 +76,9 @@ class AskUserArgs(ToolModel):
 
 class AskUserValue(ToolModel):
     answer: str | None = None
-    answered: bool
-    attended: bool = True
-    """Whether the question was put to anybody at all (K7).
-
-    `ask` answers `None` for three situations — nobody is attending, somebody was
-    asked and declined, an answerer failed — and the tool rendered all three as
-    `UNATTENDED`. This is what tells the first apart from the rest; `DECLINED`
-    below says why that distinction is worth a field.
-    """
+    outcome: AskResolution = "answered"
+    """How the ask ended, as the seam that ran it says — see `AskResolution`,
+    which is where the closed set and the guess it replaced are argued (K7)."""
 
 
 DECLINED = (
@@ -101,12 +95,54 @@ just dismissed the prompt — that is a person declining to direct it, and askin
 again is the one thing it must not do.
 """
 
+CANCELED = (
+    "The question was not put to anybody, because this turn was canceled while it "
+    "was being asked. Stop rather than continuing on an assumption."
+)
+"""What the model reads when the ask was abandoned before delivery.
+
+The one ending that is not about the person's attention at all. Telling the
+model to carry on would be telling it to work through a cancellation, and
+telling it somebody declined — which is what the old attendance guess said here
+— invents a person who was never asked.
+"""
+
+FAILED = (
+    "The question could not be delivered: the harness failed while asking it. "
+    "Treat it as unanswered — choose the most reasonable option yourself and state "
+    "the assumption you made, or say what you would need in order to proceed."
+)
+"""What the model reads when an answerer raised.
+
+Named rather than folded into `UNATTENDED`, because "there is nobody there" and
+"something here is broken" are different facts and only the second is worth a
+person seeing in the transcript."""
+
+_SENTENCES: dict[AskResolution, str] = {
+    "unattended": UNATTENDED,
+    "declined": DECLINED,
+    "canceled": CANCELED,
+    "failed": FAILED,
+}
+"""One sentence per way of not getting an answer.
+
+A dict rather than a chain of conditionals, so adding a resolution is adding a
+row. Nothing here makes it *exhaustive* — a dict literal is not checked against
+the `Literal`, and the `.get` below falls back rather than raising — so
+`test_every_way_a_question_can_end_reads_as_itself` walks `get_args` and is what
+actually catches a resolution that arrived without a sentence."""
+
 
 def _rendered(value: Any) -> str:  # noqa: ANN401
-    """The three outcomes `ask` folds into `None`, told apart again."""
-    if value["answered"]:
+    """The four endings `ask` used to fold into `None`, told apart again."""
+    resolution: AskResolution = value["outcome"]
+    if resolution == "answered":
         return as_str(value["answer"])
-    return DECLINED if value["attended"] else UNATTENDED
+    # `.get`, for the reason `ph.wire.literal_lookup` exists: a `Literal`
+    # constrains writers and dies at the payload boundary, so a reader holding
+    # what is really a `str` has to have an answer for one it does not know.
+    # `denial_reason` makes the same fallback on the approval side.
+    return _SENTENCES.get(resolution, UNATTENDED)
 
 
 @plugin("tool-ask-user", inject=[TOOLS, USER_QUESTIONS])
@@ -115,7 +151,7 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def ask_user(args: AskUserArgs, run: ToolRunContext) -> dict[str, Any]:
         questions = ctx.require(USER_QUESTIONS)
-        answer = await questions.ask(
+        outcome = await questions.ask(
             UserQuestion(
                 question=args.question,
                 options=args.options,
@@ -129,14 +165,7 @@ async def apply(ctx: Context, config: None) -> None:
             session=run.session,
             cancel=run.signal,
         )
-        return {
-            "answer": answer,
-            "answered": answer is not None,
-            # Read here rather than at render time: by then the front end may
-            # have detached, and what the model is owed is what was true when
-            # its question was put.
-            "attended": questions.attended,
-        }
+        return {"answer": outcome.answer, "outcome": outcome.resolution}
 
     ctx.require(TOOLS).register(
         define_tool(

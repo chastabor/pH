@@ -63,7 +63,7 @@ from typing import Any, Literal, TypeAlias
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context, Next, ServiceKey, plugin
-from ph.keys import APPROVAL, FS, SPILL_STORE
+from ph.keys import APPROVAL, FS
 from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -75,6 +75,7 @@ from ph.seams.fs import (
     matches_glob,
 )
 from ph.seams.sandbox import allowed_paths_of, enforcement_of
+from ph.seams.spill import handed_paths_of
 from ph.seams.workspace import workspace_of, writable_roots
 from ph.wire import WireModel
 
@@ -491,18 +492,11 @@ class FsPermissions:
     def _handed_paths(self, agent: AgentHandle | None, operation: Operation) -> tuple[Path, ...]:
         """Paths the harness put in front of *this* agent, which a read may follow.
 
-        **A read here is not leaving the agent's reach.** `tool-result-offload`
-        replaces a result with a preview and the file it was written to, so a
-        rule that refused reads outside the workspace would hand the model a path
-        and then refuse it when it followed it: the harness telling it something
-        is on disk and then denying it, which is the failure the spill seam's own
-        docstring opens by ruling out.
-
-        **This agent's own session, not the store.** `locator_for` is
-        `root/<owner>/<digest>-<name>` and a session-owned claim's owner is the
-        session id, so naming the store root would have let any agent read every
-        *other* session's spilled results — far wider than the claim being made,
-        which is only that a path this session was handed can be followed.
+        Asked of `ph.seams.spill`, the way the line below asks `ph.seams.sandbox`
+        for the deployment's writable roots. Two named sets rather than one tuple
+        called `roots`, because they are two different claims — "may write here"
+        and "was handed this" — and folding them together is what made this
+        predicate stop meaning what its name says.
 
         Reads only. Nothing invites an agent to *write* into the harness's store,
         and one that could would be able to forge a spilled blob under a locator
@@ -514,19 +508,15 @@ class FsPermissions:
         `deny read outside-workspace` currently breaks every retrieval hint in
         every session, silently, and would have no way to see why.
 
-        **Attachments are deliberately not here**, and the asymmetry is
-        structural rather than an oversight: `AttachmentStore` never hands a path
-        to the model — the bytes ride in a `MediaBlock`, and `attach` returns the
-        *workspace* path. Adding an exemption for it would break the rule its
-        seam states (a model reaches a file through `ctx.fs`), not restate it.
+        **Attachments are deliberately absent**, and structurally rather than by
+        oversight: `AttachmentStore` never hands a path to the model — the bytes
+        ride in a `MediaBlock` and `attach` returns the *workspace* path. An
+        exemption for it would break the rule its seam states (a model reaches a
+        file through `ctx.fs`), not restate it.
         """
         if operation != "read" or self.ctx is None:
             return ()
-        store = self.ctx.get(SPILL_STORE)
-        session = None if agent is None else agent.session
-        if store is None or session is None:
-            return ()
-        return (store.root / session.id,)
+        return handed_paths_of(self.ctx, session=None if agent is None else agent.session)
 
     def _outside_workspace(
         self, path: Path, agent: AgentHandle | None, operation: Operation

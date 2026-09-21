@@ -38,8 +38,7 @@ from functools import cache
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from filelock import FileLock, Timeout
-
+from ph.locks import LockBusy, file_lock
 from ph.orphans import argv_digest
 
 from .protocol import PROTOCOL_VERSION
@@ -200,20 +199,25 @@ def _managed(root: Path, skills: Sequence[str]) -> RuntimeEnvironment:
     wanted = _marker(skills)
     if _current(python, marker_path, wanted):
         return RuntimeEnvironment(python=python, kind="managed", root=root)
-    root.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with FileLock(f"{root}.lock", timeout=_LOCK_TIMEOUT, thread_local=False):
+        with file_lock(f"{root}.lock", timeout=_LOCK_TIMEOUT, what="the runtime venv"):
             if _current(python, marker_path, wanted):
                 # Built by whoever held the lock. Reported as not rebuilt,
                 # because this process did not rebuild it.
                 return RuntimeEnvironment(python=python, kind="managed", root=root)
             _build(root, skills)
             marker_path.write_text(json.dumps(wanted, indent=2) + "\n", encoding="utf-8")
-    except Timeout as timeout:
+    except LockBusy as busy:
+        # **Not "remove the lock file"**, which is what this used to advise and
+        # is the one instruction that can cause the damage the lock prevents.
+        # `flock` is held by the open descriptor (`ph.persistence.lease`), so a
+        # dead process has already released it and a leftover `.lock` file is
+        # not a lock — while a *live* one is still installing, and deleting the
+        # file lets this process `rmtree` the tree out from under it.
         raise RuntimeVenvError(
             f"another process has been building the runtime venv at {root} for over "
-            f"{_LOCK_TIMEOUT:.0f}s; if nothing is, remove {root}.lock"
-        ) from timeout
+            f"{_LOCK_TIMEOUT:.0f}s; wait for it, or stop that process and try again"
+        ) from busy
     return RuntimeEnvironment(python=python, kind="managed", root=root, rebuilt=True)
 
 

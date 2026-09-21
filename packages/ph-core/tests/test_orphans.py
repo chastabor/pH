@@ -8,17 +8,19 @@ process, and killing it would be far worse than leaving a stray behind.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from ph.cordis import Context
 from ph.keys import SUBPROCESS
-from ph.orphans import OrphanJournal, argv_digest, process_start_token
+from ph.orphans import OrphanJournal, argv_digest, process_alive, process_start_token
 from ph.seams.subprocess import SubprocessSpawnSpec
 from ph.testing import MountProfile
 
@@ -88,6 +90,58 @@ def test_a_live_stray_is_killed(tmp_path: Path) -> None:
     finally:
         if stray.poll() is None:  # pragma: no cover
             stray.kill()
+            stray.wait()
+
+
+def test_a_strays_own_children_go_with_it(tmp_path: Path) -> None:
+    """The sweep kills a group, not a pid.
+
+    Every pid recorded here was spawned with `start_new_session=True`, so the
+    stray is a session leader and whatever it started is in *its* group and not
+    the host's. Killing the leader alone left those children running on the one
+    path this journal exists for — a restart after a host died without
+    unwinding — which is the same hole `signal_group` was written to close for
+    the kernel and the subprocess seam.
+
+    Sabotage: `os.kill(pid, SIGKILL)` in place of `signal_group` and the
+    grandchild survives its parent.
+    """
+    journal = _journal(tmp_path)
+    stray = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    grandchild = 0
+    try:
+        assert stray.stdout is not None
+        grandchild = int(stray.stdout.readline().strip())
+        assert process_alive(grandchild)
+        journal.record(pid=stray.pid, argv=["stray"], label="a1")
+        _orphaned(journal, stray.pid)
+
+        report = journal.sweep()
+
+        assert stray.pid in report.killed
+        stray.wait(timeout=10)
+        deadline = time.monotonic() + 5
+        while process_alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert not process_alive(grandchild), "the stray's child outlived the sweep"
+    finally:
+        for pid in (stray.pid, grandchild):
+            if pid:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, 9)
+        if stray.poll() is None:  # pragma: no cover
             stray.wait()
 
 

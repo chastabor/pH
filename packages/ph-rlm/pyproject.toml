@@ -24,7 +24,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
-dependencies = ["ph-core==0.2.0", "ph-runtime-guest==0.2.0", "dill>=0.3.8", "filelock>=3.15"]
+# `filelock` is deliberately absent: nothing under `src/` may import it —
+# `ph.locks` owns it and a gate enforces that — so a runtime declaration here
+# would be a claim the gate contradicts. The suite's direct use is declared in
+# the root dev group, which is the half an earlier version of this comment
+# conflated with this one.
+dependencies = ["ph-core==0.2.0", "ph-runtime-guest==0.2.0", "dill>=0.3.8"]
 
 [project.urls]
 Homepage = "https://github.com/chastabor/pH"

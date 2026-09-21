@@ -50,7 +50,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from ph.cordis import Context, Next, plugin
+from ph.cordis import DEPLOYMENT, Boundary, Context, Next, plugin
 from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import ContentBlock, text_of
 from ph.seams.spill import SpillClaim
@@ -65,16 +65,20 @@ from ph.tools.definition import (
 from ph.wire import WireModel
 
 __all__ = [
+    "GENERIC_READER",
     "HISTORY_PREFIX",
     "NUM_CHARS_PER_TOKEN",
     "SPILL_TOOLS_HINT",
     "TOOL_TOKEN_LIMIT_BEFORE_EVICT",
     "TOO_LARGE_TOOL_MSG",
+    "UPSTREAM_READER",
+    "UPSTREAM_TOO_LARGE_TOOL_MSG",
     "Config",
     "apply",
     "content_preview",
     "over_token_limit",
     "spill_tool_result",
+    "spill_wording",
 ]
 
 NUM_CHARS_PER_TOKEN = 4
@@ -90,7 +94,7 @@ PREVIEW_HEAD_LINES = 5
 PREVIEW_TAIL_LINES = 5
 PREVIEW_LINE_CLIP = 1_000
 
-TOO_LARGE_TOOL_MSG = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
+UPSTREAM_TOO_LARGE_TOOL_MSG = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
 
 You can read the result from the filesystem by using the read_file tool, but make sure to only read part of the result at a time.
 
@@ -100,20 +104,39 @@ Here is a preview showing the head and tail of the result (lines of the form `..
 
 {content_sample}
 """  # noqa: E501
-"""Verbatim from `deepagents/middleware/_message_eviction.py`."""
+"""Verbatim from `deepagents/middleware/_message_eviction.py`, and never sent.
 
-SPILL_TOOLS_HINT = """This path is an ordinary file on disk, so `grep` and `glob` reach it with the path above as their `path` argument — searching it is usually better than paging through it. pH's reader is `read`, not the `read_file` the paragraph above names."""  # noqa: E501
-"""pH's own sentence, appended rather than folded into the upstream text.
+Kept byte-identical because the whole value of tracking a port is that an
+upstream change produces a visible diff. `TOO_LARGE_TOOL_MSG` below is what
+actually goes out."""
 
-**Two things the verbatim block cannot say.** It tells the model to page with
-`read_file`, which is not a tool pH has — its readers are `read`, `grep` and
-`glob` — and it describes paging as the only way through, so a model handed 40 MB
-reads it from the top. Search is the thing you actually want on a large result
-and nothing told the model it was available.
+UPSTREAM_READER = "read_file"
+"""The one token in the block above that is wrong here.
 
-Kept separate because the block above is tracked verbatim against upstream, and
-the whole value of that is an upgrade producing a visible diff. Correcting the
-tool name in place would make the next comparison lie.
+deepagents names its own tool. pH's readers are *registered plugins* — a
+deployment renames them, an MCP server adds its own — so the name is localized
+rather than corrected in a second paragraph, which is what this row used to do:
+append a sentence saying "pH's reader is `read`, not the `read_file` the
+paragraph above names", spending model attention to retract text pH itself
+emitted. `ToolDefinition.reads_paths` is how the real name is found."""
+
+GENERIC_READER = "file-reading"
+"""What stands in when no visible tool declares `reads_paths`.
+
+A deployment can disable the fs tools, and "use the {reader} tool" with an empty
+name is worse than not naming one. The path is still true and still the point."""
+
+TOO_LARGE_TOOL_MSG = UPSTREAM_TOO_LARGE_TOOL_MSG.replace(UPSTREAM_READER, "{reader}")
+"""Upstream's wording with the tool name left to the deployment."""
+
+SPILL_TOOLS_HINT = """This path is an ordinary file on disk, so {searchers} reach it with the path above as their `path` argument — searching it is usually better than paging through it."""  # noqa: E501
+"""pH's own sentence: the capability upstream does not mention.
+
+The block above describes paging as the only way through, so a model handed
+40 MB reads it from the top. Search is what you actually want on a large result,
+and nothing told the model it was available. Appended only when some visible tool
+declares `searches_paths` — naming a tool this deployment does not have is the
+mistake this row is fixing, not one to make in the other direction.
 """
 
 
@@ -198,7 +221,13 @@ rename silently splits.
 
 
 async def spill_tool_result(
-    ctx: Context, session: Session, *, call_id: str, source: str, text: str
+    ctx: Context,
+    session: Session,
+    *,
+    call_id: str,
+    source: str,
+    text: str,
+    scope: Boundary | None = None,
 ) -> str | None:
     """Relocate one tool result and return the text that stands in for it.
 
@@ -234,19 +263,43 @@ async def spill_tool_result(
         {"callId": call_id, "locator": ref.locator, "bytes": ref.bytes},
     )
     await store.commit(ref)
-    upstream = TOO_LARGE_TOOL_MSG.format(
-        tool_call_id=call_id, file_path=ref.locator, content_sample=content_preview(text)
+    return spill_wording(
+        ctx,
+        scope,
+        TOO_LARGE_TOOL_MSG,
+        tool_call_id=call_id,
+        file_path=ref.locator,
+        content_sample=content_preview(text),
     )
+
+
+def spill_wording(ctx: Context, scope: Boundary | None, template: str, **fields: str) -> str:
+    """One spill's replacement text, naming the tools this deployment has.
+
+    Shared by both rows, because a spilled paste and a spilled tool result are
+    the same kind of file in the same store and the model cannot tell which wrote
+    the path it was handed — so a sentence true of one and absent from the other
+    is worse than either. It was: the tool-result side got the correction and the
+    pasted-message side kept telling the model to call `read_file`.
+    """
+    # Asked at `scope` because a tool can be registered for one agent: the names
+    # in a replacement have to be the ones *that* model can call. `None` is the
+    # deployment view, which is what the overflow clip has.
+    readers, searchers = ctx.require(TOOLS).path_tools(scope=scope or DEPLOYMENT)
+    said = template.format(reader=readers[0] if readers else GENERIC_READER, **fields)
+    if not searchers:
+        return said
     # After the preview, not before it: the preview is what the model reads first
     # to decide whether it needs the rest at all.
-    return f"{upstream}\n{SPILL_TOOLS_HINT}\n"
+    hint = SPILL_TOOLS_HINT.format(searchers=" and ".join(f"`{name}`" for name in searchers))
+    return f"{said}\n{hint}\n"
 
 
 @plugin("tool-result-offload", inject=[TOOLS, SPILL_STORE], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized result with a preview and a path to the rest."""
     ctx.require(SPILL_STORE).claim(
-        SpillClaim.under_session("tool-result-offload", "offload/spilled")
+        SpillClaim.under_session("tool-result-offload", "offload/spilled", hands_paths=True)
     )
 
     async def offload(
@@ -281,6 +334,9 @@ async def apply(ctx: Context, config: Config) -> None:
             call_id=execution.call_id,
             source=f"{execution.name} result",
             text=text,
+            # The names in the replacement must be the ones *this* model can
+            # call, and a tool can be registered for one agent.
+            scope=execution.scope,
         )
         if replacement is None:
             # Fail open, as upstream: an offload that cannot store the content

@@ -925,10 +925,17 @@ async def test_a_spilled_result_is_readable_but_not_writable(
     only that a path this session was handed can be followed. The locator here is
     asked of the store rather than spelled by hand, because a test that writes
     the layout out is a test that passes when the layout moves.
+
+    **The producer has to be mounted**, which is the point of folding the
+    claims rather than assuming the layout: a deployment that spills nothing
+    hands the model no paths, and exempting one would be granting a reach
+    nothing asked for. `tool-result-offload` is what registers the claim, so it
+    is in the profile here exactly as it is in a real one.
     """
     ctx = await mount(
         {
             "insert": [
+                {"id": "tool-result-offload", "name": "tool-result-offload"},
                 {
                     "id": "permissions-fs",
                     "name": "permissions-fs",
@@ -942,7 +949,7 @@ async def test_a_spilled_result_is_readable_but_not_writable(
                             }
                         ]
                     },
-                }
+                },
             ]
         },
     )
@@ -967,6 +974,54 @@ async def test_a_spilled_result_is_readable_but_not_writable(
     # And the rule still bites everywhere else, so this is an exemption rather
     # than the scope being switched off.
     assert permissions.objection("read", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
+
+
+async def test_every_row_that_hands_the_model_a_path_is_exempt(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Not just the two offloads — the set is what the rows declare.
+
+    `compaction-summarize` spills the pre-compaction history and its replacement
+    tells the model it "has been saved to {file_path} should you need to refer
+    back to it". Under the first cut — an unconditional `root/<session id>` —
+    that read was exempt by accident of the layout. Folding the claims made the
+    set honest and, until this, one row short: it shipped alongside the offloads
+    so nothing noticed, and a profile that kept compaction without them would
+    have pointed the model at a file it was then refused.
+
+    Sabotage: drop `hands_paths=True` from the compaction claim.
+    """
+    ctx = await mount(
+        {
+            "insert": [
+                {"id": "compaction-summarize", "name": "compaction-summarize"},
+                {
+                    "id": "permissions-fs",
+                    "name": "permissions-fs",
+                    "config": {
+                        "rules": [
+                            {
+                                "operations": ["read"],
+                                "paths": ["**"],
+                                "mode": "deny",
+                                "scope": "outside-workspace",
+                            }
+                        ]
+                    },
+                },
+            ]
+        },
+    )
+    (tmp_path / "project").mkdir(exist_ok=True)
+    agent, _ = await scoped_agent(ctx, tmp_path)
+    session = agent.session
+    assert session is not None
+    store = ctx.require(SPILL_STORE)
+    history = store.locator_for(
+        owner=session.id, suggested_name="conversation_history/1.md", content=b"x"
+    )
+
+    assert ctx.require(FS_PERMISSIONS).objection("read", history, agent=agent) is None
 
 
 def test_a_wildcard_that_is_not_a_star_still_makes_a_head() -> None:

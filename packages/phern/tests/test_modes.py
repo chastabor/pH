@@ -271,9 +271,10 @@ async def test_a_one_shot_run_is_refused_a_session_another_process_holds(
 ) -> None:
     """The half the lease used to miss: a print run against a held log is refused.
 
-    The holder is a bare `FileLock` on the path the store would claim — what a
-    daemon, or another `phern -p`, looks like from here — and the refusal is the
-    store's own, by name, so the CLI and the daemon protocol say one thing.
+    The holder is `hold_session`, which takes the lease on the path the store
+    would claim — what a daemon, or another `phern -p`, looks like from here —
+    and the refusal is the store's own, by name, so the CLI and the daemon
+    protocol say one thing.
     Nothing is written: a refused run leaves no partial turn to explain.
     """
     with (
@@ -311,3 +312,40 @@ async def test_a_refused_open_leaves_an_ops_record(profile: Profile, tmp_path: P
     ops = [record for record in seen if record.channel == "ops"]
     assert [record.severity for record in ops] == ["warn"]
     assert ops[0].attributes["session_id"] == "held"
+
+
+def test_the_transcript_never_shows_the_person_encrypted_reasoning() -> None:
+    """G8's other half, which did not land with the first fix.
+
+    `redacted_thinking` carries ciphertext only Anthropic can read, and it is
+    still a `ReasoningBlock` — so the wire half was fixed (it is re-sent as
+    itself) while every renderer that shows `block.text` went on putting a wall
+    of base64 in front of the person as something the assistant had said. The
+    field existed and had no neutral reader.
+
+    Sabotage: render `block.text` unconditionally and the blob is in the output.
+    """
+    from ph.llm.types import create_assistant_message
+    from ph.text import redacted_marker
+
+    blob = "AAAAB3NzaC1yc2EAAAADAQAB" * 4
+    messages = (
+        create_assistant_message(
+            content=[
+                {"type": "reasoning", "text": blob, "redacted": True},
+                {"type": "reasoning", "text": "considering"},
+                {"type": "text", "text": "on it"},
+            ],
+            provider="anthropic",
+            model="m",
+        ),
+    )
+
+    rendered = render_transcript(messages)
+
+    assert blob not in rendered, "the person was shown ciphertext"
+    assert redacted_marker() in rendered, "and told nothing was there"
+    # Ordinary reasoning is untouched — this narrows one case, it does not
+    # switch the thinking rows off.
+    assert "considering" in rendered
+    assert "on it" in rendered

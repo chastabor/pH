@@ -34,7 +34,15 @@ from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import MountProfile, StubAgent, as_kind, not_none, run_tool, simple_tool
+from ph.testing import (
+    MountProfile,
+    StubAgent,
+    as_kind,
+    not_none,
+    run_tool,
+    simple_tool,
+    tool_runtime,
+)
 from ph.tools import ToolExecution
 from ph.tools.batch import execute_tool_calls
 from ph.tools.definition import (
@@ -45,9 +53,9 @@ from ph.tools.definition import (
 )
 from ph_stabilize.offload import (
     NUM_CHARS_PER_TOKEN,
-    SPILL_TOOLS_HINT,
     TOO_LARGE_TOOL_MSG,
     TOOL_TOKEN_LIMIT_BEFORE_EVICT,
+    UPSTREAM_TOO_LARGE_TOOL_MSG,
     Config,
     content_preview,
     oversized,
@@ -498,16 +506,23 @@ async def test_the_program_keeps_the_value_the_model_only_gets_a_pointer(
     assert TOO_LARGE in text_of(settled.content), "the model was sent the whole thing"
 
 
-async def test_the_replacement_says_the_file_can_be_searched(mount: MountProfile) -> None:
-    """The capability existed and nothing told the model about it.
+async def test_the_replacement_names_the_tools_this_deployment_actually_has(
+    mount: MountProfile,
+) -> None:
+    """Two faults in one sentence, and both were pH's own words.
 
     The upstream paragraph describes paging as the only way through, so a model
-    handed 40 MB reads it from the top — and it names `read_file`, which is not a
-    tool pH has: the readers here are `read`, `grep` and `glob`. Both are things
-    the verbatim block cannot say, which is why pH's sentence is appended rather
-    than folded in: the value of tracking that text verbatim is that an upgrade
-    produces a visible diff, and correcting the tool name in place would make the
-    next comparison lie.
+    handed 40 MB reads it from the top; and it names `read_file`, which is not a
+    tool pH has. The first fix appended a paragraph *retracting* the second —
+    "pH's reader is `read`, not the `read_file` the paragraph above names" —
+    which spends model attention correcting text pH itself emitted, and still
+    hardcodes a name list in the one package whose `self_limits` docstring argues
+    that a name list in another package cannot know what a deployment registered.
+
+    So the name is localized instead: the reader is whichever visible tool
+    declares `reads_paths`, the searchers are the ones declaring
+    `searches_paths`, and the upstream literal stays byte-identical and unsent so
+    an upgrade still produces a visible diff.
     """
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("hinted")
@@ -516,9 +531,37 @@ async def test_the_replacement_says_the_file_can_be_searched(mount: MountProfile
 
     said = model_text(event)
     assert TOO_LARGE in said, "the fixture did not offload"
-    assert SPILL_TOOLS_HINT in said
+    assert "read_file" not in said, "the model was sent a tool pH does not register"
+    assert "read tool" in said, "and was not told which one to use"
+    assert "`grep`" in said and "`glob`" in said, "searching was still not offered"
     # The path is in it, and the hint points at that path rather than at a
     # vocabulary the model has to map onto its own tools.
     (spilled,) = [one for one in session.events if one.type == "offload/spilled"]
     assert str(spilled.data["locator"]) in said
-    assert "grep" in said and "read_file" in said, "both halves of the correction"
+    # The tracked literal is untouched, which is the whole reason it is separate.
+    assert "read_file" in UPSTREAM_TOO_LARGE_TOOL_MSG
+
+
+def test_the_tools_named_are_the_ones_that_declared_themselves() -> None:
+    """The derivation, by declaration rather than by name.
+
+    A name list in this package cannot know what a deployment registered —
+    `ToolDefinition.reads_paths` says why — and the empty case is real: a
+    profile can disable the fs tools, where "use the  tool" is worse than not
+    naming one.
+
+    Asked of the registry, and of the row only for the wording: the tiebreak
+    ("which of several readers to name") is the row's, so the registry answers
+    with both sets whole.
+    """
+    ctx, runtime = tool_runtime()
+    tools = ctx.require(TOOLS)
+
+    assert tools.path_tools(scope=DEPLOYMENT) == ((), ())
+
+    runtime.register(simple_tool("peek", lambda _a, _r: "x", reads_paths=True))
+    runtime.register(simple_tool("hunt", lambda _a, _r: "x", searches_paths=True))
+    runtime.register(simple_tool("plain", lambda _a, _r: "x"))
+
+    # None of these three is called `read`, `grep` or `glob`.
+    assert tools.path_tools(scope=DEPLOYMENT) == (("peek",), ("hunt",))

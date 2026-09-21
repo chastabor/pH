@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Literal
 
 from textual.binding import Binding, BindingType
 
@@ -57,6 +58,21 @@ class TuiVerb:
     argument_hint: str = ""
     """What follows the name, when the verb takes something — shown in the
     palette row, and the reason `_RunAction` forwards the typed argument."""
+    work: Literal["replace", "queue"] | None = None
+    """How the body reaches the harness, or `None` if it never leaves the app (H7).
+
+    A verb that makes a wire call must not run on Textual's message pump, and
+    `verb_work` reads this to decide both halves: that it schedules at all, and
+    whether a second press supersedes the first (`replace`) or runs beside it
+    (`queue`). A picker replaces — pressing again means "I meant this one". A
+    verb with an effect queues: two `/attach` calls are two files, and
+    cancelling the first to honour the second drops one.
+
+    Declared here because this is where a verb already says what it is. Both
+    facts were hand-copied into a test file before, which is a new slow verb
+    answering the worker question in two places — the same argument
+    `ToolDefinition.self_limits` makes about name lists in another package.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,16 +133,33 @@ TUI_VERBS: tuple[TuiVerb, ...] = (
     TuiVerb("commands", "Browse every command.", "open_commands", "command_palette"),
     TuiVerb("model", "Choose the provider and model.", "open_models", "model_picker"),
     TuiVerb("theme", "Choose a color theme.", "open_themes", "theme_picker"),
-    TuiVerb("sessions", "Reopen a stored session.", "open_sessions", "session_picker"),
+    TuiVerb(
+        "sessions", "Reopen a stored session.", "open_sessions", "session_picker", work="replace"
+    ),
     TuiVerb("history", "Search the prompts you have sent.", "open_history", "history_search"),
     TuiVerb(
-        "permissions", "Change what pH may do without asking.", "open_presets", "permission_picker"
+        "permissions",
+        "Change what pH may do without asking.",
+        "open_presets",
+        "permission_picker",
+        work="replace",
     ),
-    TuiVerb("login", "Provide a provider credential for this process.", "open_login"),
+    TuiVerb(
+        "login",
+        "Provide a provider credential for this process.",
+        "open_login",
+        work="replace",
+    ),
     TuiVerb("view", "Show or hide part of the view.", "view", argument_hint=" | ".join(VIEWABLE)),
     TuiVerb("tools", "List what the model may call.", "list_tools"),
     TuiVerb("skills", "List the skills installed here.", "list_skills"),
-    TuiVerb("attach", "Attach files to the next prompt.", "attach", argument_hint="<path> …"),
+    TuiVerb(
+        "attach",
+        "Attach files to the next prompt.",
+        "attach",
+        argument_hint="<path> …",
+        work="queue",
+    ),
     TuiVerb("quit", "Leave pH.", "quit", "quit"),
 )
 

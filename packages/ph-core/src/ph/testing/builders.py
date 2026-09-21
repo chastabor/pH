@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
-from filelock import FileLock
 
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
@@ -25,6 +24,7 @@ from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..json import dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
+from ..locks import file_lock
 from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
 from ..persistence.lease import lease_path
 from ..seams.skills import SkillService
@@ -501,7 +501,7 @@ def hold_session(root: Path, session_id: str) -> Iterator[Path]:
     A test that spells the layout locks the wrong file the moment the layout
     moves, and then tests nothing while still passing.
     """
-    with FileLock(lease_path(root, session_id), thread_local=False):
+    with file_lock(lease_path(root, session_id), timeout=-1, what="the session lease"):
         yield stored_log(root, session_id)
 
 

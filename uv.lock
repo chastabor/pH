@@ -22,6 +22,7 @@ members = [
 [manifest.dependency-groups]
 dev = [
     { name = "anyio", specifier = ">=4.4,<5" },
+    { name = "filelock", specifier = ">=3.15" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "ph-core", extras = ["otel"], editable = "packages/ph-core" },
     { name = "ph-text-index", extras = ["local"], editable = "packages/ph-text-index" },
@@ -1441,7 +1442,6 @@ version = "0.2.0"
 source = { editable = "packages/ph-rlm" }
 dependencies = [
     { name = "dill" },
-    { name = "filelock" },
     { name = "ph-core" },
     { name = "ph-runtime-guest" },
 ]
@@ -1449,7 +1449,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dill", specifier = ">=0.3.8" },
-    { name = "filelock", specifier = ">=3.15" },
     { name = "ph-core", editable = "packages/ph-core" },
     { name = "ph-runtime-guest", editable = "packages/ph-runtime-guest" },
 ]
@@ -1517,7 +1516,6 @@ version = "0.2.0"
 source = { editable = "packages/phern" }
 dependencies = [
     { name = "anyio" },
-    { name = "filelock" },
     { name = "httpx" },
     { name = "ph-code-graph" },
     { name = "ph-core" },
@@ -1545,7 +1543,6 @@ web = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.4,<5" },
-    { name = "filelock", specifier = ">=3.15" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "ph-code-graph", editable = "packages/ph-code-graph" },
     { name = "ph-core", editable = "packages/ph-core" },

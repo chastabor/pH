@@ -36,16 +36,17 @@ from __future__ import annotations
 
 import logging
 import shlex
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, ParamSpec, cast
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.timer import Timer
+from textual.worker import Worker
 
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
@@ -59,7 +60,7 @@ from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
-from .commands import VIEW_USAGE, VIEWS, app_bindings
+from .commands import TUI_VERBS, VIEW_USAGE, VIEWS, app_bindings
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
 from .frontend import FrontSession
 from .modals.approval import ApprovalModal
@@ -95,6 +96,38 @@ from .widgets.transcript import TranscriptView
 __all__ = ["PHTuiApp", "run_tui"]
 
 log = logging.getLogger("ph_app.tui.app")
+
+_P = ParamSpec("_P")
+
+VERB_GROUP = "verb"
+"""The worker-group prefix a verb's harness call runs under.
+
+Named because three places agree on it: `verb_work` below, the gate that
+asserts every slow verb carries it, and the pilot tests that wait for one to
+finish rather than pausing and hoping."""
+
+
+def verb_work(
+    verb: str,
+) -> Callable[[Callable[_P, Coroutine[Any, Any, None]]], Callable[_P, Worker[None]]]:
+    """`@work` for a verb that has to reach the harness (H7), read off its row.
+
+    **The policy is `TuiVerb.work`, not an argument here.** Both halves — that
+    this verb schedules at all, and whether a second press supersedes the first
+    — are facts about the verb, and `TUI_VERBS` is where a verb already says
+    what it is. Spelled at the decorator they were a second copy for a new verb
+    to get wrong, and a test had to assert the two agreed.
+
+    **A group per verb, which is what makes `replace` safe.** One shared group
+    with `exclusive=True` would mean opening the session picker cancels an
+    in-flight `/attach` — a different verb's work, and in that case an
+    attachment the person asked for and silently does not get.
+    """
+    row = next((one for one in TUI_VERBS if one.name == verb), None)
+    if row is None or row.work is None:  # pragma: no cover - the gate refuses it
+        raise ValueError(f"{verb!r} is not a verb declaring `work`")
+    return work(group=f"{VERB_GROUP}:{row.name}", exclusive=row.work == "replace")
+
 
 ANSWERED_ELSEWHERE = "Answered in another terminal."
 """Why a modal went away by itself — the ordinary reason, and the default."""
@@ -575,6 +608,7 @@ class PHTuiApp(App[str | None]):
             log.exception("ph_app.tui: a shell command failed to start")
             self.notify(str(error), title="shell", severity="error", markup=False)
 
+    @verb_work("attach")
     async def action_attach(self, argument: str = "") -> None:
         """`/attach <path> …` — stage files for the next prompt.
 
@@ -839,6 +873,7 @@ class PHTuiApp(App[str | None]):
         self.notify(f"{front.state.provider}/{front.state.model}", title="model", markup=False)
         self.state_changed()
 
+    @verb_work("sessions")
     async def action_open_sessions(self) -> None:
         """Which sessions exist — one question, asked of the harness.
 
@@ -937,6 +972,7 @@ class PHTuiApp(App[str | None]):
         # Chosen or canceled, the theme in force is the one the profile names.
         self.theme = self.catalog.resolve(self.theme_profile.chosen).name
 
+    @verb_work("permissions")
     async def action_open_presets(self) -> None:
         """Ask the daemon which postures there are, then offer them."""
         front = self.front
@@ -954,13 +990,15 @@ class PHTuiApp(App[str | None]):
         front.set_preset(name)
         self.state_changed()
 
+    @verb_work("login")
     async def action_open_login(self) -> None:
         """Ask the harness what it holds, then offer the list.
 
-        `async` for the reason `action_attach` is: the answer is a wire call when
-        the harness is a daemon, and `credential_held` is synchronous — so the
-        asking has to happen before the picker is built, and only an awaiting
-        caller can do it.
+        The asking has to happen before the picker is built — the answer is a
+        wire call when the harness is a daemon, and `credential_held` is
+        synchronous — so somebody has to await it. That is an argument about
+        *ordering*, and it used to settle *who owns the pump* as a side effect,
+        because `async def action_*` is the only shape Textual offers.
         """
         front = self.front
         if front is None:

@@ -315,10 +315,15 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
 
 
 async def _ask_question(root: Root) -> str | None:
-    """One question through the seam, exactly as `ask_user` puts it."""
-    return await root.ctx.require(USER_QUESTIONS).ask(
+    """One question through the seam, exactly as `ask_user` puts it.
+
+    Flattened back to the answer, because every caller here is about the
+    *transport* reaching a front end; which of the four ways it can end is
+    `test_ask_user`'s subject."""
+    outcome = await root.ctx.require(USER_QUESTIONS).ask(
         UserQuestion(question="which port?", ask_id="call-1"), session=root.session
     )
+    return outcome.answer
 
 
 async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Path) -> None:

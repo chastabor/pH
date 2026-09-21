@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from filelock import FileLock, Timeout
+from ..locks import LockBusy, file_lock
 
 __all__ = ["INDEX_NAME", "Appointment", "ScheduleIndex"]
 
@@ -179,7 +179,7 @@ class ScheduleIndex:
         if next_at is not None and settled is not None and settled.next_at == next_at:
             return
         try:
-            with FileLock(f"{self.path}.lock", timeout=_LOCK_TIMEOUT, thread_local=False):
+            with file_lock(f"{self.path}.lock", timeout=_LOCK_TIMEOUT, what="the schedule index"):
                 found = self.read()
                 current = found.get(session_id)
                 if next_at is None:
@@ -191,7 +191,7 @@ class ScheduleIndex:
                         return
                     found[session_id] = Appointment(session_id, next_at, now)
                 self._write(found)
-        except Timeout:
+        except LockBusy:
             log.warning("ph.seams.schedule_index: %s is locked; not recording", self.path)
         except OSError:
             log.warning("ph.seams.schedule_index: could not write %s", self.path, exc_info=True)

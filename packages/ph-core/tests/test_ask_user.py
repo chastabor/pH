@@ -18,18 +18,19 @@ claim, not a tidiness problem, which is why the check is here and not in the UI.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, get_args
 
 import anyio
 import pytest
 
+from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, TOOLS, USER_QUESTIONS
 from ph.llm.types import text_of
-from ph.seams.user_questions import UserQuestion, pending_questions
+from ph.seams.user_questions import AskResolution, UserQuestion, pending_questions
 from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
-from ph.tools.builtin.ask_user import DECLINED, UNATTENDED
+from ph.tools.builtin.ask_user import DECLINED, FAILED, UNATTENDED, _rendered
 
 pytestmark = pytest.mark.anyio
 
@@ -285,3 +286,99 @@ async def test_the_ask_id_is_the_call_id_the_rest_of_the_log_already_uses(
     assert [one.data.get("askId") for one in session.events if one.type == "question/answered"] == [
         "call-abc"
     ]
+
+
+async def test_a_canceled_ask_is_not_reported_as_somebody_declining(mount: MountProfile) -> None:
+    """The false story K7 left behind, now gone.
+
+    `ask` returns without delivering when its cancellation is already tripped,
+    and it returned the same `None` as every other failure. The tool told the
+    endings apart by sampling `questions.attended` — which is still `True` here,
+    because a front end *is* attached; nobody was asked, it just never got that
+    far. So a cancelled ask rendered as `DECLINED`: "the question reached
+    somebody and they did not answer it", about a person never shown it.
+
+    Asked of the seam rather than through the tool because that is where the
+    window is: a call whose token is *already* tripped is refused before dispatch
+    ("aborted before dispatch"), so the only way `ask` sees one is a cancel
+    landing between dispatch and the ask. `_rendered` below pins the other half.
+
+    Sabotage: fold `canceled` back into `unattended` or `declined` in `ask` and
+    the resolution assertion fails.
+    """
+    ctx = await mount(ROW)
+    session = ctx.require(SESSIONS).create("canceled")
+    seen: list[UserQuestion] = []
+    questions = ctx.require(USER_QUESTIONS)
+    questions.register_answerer(_answering("yes", seen))
+    stopped = CancelToken()
+    stopped.cancel()
+
+    outcome = await questions.ask(
+        UserQuestion(question="which port?", ask_id="q-1"), session=session, cancel=stopped
+    )
+
+    assert questions.attended, "the guess this replaces read attendance, and it is True here"
+    assert outcome.resolution == "canceled"
+    assert outcome.answer is None
+    assert seen == [], "the question was put to an answerer anyway"
+    # And nothing was written: an ask that never reached anybody never happened.
+    assert session.latest("question/asked") is None
+    assert pending_questions(session.events) == []
+
+
+def test_every_way_a_question_can_end_reads_as_itself() -> None:
+    """One sentence per resolution, and four distinct ones.
+
+    The table is the point: `canceled` used to share `DECLINED`'s wording and
+    `failed` used to share it too, so two of the four endings told the model
+    something that had not happened. Asserting they are distinct is what stops a
+    future resolution being added with a borrowed sentence.
+    """
+    # Walked off the `Literal` rather than listed: `_SENTENCES` is a plain dict
+    # and nothing checks it covers the closed set, so a resolution added without
+    # a sentence would fall through `.get` to `UNATTENDED` and say the wrong
+    # thing quietly. This is what notices.
+    endings = [one for one in get_args(AskResolution) if one != "answered"]
+    said = {one: _rendered({"outcome": one, "answer": None}) for one in endings}
+
+    # Not compared against the constants themselves — that is `_SENTENCES`
+    # against `_SENTENCES`, and it cannot fail. What matters is that the four
+    # endings read as four different things, and that each says its own.
+    assert len(set(said.values())) == len(endings), "two endings share a sentence"
+    assert "canceled" in said["canceled"]
+    assert "could not be delivered" in said["failed"]
+    assert "Nobody is attending" in said["unattended"]
+    assert "reached somebody" in said["declined"]
+    assert _rendered({"outcome": "answered", "answer": "8080"}) == "8080"
+
+
+async def test_an_answerer_that_raises_is_not_reported_as_nobody_there(
+    mount: MountProfile,
+) -> None:
+    """ "There is nobody there" and "something here is broken" are different facts.
+
+    Both folded into `None`, and the attendance guess called this one `DECLINED`
+    too — a person declining, when what happened is that the harness failed while
+    asking. The log still closes the pair, which is the half that was already
+    right.
+    """
+    ctx = await mount(ROW)
+    session = ctx.require(SESSIONS).create("raising")
+
+    async def broken(_question: UserQuestion, _next: object = None) -> str:
+        raise RuntimeError("the front end fell over")
+
+    ctx.require(USER_QUESTIONS).register_answerer(broken)
+
+    result = await _ask(ctx, session)
+
+    assert text_of(result.content) == FAILED
+    answered = session.latest("question/answered")
+    assert answered is not None
+    # The log says which kind of not-answered, because the transcript renders
+    # it: `declined` alone reads as "No answer given" about a person who was
+    # never shown the question.
+    assert answered.data.get("resolution") == "failed"
+    assert answered.data.get("declined") is True, "older readers still fold on this"
+    assert pending_questions(session.events) == [], "the pair still closes"

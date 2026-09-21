@@ -38,12 +38,12 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-from filelock import FileLock
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
 from ph.json import dumps
 from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
+from ph.locks import file_lock
 from ph.paths import write_text_under
 from ph.session import Session, SessionFoldCache
 
@@ -361,10 +361,9 @@ class HarnessService:
         refinements at once two records rather than one torn line. Held for the
         append alone — a reader folds whatever complete lines it finds.
         """
-        # The directory must exist before FileLock can create its lock file.
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / GLOBAL_LOG_NAME
-        with FileLock(str(path.with_suffix(".lock")), timeout=30):
+        with file_lock(path.with_suffix(".lock"), timeout=30, what="the harness log"):
             write_text_under(path, f"{dumps(record.to_wire())}\n", append=True)
         self._global_cache = None
 

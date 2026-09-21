@@ -21,6 +21,7 @@ __all__ = [
     "brief_value",
     "count_of",
     "duration",
+    "redacted_marker",
     "thousands",
     "truncation_marker",
 ]
@@ -45,6 +46,21 @@ def block_marker(kind: str) -> str:
     inline, and one of them already says something else.
     """
     return f"[{kind}]"
+
+
+def redacted_marker() -> str:
+    """What stands in for reasoning the provider encrypted (G8).
+
+    A `redacted_thinking` block carries ciphertext only the provider can read,
+    and it is still a `ReasoningBlock` — so every renderer that shows `block.text`
+    showed a wall of base64 as something the assistant had said. Named here
+    rather than spelled at each renderer for `block_marker`'s reason: the three
+    that show reasoning to a person owe the same answer. Built *from*
+    `block_marker` rather than beside it — a sixth inline `f"[{kind}]"` three
+    lines under the function whose docstring counts the five that preceded it
+    would be a joke at its expense.
+    """
+    return block_marker("redacted reasoning")
 
 
 def brief_value(value: JsonValue, *, nested: bool = False) -> str:

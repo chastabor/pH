@@ -30,7 +30,7 @@ from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
 
-__all__ = ["SpillClaim", "SpillRef", "SpillStore", "apply"]
+__all__ = ["SpillClaim", "SpillRef", "SpillStore", "apply", "handed_paths_of"]
 
 log = logging.getLogger("ph.seams.spill")
 
@@ -79,11 +79,25 @@ class SpillClaim:
     owners: Callable[[Session], Iterable[str]] = lambda _session: ()
     locator: Callable[[Mapping[str, Any]], str | None] = _plain_locator
     owner: Callable[[Mapping[str, Any]], str | None] = lambda _data: None
+    hands_paths: bool = False
+    """Whether this producer's locator is put in front of the model to follow.
+
+    `tool-result-offload` and `input-offload` replace content with a preview and
+    the path it was written to, so a read of that path is the model following
+    something the harness handed it — see `handed_paths_of`, which folds this.
+    A kernel snapshot is *not*: nothing shows the model where it went, and a
+    producer that has to say so is the extension point the seam already has.
+    """
 
     @classmethod
-    def under_session(cls, label: str, event_type: str) -> SpillClaim:
+    def under_session(cls, label: str, event_type: str, *, hands_paths: bool = False) -> SpillClaim:
         """A producer writing under `session.id` whose events carry `locator`."""
-        return cls(label=label, event_type=event_type, owners=lambda session: {session.id})
+        return cls(
+            label=label,
+            event_type=event_type,
+            owners=lambda session: {session.id},
+            hands_paths=hands_paths,
+        )
 
 
 @dataclass(slots=True)
@@ -93,6 +107,25 @@ class SpillStore:
     ctx: Context
     root: Path
     _claims: list[SpillClaim] = field(default_factory=list)
+
+    @property
+    def claims(self) -> tuple[SpillClaim, ...]:
+        """What producers have contributed, for a caller that folds them.
+
+        A tuple rather than the list, for `sweep_session`'s reason one method
+        down: a claim registered while a fold is running must not change the
+        fold under it."""
+        return tuple(self._claims)
+
+    def owner_root(self, owner: str) -> Path:
+        """Where one owner's blobs live. The other half of the naming rule.
+
+        `locator_for` derives a whole path; a caller that has to answer "is this
+        path one of yours" needs the directory, and reconstructing `root / owner`
+        outside this class is how the two spellings drift. `permissions-fs` is
+        that caller.
+        """
+        return self.root / owner
 
     def locator_for(self, *, owner: str, suggested_name: str, content: bytes) -> Path:
         """Where `content` will be written — derived, not written.
@@ -104,7 +137,7 @@ class SpillStore:
         """
         digest = hashlib.sha256(content).hexdigest()[:16]
         safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
-        return self.root / owner / f"{digest}-{safe}"
+        return self.owner_root(owner) / f"{digest}-{safe}"
 
     async def save_bytes(
         self, *, owner: str, source: str, suggested_name: str, content: bytes
@@ -270,7 +303,7 @@ class SpillStore:
         it cost. What is left behind instead is the leak this module's
         `SpillClaim` already describes, one file per run that died mid-write.
         """
-        claims = tuple(self._claims)
+        claims = self.claims
 
         def run() -> list[str]:
             owners: set[str] = set()
@@ -295,7 +328,7 @@ class SpillStore:
                         owners.add(owner)
             removed: list[str] = []
             for owner in sorted(owners):
-                directory = self.root / owner
+                directory = self.owner_root(owner)
                 for completed in _complete_staged(directory, referenced):
                     log.info("ph.seams.spill: completed an interrupted write of %s", completed)
                 removed.extend(_remove_unreferenced(directory, referenced))
@@ -367,6 +400,44 @@ class Config(WireModel):
     """Row config for the local spill store."""
 
     root: str | None = None
+
+
+def handed_paths_of(ctx: Context, *, session: Session | None) -> tuple[Path, ...]:
+    """Paths this session was handed and may follow, asked of a seam that may not
+    be mounted.
+
+    The twin of `ph.seams.sandbox.allowed_paths_of`, and deliberately a different
+    set: that one is "where the backend binds writes", this one is "what the
+    harness put in front of the model to read". `tool-result-offload` replaces an
+    oversized result with a preview and the file it was written to, so a rule
+    refusing reads outside the workspace would hand the model a path and then
+    refuse it when it followed it — the harness telling it something is on disk
+    and then denying it.
+
+    **Folded from the claims, not assumed.** The first cut answered
+    `root/<session id>` for every mounted deployment, which made the set a
+    property of the layout instead of of what any row actually does. Three
+    producers put a locator in front of the model — both offloads and the
+    compaction history — and each says so where it already declares everything
+    else. A producer whose owner is *not* the session id would be picked up too,
+    though none is today: `ph_rlm.snapshot`'s owner is per-event
+    (`kernel/<namespace>`), so it contributes nothing here whatever it declares,
+    and it is right not to — nothing shows the model where a snapshot went.
+
+    Still this session's own directories and not the store: a locator is
+    `root/<owner>/…`, so answering with `root` would let any agent read every
+    other session's spilled results.
+
+    Empty without a session, and empty without a store: a caller with neither was
+    handed nothing.
+    """
+    store = ctx.get(SPILL_STORE)
+    if store is None or session is None:
+        return ()
+    owners = {
+        owner for claim in store.claims if claim.hands_paths for owner in claim.owners(session)
+    }
+    return tuple(store.owner_root(one) for one in sorted(owners))
 
 
 @plugin("spill-local", config=Config)

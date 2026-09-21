@@ -43,6 +43,7 @@ import sys
 import time
 import traceback
 from contextvars import ContextVar
+from functools import partial
 from types import FrameType
 from typing import Any
 
@@ -193,8 +194,11 @@ class Runner:
         fallbacks for the ways settling can itself fail. A task cancelled
         *before its first line* runs none of them: `create_task` only schedules,
         so `run` and `cancel` arriving in one read chunk cancels a coroutine
-        that never entered its own `try`. `_abort_run` reads this and answers for
-        it."""
+        that never entered its own `try`.
+
+        Cleared by `_send_done` and read by `_answer_if_owed`, which the task
+        itself calls on the way out — so this is a fact the run's completion
+        checks, not one each exit path has to remember."""
         self._cpu_exceeded = False
         """Set by the `SIGXCPU` handler, read by `_execute`'s cancellation arm.
 
@@ -315,9 +319,18 @@ class Runner:
             )
             return
         self._owed = run_id
-        self._run = asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             self._execute(run_id, as_str(frame.get("program")))
         )
+        # **Every way this task can stop, covered by one line.** Cancelled before
+        # its first statement, cancelled mid-settle, killed by a `BaseException`
+        # above `_execute`'s own `try` — `arm_cpu_budget`, `_CappedStream`,
+        # `_RUN.set` are all outside it — or stopped by an exit path added later.
+        # The alternative is what this replaces: a check at the one caller that
+        # happened to know, which `_abort_run` could not even reach for a task
+        # that had already finished without settling.
+        task.add_done_callback(partial(self._answer_if_owed, run_id))
+        self._run = task
 
     def _resolve(self, frame: dict[str, Any]) -> None:
         call_id = frame.get("id")
@@ -344,19 +357,56 @@ class Runner:
         run = self._run
         if run is None or run.done():
             return
+        owed = self._owed
         run.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await run
-        if self._owed is not None:
-            # **The run never reached its own `finally`** (F7). `create_task`
-            # schedules rather than starts, so `run` and `cancel` in one read
-            # chunk cancels a coroutine whose body never ran — no `try`, no
-            # `_settle`, and none of the two fallbacks `_execute` carries for
-            # exactly this promise. The host waits for `done` with no wall clock
-            # of its own, so the kernel wedges until a person cancels it.
-            self._send_done(
-                self._owed, {"error": {"kind": "aborted", "message": "the run was canceled"}}
-            )
+        # **Answered here too, and that is not a double-settle.** The callback is
+        # scheduled through `call_soon`, so leaving it to fire would make this
+        # method return with the run *not* yet settled — a contract it used to
+        # keep, and one the host relies on. `_answer_if_owed` is idempotent
+        # because `_send_done` clears `_owed`, so whichever runs second does
+        # nothing. The callback stays as the answer for every path that does not
+        # come through here at all.
+        if owed is not None:
+            self._answer_if_owed(owed, run)
+
+    def _answer_if_owed(self, run_id: int, task: asyncio.Task[None]) -> None:
+        """Settle a run that ended without settling itself (F7).
+
+        **Bound to the run, not to whatever `_owed` says now.** `_begin`'s guard
+        is `self._run.done()`, which is already true for a task whose callback
+        has not fired — `add_done_callback` schedules through `call_soon`. So a
+        task that finished without settling could be followed by a new `run`
+        frame, and the *stale* callback would then send `done` for the run that
+        had just started: reported finished before its first statement, and
+        never settleable after. The id makes the callback answer only for its
+        own run.
+
+        The host waits for `done` with no wall clock of its own, so a run that
+        stops without sending one wedges the kernel until a person cancels it.
+        `_execute` sends the frame on every path it controls; this covers the
+        ones it does not — a cancellation that lands before its first statement
+        (`create_task` schedules rather than starts, so `run` and `cancel` in one
+        read chunk cancels a coroutine whose body never ran) and anything raised
+        outside its own `try`.
+
+        A no-op in the ordinary case, because `_send_done` has already cleared
+        `_owed`.
+        """
+        if self._owed != run_id:
+            return
+        if task.cancelled():
+            error = {"kind": "aborted", "message": "the run was canceled"}
+        elif (raised := task.exception()) is None:
+            # `exception()` is safe here: the cancelled case returned above.
+            error = {"kind": "aborted", "message": "the run ended without settling"}
+        else:
+            error = {
+                "kind": type(raised).__name__,
+                "message": f"the run ended without settling: {raised!r}",
+            }
+        self._send_done(run_id, {"error": error})
 
     # ------------------------------------------------------------ dispatch --
 

@@ -31,7 +31,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ph.json import JsonObject, JsonValue, as_obj, as_seq, as_str
-from ph.text import brief_value
+from ph.text import brief_value, redacted_marker
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
@@ -77,7 +77,12 @@ def text_of_wire(
             continue
         block_kind = block.get("type")
         if block_kind == kind:
-            parts.append(as_str(block.get("text")))
+            # A redacted reasoning block's `text` is the provider's ciphertext,
+            # not prose (G8). Answered here rather than at each caller for the
+            # reason this function exists: it and `ph.llm.types.text_of` are one
+            # behavior described twice, and a branch at the call site would make
+            # it three.
+            parts.append(redacted_marker() if block.get("redacted") else as_str(block.get("text")))
         elif placeholder is not None and isinstance(block_kind, str):
             parts.append(placeholder(block_kind))
     return "\n".join(parts)

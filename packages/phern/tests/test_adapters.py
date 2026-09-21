@@ -806,7 +806,11 @@ def test_a_thinking_block_keeps_its_signature_through_the_round_trip() -> None:
     )
     block = as_kind(chunks[-1], BlockEnd).block
     assert isinstance(block, ReasoningBlock)
-    assert (block.text, block.signature) == ("hm", "sig")
+    # Opaque state, not a named field: the key is the adapter's, and only it
+    # reads one — which is what keeps Gemini's and OpenAI's equivalents off the
+    # neutral type.
+    assert block.text == "hm"
+    assert block.provider_state == {"signature": "sig"}
 
     # And it goes back out with the block, which is the half the wire refuses
     # without.

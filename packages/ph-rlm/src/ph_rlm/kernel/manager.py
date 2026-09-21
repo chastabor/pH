@@ -65,7 +65,7 @@ from ph.seams.code_runtime import (
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy, SandboxSeam
-from ph.seams.subprocess import first_line, scrub_env
+from ph.seams.subprocess import first_line, scrub_env, signal_group
 from ph.seams.workspace import Workspace, workspace_of, workspace_policy
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
@@ -321,6 +321,11 @@ class Kernel:
     _scanned: int = 0
     """How much of `_buffer` has already been searched for a frame boundary, so
     a large frame is scanned once rather than once per chunk."""
+    _guest_pgid: int | None = None
+    """The guest's process group, read at spawn while it is provably alive.
+
+    `getpgid` stops answering once the child is reaped, and the teardown sweep
+    runs after that — so the id has to be captured rather than asked for."""
     _boot_noise: bytearray = field(default_factory=bytearray)
     """Whatever the child wrote to fd 1/2 before it acked (F7). Read while boot
     waits, so a guest cannot block on a full pipe — and quoted by `_boot_said`
@@ -379,6 +384,22 @@ class Kernel:
                 env=environ,
                 cwd=str(self.cwd) if self.cwd is not None else None,
                 pass_fds=(child_fd,),
+                # **A session of its own, whatever confines it** (J9). This is
+                # the one pH child that does not go through `ph.seams.subprocess`
+                # — which sets the same flag for everything it launches — and it
+                # is the child that most needs it: it executes model-authored
+                # cells, so a cell could `open("/dev/tty")` and reach the
+                # person's terminal directly, or push characters back into it
+                # with `TIOCSTI`, both of which require the *controlling*
+                # terminal that `setsid()` takes away.
+                #
+                # Stated here rather than only as bwrap's `--new-session`,
+                # because that argv element closes the hole on exactly one of
+                # three configurations: Seatbelt has no equivalent, and a
+                # deployment with no sandbox backend got nothing at all. The
+                # bwrap flag stays as belt-and-braces for a `ConfinedArgv`
+                # somebody else spawns.
+                start_new_session=True,
             )
         finally:
             # Closed in the parent either way: held open, the parent would never
@@ -388,6 +409,14 @@ class Kernel:
         host_end.setblocking(False)
         self._sock = host_end
         self._alive = True
+        # **Recorded now, because later is too late.** The sweep in `_teardown`
+        # runs after `await process.wait()`, where `getpgid` no longer answers;
+        # the pid is the group only because `start_new_session` made this child
+        # a session leader, and reading it here — while it is provably alive —
+        # is what keeps that true rather than assumed. A pid is not reused while
+        # it is still the pgid of a live group, so a later `killpg` on this
+        # number either reaches our group or fails `ESRCH`.
+        self._guest_pgid = self._process.pid
         pid = self._process.pid
         if pid is not None and self.journal is not None:
             # What is actually running, wrapper included: the journal verifies an
@@ -752,11 +781,27 @@ class Kernel:
             with suppress(ProcessLookupError, OSError):
                 process.send_signal(signal.SIGINT)
 
+    def _kill_group(self, process: anyio.abc.Process, *, reaped: bool = False) -> None:
+        """Kill the guest **and whatever it started** (J9).
+
+        `signal_group` is where the pairing is argued: `start_new_session` alone
+        leaves a cell's subprocess in a session nothing signals.
+
+        `reaped` picks which group id to use, and the default is the better one.
+        While the guest is alive `getpgid` is authoritative — a child that called
+        `setpgid` on itself is no longer in the group its pid names. Once it has
+        been waited on, `getpgid` stops answering and the only id left is the pid
+        it was spawned with, which is its group because a session leader's is.
+        """
+        if signal_group(process.pid, kill=True, group=self._guest_pgid if reaped else None):
+            return
+        with suppress(ProcessLookupError, OSError):
+            process.kill()
+
     async def _kill_unresponsive(self, active: _ActiveRun) -> None:
         process = self._process
         if process is not None and process.returncode is None:
-            with suppress(ProcessLookupError, OSError):
-                process.kill()
+            self._kill_group(process)
         # Settled before the teardown, because the teardown is what wakes the
         # pump: `_teardown` closes the channel, `_recv_line` returns `None`,
         # and `_on_closed` would otherwise be the first writer with a vaguer
@@ -1041,14 +1086,20 @@ class Kernel:
             with anyio.CancelScope(deadline=until):
                 await process.wait()
             if process.returncode is None:
-                with suppress(ProcessLookupError, OSError):
-                    process.kill()
+                self._kill_group(process)
         self._alive = False
         if process is not None:
             # A child that exited while the parent lives and is never reaped is a
             # zombie; this is the `finally` that prevents one (F4).
             with suppress(Exception):
                 await process.wait()
+            # **And whatever the guest started, on this path too** (J9). A clean
+            # shutdown orphans a cell's subprocess exactly as thoroughly as a
+            # kill does — the guest exits, its session outlives it, and nothing
+            # else is looking. Swept after the reap because the group id used
+            # here is the one captured at spawn, since the reap above has taken
+            # `getpgid`'s answer away.
+            self._kill_group(process, reaped=True)
             if process.pid is not None and self.journal is not None:
                 self.journal.forget(process.pid)
         if self._sock is not None:
@@ -1441,9 +1492,14 @@ async def apply(ctx: Context, config: Config) -> None:
     at every start, the second pass a no-op over the first's output, each behind
     its own thread hop. `subprocess-local` is in `base.yaml` and therefore always
     mounted, so it owns the sweep; this row keeps its own handle because the
-    guest is spawned with `pass_fds`, which `SubprocessSpawnSpec` cannot express
-    — so the kernel journals through `ph.orphans` directly while sharing the
-    ledger and the sweep.
+    guest cannot be spawned through that seam at all — `spawn` passes
+    `stdin=None`, i.e. *inherit*, and handing the process that runs
+    model-authored cells a descriptor on the person's terminal is the opposite
+    of what J9 is for. (Not `pass_fds`, which an earlier version of this
+    sentence blamed: `anyio.open_process` takes it and the spec could forward
+    it, so that reading invited exactly the change this rules out.) The kernel
+    journals through `ph.orphans` directly while sharing the ledger and the
+    sweep.
     """
     roots = resolve_roots()
     journal = host_journal()

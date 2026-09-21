@@ -20,6 +20,7 @@ guest-level one and this is where it can be opened deliberately.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest
@@ -106,3 +107,69 @@ async def test_a_run_that_settled_is_not_settled_twice() -> None:
     assert done[0]["id"] == 3
     assert done[0].get("error") is None
     assert done[0]["value"] == 2
+
+
+async def test_a_run_that_dies_above_its_own_guards_still_sends_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hole `_abort_run` could not reach, and the reason this hangs off the task.
+
+    `_execute` reports through a `finally` and carries a second catch around the
+    settle, but both live *inside* its own `try`. Anything raised before that —
+    `arm_cpu_budget`, building the capped streams, `_RUN.set` — leaves the task
+    `done()` with `_owed` still set, and the old check was in `_abort_run` behind
+    an early `if run is None or run.done(): return`. So the one class of failure
+    the bookkeeping could not answer for was a task that finished *without*
+    settling: the kernel then waits for a frame nobody will send.
+
+    Sabotage: drop `task.add_done_callback(self._answer_if_owed)` from `_begin`
+    and no terminal frame is sent at all.
+    """
+
+    def exploding(_seconds: int) -> None:
+        raise RuntimeError("the budget could not be armed")
+
+    monkeypatch.setattr("ph_runtime.runner.arm_cpu_budget", exploding)
+    runner, channel = _runner([{"type": "run", "id": 11, "program": "1 + 1"}])
+
+    await asyncio.wait_for(runner.serve(), timeout=5)
+    assert runner._run is not None
+    with contextlib.suppress(RuntimeError):
+        await asyncio.wait_for(runner._run, timeout=5)
+    # The callback is scheduled with `call_soon`, so it lands on the next tick.
+    await asyncio.sleep(0)
+
+    done = [frame for frame in channel.sent if frame.get("type") == "done"]
+    assert len(done) == 1, "a run ended without settling and the host was never told"
+    assert done[0]["id"] == 11
+    assert done[0]["error"]["kind"] == "RuntimeError"
+    assert "could not be armed" in done[0]["error"]["message"]
+
+
+async def test_a_stale_callback_cannot_settle_the_run_that_followed_it() -> None:
+    """The callback answers for its own run, not for whatever is owed now.
+
+    `add_done_callback` fires through `call_soon`, and `_begin`'s guard is
+    `self._run.done()` — already true for a task whose callback has not fired.
+    So a run that ended without settling could be followed by a new `run` frame,
+    and the stale callback would then send `done` for the run that had *just
+    started*: the host marks it finished before its first statement, and nothing
+    can settle it afterwards.
+
+    Sabotage: have `_answer_if_owed` read `self._owed` instead of comparing it
+    to the run it was created for, and the second run is settled here.
+    """
+    runner, channel = _runner([])
+
+    async def nothing() -> None:
+        return None
+
+    finished = asyncio.get_running_loop().create_task(nothing())
+    await finished
+    # Run 1 ended without settling; run 2 has since been accepted.
+    runner._owed = 2
+
+    runner._answer_if_owed(1, finished)
+
+    assert channel.sent == [], "a finished run settled its successor"
+    assert runner._owed == 2, "and cleared what that successor still owes"

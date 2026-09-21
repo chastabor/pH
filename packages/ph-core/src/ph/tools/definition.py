@@ -521,6 +521,24 @@ class ToolDefinition:
     result inline: a model that hit this tool's own cap already knows how to ask
     for the next page, so spending a spill file to tell it again teaches nothing.
     """
+    reads_paths: bool = False
+    """Given an absolute path, this tool returns the file's contents, and it can
+    page through a large one.
+
+    Declared rather than matched by name, for `self_limits`' reason one field up:
+    a deployment renames its tools and an MCP server adds its own, so a name list
+    in another package cannot know. Read by `ph-stabilize`'s offload row, whose
+    replacement text has to tell the model *how* to reach a spilled result —
+    upstream's wording says `read_file`, which is not a tool pH has, and pH was
+    appending a paragraph to correct it rather than naming the tool that exists.
+    """
+    searches_paths: bool = False
+    """Given a path, this tool searches inside it rather than returning it whole.
+
+    The other half of what the offload replacement needs to say: a spilled result
+    is an ordinary file, and searching one is usually better than paging through
+    it — but only a tool that takes a path as its root can do that.
+    """
     arguments_disposable: bool = False
     """The model does not need to re-read this call's arguments.
 
@@ -668,6 +686,8 @@ def define_tool[A: BaseModel](
     finalize_content: Callable[..., Sequence[ContentBlock] | None] | None = None,
     timeout_ms: int | None = None,
     self_limits: bool = False,
+    reads_paths: bool = False,
+    searches_paths: bool = False,
     arguments_disposable: bool = False,
     effects_confined_to_workspace: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
@@ -722,6 +742,8 @@ def define_tool[A: BaseModel](
         finalize_content=finalize_content,
         timeout_ms=timeout_ms,
         self_limits=self_limits,
+        reads_paths=reads_paths,
+        searches_paths=searches_paths,
         arguments_disposable=arguments_disposable,
         effects_confined_to_workspace=effects_confined_to_workspace,
         is_concurrency_safe=_classifier(is_concurrency_safe),

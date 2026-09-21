@@ -58,7 +58,6 @@ dependencies = [
     # `anyio` directly at 20-odd sites and `cancelsafe` is keyed to its
     # internals, so arriving here transitively understated the coupling.
     "anyio>=4.4,<5",
-    "filelock>=3.15",
     # Declared although `ph-core` already requires it, for `anyio`'s reason above:
     # `ph_app` imports `yaml` directly — `cli.py` to print a composed profile, and
     # `tui.themes` to write `$PH_HOME/themes/theme-profile.yaml` — so arriving here

@@ -49,11 +49,18 @@ from ph.session.events import SurfaceReplace
 from ph.text import count_of
 from ph.wire import WireModel
 
-from .offload import HISTORY_PREFIX, SPILL_TOOLS_HINT, content_preview, over_token_limit
+from .offload import (
+    HISTORY_PREFIX,
+    UPSTREAM_READER,
+    content_preview,
+    over_token_limit,
+    spill_wording,
+)
 
 __all__ = [
     "HUMAN_TOKEN_LIMIT_BEFORE_EVICT",
     "TOO_LARGE_HUMAN_MSG",
+    "UPSTREAM_TOO_LARGE_HUMAN_MSG",
     "Config",
     "apply",
 ]
@@ -65,7 +72,7 @@ Two and a half times the tool-result limit, and deliberately: a person does not
 reach this by typing. It is the paste of a build log or a dumped table, which is
 the case the row exists for."""
 
-TOO_LARGE_HUMAN_MSG = """Message content too large and was saved to the filesystem at: {file_path}
+UPSTREAM_TOO_LARGE_HUMAN_MSG = """Message content too large and was saved to the filesystem at: {file_path}
 
 You can read the full content using the read_file tool with pagination (offset and limit parameters).
 
@@ -73,7 +80,16 @@ Here is a preview showing the head and tail of the content:
 
 {content_sample}
 """  # noqa: E501
-"""Verbatim from `deepagents/middleware/filesystem.py`."""
+"""Verbatim from `deepagents/middleware/filesystem.py`, and never sent.
+
+Its sibling in `offload` says why it is kept unsent: tracking the port is only
+worth something if an upstream change produces a visible diff."""
+
+TOO_LARGE_HUMAN_MSG = UPSTREAM_TOO_LARGE_HUMAN_MSG.replace(UPSTREAM_READER, "{reader}")
+"""Upstream's wording with the tool name left to the deployment.
+
+The same localization the tool-result side does; `spill_wording` argues why both
+rows have to say the same thing."""
 
 
 class Config(WireModel):
@@ -106,7 +122,7 @@ def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | Non
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized pasted message on the surface, not in the log."""
     ctx.require(SPILL_STORE).claim(
-        SpillClaim.under_session("input-offload", "offload/input-spilled")
+        SpillClaim.under_session("input-offload", "offload/input-spilled", hands_paths=True)
     )
 
     async def offload(proposal: RequestProposal, next_: Next[LlmCallConfig]) -> LlmCallConfig:
@@ -140,16 +156,13 @@ async def apply(ctx: Context, config: Config) -> None:
             {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
         )
         await store.commit(ref)
-        # The same correction its sibling makes, for the same reason: this block
-        # is upstream's too, and it names `read_file` as well. A spilled paste
-        # and a spilled result are the same kind of file in the same store, and
-        # the model cannot tell which row wrote the path it was handed — so a
-        # sentence that is true of one and absent from the other is worse than
-        # either.
-        upstream = TOO_LARGE_HUMAN_MSG.format(
-            file_path=ref.locator, content_sample=content_preview(text)
+        preview = spill_wording(
+            ctx,
+            proposal.agent.ctx,
+            TOO_LARGE_HUMAN_MSG,
+            file_path=ref.locator,
+            content_sample=content_preview(text),
         )
-        preview = f"{upstream}\n{SPILL_TOOLS_HINT}\n"
         session.append(
             "user/message",
             create_user_message(

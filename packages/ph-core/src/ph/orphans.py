@@ -34,6 +34,7 @@ import os
 import signal
 import sys
 from collections.abc import Iterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,9 @@ __all__ = [
     "SweepReport",
     "argv_digest",
     "host_journal",
+    "process_alive",
     "process_start_token",
+    "signal_group",
 ]
 
 log = logging.getLogger("ph.orphans")
@@ -174,7 +177,7 @@ class OrphanJournal:
                 # process has no business killing them — see `record`.
                 held.append(pid)
                 continue
-            if not _alive(pid):
+            if not process_alive(pid):
                 stale.append(pid)
                 continue
             # Read after the liveness check, not before: a dead pid's token is a
@@ -286,7 +289,7 @@ def _owner_alive(record: dict[str, Any]) -> bool:
     live process owns it — would never sweep anything.
     """
     owner = record.get("owner")
-    if not isinstance(owner, int) or not _alive(owner):
+    if not isinstance(owner, int) or not process_alive(owner):
         return False
     recorded = record.get("ownerToken")
     token = process_start_token(owner)
@@ -296,7 +299,60 @@ def _owner_alive(record: dict[str, Any]) -> bool:
     return recorded is None or token is None or recorded == token
 
 
-def _alive(pid: int) -> bool:
+def signal_group(pid: int | None, *, kill: bool, group: int | None = None) -> bool:
+    """Signal a child's whole process group. `False` if there was none to signal.
+
+    **The group, because making a child a session leader creates the need.**
+    `start_new_session=True` is what lets `killpg` mean "this command" — a shell
+    command is usually more than one process, and signalling the shell leaves
+    the pipeline it started running. The two belong together, and taking one
+    without the other is worse than taking neither: before the child had a
+    session of its own it shared the caller's, so a grandchild at least died
+    with the terminal.
+
+    **Here rather than in `ph.seams.subprocess`**, which is where it started,
+    because this module's sweep is the third caller and cannot import the seam —
+    the seam imports *this*. That the sweep needed it is the argument for the
+    move: every pid the journal records was spawned as a session leader, so
+    killing the leader alone left the group on the one path the journal exists
+    to cover.
+
+    `group` is for a caller that already knows the id and needs the answer to
+    outlive the child. `getpgid` stops answering once the child is reaped, which
+    is exactly when a *sweep* matters — the leader is gone and whatever it
+    started is not — and a session leader's group is its own pid. Pass it only
+    then: while the child is alive `getpgid` is the better answer, because a
+    child that called `setpgid` on itself is no longer in the group its pid
+    names.
+
+    `False` rather than an exception on the paths where there is nothing to do:
+    `killpg` is POSIX-only, and a group with no members left is not an error to
+    report. Both leave the direct child as the caller's honest best effort.
+    """
+    if not hasattr(os, "killpg"):
+        return False
+    if group is None:
+        if pid is None:
+            return False
+        try:
+            group = os.getpgid(pid)
+        except OSError:
+            return False
+    try:
+        os.killpg(group, signal.SIGKILL if kill else signal.SIGTERM)
+    except OSError:
+        return False  # No group: already reaped, or it changed its own.
+    return True
+
+
+def process_alive(pid: int) -> bool:
+    """Whether `pid` still exists.
+
+    Public because a test that watches a process die needs the same answer this
+    module's sweep does, and three suites had written it out — two of them with
+    a different reading of `PermissionError`, which is the one case where the
+    honest answer is "yes, and not yours to signal".
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -309,6 +365,21 @@ def _alive(pid: int) -> bool:
 
 
 def _kill(pid: int) -> bool:
+    """Kill one stray **and whatever it started**.
+
+    The group, because every pid recorded here was spawned with
+    `start_new_session=True` — see `signal_group`. Signalling the leader alone
+    left its children running on exactly the path this journal exists for: the
+    restart after a host died without unwinding.
+    """
+    # **Only when the stray leads its own group**, and that is not a formality:
+    # these pids come out of a *file*, and one that shares this process's group
+    # would make the sweep kill the sweeper. Every pid pH records is a session
+    # leader, so the check costs nothing and turns an assumption into a
+    # verified fact — the same restraint the start token applies to identity.
+    with suppress(OSError):
+        if os.getpgid(pid) == pid and signal_group(pid, kill=True, group=pid):
+            return True
     try:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):

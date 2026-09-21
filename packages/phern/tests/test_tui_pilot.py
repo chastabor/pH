@@ -37,7 +37,7 @@ from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, simple_tool
 from ph_app.daemon.supervisor import Root
 from ph_app.trust import TrustStore
-from ph_app.tui.app import PHTuiApp
+from ph_app.tui.app import VERB_GROUP, PHTuiApp
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
@@ -811,10 +811,11 @@ async def test_login_stores_a_secret_without_logging_it(
 
         # **And the picker knows it is set now.** `credential_held` is a
         # synchronous member answered from the last `credentials/held` reply, so
-        # something has to have asked — which is why `action_open_login` is
-        # async. Without that the remote front end answered `False` for every
-        # credential and a deployment with all of them set looked like one with
-        # none: no test noticed, because nothing asserted the marker.
+        # something has to have asked — which is why `action_open_login` does the
+        # asking before it builds the picker (on a worker, H7). Without that the
+        # remote front end answered `False` for every credential and a deployment
+        # with all of them set looked like one with none: no test noticed,
+        # because nothing asserted the marker.
         assert app.front is not None
         await app.front.refresh_credentials()
         assert app.front.credential_held("PH_TEST_KEY"), "the front end cannot see its own store"
@@ -890,6 +891,29 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(
     assert ("user", "remember this") in after
 
 
+async def _verbs_done(app: Any) -> None:  # noqa: ANN401
+    """Wait for the verb workers, and only those.
+
+    A verb carrying `@work` schedules and returns (H7), so the work it was asked
+    for has not happened when the call does. Waited for rather than paused past:
+    a `pause` that happens to be long enough is a test that passes on timing,
+    and both attach tests did.
+
+    `wait_for_complete()` with no argument waits for *every* worker, and this app
+    keeps long-lived ones — the daemon watch, the pump — so the bare call hangs
+    forever rather than failing. **An empty list does the same**: its body is
+    `workers or self`, so a filter that matches nothing falls back to all of
+    them. Hence the early return rather than passing the list straight through.
+
+    `startswith`, because the group is per verb (`verb:attach`) — one shared
+    group would make `exclusive` cancel across verbs.
+    """
+    waiting = [one for one in app.workers if one.group.startswith(VERB_GROUP)]
+    if not waiting:
+        return
+    await app.workers.wait_for_complete(waiting)
+
+
 async def test_a_typed_attach_reaches_the_verb_with_its_argument(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
@@ -908,6 +932,7 @@ async def test_a_typed_attach_reaches_the_verb_with_its_argument(
         assert front is not None
 
         await app._dispatch_command(front, f"/attach {picture}")
+        await _verbs_done(app)
         await pilot.pause()
 
         staged = front._staged.refs  # type: ignore[attr-defined]
@@ -930,6 +955,7 @@ async def test_a_quoted_attach_path_is_one_path(make_tui_app: MakeApp, tmp_path:
         assert front is not None
 
         await app._dispatch_command(front, f'/attach "{picture}"')
+        await _verbs_done(app)
         await pilot.pause()
 
         staged = front._staged.refs  # type: ignore[attr-defined]

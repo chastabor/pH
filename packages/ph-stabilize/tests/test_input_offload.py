@@ -31,6 +31,7 @@ from ph.testing import FAKE_OPTIONS, MountProfile, user_payload
 from ph_stabilize.input_offload import (
     HUMAN_TOKEN_LIMIT_BEFORE_EVICT,
     TOO_LARGE_HUMAN_MSG,
+    UPSTREAM_TOO_LARGE_HUMAN_MSG,
     Config,
     _pending,
 )
@@ -217,3 +218,32 @@ def test_the_event_type_is_in_the_vocabulary() -> None:
     """The proof a producer outside ph-core owes through its own bundle."""
     assert "offload/input-spilled" in KNOWN_SESSION_EVENT_TYPES
     assert "offload/input-spilled" in IGNORABLE_SESSION_EVENT_TYPES
+
+
+async def test_a_spilled_paste_names_the_same_tools_its_sibling_does(
+    mount: MountProfile,
+) -> None:
+    """The half the first correction missed.
+
+    Both blocks are upstream's and both name `read_file`, which pH does not
+    register — but only the tool-result side was corrected. A spilled paste and a
+    spilled result are the same kind of file in the same store, and the model
+    cannot tell which row wrote the path it was handed, so a sentence true of one
+    and absent from the other is worse than either.
+
+    Sabotage: append `SPILL_TOOLS_HINT` here without formatting it and the model
+    reads a literal `{searchers}`; drop the localization and it reads `read_file`.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = ctx.require(SESSIONS).create("named")
+
+    await _prompt(ctx, session, blob(THRESHOLD + 1))
+
+    said = _model_text(session)
+    assert TOO_LARGE in said, "the paste was not offloaded"
+    assert "read_file" not in said, "the person's paste was answered with a tool pH lacks"
+    assert "read tool" in said
+    assert "`grep`" in said and "`glob`" in said
+    assert "{searchers}" not in said and "{reader}" not in said, "an unformatted template"
+    # The tracked literal is untouched, which is the whole reason it is separate.
+    assert "read_file" in UPSTREAM_TOO_LARGE_HUMAN_MSG

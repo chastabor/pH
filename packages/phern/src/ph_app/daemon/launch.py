@@ -30,11 +30,12 @@ import logging
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import anyio
-from filelock import FileLock, Timeout
 
+from ph.locks import LockBusy, acquire_file_lock
 from ph.paths import PathRoots, resolve_roots
 
 from ..protocol import Refusal
@@ -114,20 +115,22 @@ async def ensure_daemon(
     if not spawn:
         raise DaemonAbsent(f"no daemon at {path}; start one with `phern daemon`")
 
-    # `thread_local=False` for the reason the session lease uses it: filelock
-    # keeps its re-entrancy counter in a thread-local, and anyio runs the blocking
-    # acquire on a worker thread while the release happens on the event loop —
-    # where the counter is zero and releasing silently does nothing.
-    lock = FileLock(str(resolved.runtime / "daemon.lock"), timeout=LOCK_TIMEOUT, thread_local=False)
+    # Acquired on a worker thread because it blocks, which is exactly why
+    # `ph.locks` owns `thread_local=False`: the release below happens on the event
+    # loop, where a thread-local counter would be zero and releasing would
+    # silently do nothing.
+    lock_path = resolved.runtime / "daemon.lock"
     try:
-        await anyio.to_thread.run_sync(lock.acquire)
-    except Timeout as error:
+        release = await anyio.to_thread.run_sync(
+            partial(acquire_file_lock, lock_path, timeout=LOCK_TIMEOUT, what="the daemon launcher")
+        )
+    except LockBusy as busy:
         # A live holder inside the lock longer than a spawn can take. Not a
         # reason to spawn anyway — that is the race the lock exists to stop.
         raise DaemonAbsent(
-            f"another launcher has held {lock.lock_file} for {LOCK_TIMEOUT:g}s; "
+            f"another launcher has held {lock_path} for {LOCK_TIMEOUT:g}s; "
             "run `phern daemon` to see why"
-        ) from error
+        ) from busy
     try:
         # **Inside the lock**, and this is the line that makes the race benign:
         # the loser of two simultaneous launches gets here after the winner's
@@ -139,7 +142,7 @@ async def ensure_daemon(
         await _await_socket(path)
         return Started(path=path, spawned=True)
     finally:
-        await anyio.to_thread.run_sync(lock.release)
+        await anyio.to_thread.run_sync(release)
 
 
 def _detach(argv: list[str]) -> None:

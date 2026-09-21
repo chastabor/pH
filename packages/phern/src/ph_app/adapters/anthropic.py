@@ -71,6 +71,9 @@ __all__ = ["AnthropicAdapter", "apply"]
 
 log = logging.getLogger("ph_app.adapters.anthropic")
 
+_SIGNATURE_KEY = "signature"
+"""Where this adapter keeps its attestation inside `ReasoningBlock.provider_state`."""
+
 API_VERSION = "2023-06-01"
 
 FILES_BETA = "files-api-2025-04-14"
@@ -529,7 +532,9 @@ def _close(open_block: _Open, index: int) -> ContentBlock:
     if open_block.kind == "reasoning":
         return ReasoningBlock(
             text=open_block.text,
-            signature=open_block.signature or None,
+            provider_state=(
+                {_SIGNATURE_KEY: open_block.signature} if open_block.signature else None
+            ),
             redacted=open_block.redacted,
         )
     if open_block.kind == "tool-call":
@@ -569,6 +574,18 @@ def _merge_usage(current: TokenUsage | None, raw: dict[str, Any]) -> TokenUsage:
         cache_read_tokens=incoming.cache_read_tokens or current.cache_read_tokens,
         cache_write_tokens=incoming.cache_write_tokens or current.cache_write_tokens,
     )
+
+
+def _signature_of(block: ReasoningBlock) -> str:
+    """This adapter's own attestation, out of the block's opaque state (G8).
+
+    `provider_state` is deliberately untyped at the seam — it is whatever the
+    producing adapter needs back, and only that adapter reads it — so the one
+    place that knows the key is here. Empty for a block another provider wrote,
+    which is exactly the case the caller drops.
+    """
+    state = block.provider_state or {}
+    return as_str(state.get(_SIGNATURE_KEY))
 
 
 def _media_part(
@@ -655,13 +672,9 @@ def _to_anthropic(
                 # with it.
                 if block.redacted:
                     blocks.append({"type": "redacted_thinking", "data": block.text})
-                elif block.signature:
+                elif signature := _signature_of(block):
                     blocks.append(
-                        {
-                            "type": "thinking",
-                            "thinking": block.text,
-                            "signature": block.signature,
-                        }
+                        {"type": "thinking", "thinking": block.text, "signature": signature}
                     )
             case MediaBlock():
                 blocks.append(_media_part(block.attachment, media, handles or {}))

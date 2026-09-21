@@ -40,7 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from filelock import FileLock, Timeout
+from ..locks import LockBusy, acquire_file_lock
 
 if TYPE_CHECKING:
     from ..cordis import Context
@@ -91,15 +91,13 @@ async def claim_session(scope: Context, root: Path, session_id: str) -> None:
     """
 
     def acquire() -> Callable[[], None]:
-        # No mkdir: filelock's own `ensure_directory_exists` is the same
-        # `parents=True, exist_ok=True` call on the same directory.
-        lock = FileLock(lease_path(root, session_id), timeout=0, thread_local=False)
         try:
-            lock.acquire()
-        except Timeout as error:
+            return acquire_file_lock(
+                lease_path(root, session_id), timeout=0, what=f'session "{session_id}"'
+            )
+        except LockBusy as busy:
             raise SessionBusy(
                 f'session "{session_id}" is already active in another process'
-            ) from error
-        return lock.release
+            ) from busy
 
     await scope.effect(acquire, label=f"session-lease({session_id})")

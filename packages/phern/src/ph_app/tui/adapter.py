@@ -556,7 +556,16 @@ class TuiEventAdapter:
             # Asked and not answered. A row rather than silence: the transcript
             # otherwise shows a question and then the model carrying on, which
             # reads as the person having answered something invisible.
-            self._row("answered", "notice", "No answer given.", event)
+            #
+            # **Which kind of not-answered matters** (K7). "No answer given"
+            # about an ask the harness failed to deliver tells the person they
+            # declined something they were never shown — the same false story
+            # the model's own sentence was fixed for. `resolution` is absent
+            # from logs written before the seam supplied it, and the older
+            # reading is the right default for those.
+            failed = as_str(event.data.get("resolution")) == "failed"
+            said = "pH could not deliver the question." if failed else "No answer given."
+            self._row("answered", "notice", said, event)
             return
         self._row("answered", "user", as_str(event.data.get("answer")), event)
 
