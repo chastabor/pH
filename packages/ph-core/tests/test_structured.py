@@ -25,13 +25,14 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from ph.llm.adapter import LlmError
 from ph.llm.structured import (
     SchemaViolation,
     ask_for_shape,
     structural_warning,
     validated_shape,
 )
-from ph.llm.types import GenerateOptions, create_message
+from ph.llm.types import Finish, FinishReason, GenerateOptions, LlmFailure, create_message
 from ph.testing import text_chunks
 
 pytestmark = pytest.mark.anyio
@@ -262,3 +263,74 @@ async def test_a_degenerate_schema_warns_on_the_call(caplog: pytest.LogCaptureFi
         )
 
     assert any("will not constrain" in record.message for record in caplog.records)
+
+
+async def test_a_failed_call_is_not_reported_as_a_bad_shape() -> None:
+    """C11 — `finish{error}` was raised as `SchemaViolation`.
+
+    That is the one exception in this module whose meaning is "the model
+    answered, and the answer was the wrong shape". A rate limit, a context
+    overflow or a dropped connection arriving under it tells every caller
+    something false, and strips the provider's code on the way — which is the
+    field `llm-retry` branches on, so a retryable failure became a permanent
+    one. It also burned the correction budget re-asking a model that never
+    answered.
+    """
+
+    async def failing(options: GenerateOptions) -> Any:  # noqa: ANN401
+        async def chunks() -> Any:  # noqa: ANN401
+            yield Finish(
+                reason=FinishReason(
+                    kind="error",
+                    failure=LlmFailure(message="slow down", code="RATE_LIMIT", status=429),
+                )
+            )
+
+        return chunks()
+
+    with pytest.raises(LlmError) as raised:
+        await ask_for_shape(failing, _options(), Verdict)
+
+    assert raised.value.code == "RATE_LIMIT", "the provider's own code did not survive"
+    assert not isinstance(raised.value, SchemaViolation)
+
+
+async def test_a_reply_holding_two_objects_still_yields_the_first() -> None:
+    """C11 — the candidate span was first `{` to last `}`, so it held both.
+
+    `{"a": 1} and also {"b": 2}` parses as neither, and the caller was told "the
+    reply is not JSON" about a reply that was almost entirely JSON. The widest
+    span is still tried first, because one object containing another is the
+    common shape and taking the inner one there would return a fragment.
+    """
+    assert (
+        validated_shape(
+            'here it is: {"verdict": "keep"} and also {"verdict": "drop"}', Verdict
+        ).verdict
+        == "keep"
+    )
+    # The widest span still wins where it is the whole object, braces in strings
+    # included — a scan that counted those would close the object early.
+    assert validated_shape('{"verdict": "use } sparingly"}', Verdict).verdict == "use } sparingly"
+
+
+def test_an_optional_field_is_not_an_unconstrained_one() -> None:
+    """C11 — `CONSTRAINING_KEYWORDS` says why an optional field is constrained.
+
+    The three spellings pydantic actually emits for one: `anyOf` for
+    `str | None`, `enum` for a `Literal`, `$ref` for a nested model. None has a
+    top-level `type`, which was the whole test.
+    """
+    assert (
+        structural_warning(
+            {
+                "properties": {
+                    "verdict": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "grade": {"enum": ["a", "b"]},
+                    "nested": {"$ref": "#/$defs/Other"},
+                },
+                "required": ["verdict", "grade", "nested"],
+            }
+        )
+        is None
+    )

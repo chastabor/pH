@@ -51,6 +51,7 @@ from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import ADMITTED, SubagentRequest
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import Session, SessionEvent, SessionFoldCache, derive_event_message
+from ph.tools import TOOL_DISPATCH_EVENT_TYPES
 from ph.tools.definition import Deny, PreToolDecision, ToolExecution
 from ph.wire import WireModel
 
@@ -278,9 +279,8 @@ _COUNTED = frozenset(
     {
         "turn/start",
         "step/start",
-        "tool/call",
+        *TOOL_DISPATCH_EVENT_TYPES,
         "tool/result",
-        "tool/code-dispatch-start",
         "tool/code-dispatch",
         ADMITTED,
     }
@@ -338,7 +338,7 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
         elif event.type == "step/start":
             session_steps += 1
             turn_steps += 1
-        elif event.type in ("tool/call", "tool/code-dispatch-start"):
+        elif event.type in TOOL_DISPATCH_EVENT_TYPES:
             name = as_str(event.data.get("name"))
             # `callId` for a model's call, `subCallId` for a dispatch: the id the
             # settling record will cite, so the breaker can pair them.

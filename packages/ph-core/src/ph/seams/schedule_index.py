@@ -62,7 +62,31 @@ of the access pattern a directory of files is good at.
 """
 
 _VERSION = 1
-_LOCK_TIMEOUT = 5.0
+
+_LOCK_TIMEOUT = 0.25
+"""How long a writer waits for the file lock before giving up (K10).
+
+**This is a bound on stalling the event loop, not on contention.** `record` is
+synchronous and every caller reaches it from the loop — `create`, `cancel`,
+`claim` and the `session/created` listener — so the wait is time the daemon
+spends serving nothing at all, including the schedules of every *other* root it
+is holding. At five seconds two hosts sharing a `$PH_HOME` could stop each
+other's loops for longer than the tick interval they are contending over.
+
+A quarter second is far past what the critical section costs — a read and a
+rewrite of a file the size of the outstanding work — so it is only reached when
+another process is genuinely wedged, which is exactly when waiting is worthless.
+Giving up is already the established answer here: the whole method is
+best-effort, because "an index that cannot be written costs a late run" and
+taking a session's own `create` down to protect a cache would be the projection
+outranking the log.
+
+The reconcile path no longer reaches the lock at all — `record` settles the
+no-op case before taking it — so what this bounds is a genuine contended write.
+Moving even that off the loop is a follow-up: the shape that wants no signature
+changes is a single writer task fed by a memory object stream, where `record`
+becomes a `send_nowait` and one background task drains it.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +165,19 @@ class ScheduleIndex:
         session open: reconciling an entry that is already right must not cost a
         lock and a rewrite, and every fork and every subagent opens a session.
         """
+        # **The no-op is decided before the lock, not inside it** (K10). This
+        # method is documented as callable on every session open — every fork,
+        # every subagent — precisely because reconciling an entry that is already
+        # right should cost nothing, and it was paying a lock acquisition to
+        # discover that. Reading first is safe: `read` treats every failure as
+        # empty and `_write` is an atomic rename, so there is no torn state to
+        # observe, and a racing writer only means this call re-checks under the
+        # lock below and finds nothing to do.
+        settled = self.read().get(session_id)
+        if next_at is None and settled is None:
+            return
+        if next_at is not None and settled is not None and settled.next_at == next_at:
+            return
         try:
             with FileLock(f"{self.path}.lock", timeout=_LOCK_TIMEOUT, thread_local=False):
                 found = self.read()

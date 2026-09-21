@@ -16,6 +16,7 @@ would inherit a half-executed step whose tool results never arrive.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ __all__ = [
     "is_fork_boundary",
     "new_session_id",
     "open_turn_at",
+    "valid_session_id",
 ]
 
 log = logging.getLogger("ph.session")
@@ -57,8 +59,20 @@ events.declare(
 )
 
 ForkRejection = Literal[
-    "SESSION_NOT_FOUND", "SESSION_ALREADY_EXISTS", "INVALID_BOUNDARY", "OPEN_TURN"
+    "SESSION_NOT_FOUND",
+    "SESSION_ALREADY_EXISTS",
+    "SESSION_ID_INVALID",
+    "INVALID_BOUNDARY",
+    "OPEN_TURN",
 ]
+"""Why a session could not be created, adopted or forked.
+
+A closed set because the code is what a client branches on — a daemon reply
+carries it and `phern` maps it to an exit status — so a new refusal is a
+deliberate addition to a vocabulary rather than a string somebody invents at a
+raise site. `SESSION_ID_INVALID` is K9's: an id that cannot be a path component
+is refused before it names a directory in three stores.
+"""
 
 
 class SessionForkError(Exception):
@@ -73,6 +87,47 @@ def new_session_id() -> str:
     """A sortable, human-legible session id."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     return f"{stamp}-{secrets.token_hex(3)}"
+
+
+_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+"""What a session id may be (K9).
+
+**A session id becomes a directory name in several stores**, and none of them
+re-checks it: `SpillStore.locator_for` joins it onto the spill root — and
+`sweep_session` unlinks unreferenced files under whatever that resolves to — the
+session archive names a file after it, and the workspace scratch root is
+`<scratch>/<session>/<agent>`. Every one of them sanitizes the *other* half of
+the name and trusts this one, because an id was minted by `new_session_id` for
+the whole life of the codebase.
+
+It is not always: `create` takes a caller-supplied `session_id`, which reaches it
+from `phern -p --session`, from a daemon client's `session/attach`, and from
+`adopt` on the resume path. An id of `../../..` would make the sweep delete
+outside the store it was pointed at.
+
+Checked once here rather than sanitized at each store, for the reason
+`ph.paths.canonical` states about spellings: a sanitizer at four call sites is
+four chances to disagree about what `..` becomes, and the id is also a *key* — in
+`_entries`, in `parentSession`, in the roster — so mapping two ids onto one name
+would be its own defect. A leading dot is refused with the rest so an id cannot
+be a hidden file, and a bare `..` fails the first character class.
+"""
+
+
+def valid_session_id(session_id: str) -> bool:
+    """Whether `session_id` is safe to use as a path component and as a key."""
+    return bool(_ID.match(session_id))
+
+
+def _require_valid_id(session_id: str) -> None:
+    """The refusal, in one sentence and one place. See `_ID` for why."""
+    if not valid_session_id(session_id):
+        raise SessionForkError(
+            f'session id "{session_id}" is not usable as a path component: it must be '
+            "alphanumerics, dots, dashes and underscores, starting with a letter or "
+            "a digit",
+            "SESSION_ID_INVALID",
+        )
 
 
 @dataclass(slots=True)
@@ -120,6 +175,7 @@ class SessionStore:
         avoid. As a keyword that ordering cannot be got wrong.
         """
         resolved = session_id or new_session_id()
+        _require_valid_id(resolved)
         if resolved in self._entries:
             raise SessionForkError(f'session "{resolved}" already exists', "SESSION_ALREADY_EXISTS")
         fields: dict[str, Any] = {"id": resolved, "createdAt": now_ms()}
@@ -139,7 +195,12 @@ class SessionStore:
         return self._publish(Session(resolved, seed=seed, header=header, durable=inherited))
 
     def adopt(self, session: Session) -> Session:
-        """Publish an already-constructed session (the resume path)."""
+        """Publish an already-constructed session (the resume path).
+
+        The id is checked here too (K9): `adopt` is how a log comes off disk, and
+        a `Session` built by a caller never passed through `create`.
+        """
+        _require_valid_id(session.id)
         if session.id in self._entries:
             raise SessionForkError(
                 f'session "{session.id}" already exists', "SESSION_ALREADY_EXISTS"

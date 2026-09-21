@@ -32,6 +32,7 @@ from ph.system_prompt.assembly import (
     render_prompt,
 )
 from ph.testing import MountProfile, StubAgent
+from ph.tools.code_mode import CodeDispatchRef
 from ph_stabilize import BUNDLE
 from ph_stabilize.todo import (
     MAX_TODO_CONTENT,
@@ -560,3 +561,33 @@ def test_the_event_type_is_in_the_vocabulary() -> None:
     from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 
     assert "todo/write" not in IGNORABLE_SESSION_EVENT_TYPES
+
+
+async def test_work_inside_a_code_cell_counts_as_work(mount: MountProfile) -> None:
+    """D12 — `TOOL_DISPATCH_EVENT_TYPES` says why both records are one fact.
+
+    Counting `tool/call` alone scored a Code Mode cell that read nine files and
+    edited three as *one* piece of work.
+
+    The records are appended directly rather than driven through a code runtime:
+    what is under test is the fold's arithmetic, and a real cell would put a
+    kernel between this assertion and the thing it is about.
+    """
+    ctx = await mount(ENABLED, profile=PROFILE)
+    session = ctx.require(SESSIONS).create("code-mode")
+
+    await _run(ctx, session, todo_call("c1", _todos(("survey", "in_progress"))))
+    for index in range(3):
+        # Through the real wire type, as `test_limits.py` does for the same
+        # event: a renamed field then fails here rather than silently uncounting.
+        session.append(
+            "tool/code-dispatch-start",
+            CodeDispatchRef(
+                root_call_id="r1", parent_call_id="r1", sub_call_id=f"s{index}", name="read"
+            ).to_wire(),
+        )
+    await _run(ctx, session, todo_call("c2", _todos(("survey", "completed"))), step=3)
+
+    (done,) = [one for one in todos_of(session) if one["status"] == "completed"]
+    assert done["worked"] == 3, "the dispatches inside the cell were not counted"
+    assert unevidenced(todos_of(session)) == []

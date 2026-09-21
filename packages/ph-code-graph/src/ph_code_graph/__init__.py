@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -59,6 +60,7 @@ from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
 from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.diagnostics import Diagnostic, contribute
+from ph.seams.fs import FsService
 from ph.seams.skills import discover_skills
 from ph.text import count_of
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -535,6 +537,16 @@ async def apply(ctx: Context, config: Config) -> None:
     def store(run: ToolRunContext) -> CodeGraphStore:
         return seam.store_for(ctx.require(FS).root_for(run.agent))
 
+    def _forget_missing(
+        fs: FsService,
+        book: CodeGraphStore,
+        known: Mapping[str, tuple[str, str]],
+        run: ToolRunContext,
+    ) -> int:
+        """Drop every indexed path that is no longer on disk. One thread hop."""
+        gone = [path for path in known if not fs.resolve(path, agent=run.agent).exists()]
+        return book.forget(gone) if gone else 0
+
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
         fs = ctx.require(FS)
         book = store(run)
@@ -647,6 +659,25 @@ async def apply(ctx: Context, config: Config) -> None:
                     book.put, path, digest, extraction, state.id_for(path)
                 )
                 indexed += 1
+            if not args.forget:
+                # **Gone from disk is gone from the index** (X3). A deleted file
+                # kept its symbols until somebody ran `forget` by hand, so
+                # `code_graph` went on naming definitions at paths that are not
+                # there — and a rename showed the symbol twice, once under each
+                # name, with nothing saying which was real. A pointer into a file
+                # that does not exist is the one answer this tool must not give,
+                # because the model's next move is to open it.
+                #
+                # **Asked of the filesystem, not of the walk.** "Absent from
+                # `paths`" looks like the same question and is not: `collect`
+                # stops at `max_files` and reports nothing, and the policy screen
+                # prunes whole directories — so on a tree past the cap, or with a
+                # `permissions-fs` rule hiding a subtree, the walk is a *subset*
+                # of the scope and differencing against it would forget
+                # everything it did not reach. It also settles the narrowed walk
+                # for free, where the question is not "did we cover the scope"
+                # but "is this file still there".
+                removed = await anyio.to_thread.run_sync(_forget_missing, fs, book, known, run)
             # Stored last, and only after the loop: a token recorded before the
             # writes would, on a crash between the two, vouch for files this run
             # never actually indexed.

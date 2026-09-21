@@ -123,7 +123,13 @@ def test_a_procedure_that_grew_seeds_only_what_is_new() -> None:
 
     assert grown is not None
     assert steps_of(grown) == ["survey", "port", "gate it"]
-    assert grown[-1]["requires"] == [], "the new step waits on nothing it did not arrive with"
+    # It waits on the step the *skill* put before it (D13), which is `port` —
+    # already in the list and still in progress. This assertion used to read
+    # `== []`, on the argument that a new step "waits on nothing it did not
+    # arrive with"; that was the chain being built over what is *missing* rather
+    # than over what the skill declared, so a step the procedure put last became
+    # immediately available. The ordering is the procedure's, not the gap's.
+    assert grown[-1]["requires"] == ["port"]
     assert [one["status"] for one in grown[:2]] == ["completed", "in_progress"], "progress kept"
 
 
@@ -464,3 +470,27 @@ def test_a_chain_points_at_one_step_at_a_time() -> None:
     todos[1]["status"] = "completed"
     todos[2]["status"] = "completed"
     assert startable(todos) == [], "and a finished chain offers nothing, which is how it ends"
+
+
+def test_a_re_read_links_around_a_step_that_is_already_there() -> None:
+    """D13 — the chain was built over the missing steps, so it linked *over* one.
+
+    A skill re-read mid-session is ordinary, and so is finding one of its steps
+    already in the list — the model may have written the same text itself, or a
+    previous seed may have been partly carried. With the chain built over
+    `wanted`, a procedure `one → two → three` whose middle step is present seeds
+    `three` waiting on `one`: the ordering the skill declared is silently
+    replaced by one that lets `three` start while `two` is still pending, which
+    is the whole thing `requires` exists to prevent.
+
+    The predecessor is always nameable, which is why this needs no fallback:
+    every step is either already in the list or being added in the same batch.
+    """
+    current = [_entry("two", "pending", source=SKILL)]
+
+    grown = seeded(current, ["one", "two", "three"])
+
+    assert grown is not None
+    by_content = {one["content"]: one for one in grown}
+    assert by_content["one"]["requires"] == []
+    assert by_content["three"]["requires"] == ["two"], "the chain skipped the step that was there"

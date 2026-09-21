@@ -665,6 +665,21 @@ def _to_openai(
             for block in message.content
             if isinstance(block, ToolCallBlock)
         ]
+        if not text and not calls:
+            # **Nothing this wire can carry** (G9). `text_of` skips reasoning —
+            # it is the model's scratch, not conversation — so an assistant turn
+            # that produced only a `ReasoningBlock` renders as
+            # `{"content": null}` with no `tool_calls`, which servers on this
+            # wire reject outright: the whole request fails on a message that
+            # said nothing. A max-tokens step that stopped inside its thinking is
+            # the ordinary way to produce one, and it lands in history for the
+            # rest of the session, so every later request fails too.
+            #
+            # Dropped rather than sent as `""`: an empty assistant turn is a
+            # message the model did not write, and nothing references it — a
+            # reasoning-only message has no calls for a later result to pair
+            # with, so removing it cannot unbalance the history.
+            return []
         entry: dict[str, Any] = {"role": "assistant", "content": text or None}
         if calls:
             entry["tool_calls"] = calls

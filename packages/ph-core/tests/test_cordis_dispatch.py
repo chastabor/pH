@@ -268,3 +268,95 @@ async def test_disposal_removes_listeners() -> None:
     # A registration is an effect: unloading the plugin unregisters it, with
     # nothing to remember (invariant I2).
     assert heard == [1]
+
+
+async def test_a_listener_that_retries_runs_the_rest_of_the_chain_again() -> None:
+    """A6 — `Context.waterfall`'s per-frame cursor, which says why.
+
+    What this pins is the *ordering*: the listeners between the retry and the
+    built-in run on both attempts. With a shared index the second call resumed
+    past all of them, so a retry got `inner` alone.
+    """
+    root = Context()
+    ran: list[str] = []
+
+    async def retrying(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
+        first = await next_()
+        return f"{first}+{await next_()}"
+
+    async def counted(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
+        ran.append("inner-listener")
+        return await next_()
+
+    async def built_in(payload: dict[str, Any]) -> str:
+        ran.append("built-in")
+        return "answer"
+
+    root.on("test/waterfall", retrying)
+    root.on("test/waterfall", counted)
+
+    assert await root.waterfall("test/waterfall", {}, inner=built_in) == "answer+answer"
+    assert ran == ["inner-listener", "built-in", "inner-listener", "built-in"], (
+        "the second attempt skipped the listeners between the retry and the built-in"
+    )
+
+
+async def test_a_replacement_is_scoped_to_the_call_that_passed_it() -> None:
+    """The other half of A6: `state` was a list every frame mutated.
+
+    `next_(*replacement)` rewrote the shared list, so a rewrite one attempt made
+    was still in force on the next — a retry that narrowed its arguments once
+    could not widen them again, and a sibling listener read arguments it never
+    saw passed.
+    """
+    root = Context()
+    seen: list[str] = []
+
+    async def rewriting(value: str, next_: Callable[..., Awaitable[str]]) -> str:
+        await next_("narrowed")
+        return await next_()
+
+    async def built_in(value: str) -> str:
+        seen.append(value)
+        return value
+
+    root.on("test/waterfall", rewriting)
+
+    assert await root.waterfall("test/waterfall", "original", inner=built_in) == "original"
+    assert seen == ["narrowed", "original"], "a replacement outlived the call that passed it"
+
+
+def test_disposing_one_registration_leaves_its_twin_where_it_was() -> None:
+    """A8 — `Hook` was an ordinary dataclass, so `list.remove` matched by field.
+
+    Two registrations of one callback on one scope produce hooks that compare
+    equal — same ctx, same callback, same flags — and `remove` takes the *first*
+    equal element. Disposing the second therefore deleted the first.
+
+    The damage is **ordering**, which is why the two hooks being interchangeable
+    is not a defence: with a third listener between them the survivor moves from
+    in front of it to behind it, so a listener registered first starts running
+    last. Order is the one thing `on`/`prepend` promises, and every policy chain
+    is built on it.
+
+    Two registrations of one callback is not exotic — a row mounted per agent, a
+    wrapper registered around itself — and nothing about the symptom points at
+    equality.
+    """
+    root = Context()
+    heard: list[str] = []
+
+    def twice(value: int) -> None:
+        heard.append("twice")
+
+    def between(value: int) -> None:
+        heard.append("between")
+
+    root.on("test/emit", twice)
+    root.on("test/emit", between)
+    second = root.on("test/emit", twice)
+
+    second()
+    root.emit("test/emit", 1)
+
+    assert heard == ["twice", "between"], "the disposer took the wrong registration"

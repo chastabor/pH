@@ -348,6 +348,26 @@ realm. A first draft claimed the reconcile alone covered this; the test that
 showed otherwise was the one not yet written. `Mount.topology` lists each realm
 and each private copy under `<row>/<source>`.
 
+**An isolating row is deaf to every dispatch the harness makes** (A9), and
+that is a gap rather than a decision. The row mounts at `realm.plugin(...)`, so
+its listeners carry `hook.ctx = realm`, and `reaches` asks whether the
+registering scope is an ancestor of the *target*: a realm is a sibling of every
+agent and a descendant of root, so it reaches neither. A root-scoped `emit` and
+an agent-scoped one both pass it by, and nothing dispatches into a realm — so a
+row that says `isolate: [fs]` keeps its private `ctx.fs` and silently stops
+hearing `session/created`, `tools/pre-execute` and everything else it registered
+for.
+
+The two halves pull against each other, which is why this is written down rather
+than patched: the realm is what makes the row's *service* lookup private, and it
+is the same property that makes its *listeners* invisible. Marking realm hooks
+`global_` is the likely answer — an isolating row is a deployment row like any
+other, with a narrower view of one service — but it is a change to what
+isolation means, and no shipped profile uses `isolate:` yet. The behavior is
+pinned by `test_cordis_loader.py::test_an_isolating_rows_listeners_hear_only_the_realm`
+so the first profile that wants one finds the limit stated rather than discovering
+it as a row that quietly does nothing.
+
 What a realm does **not** do is change hands while an agent is running in it —
 the provider a realm holds is the one it was mounted with. That is the one half
 of dsh's isolation story pH has not built, and §8 records it as a deliberate

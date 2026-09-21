@@ -214,10 +214,42 @@ async def _run_group(
                 break
             await fill_pool(scope)
 
+    def answer_uncommitted() -> None:
+        """Close every call this group logged and did not answer (C8).
+
+        **A raise is not a cancellation, and only the cancellation path had this.**
+        `commit_ready` advances across *contiguous* settled slots — the model-order
+        window B6 exists for — so when one call raises, every call behind it in the
+        group may have run, settled, and still hold no `tool/result`. The turn then
+        ends carrying `tool_use` blocks nothing answers, which the provider rejects
+        on the next request; and the crash repair does not reach it, because repair
+        closes pairs in a turn the log left *open* and this one closed normally.
+
+        Two spellings, and the difference is what the model is owed. A slot that
+        holds a result ran to completion and the batch simply never got to commit
+        it — `aborted` after dispatch, which says "this may have happened". A slot
+        still empty never dispatched, which is safe to retry. A call past `started`
+        was never logged at all, so it needs the pair `_append_skipped` writes.
+        """
+        for index in range(committed, len(group)):
+            block = group[index].block
+            if index >= started or call_seqs[index] < 0:
+                _append_skipped(session, turn, step, block)
+                continue
+            _append_result(
+                session,
+                turn,
+                step,
+                block,
+                aborted_result(started=slots[index] is not None),
+                call_seqs[index],
+            )
+
     settled_send.close()
     settled_recv.close()
     await commit_ready()
     if failure is not None:
+        answer_uncommitted()
         raise failure
     if aborted or token.canceled:
         for skipped in group[started:]:

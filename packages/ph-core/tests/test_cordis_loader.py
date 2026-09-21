@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from ph.cordis import Context, Disposer, LoaderError, plugin
+from ph.cordis import Context, Disposer, LoaderError, events, plugin
 from ph.cordis.loader import (
     PROJECT_ROOT,
     Profile,
@@ -32,6 +32,8 @@ from ph.testing import MountProfile, not_none
 from ph.wire import WireModel
 
 pytestmark = pytest.mark.anyio
+
+events.declare("test/realm-probe", "emit", owner="tests")
 
 
 def _doc(name: str, text: str) -> ProfileDocument:
@@ -76,7 +78,11 @@ def test_insert_appends_new_rows_and_refuses_duplicate_ids() -> None:
         ]
     )
     assert [row.id for row in rows] == ["a", "b"]
-    with pytest.raises(LoaderError, match="duplicate row id"):
+    # Refused by `_check_unique_ids` over the composed list, which is the one
+    # implementation of this rule — `insert:` had its own copy with its own
+    # sentence until that existed. The message now names the layer that declared
+    # the id first, which an insert-local check could not see.
+    with pytest.raises(LoaderError, match="already declared by base"):
         compose_rows(
             [
                 _doc("base", "- id: a\n  name: mod.a\n"),
@@ -406,6 +412,65 @@ async def test_isolate_gives_a_row_a_private_copy_of_a_service() -> None:
     await ctx.dispose()
 
 
+async def test_an_isolating_rows_listeners_hear_only_the_realm() -> None:
+    """A9 — the limit of `isolate:`, pinned because it is a gap, not a decision.
+
+    The row mounts at `realm.plugin(...)`, so its listeners carry
+    `hook.ctx = realm`, and `reaches` asks whether the registering scope is an
+    ancestor of the dispatch target. A realm is a descendant of root and a
+    sibling of every agent, so it is an ancestor of neither: a root-scoped emit
+    and an agent-scoped one both pass it by, and nothing in the harness ever
+    dispatches into a realm. A row that asked for a private `ctx.fs` therefore
+    *also* stopped hearing `session/created` and everything else it registered
+    for, silently.
+
+    The two halves pull against each other — the realm is what makes the row's
+    service lookup private, and the same property makes its listeners invisible
+    — so DESIGN.md §2.7 states the limit and this pins the behavior. No shipped
+    profile uses `isolate:`; the first one that does should find this written
+    down rather than discover a row that quietly does nothing.
+
+    **Change this test when that is decided**, rather than reading it as an
+    endorsement: it asserts what happens, not what should.
+    """
+
+    heard: list[str] = []
+
+    class FsConfig(WireModel):
+        root: str = "shared"
+
+    @plugin("t-fs", config=FsConfig)
+    async def fs_provider(ctx: Context, config: FsConfig) -> None:
+        ctx.provide("t_fs", {"root": config.root, "owner": ctx.path})
+
+    @plugin("t-listener", inject=["t_fs"])
+    async def listener(ctx: Context, config: None) -> None:
+        ctx.on("test/realm-probe", lambda tag: heard.append(str(tag)))
+
+    _fake_module("ph_test_realm_events", fs_provider=fs_provider, listener=listener)
+    profile = Profile.from_documents(
+        [
+            _doc(
+                "base",
+                "- id: fs\n  name: ph_test_realm_events:fs_provider\n"
+                "- id: isolated\n  name: ph_test_realm_events:listener\n  isolate: [fs]\n",
+            )
+        ]
+    )
+    ctx = Context()
+    mount = await profile.mount(ctx)
+
+    ctx.emit("test/realm-probe", "root-scoped")
+    assert heard == [], "an isolating row heard a root dispatch — A9 is fixed, update §2.7"
+
+    # And the listener is registered and working — it is the *scope* that is
+    # wrong, not the row. Dispatching into the realm reaches it.
+    realm = not_none(mount.forks["isolated"].ctx)
+    realm.emit("test/realm-probe", "realm-scoped")
+    assert heard == ["realm-scoped"]
+    await ctx.dispose()
+
+
 async def test_isolate_with_a_mapping_overrides_the_private_copy_s_config() -> None:
     """The form the feature exists for: a private `fs` rooted somewhere else.
 
@@ -628,3 +693,40 @@ async def test_a_mount_given_no_project_provides_none() -> None:
     # `has` is the stronger of the two: it also rules out a provided `None`.
     assert not ctx.has(PROJECT_ROOT)
     await ctx.dispose()
+
+
+def test_two_plain_rows_cannot_share_an_id() -> None:
+    """A7 — `_check_unique_ids` says why a duplicate cannot be addressed.
+
+    Both shapes, because they arrive differently: between layers is a local
+    profile re-declaring a row `ph-base` already layers, where neither document
+    is wrong on its own; within one document it is a typo. The message names the
+    layer that declared it first, which is what makes the first case actionable.
+    """
+    with pytest.raises(LoaderError, match="already declared by base"):
+        compose_rows(
+            [
+                _doc("base", "- id: a\n  name: mod.a\n"),
+                _doc("local", "- id: a\n  name: mod.a\n"),
+            ]
+        )
+    # And within one document, which is the typo rather than the layering.
+    with pytest.raises(LoaderError, match='row id "a" is already declared'):
+        compose_rows([_doc("base", "- id: a\n  name: mod.a\n- id: a\n  name: mod.b\n")])
+
+
+def test_an_interpolated_default_may_contain_braces() -> None:
+    """A10 — the default was `[^}]*`, so it stopped at the first `}`.
+
+    A JSON-shaped fallback is the ordinary thing to want there, and under the
+    old class the row received `{"tier":"none"` with the rest left literal —
+    config that is wrong in a way no schema catches, because what arrives is
+    still a string.
+    """
+    # The brace must not be the *last* character, or the leftover `}` the old
+    # pattern left behind happens to reconstruct the right string and the
+    # assertion proves nothing. It is trailing text that shows the loss.
+    assert interpolate('${env:PH_TEST_MISSING:-{"a":1} then more}', {}) == '{"a":1} then more'
+    # The plain defaults still work, including the empty one.
+    assert interpolate("${env:PH_TEST_MISSING:-}", {}) == ""
+    assert interpolate("${env:PH_TEST_MISSING:-small}", {}) == "small"

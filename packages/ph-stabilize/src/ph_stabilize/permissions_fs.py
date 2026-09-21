@@ -71,6 +71,7 @@ from ph.seams.fs import (
     FsIntent,
     FsService,
     WalkDecision,
+    literal_head,
     matches_glob,
 )
 from ph.seams.sandbox import allowed_paths_of, enforcement_of
@@ -430,7 +431,9 @@ class FsPermissions:
                 if not outside:
                     continue
             if any(
-                (_has_head(pattern) or not require_head) and _could_match_under(pattern, directory)
+                _could_match_under(
+                    pattern, directory, require_head=require_head, at_root=directory == ""
+                )
                 for pattern in rule.paths
                 for directory in spellings
             ):
@@ -566,6 +569,11 @@ class FsPermissions:
         prefix = self._prefix(agent)
         if absolute.startswith(prefix):
             return (absolute, absolute[len(prefix) :])
+        if f"{absolute}/" == prefix:
+            # The root itself, whose relative spelling is `""` — the one path
+            # the prefix test cannot match, because the prefix carries the
+            # trailing slash the root does not (D11).
+            return (absolute, "")
         return (absolute,)
 
 
@@ -581,29 +589,33 @@ def _prefix_of(root: Path) -> str:
     return f"{root.as_posix().rstrip('/')}/"
 
 
-def _has_head(pattern: str) -> bool:
-    """Whether `pattern` names anything literal before its first wildcard.
-
-    Separated from `_could_match_under` rather than folded into it because the
-    two callers want opposite answers for a headless pattern: a delete must
-    treat "could match anywhere" as a refusal, and a walk must not treat it as a
-    reason to enter nothing. See `_refuses_under`.
-    """
-    return bool(pattern.split("*", 1)[0].rstrip("/"))
-
-
-def _could_match_under(pattern: str, directory: str) -> bool:
+def _could_match_under(pattern: str, directory: str, *, require_head: bool, at_root: bool) -> bool:
     """Whether `pattern` could match anything inside `directory`.
 
     Judged from the pattern's literal head — everything before the first
-    wildcard — which is the most a glob will tell you without enumerating the
-    tree. Two ways to be inside: the head already points into the tree, or the
-    head is an ancestor of it and the wildcard is free to descend. Both round
-    towards refusal, which is the only direction a delete may be wrong in.
+    wildcard, which `ph.seams.fs.literal_head` owns because it is a fact about
+    the glob dialect. That is the most a glob will tell you without enumerating
+    the tree. Two ways to be inside: the head already points into the tree, or
+    the head is an ancestor of it and the wildcard is free to descend.
+
+    **`at_root` is asked, not encoded.** The workspace root's relative spelling
+    is `""`, and every relative path is inside it — but `""` is *also* what a
+    headless pattern returns, meaning "could be anywhere", and the two are nearly
+    opposite claims. Telling them apart by the order of two guards made that
+    ordering silently load-bearing in the permissive direction, so the caller
+    states which question it is asking and `_under` stays total path
+    containment.
+
+    **`require_head` is the two callers' disagreement, in one place.** A delete
+    must read "could match anywhere" as a refusal; a walk must not read it as a
+    reason to enter nothing, or `deny read **/.env` — the idiomatic spelling —
+    prunes the whole tree. `_refuses_under` records why.
     """
-    head = pattern.split("*", 1)[0].rstrip("/")
+    if at_root:
+        return True
+    head = literal_head(pattern)
     if not head:
-        return True  # a leading wildcard reaches everywhere
+        return not require_head
     return _under(head, directory) or _under(directory, head)
 
 

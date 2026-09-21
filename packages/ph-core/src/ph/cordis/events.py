@@ -58,6 +58,14 @@ class EventRegistry:
         Re-declaring the same name with the same mode is a no-op, so a module
         imported twice under different paths does not fail. Re-declaring it with
         a different mode raises: the mode is part of the event's contract.
+
+        **And so does re-declaring it with a different owner** (A13). The no-op
+        exists for the *same* declaration arriving twice; two modules declaring
+        one name are two owners for one contract, and returning the first
+        silently dropped the second's `owner` and `doc` — so `/events` named one
+        module for an event two dispatch, and the loser's documentation was
+        simply gone. Latent today because no name is declared twice; it is the
+        kind of thing that arrives with a plugin somebody else wrote.
         """
         if mode not in _MODES:
             raise EventModeError(f'unknown dispatch mode "{mode}" for event "{name}"')
@@ -67,6 +75,11 @@ class EventRegistry:
                 raise EventModeError(
                     f'event "{name}" is already declared as "{existing.mode}"; '
                     f'cannot re-declare as "{mode}"'
+                )
+            if owner and existing.owner and owner != existing.owner:
+                raise EventModeError(
+                    f'event "{name}" is already declared by "{existing.owner}"; '
+                    f'"{owner}" cannot declare it as well'
                 )
             return existing
         declaration = EventDeclaration(name=name, mode=mode, payload=payload, owner=owner, doc=doc)

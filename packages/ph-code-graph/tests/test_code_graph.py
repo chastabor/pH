@@ -1233,3 +1233,68 @@ async def test_a_tree_with_no_version_control_still_indexes(
     assert first.value["indexed"] == 2, "the fixture's two modules"
     # Still reported unchanged — by the content hash, which never went away.
     assert again.value["indexed"] == 0 and again.value["unchanged"] == 2
+
+
+async def test_a_deleted_file_leaves_the_index_on_the_next_sweep(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """X3 — the walk never diffed itself against what the index already held.
+
+    A file removed from the tree kept its symbols until somebody ran `forget` by
+    hand, so `code_graph` went on naming definitions at paths that are not there
+    — and a *rename* showed the symbol twice, once under each name, with nothing
+    saying which was real. A pointer into a file that does not exist is the one
+    answer this tool must not give, because the model's next move is to open it.
+
+    Only a full sweep does this, which is the second half: narrowing the walk
+    must not empty the index, or `code_index paths=["src/x.py"]` would delete
+    everything else.
+    """
+    _tree(tmp_path)
+    ctx = await _indexed(mount, tmp_path)
+    agent = _agent(ctx)
+    await run_tool(ctx, "code_index", {"paths": ["."]}, agent=agent)
+
+    (tmp_path / "pkg" / "helpers.py").unlink()
+    swept = await run_tool(ctx, "code_index", {"paths": ["."]}, agent=agent)
+
+    assert not swept.is_error, text_of(swept.content)
+    assert swept.value["removed"] == 1, "the deleted file kept its symbols"
+    found = await run_tool(ctx, "code_graph", {"mode": "define", "query": "shared"}, agent=agent)
+    assert found.value["symbols"] == [], "a definition still points at a file that is gone"
+
+
+async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """X3's guard rail, and the reason the sweep asks the filesystem.
+
+    The first cut of this fix differenced the index against the *walk* and
+    decided it was a full sweep by pattern-matching the arguments
+    (`paths == ["."]`). Two things make that wrong, and both empty the index
+    rather than trimming it: `fs.collect` stops at `max_files` and reports
+    nothing, so on a tree past the cap the walk is a prefix of the scope; and
+    the `permissions-fs` screen prunes whole directories, so a rule hiding a
+    subtree makes those files "absent". Asking `exists()` settles all three —
+    truncated, pruned and narrowed — because "is this file still there" is the
+    question, and it never depended on the walk at all.
+    """
+    _tree(tmp_path)
+    ctx = await _indexed(mount, tmp_path)
+    agent = _agent(ctx)
+    await run_tool(ctx, "code_index", {"paths": ["."]}, agent=agent)
+
+    narrowed = await run_tool(ctx, "code_index", {"paths": ["pkg/helpers.py"]}, agent=agent)
+
+    assert narrowed.value["removed"] == 0
+    still = await run_tool(ctx, "code_graph", {"mode": "define", "query": "shared"}, agent=agent)
+    assert still.value["symbols"], "a narrowed walk emptied the index"
+
+    # And a walk truncated by `max_files`, which *looks* like a full sweep: the
+    # arguments are the row's own defaults and `paths` is still only a subset.
+    capped = await _indexed(mount, tmp_path / "capped", max_files=1)
+    narrow_agent = _agent(capped)
+    await run_tool(capped, "code_index", {"paths": ["."]}, agent=narrow_agent)
+    swept = await run_tool(capped, "code_index", {"paths": ["."]}, agent=narrow_agent)
+
+    assert swept.value["removed"] == 0, "a truncated walk forgot the files it never reached"

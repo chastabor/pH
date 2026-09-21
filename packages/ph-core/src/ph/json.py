@@ -57,6 +57,7 @@ __all__ = [
     "as_seq",
     "as_str",
     "dumps",
+    "first_json_value",
     "loads",
     "thaw_json",
 ]
@@ -361,6 +362,26 @@ decoding runs on every frame the guest sends. *Hookless*: a `parse_int` guard
 here once vetoed whole frames over a bound that only some fields are held to, so
 the bound is checked where a field is read (`ph_rlm.kernel.codec._coerce`).
 """
+
+
+def first_json_value(text: str, start: int = 0) -> str | None:
+    """The first complete JSON value in `text` at or after `start`, as a slice.
+
+    `raw_decode` is the stdlib's own "parse one value and tell me where it
+    ended", so a reader tolerating prose around a document does not need a brace
+    scanner of its own — and a hand-rolled one has to get string literals and
+    escapes right, which is the part that looks done long before it is.
+
+    A *slice* rather than the decoded value, because the caller that wants this
+    is choosing between candidate spans and hands the winner to its own
+    validation; returning the value would make this the parser and leave the
+    caller re-encoding to report what it read.
+    """
+    try:
+        _, ended = _DECODER.raw_decode(text, start)
+    except ValueError:
+        return None
+    return text[start:ended]
 
 
 def loads(raw: str | bytes) -> JsonValue:

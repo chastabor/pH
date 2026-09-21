@@ -280,23 +280,52 @@ class LlmRuntime:
 
         async def inner(request: GenerateOptions) -> AsyncIterator[StreamChunk]:
             handle = self._route(request.provider)
-            with running(handle.by):
-                return _normalized(handle.adapter.stream(request), request)
+            # The binding goes *inside* the generator (C10). Both
+            # `adapter.stream(...)` and `_normalized(...)` are async-generator
+            # calls, so this line only constructs them — nothing of the adapter
+            # ran here, and the whole stream used to be pulled later, outside any
+            # `running`. Every registration the adapter made mid-stream landed on
+            # the seam instead of the row, and outlived it.
+            return _normalized(handle.adapter.stream(request), request, handle.by)
 
         return await self.ctx.waterfall("llm/stream", options, inner=inner)
 
 
 async def _normalized(
-    source: AsyncIterator[StreamChunk], request: GenerateOptions
+    source: AsyncIterator[StreamChunk], request: GenerateOptions, by: Running
 ) -> AsyncIterator[StreamChunk]:
     """Turn an adapter raise into a terminal `finish{error}`.
 
     The loop's contract is that a stream always ends with a finish. Without this
     the loop would need a second failure path, and `agent/request-error` would
     not see provider failures uniformly.
+
+    **`by` is entered around each pull rather than around construction** (C10).
+    An adapter's body is row code this seam drives, so it runs as an effect of
+    the row that registered it (P6-25) — and a generator's body runs at
+    `__anext__`, on whatever task is consuming it. The binding therefore wraps
+    the *await*, not the `__anext__()` call that merely builds the coroutine,
+    which is the same mistake one level down. Entered and left per chunk rather
+    than held across the `yield`, because a binding held across a suspension is
+    released on whichever task resumes it — `_hooks`' reason for returning a
+    list rather than a generator.
+
+    **`running` and not the inline `_ACTIVATING.set/reset` `_invoke` uses**, and
+    the difference between the two is a layer rather than a preference. That one
+    is inside cordis and may touch its own ContextVar; reaching for it from here
+    would be a private import across two packages to save a measured 291 ns per
+    chunk — 0.3 ms on a thousand-chunk stream, against a stream that takes
+    seconds. `_invoke`'s note about the context manager's own frame is about a
+    path with no such boundary to cross.
     """
+    pull = source.__anext__
     try:
-        async for chunk in source:
+        while True:
+            with running(by):
+                try:
+                    chunk = await pull()
+                except StopAsyncIteration:
+                    return
             yield chunk
     except Exception as error:
         failure = (

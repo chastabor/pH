@@ -46,6 +46,27 @@ def test_redeclaring_with_a_different_mode_is_refused() -> None:
         registry.declare("x/y", "serial")
 
 
+def test_two_owners_cannot_declare_one_event() -> None:
+    """A13 — `EventRegistry.declare`, which says why a second owner is refused.
+
+    Three cases in one test, because the line between them is the finding: the
+    identical re-declaration a double import makes is still a no-op, an
+    anonymous one is not a claim, and only a *different* owner is refused — with
+    the first one's documentation intact afterwards.
+    """
+    registry = EventRegistry()
+    registry.declare("x/y", "emit", owner="ph.first", doc="The first.")
+
+    # Still idempotent for a module imported twice under different paths.
+    registry.declare("x/y", "emit", owner="ph.first", doc="The first.")
+    # And an anonymous re-declaration is not a second owner claiming it.
+    registry.declare("x/y", "emit")
+
+    with pytest.raises(EventModeError, match=r"already declared by .ph\.first."):
+        registry.declare("x/y", "emit", owner="ph.second", doc="The second.")
+    assert registry.require("x/y").doc == "The first.", "the survivor kept its documentation"
+
+
 def test_matrix_records_producers_and_consumers() -> None:
     registry = EventRegistry()
     registry.declare("a/b", "waterfall", owner="ph.thing", doc="Does a thing.")

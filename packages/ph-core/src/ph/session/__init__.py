@@ -40,6 +40,7 @@ from .store import (
     is_fork_boundary,
     new_session_id,
     open_turn_at,
+    valid_session_id,
 )
 from .surface import (
     SurfaceError,
@@ -98,4 +99,5 @@ __all__ = [
     "new_session_id",
     "now_ms",
     "open_turn_at",
+    "valid_session_id",
 ]

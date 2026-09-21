@@ -30,16 +30,21 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import replace
 from typing import Any, overload
 
 from pydantic import BaseModel
 
-from ..json import JsonObject, JsonValue, loads
-from ..tools.json_schema import schema_of, validate_json_schema_value
+from ..json import JsonObject, JsonValue, first_json_value, loads
+from ..tools.json_schema import (
+    CONSTRAINING_KEYWORDS,
+    schema_of,
+    validate_json_schema_value,
+)
+from .adapter import LlmError
 from .assembler import BlockAssembler
-from .types import GenerateOptions, StreamChunk, create_message, text_of
+from .types import GenerateOptions, LlmFailure, StreamChunk, create_message, text_of
 
 __all__ = [
     "SchemaViolation",
@@ -88,17 +93,27 @@ def structural_warning(schema: dict[str, Any]) -> str | None:
     if not isinstance(required, list):
         return None
     typed = properties if isinstance(properties, dict) else {}
-    untyped = [
-        str(name)
-        for name in required
-        if not isinstance(typed.get(str(name)), dict) or "type" not in typed[str(name)]
-    ]
+    untyped = [str(name) for name in required if not _constrains(typed.get(str(name)))]
     if not untyped:
         return None
     return (
         f"required field(s) {', '.join(untyped)} have no typed `properties` entry, "
         "so a grammar built from this schema will not constrain the reply"
     )
+
+
+def _constrains(entry: object) -> bool:
+    """Whether one `properties` entry says anything about its value (C11).
+
+    `CONSTRAINING_KEYWORDS` rather than `"type" in entry`, which was the test: an
+    optional field has no top-level `type`, because pydantic renders `str | None`
+    as an `anyOf` and a `Literal` as an `enum`. `required` is about *presence*,
+    not nullability, so a required-and-optional field is ordinary — and every
+    schema with one warned that its grammar would not constrain the reply. A
+    warning that fires on correct input is one people learn to scroll past,
+    which costs the case it was written for.
+    """
+    return isinstance(entry, dict) and any(key in entry for key in CONSTRAINING_KEYWORDS)
 
 
 def _object_in(text: str) -> JsonValue:
@@ -108,7 +123,7 @@ def _object_in(text: str) -> JsonValue:
     property of the *route* and this runs on every route. It is a fallback now
     rather than the whole mechanism, which is the difference P7-17 is about.
     """
-    for candidate in (text.strip(), *_braced(text)):
+    for candidate in _candidates(text):
         try:
             return loads(candidate)
         except json.JSONDecodeError:
@@ -116,9 +131,33 @@ def _object_in(text: str) -> JsonValue:
     raise SchemaViolation(["the reply is not JSON"])
 
 
-def _braced(text: str) -> list[str]:
+def _candidates(text: str) -> Iterator[str]:
+    """Spans of `text` that might be the document, widest first, lazily (C11).
+
+    Three readings, in the order they are likely and cheap:
+
+    * the whole reply, for a model that answered with nothing else;
+    * first `{` to last `}`, which is one object wrapped in prose or a fence;
+    * the first *complete* object, for a reply that holds two — `here it is:
+      {"a": 1} and also {"b": 2}` spans both under the second reading and parses
+      as neither, so the caller was told "the reply is not JSON" about a reply
+      that was mostly JSON.
+
+    **A generator, because the third costs a parse.** `raw_decode` scans at
+    ~32 ns/char, which is 628 µs on a 20 KB reply — paid on every attempt, and
+    `ask_for_shape` retries. Widest-first also matters on its own: one object
+    containing another is the common shape, and taking the inner one there would
+    return a fragment that validates against nothing.
+    """
+    yield text.strip()
     start, end = text.find("{"), text.rfind("}")
-    return [text[start : end + 1]] if start != -1 and end > start else []
+    if start == -1 or end <= start:
+        return
+    widest = text[start : end + 1]
+    yield widest
+    first = first_json_value(text, start)
+    if first is not None and first != widest:
+        yield first
 
 
 @overload
@@ -191,8 +230,16 @@ async def ask_for_shape[Shape: BaseModel](
         async for chunk in await stream(attempt):
             assembler.push(chunk)
         if assembler.finish.kind == "error":
-            failure = assembler.finish.failure
-            raise SchemaViolation([failure.message if failure else "the model call failed"])
+            # **The call failed; the shape was never in question** (C11). Raised
+            # as a `SchemaViolation` this told every caller the model had
+            # answered badly — so a rate limit, a context overflow or a dropped
+            # connection arrived under the one exception whose meaning is "the
+            # reply was the wrong shape", carrying none of the provider's code.
+            # `llm-retry` branches on that code, and `SchemaViolation` has none.
+            failure = assembler.finish.failure or LlmFailure(
+                message="the model call failed", code="UNKNOWN"
+            )
+            raise LlmError(failure.message, failure.code, failure)
         reply = text_of(assembler.blocks()).strip()
         try:
             return validated_shape(reply, shape)

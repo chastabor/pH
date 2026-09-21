@@ -173,7 +173,12 @@ class TuiScreenRegistry:
         for front_end in self._front_ends:
             self._draw(front_end, entry)
         changed()
-        return release
+
+        def undraw_and_release() -> None:
+            self._undraw(screen.id)
+            release()
+
+        return undraw_and_release
 
     def present_with(self, present: ScreenPresenter, *, scope: Context | None = None) -> Disposer:
         """Attach a front end: every screen registered now, and every later one.
@@ -215,6 +220,26 @@ class TuiScreenRegistry:
         return sorted(
             self._entries.values(), key=lambda entry: (entry.screen.order, entry.screen.id)
         )
+
+    def _undraw(self, screen_id: str) -> None:
+        """Take one screen off every front end (K8).
+
+        `claim_key`'s disposer removes the *entry* and nothing else, while what
+        each front end drew is owned by `entry.owner` — the row's scope. So
+        releasing one registration left the screen on screen: a row that
+        re-registers, or a command that retires one of several screens, took its
+        entry out of the table and the front end went on showing it until the
+        whole row unloaded. The table and the drawing are two halves of one
+        registration, so one disposer owns both.
+
+        Each `undo` is `add_disposer`'s idempotent release, so the scope running
+        it later is a no-op — which is what lets the two lifetimes overlap
+        without either having to know about the other.
+        """
+        for front_end in self._front_ends:
+            undo = front_end.drawn.pop(screen_id, None)
+            if undo is not None:
+                undo()
 
     def _draw(self, front_end: _FrontEnd, entry: _Entry) -> None:
         """Present one screen to one front end, owned by the registration.

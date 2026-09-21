@@ -942,7 +942,7 @@ class Kernel:
             try:
                 await anyio.wait_readable(sock)
                 chunk = sock.recv(65536)
-            except (OSError, anyio.ClosedResourceError):
+            except _CHANNEL_GONE:
                 return None
             if not chunk:
                 return None
@@ -958,7 +958,7 @@ class Kernel:
                 try:
                     await anyio.wait_writable(sock)
                     sent = sock.send(view)
-                except (OSError, anyio.ClosedResourceError):
+                except _CHANNEL_GONE:
                     # Only a real closure gets here: `_send_lock` is what keeps
                     # contention from arriving as `BusyResourceError` and being
                     # reported as the child having exited.
@@ -1028,6 +1028,28 @@ class Kernel:
             with suppress(OSError):
                 self._sock.close()
             self._sock = None
+
+
+_CHANNEL_GONE = (OSError, ValueError, anyio.ClosedResourceError)
+"""What this socket says when it has been closed underneath a caller.
+
+Three, because the answer depends on *where* the close lands, and the third was
+missing. `sock.send`/`sock.recv` on a closed socket raise `OSError` (EBADF);
+`anyio.notify_closing` raises `ClosedResourceError` into a waiter that is already
+parked. But `wait_readable`/`wait_writable` **entered** with a closed socket
+raise `ValueError("Invalid file descriptor: -1")` — `socket.close()` sets the
+fileno to `-1`, and the event loop refuses to register it.
+
+That third case is a loop re-entry, which is why a partial write finds it: a
+frame larger than the socket buffer goes round `wait_writable`/`send` many
+times, and `_teardown` closing the channel between two of those turns lands
+exactly there. Reached from `test_a_cell_blocked_behind_a_large_reply_is_still_killed`,
+where an 8 MB reply is being written while the stop ladder kills the guest — and
+observed on macOS while Linux passed, because which of the three arrives first is
+a matter of buffer sizes and wakeup order rather than of anything this code
+decides. The module already reads `ValueError` as "this fd is gone" where it
+calls `notify_closing`; this is the same reading at the two places that wait.
+"""
 
 
 @dataclass(slots=True)

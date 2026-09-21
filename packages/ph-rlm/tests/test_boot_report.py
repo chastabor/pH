@@ -170,3 +170,23 @@ async def test_doctor_reports_the_limits_the_guests_applied_not_the_ones_asked_f
     runtime._kernels = {"a": applied, "b": refused}
     row = dict(runtime.describe())["per-child limits"]
     assert "not applied" in row and "GiB address space" not in row, row
+
+
+def test_the_design_document_names_the_version_the_guest_declares() -> None:
+    """I1 — DESIGN.md §1 stated the kernel's `PROTOCOL_VERSION` as prose.
+
+    It was wrong for a while: the document said 2 while the guest declared 1,
+    and the `2` a reader would have found by grepping is `ph_app.protocol`'s
+    *wire* version, which numbers a different protocol entirely. Two constants
+    with one name, one of them in a paragraph nothing checks.
+
+    The bump has since landed, so this is the guard rather than the fix: the
+    number a person reads and the number the host negotiates with cannot drift
+    apart again without a test saying so. Asserted against the document text
+    because that is the copy with no compiler.
+    """
+    design = (Path(__file__).resolve().parents[3] / "DESIGN.md").read_text(encoding="utf-8")
+
+    assert f"`PROTOCOL_VERSION = {PROTOCOL_VERSION}`" in design, (
+        "DESIGN.md §1 names a kernel protocol version the guest does not declare"
+    )

@@ -35,10 +35,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 
 from ph.json import as_str
-from ph.session import Session
+from ph.session import Session, valid_session_id
 from ph.wire import WireModel, validation_errors
 
 __all__ = [
@@ -68,6 +68,7 @@ __all__ = [
     "capabilities",
     "cursor_of",
     "cursor_text",
+    "is_number",
     "notification",
     "parse_cursor",
     "parse_params",
@@ -444,6 +445,21 @@ def cursor_text(cursor: Cursor) -> str:
     return f"{cursor.generation}:{cursor.sequence}"
 
 
+def is_number(text: str) -> bool:
+    """Whether `text` is a run of ASCII digits (E6).
+
+    `str.isdigit()` alone is true for `²`, `٣` and the rest of Unicode's numeric
+    characters, and `int()` raises on most of them — a traceback out of a field a
+    *peer* sent, on the receive path, where the contract is to answer `None`
+    rather than fail. `isascii()` beside it is the narrow test that matches what
+    a cursor can legitimately be.
+
+    Public because the generation is parsed in two places: here, and in the TUI's
+    own attach reply reader, which had the bare `isdigit()` this fixes.
+    """
+    return text.isascii() and text.isdigit()
+
+
 def parse_cursor(text: str, current: object) -> Cursor | None:
     """`GENERATION:SEQ` or a bare `SEQ`, as a cursor — or `None` if it is neither.
 
@@ -465,7 +481,12 @@ def parse_cursor(text: str, current: object) -> Cursor | None:
     if not separator:
         fields = current if isinstance(current, dict) else {}
         generation, sequence = as_str(fields.get("generation")), text
-    if not (sequence.isdigit() and generation.isdigit()):
+    # `str.isdigit()` is true for `²`, `٣` and every other Unicode digit, and
+    # `int()` then raises on most of them (E6) — a traceback out of a cursor a
+    # client sent, on the read path, where the whole contract of this function is
+    # to answer `None` rather than fail. `str.isascii()` beside it is the narrow
+    # test that matches what `int` will actually take.
+    if not (is_number(sequence) and is_number(generation)):
         return None
     return Cursor(generation=generation, sequence=int(sequence))
 
@@ -614,9 +635,26 @@ class SessionParams(WireModel):
     session is *about*, on either transport. What each server adds to it is its
     own — the daemon's idempotence key, stdio's optional id — which is where
     the two vocabularies genuinely differ.
+
+    **The id is validated here** (K9), because this one model is what every
+    `session/*` method on both transports takes: a handler cannot forget a check
+    the wire type already made. An id becomes a directory name in the spill
+    store, the archive and the workspace scratch root, and several of the
+    daemon's own reads — `recorded_cwd`, the lease, `locate_session` — build a
+    path from it before any `Session` exists to refuse it.
     """
 
     session_id: str
+
+    @field_validator("session_id")
+    @classmethod
+    def _usable_as_a_path_component(cls, value: str) -> str:
+        if not valid_session_id(value):
+            raise ValueError(
+                "sessionId must be alphanumerics, dots, dashes and underscores, "
+                "starting with a letter or a digit"
+            )
+        return value
 
 
 async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> ReplyFrame | None:

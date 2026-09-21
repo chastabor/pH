@@ -75,6 +75,7 @@ __all__ = [
     "WriteIntent",
     "Written",
     "apply",
+    "literal_head",
     "matches_glob",
     "read_before_edit",
 ]
@@ -1014,6 +1015,38 @@ def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | Non
             yielded += 1
             if limit is not None and yielded >= limit:
                 return
+
+
+_WILDCARD = re.compile(r"[*?\[]")
+"""The metacharacters `matches_glob` treats as wildcards.
+
+Beside the matcher for the matcher's own stated reason: *"Two glob dialects in
+one harness is a rule someone writes once and is then wrong about forever."* A
+reader that wants to know where a pattern stops being literal is asking about
+this dialect, so it may not keep its own copy of the alphabet — `permissions_fs`
+had one that knew only `*`, and `sec?ets/**` was read as a literal directory no
+tree contains (D11).
+"""
+
+
+@lru_cache(maxsize=256)
+def literal_head(pattern: str) -> str:
+    """Everything before `pattern`'s first wildcard, without a trailing slash.
+
+    The most a glob will tell you about *where* it can match without walking the
+    tree, which is what lets a permission rule prune a directory it will never
+    hit. `""` means the pattern leads with a wildcard and could match anywhere —
+    the caller decides what to do with that, because a delete and a walk want
+    opposite answers for it.
+
+    Cached for `permissions_fs._prefix_of`'s reason and against the same kind of
+    key: rule patterns are a small fixed set written in a profile, so the cache
+    never churns. It is called up to three times per pattern per directory on the
+    walk screen, where the uncached regex measured 178 ns against 80 ns for the
+    `str.split` it replaced; at 31 ns cached the whole screen is *faster* than
+    before the dialect was fixed (6.5 µs against 8.8 µs per directory).
+    """
+    return _WILDCARD.split(pattern, 1)[0].rstrip("/")
 
 
 def matches_glob(candidate: str, pattern: str) -> bool:

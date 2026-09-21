@@ -552,6 +552,15 @@ async def apply(ctx: Context, config: Config) -> None:
     seam = TextIndexSeam(ctx=ctx, config=config)
     ctx.provide(TEXT_INDEX, seam)
 
+    def _forget_missing(store: TextIndex, run: ToolRunContext) -> int:
+        """Drop every indexed document that is no longer on disk. One thread hop."""
+        fs = ctx.require(FS)
+        dropped = 0
+        for path in store.documents():
+            if not fs.resolve(path, agent=run.agent).exists():
+                dropped += store.forget(path)
+        return dropped
+
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
         store = await seam.index()
         documents = await ctx.require(FS).collect(
@@ -596,6 +605,23 @@ async def apply(ctx: Context, config: Config) -> None:
                     store.add, path, chunks, vectors, state.id_for(path)
                 )
                 indexed.append(path)
+            if not args.forget:
+                # **Gone from disk is gone from the index** (X3). A deleted
+                # document kept its passages until somebody ran `forget` by
+                # hand, so search went on answering with text that is not there
+                # — worse here than for the code graph, because a passage is
+                # *quoted back to the model as evidence*.
+                #
+                # Asked of the filesystem rather than of the walk, for the
+                # reason the sibling sweep gives: `collect` stops at
+                # `max_files` and the policy screen prunes directories, so
+                # "absent from `documents`" is not "deleted" — it is also
+                # "past the cap" and "hidden by a rule".
+                #
+                # One thread hop for the whole sweep, not one per document: a
+                # round trip is 26.8 µs, which is 13 ms on a 500-document
+                # deletion and buys nothing, since `forget` is a dict pop.
+                removed += await anyio.to_thread.run_sync(_forget_missing, store, run)
             # After the writes: a token stored first would, on a crash between
             # the two, vouch for documents this run never indexed.
             moved = bool(state.token) and state.token != store.token

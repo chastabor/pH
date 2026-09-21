@@ -19,7 +19,7 @@ from ph.cordis import Context, Profile
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS
 from ph.persistence import ClaimingStore, SessionBusy, resume_session
 from ph.seams.telemetry import ops_record
-from ph.session import Session, new_session_id
+from ph.session import Session, SessionForkError, new_session_id, valid_session_id
 
 from .attach import ingest, prompt_message
 
@@ -86,6 +86,17 @@ async def open_session(
     working directory, which is not the caller's.
     """
     resolved = session_id or new_session_id()
+    # **Before anything builds a path from it** (K9). `SessionStore.create` and
+    # `.adopt` check this too, and by then it is too late here: `claim` below
+    # creates `<root>/.leases/<id>.lock`, `exists` locates `<root>/<id>/<id>.jsonl`,
+    # and `resume_session` *opens and parses* that file — all from the raw id, and
+    # all before a `Session` object exists for the store to refuse. This is the
+    # door the docstring above calls "the one door every host opens a session
+    # through", so it is where the id stops being arbitrary.
+    if not valid_session_id(resolved):
+        raise SessionForkError(
+            f'session id "{resolved}" is not usable as a path component', "SESSION_ID_INVALID"
+        )
     store = ctx.get(SESSION_PERSISTENCE)
     if isinstance(store, ClaimingStore):
         try:

@@ -106,7 +106,7 @@ from ..payloads import (
     StatusFacts,
     notice_of,
 )
-from ..protocol import DaemonGone, NoParams, SessionParams, Verb
+from ..protocol import DaemonGone, NoParams, SessionParams, Verb, is_number
 from ..sessions import SessionSummary
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
@@ -720,7 +720,7 @@ async def attach_session(
             _remote_command(client, session_id, one) for one in listed_commands[0].commands
         ],
         screens=_screens_of(listed_screens[0].screens),
-        generation=int(generation) if generation.isdigit() else None,
+        generation=int(generation) if is_number(generation) else None,
     )
     client.peer.on_notify = front.dispatch
     # The attach reply carries the status, the route and the footer, so this is

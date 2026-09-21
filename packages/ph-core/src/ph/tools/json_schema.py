@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from ..json import JsonValue
 
 __all__ = [
+    "CONSTRAINING_KEYWORDS",
     "SUPPORTED_KEYWORDS",
     "schema_of",
     "unsupported_keywords",
@@ -63,6 +64,25 @@ SUPPORTED_KEYWORDS: frozenset[str] = frozenset(
         "definitions",
     }
 )
+
+CONSTRAINING_KEYWORDS: frozenset[str] = frozenset(
+    {"type", "anyOf", "oneOf", "allOf", "$ref", "enum", "const"}
+)
+"""Keywords that make a `properties` entry say something about its value.
+
+Beside `SUPPORTED_KEYWORDS` because both are this module's vocabulary, and
+**deliberately not a subset of it**: that one lists what *pH's own validator*
+enforces, this one what a **grammar built from the schema** would constrain, and
+`anyOf`/`oneOf`/`allOf` are in the second and not the first. A route that
+compiles the schema honors them; `validate_json_schema_value` does not, and
+`unsupported_keywords` correctly says so. Two questions, one place, so the next
+reader sees the difference rather than discovering it.
+
+Read by `llm.structured.structural_warning`, which used `"type" in entry` alone
+— so every schema with an optional required field warned that its grammar would
+not constrain the reply, because pydantic renders `str | None` as an `anyOf` and
+a `Literal` as an `enum` (C11).
+"""
 
 _TYPE_CHECKS: dict[str, Any] = {
     "null": lambda v: v is None,

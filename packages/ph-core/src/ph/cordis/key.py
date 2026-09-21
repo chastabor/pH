@@ -54,4 +54,10 @@ def service_names(keys: Sequence[str | ServiceKey[Any]]) -> tuple[str, ...]:
     fourth caller copies whichever it reads first, and `normalize_plugin`'s
     `getattr(source, "inject", ()) or ()` was already a divergent variant.
     """
+    if isinstance(keys, str):
+        # `str` satisfies `Sequence[str]`, so `inject="llm"` type-checks and
+        # iterates into `l`, `l`, `m` (A12). The row then waits for a service
+        # named `l` that nothing provides — no error at compose, none at mount,
+        # just a row that never applies. The one spelling that cannot be meant.
+        raise TypeError(f'inject must be a list of service names, not the string "{keys}"')
     return tuple([service_name(key) for key in keys])

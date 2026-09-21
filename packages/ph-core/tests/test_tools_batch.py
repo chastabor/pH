@@ -275,3 +275,44 @@ def test_malformed_arguments_survive_as_text() -> None:
     # A broken argument string is the tool's problem to report, not the loop's
     # to crash on.
     assert parse_arguments("{not json") == "{not json"
+
+
+async def test_a_raise_still_answers_every_call_it_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C8 — `answer_uncommitted` says why a raise must still close every pair.
+
+    The raise is injected at `dispatch` rather than in a tool body on purpose: a
+    body that raises is already an error result one layer down (the test above
+    pins that), so it never reaches this path. What does is the runtime itself
+    coming apart — which is when the log most needs to stay answerable.
+    """
+    root, tools, agent, trace = _setup()
+    for name in ("first", "second", "third"):
+        tools.register(_slow(name, trace, 0.0, safe=True))
+
+    original = type(tools).dispatch
+
+    async def dispatch(self: ToolRuntime, run: Any) -> Any:  # noqa: ANN401
+        prepared = await original(self, run)
+        if run.execution.name == "first":
+            raise RuntimeError("the runtime fell over")
+        return prepared
+
+    # On the class: `ToolRuntime` is a slots dataclass, so the instance has no
+    # room for an override.
+    monkeypatch.setattr(ToolRuntime, "dispatch", dispatch)
+
+    with pytest.raises(RuntimeError, match="fell over"):
+        await _run(root, agent, "first", "second", "third")
+
+    events = session_of(agent).events
+    calls = [event for event in events if event.type == "tool/call"]
+    results = [event for event in events if event.type == "tool/result"]
+    assert len(calls) == 3
+    assert len(results) == 3, "a logged call was left with no answer"
+    # Every pair matches by id, which is what the provider checks.
+    assert {as_obj(one.data)["callId"] for one in calls} == {
+        as_obj(as_obj(one.data["message"])["source"])["callId"] for one in results
+    }
+    assert all(one.data["failureKind"] == "aborted" for one in results)

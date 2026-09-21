@@ -100,7 +100,10 @@ def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, An
     end rather than a plan rewritten underneath somebody.
 
     Sequential `requires` within the skill's own steps, and only within them —
-    two procedures read in one session are two orderings, not one queue.
+    two procedures read in one session are two orderings, not one queue. The
+    chain follows the order the *skill* declared rather than the order of what is
+    missing, so a re-read that finds one step already present links the rest
+    around the gap instead of over it (D13).
 
     **Built through `TodoItem` and checked by `_checked`, because this is the
     list's second writer.** `write_todos` is bounded by its own schema and its own
@@ -126,12 +129,19 @@ def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, An
         )
         return None
     grown = list(current)
-    for index, step in enumerate(wanted):
+    # **The chain follows the skill's own order, not the gap** (D13). Built over
+    # `wanted`, a procedure whose middle step was already in the list linked the
+    # step after it to the step *before* — `[one, three]` with `three` waiting on
+    # `one` — so the ordering the skill declared was quietly replaced by one that
+    # let `three` start while `two` was still pending. The predecessor is always
+    # nameable: every step is either already present or being added now.
+    predecessor = {step: steps[index - 1] for index, step in enumerate(steps) if index}
+    for step in wanted:
         try:
             entry = TodoItem(
                 content=step,
                 status="pending",
-                requires=[wanted[index - 1]] if index else [],
+                requires=[predecessor[step]] if step in predecessor else [],
             ).model_dump(mode="json")
         except ValidationError as error:
             log.warning("ph_stabilize.skill_steps: a step cannot be a todo entry: %s", error)

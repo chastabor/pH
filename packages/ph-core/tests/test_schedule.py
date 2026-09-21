@@ -65,6 +65,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from filelock import FileLock
 
 from ph.json import as_int
 from ph.seams.schedule import (
@@ -462,3 +463,27 @@ def test_a_missing_or_unreadable_index_reads_as_empty(tmp_path: Path) -> None:
 
     (tmp_path / INDEX_NAME).write_text('{"version": 99, "sessions": {}}', encoding="utf-8")
     assert _index(tmp_path).read() == {}, "a version this build does not know"
+
+
+def test_a_wedged_writer_does_not_stall_the_loop_for_long(tmp_path: Path) -> None:
+    """K10 — `_LOCK_TIMEOUT` says why the wait is bounded rather than patient.
+
+    `record` runs on the event loop from four callers, so a wait is time the
+    daemon serves nothing — including the schedules of every other root it
+    holds. Giving up is already its answer to a write it cannot do.
+    """
+    index = _index(tmp_path)
+    held = FileLock(f"{index.path}.lock", thread_local=False)
+    held.acquire()
+    try:
+        started = time.monotonic()
+        index.record("s1", next_at=1_000, now=0)
+        waited = time.monotonic() - started
+    finally:
+        held.release()
+
+    assert waited < 2.0, f"a contended write stalled the loop for {waited:.1f}s"
+    assert index.read() == {}, "the write went through a lock somebody else held"
+    # And with nobody holding it, the write lands as usual.
+    index.record("s1", next_at=1_000, now=0)
+    assert index.read()["s1"].next_at == 1_000

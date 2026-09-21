@@ -48,6 +48,7 @@ from ph.llm.types import (
     ToolCallBlock,
     ToolCallDelta,
     ToolSchema,
+    create_assistant_message,
     create_tool_result_message,
     create_user_message,
 )
@@ -558,6 +559,35 @@ def test_a_plain_user_message_stays_a_user_message() -> None:
         content=[{"type": "text", "text": "hello"}], source={"kind": "user"}
     )
     assert _to_openai(message, {}, {}) == [{"role": "user", "content": "hello"}]
+
+
+def test_an_assistant_turn_of_pure_reasoning_is_not_sent_as_an_empty_message() -> None:
+    """G9 — `_to_openai` says why a message with nothing to say is dropped.
+
+    The control matters as much as the case: reasoning *beside* text or a call
+    still travels, so this is not "strip reasoning", it is "do not send an empty
+    message". The failure it prevents is not one turn — the message stays in
+    history, so every later request fails the same way.
+    """
+    thinking = create_assistant_message(
+        content=[{"type": "reasoning", "text": "let me work through this"}],
+        provider="fake",
+        model="m",
+    )
+
+    assert _to_openai(thinking, {}, {}) == []
+
+    # Reasoning *beside* text or a call still travels — it is only the message
+    # with nothing else in it that has nothing to say.
+    spoke = create_assistant_message(
+        content=[
+            {"type": "reasoning", "text": "thinking"},
+            {"type": "text", "text": "the answer"},
+        ],
+        provider="fake",
+        model="m",
+    )
+    assert _to_openai(spoke, {}, {}) == [{"role": "assistant", "content": "the answer"}]
 
 
 async def test_a_missing_credential_fails_before_any_request() -> None:

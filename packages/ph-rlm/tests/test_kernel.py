@@ -793,3 +793,48 @@ def test_a_run_records_how_it_ended_once_and_the_first_writer_wins() -> None:
     assert active.settle(value="done") is False, "and the second is told it did not"
     assert active.error == "killed", "the kill is still the account the caller gets"
     assert active.value is None, "and the late frame's value did not land beside it"
+
+
+async def test_a_channel_closed_mid_frame_is_reported_as_a_closure(
+    make_kernel: MakeKernel,
+) -> None:
+    """The third way this socket says it is gone, which was not caught.
+
+    `sock.send`/`recv` on a closed socket raise `OSError`, and `notify_closing`
+    raises `ClosedResourceError` into a waiter already parked — both handled.
+    But `wait_writable`/`wait_readable` *entered* with a closed socket raise
+    `ValueError("Invalid file descriptor: -1")`, because `close()` sets the
+    fileno to `-1` and the loop refuses to register it. A frame bigger than the
+    socket buffer goes round that loop many times, so a teardown landing between
+    two turns hits exactly it.
+
+    Found as a macOS-only CI failure of the test above, where an 8 MB reply is
+    being written while the stop ladder kills the guest. Linux passed, and the
+    difference is buffer sizes and wakeup order rather than anything the code
+    decides — which is why this pins the *shape* with the socket closed
+    deterministically, instead of leaving it to a race that reproduces on one
+    platform.
+    """
+    import anyio
+
+    from ph_rlm.kernel.manager import _CHANNEL_GONE
+
+    kernel = await make_kernel()
+    assert (await kernel.run("1 + 1", (), None)).value == 2
+
+    # Closed underneath both waits, with nothing parked on it: this is the
+    # re-entry case, and `fileno()` is already `-1`.
+    sock = kernel._sock
+    assert sock is not None
+    sock.close()
+    assert sock.fileno() == -1
+
+    for wait in (anyio.wait_writable, anyio.wait_readable):
+        with pytest.raises(_CHANNEL_GONE):
+            await wait(sock)
+
+    # And the kernel reports it as the channel being gone rather than raising:
+    # a send finds it closed, settles the run, and the session still restarts.
+    outcome = await kernel.run("2 + 2", (), None)
+    assert outcome.error is not None or outcome.value == 4
+    assert (await kernel.run("3 + 3", (), None)).value == 6

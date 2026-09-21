@@ -1283,6 +1283,12 @@ class Context:
         def release() -> object:
             if effect.done:
                 return None
+            # **Marked before removed**, which is also what keeps `remove` — an
+            # `==` search — from taking an equal twin: two `add_disposer` calls
+            # with one bound method and one label produce equal `_Effect`s, and
+            # this line makes *this* one unequal to the others before the search
+            # runs. `Context.on` has no such mutation and matches by identity
+            # instead (A8).
             effect.done = effect.ran = True
             with suppress(ValueError):  # already removed by dispose()
                 self._effects.remove(effect)
@@ -1657,8 +1663,26 @@ class Context:
             hooks.append(hook)
 
         def off() -> None:
-            with suppress(ValueError):
-                hooks.remove(hook)
+            """Remove **that hook**, not one equal to it (A8).
+
+            `list.remove` compares with `==`, and two registrations of one
+            callback on one scope are equal by field — so disposing the second
+            deleted the first, and the first's disposer then deleted the
+            survivor. The damage is ordering: with a third listener between
+            them the survivor moves from in front of it to behind, so a listener
+            registered first starts running last, which is the one thing `on`
+            and `prepend` promise.
+
+            The same loop as `ph.seams._registry.claim_entry`, whose docstring
+            calls this "this module's whole complaint one container over" — this
+            is that container. Identity rather than `eq=False` on `Hook`, which
+            would answer this one question by silently changing what equality
+            and hashing mean for the type.
+            """
+            for index, held in enumerate(hooks):
+                if held is hook:
+                    del hooks[index]
+                    return
 
         return self.add_disposer(off, label=f"on({event})")
 
@@ -1794,25 +1818,39 @@ class Context:
         """
         event_registry.check(event, "waterfall")
         hooks = self._hooks(event, scope=scope)
-        state: list[object] = list(args)
-        index = 0
 
-        async def next_(*replacement: object) -> object:
-            nonlocal index
-            if replacement:
-                state[:] = replacement
-            if index < len(hooks):
-                hook = hooks[index]
-                index += 1
-                return await maybe_await(_invoke(hook, *state, next_))
-            # `inner` is the *producer's* body rather than a listener — nothing
-            # registered it, so it runs under whatever binding the caller of
-            # `waterfall` already had. That is still true after P6-26, which
-            # bound the bodies a *registry* owns: `tools/execute`'s inner is one
-            # of them and binds itself from the inside, before calling on. The
-            # other thirteen are a seam's own fallback, which is the row's code
-            # and wants the row's binding — exactly what it inherits here.
-            return await inner(*state)
+        async def frame(position: int, *state: object) -> object:
+            """The chain from `position` on. Its own cursor, deliberately (A6).
+
+            A shared `index` advanced by every `next_` made re-entry silently
+            wrong: a listener that awaited `next_()` twice — which is what a
+            *retry* is — got the whole inner chain the first time and `inner`
+            alone the second, because the cursor was already past everything.
+            No shipped listener does this today (`media-degrade`, `llm-retry`
+            and `permissions-fs` all call it in exclusive branches), which is
+            exactly why it would have been found by the first one that did, in
+            production, as a policy row that stopped running under retry.
+
+            Recursion gives each frame its own position, so calling `next_`
+            twice runs the rest of the chain twice — the thing a retry means —
+            and a replacement handed down is scoped to the call that passed it
+            rather than mutating a list its siblings also read.
+            """
+            if position >= len(hooks):
+                # `inner` is the *producer's* body rather than a listener —
+                # nothing registered it, so it runs under whatever binding the
+                # caller of `waterfall` already had. That is still true after
+                # P6-26, which bound the bodies a *registry* owns:
+                # `tools/execute`'s inner is one of them and binds itself from
+                # the inside, before calling on. The other thirteen are a seam's
+                # own fallback, which is the row's code and wants the row's
+                # binding — exactly what it inherits here.
+                return await inner(*state)
+
+            async def next_(*replacement: object) -> object:
+                return await frame(position + 1, *(replacement or state))
+
+            return await maybe_await(_invoke(hooks[position], *state, next_))
 
         # The one place the chain's type is unverifiable: `on` takes a
         # `Listener`, rows load through entry points, so a listener's return is
@@ -1825,7 +1863,7 @@ class Context:
         # omitted at ten and buy none of the can't-forget property that is its
         # whole point — while letting `T` be solved from two places, which is
         # what this signature exists to stop.
-        return cast("T", await next_())
+        return cast("T", await frame(0, *args))
 
     def detach(self, coro: Any, *, label: str) -> None:  # noqa: ANN401
         """Run `coro` outside the caller's lifetime, tracked and drained.

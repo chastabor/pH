@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.agent.inbox import InboxSplice
@@ -484,3 +485,80 @@ async def test_a_tool_step_after_max_tokens_gets_a_model_call(mount: MountProfil
     assert capped_calls == plain_calls == 3, "the cap swallowed the tool continuation"
     assert plain_reason == "completed"
     assert capped_reason == "max-tokens", "and the cap is still what the turn reports"
+
+
+async def test_a_scope_torn_down_around_a_turn_does_not_record_it_as_completed(
+    mount: MountProfile,
+) -> None:
+    """C9 — a raw cancellation is a `BaseException`, so both handlers missed it.
+
+    The loop catches `AgentCanceled`/`Canceled` — its own vocabulary — and
+    `Exception`. A cancellation from *outside* is neither: a host shutting down,
+    a deadline on an enclosing scope, a task group unwinding because a sibling
+    raised. It passed both, and the `finally` wrote whatever `turn_ends` happened
+    to hold, which for a turn interrupted mid-step is `None` and renders as
+    **completed**.
+
+    The log is the state, so that is a turn recorded as having finished its work
+    when nothing finished it: the resume path sees no open turn to repair, and a
+    reader — a person, the trajectory view, the compaction fold — is told a
+    story the run did not have.
+    """
+    ctx = await mount()
+    started = anyio.Event()
+
+    class Parked:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            started.set()
+            await anyio.sleep_forever()
+            yield  # pragma: no cover
+
+    ctx.require(LLM).register_adapter(["parked"], Parked())
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="parked", model="m"))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(agent.prompt, "hello")
+        with anyio.fail_after(5):
+            await started.wait()
+        tasks.cancel_scope.cancel()
+
+    ends = [event for event in session.events if event.type == "turn/end"]
+    assert ends, "the turn never closed at all"
+    reason = as_obj(ends[-1].data["reason"])
+    assert reason["kind"] == "aborted", f"a cancelled turn was recorded as {reason['kind']}"
+
+
+async def test_a_turn_that_died_in_a_group_is_not_recorded_as_completed(
+    mount: MountProfile,
+) -> None:
+    """C9's coverage, which a third `except` branch could not have given.
+
+    A cancellation reaching the loop from an anyio task group arrives wrapped in
+    a `BaseExceptionGroup`, not as the cancelled class — and `KeyboardInterrupt`
+    and `SystemExit` are neither. Catching one more type leaves the other three
+    recording a turn that finished nothing as *completed*, so the resume path
+    sees no open turn to repair.
+
+    Reading it off the state instead makes the question "did anything assign an
+    ending" rather than "which exception was it", and every normal exit assigns
+    one. `KeyboardInterrupt` is the case used here because it is the one a person
+    can actually cause.
+    """
+    ctx = await mount()
+
+    class Interrupting:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            raise KeyboardInterrupt
+            yield  # pragma: no cover
+
+    ctx.require(LLM).register_adapter(["rude"], Interrupting())
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="rude", model="m"))
+
+    with pytest.raises(KeyboardInterrupt):
+        await agent.prompt("hello")
+
+    ends = [event for event in session.events if event.type == "turn/end"]
+    assert ends, "the turn never closed at all"
+    assert as_obj(ends[-1].data["reason"])["kind"] == "aborted"

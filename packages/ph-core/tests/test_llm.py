@@ -11,16 +11,21 @@ actually happened.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import pytest
 
+from ph.cordis import Context, running
 from ph.json import JsonObject
+from ph.keys import LLM
 from ph.llm import BlockAssembler
+from ph.llm.adapter import apply as llm_apply
 from ph.llm.types import (
     BlockEnd,
     BlockStart,
     Finish,
     FinishReason,
+    GenerateOptions,
     LlmFailure,
     ReasoningDelta,
     StreamChunk,
@@ -32,8 +37,11 @@ from ph.llm.types import (
     UsageChunk,
     chunk_from_wire,
     is_token_delta,
+    user_text,
 )
-from ph.testing import as_kind, block_text
+from ph.testing import as_kind, block_text, text_chunks
+
+pytestmark = pytest.mark.anyio
 
 
 def _recorded() -> list[StreamChunk]:
@@ -215,3 +223,50 @@ def test_unknown_chunk_types_are_refused() -> None:
     # log written by a newer build needs to see.
     with pytest.raises(ValueError, match=re.escape("Input tag 'nonsense'")):
         chunk_from_wire({"type": "nonsense"})
+
+
+# ------------------------------------------------------------- the seam --
+
+
+async def test_an_adapters_stream_body_runs_inside_its_rows_binding() -> None:
+    """C10 — the `running(...)` wrapped generator *creation*, which runs nothing.
+
+    `adapter.stream(request)` is an async-generator call and `_normalized(...)`
+    is another, so the old line constructed two generators inside the binding and
+    left both bodies to run later, on whoever consumed them — outside it. Every
+    registration an adapter made while streaming therefore defaulted its owner to
+    the seam and outlived the row that made it, which is exactly the P6-12 leak
+    `current_owner` exists to close.
+
+    Asserted at the first chunk rather than at construction, because "when the
+    body runs" is the whole finding: a test that read the owner from
+    `stream()`'s own frame would pass against the broken version.
+    """
+    root = Context()
+    await llm_apply(root, None)
+    runtime = root.require(LLM)
+    row = root.scope("row:adapter")
+    seen: list[Context | None] = []
+
+    class Watching:
+        def stream(self, options: GenerateOptions) -> Any:  # noqa: ANN401
+            async def chunks() -> Any:  # noqa: ANN401
+                seen.append(Context.current_owner())
+                for chunk in text_chunks("hello"):
+                    yield chunk
+
+            return chunks()
+
+    with running(row.running_for(row)):
+        runtime.register_adapter(["watched"], Watching())
+
+    options = GenerateOptions(
+        provider="watched",
+        model="m",
+        messages=(user_text("hi"),),
+    )
+    async for _chunk in await runtime.stream(options):
+        pass
+
+    assert seen == [row], "the adapter's body ran outside its row's binding"
+    await root.dispose()

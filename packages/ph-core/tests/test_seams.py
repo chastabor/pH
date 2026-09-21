@@ -1342,6 +1342,34 @@ async def test_unloading_a_row_undoes_what_the_front_end_drew_for_it() -> None:
     assert undrawn == ["audit"], "the verb and the key outlived the row that registered them"
 
 
+async def test_releasing_one_registration_takes_its_screen_off_the_front_end() -> None:
+    """K8 — the disposer removed the table entry and left the drawing behind.
+
+    What each front end drew is owned by the *row's* scope, so it came down when
+    the row unloaded and not when the individual registration was released. The
+    two tests around this one cover the lifetimes that worked: the row unloading,
+    and the front end detaching. This is the third — a row retiring one of
+    several screens, or re-registering the same id — where the entry left the
+    table and the screen stayed on screen with nothing pointing at it.
+    """
+    root = Context()
+    registry = TuiScreenRegistry(ctx=root)
+    undrawn: list[str] = []
+    registry.present_with(lambda screen: lambda: undrawn.append(screen.id))
+
+    row = root.scope("a-row")
+    release = registry.register(_screen("audit"), scope=row)
+    registry.register(_screen("kept"), scope=row)
+
+    release()
+
+    assert registry.get("audit") is None
+    assert undrawn == ["audit"], "the released screen is still drawn"
+    # The row's own teardown still works and does not run the undo twice.
+    await row.dispose()
+    assert undrawn == ["audit", "kept"]
+
+
 async def test_a_detaching_front_end_undoes_its_own_presentations() -> None:
     """The other lifetime. A terminal can close while the harness runs on, and
     a command left pointing at a dead app is worse than no command."""

@@ -22,6 +22,7 @@ import pytest
 
 import ph.keys as core_keys
 from ph.cordis import Context, ServiceKey, ServiceNotFoundError, service_name
+from ph.cordis.key import service_names
 
 REPO = Path(__file__).resolve().parents[3]
 SOURCES = sorted(REPO.glob("packages/*/src/**/*.py"))
@@ -142,3 +143,16 @@ async def test_inject_accepts_keys_and_strings_alike() -> None:
     await ctx.reconcile()
     assert len(seen) == 1
     await ctx.dispose()
+
+
+def test_a_bare_string_is_not_a_list_of_service_names() -> None:
+    """A12 — `service_names` says why the one unmeanable spelling is refused.
+
+    Pinned here because the failure it prevents is silent: a row that waits
+    forever on a service named `l` looks exactly like a row whose dependency is
+    not mounted.
+    """
+    with pytest.raises(TypeError, match="not the string"):
+        service_names("llm")
+    # The list spelling of the same thing is untouched.
+    assert service_names(["llm"]) == ("llm",)

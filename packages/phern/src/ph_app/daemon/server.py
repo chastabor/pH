@@ -436,13 +436,8 @@ class _Connection:
         try:
             await self.peer.serve()
         finally:
-            for root_id in self.attached:
-                root = self.server.supervisor.roots.get(root_id)
-                if root is not None:
-                    root.unsubscribe(self.notify)
-                    if root.desk is not None:
-                        root.desk.leave(self)
-            self.attached.clear()
+            for root_id in list(self.attached):
+                self._part(root_id)
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> MethodResult:
         """The daemon's half of the vocabulary — dsh's names (P5-02).
@@ -868,15 +863,7 @@ class _Connection:
         # attach does not replay, so it does not take one — `SnapshotParams`
         # says why the field was removed rather than accepted and ignored.
         root = await self.server.supervisor.start(params.session_id)
-        if root.id not in self.attached:
-            self.attached.add(root.id)
-            root.subscribe(self.notify)
-        # Watching and answering are different claims, and the second is the
-        # client's `asks` capability rather than anything about this attach: a
-        # follower like `phern agents attach` watches without ever declaring it, and
-        # is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
-        if "asks" in self.declared and root.desk is not None:
-            root.desk.join(self)
+        self._join(root)
         # The footer, with the status it belongs to — the same pairing
         # `session.status` makes, so a client that has just attached draws a
         # complete one without a second call and without assembling a frame
@@ -930,12 +917,42 @@ class _Connection:
             **root.detail().model_dump(), schedules=self.server.supervisor.scheduled(root)
         )
 
-    async def _detach(self, params: SessionParams) -> SessionDetached:
-        was_attached = params.session_id in self.attached
-        self.attached.discard(params.session_id)
-        root = self.server.supervisor.roots.get(params.session_id)
+    def _join(self, root: Root) -> None:
+        """Start watching this root, and answering for it if we may.
+
+        Watching and answering are different claims, and the second is the
+        client's `asks` capability rather than anything about the attach: a
+        follower like `phern agents attach` watches without ever declaring it and
+        is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
+        """
+        if root.id not in self.attached:
+            self.attached.add(root.id)
+            root.subscribe(self.notify)
+        if "asks" in self.declared and root.desk is not None:
+            root.desk.join(self)
+
+    def _part(self, root_id: str) -> bool:
+        """Stop watching and stop being asked. Reports whether we were attached.
+
+        **One pair, three callers** (E5). Attaching does three things and there
+        were three places that undid some of them: `_detach` unsubscribed and
+        kept the desk seat, so a client that detached and stayed connected went
+        on being put in front of a person — an approval modal for a session it
+        has said it is no longer watching, which it therefore never answers. Only
+        `serve`'s teardown had the whole triple, and only because the TUI closes
+        the socket right after detaching.
+        """
+        was_attached = root_id in self.attached
+        self.attached.discard(root_id)
+        root = self.server.supervisor.roots.get(root_id)
         if root is not None:
             root.unsubscribe(self.notify)
+            if root.desk is not None:
+                root.desk.leave(self)
+        return was_attached
+
+    async def _detach(self, params: SessionParams) -> SessionDetached:
+        was_attached = self._part(params.session_id)
         # Deliberately *not* an error when nothing was attached: detach is what a
         # client does while tidying up, often twice, and a teardown path that
         # raises is one nobody can write correctly.

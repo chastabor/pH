@@ -60,7 +60,7 @@ from ph.system_prompt.assembly import (
     PromptSection,
 )
 from ph.text import count_of
-from ph.tools import ToolCallView, ToolResultView
+from ph.tools import TOOL_DISPATCH_EVENT_TYPES, ToolCallView, ToolResultView
 from ph.tools.definition import (
     Deny,
     PreToolDecision,
@@ -508,13 +508,19 @@ def _work_since(session: Session, since: int) -> int:
     which is the honest thing to count for "did anything happen, or was a box
     ticked". `write_todos` is excluded or every window would score itself.
 
+    **Both records, one per transport** — `TOOL_DISPATCH_EVENT_TYPES`, which
+    says why they are the same fact. Counting `tool/call` alone scored a Code
+    Mode cell that read nine files and edited three as *one* piece of work, so
+    the nudge for a window that did too little fired at an agent doing plenty
+    (D12).
+
     From the tail rather than the whole log: the previous `todo/write` is at most
     a turn ago, and `events_from` copies what follows it.
     """
     return sum(
         1
         for event in session.events_from(since + 1)
-        if event.type == "tool/call" and as_str(event.data.get("name")) != TOOL_NAME
+        if event.type in TOOL_DISPATCH_EVENT_TYPES and as_str(event.data.get("name")) != TOOL_NAME
     )
 
 

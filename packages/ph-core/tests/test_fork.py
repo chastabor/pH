@@ -64,7 +64,7 @@ from ph.session import (
     is_fork_boundary,
 )
 from ph.session.events import SessionEvent
-from ph.session.store import SessionStore
+from ph.session.store import SessionStore, new_session_id
 from ph.testing import block_text, user_payload
 
 
@@ -177,6 +177,32 @@ def test_fork_of_an_unknown_session_is_refused() -> None:
     with pytest.raises(SessionForkError) as caught:
         _store().fork("ghost")
     assert caught.value.code == "SESSION_NOT_FOUND"
+
+
+def test_a_session_id_that_would_escape_its_store_is_refused() -> None:
+    """K9 — `_ID` says why an id must be a safe path component.
+
+    The store's own two doors, `create` and `adopt`; the *front* door is
+    `open_session`, which reaches paths before either and is pinned in
+    `test_agents_cli.py`. The ids people and the harness actually use are
+    asserted too, because a guard that refuses a real id is worse than none.
+    """
+    store = _store()
+    # `""` is absent from this list on purpose: an empty `session_id` is how a
+    # caller says "mint me one", which `create` has always honored.
+    for bad in ("../escape", "..", "a/b", ".hidden", "with space", "/absolute"):
+        with pytest.raises(SessionForkError) as caught:
+            store.create(bad)
+        assert caught.value.code == "SESSION_ID_INVALID", bad
+
+    # `adopt` is the resume path and never went through `create`.
+    with pytest.raises(SessionForkError) as adopted:
+        store.adopt(Session("../escape"))
+    assert adopted.value.code == "SESSION_ID_INVALID"
+
+    # The ids people and the harness actually use are untouched.
+    for good in (new_session_id(), "s1", "20240101T000000-abc123", "my.session_1-2"):
+        assert store.create(good).id == good
 
 
 def test_forking_onto_an_existing_id_is_refused() -> None:

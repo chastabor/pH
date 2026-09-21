@@ -38,9 +38,12 @@ from typing import Any
 import anyio
 import pytest
 from daemon_helpers import break_the_provider, private_runtime, serving
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from ph.cordis import Context
 from ph.json import JsonObject, as_obj
+from ph.session import SessionForkError
 from ph.testing import ReapedHost
 from ph_app import verbs
 from ph_app.cli import app
@@ -259,6 +262,12 @@ def test_the_since_parser_stamps_a_bare_sequence_and_keeps_a_full_cursor() -> No
     assert bare is not None and bare.sequence == 0, "a real position, not a default"
     for bad in ("seven", "a:7", "7:b", ":", "1:2:3x"):
         assert parse_cursor(bad, current) is None, bad
+    # E6 — `str.isdigit()` is true for superscripts, Devanagari digits and the
+    # rest of Unicode's numeric characters, and `int()` raises on most of them.
+    # A cursor a client sent is read on the *receive* path, where this function's
+    # whole contract is to answer `None` rather than traceback.
+    for unicode_digit in ("\u00b2", "\u0663", "7:\u00b2", "\u0663:7"):
+        assert parse_cursor(unicode_digit, current) is None, unicode_digit
 
     # And the printed form round-trips through it, which is why the two live together.
     assert cursor_text(Cursor(generation="42", sequence=7)) == "42:7"
@@ -941,3 +950,37 @@ async def test_an_unnamed_failure_surfaces_as_itself_not_as_a_group(
     async with serving(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="nothing to do with the daemon"):
             await anyio.to_thread.run_sync(invoke)
+
+
+async def test_a_traversing_session_id_is_refused_before_any_path_is_built(
+    tmp_path: Path,
+) -> None:
+    """K9's front door — the store's own guard sits downstream of the damage.
+
+    `SessionStore.create`/`adopt` refuse a bad id, and by the time `open_session`
+    reaches either it has already used the raw string three times: `claim`
+    creates `<root>/.leases/<id>.lock`, `exists` locates `<root>/<id>/<id>.jsonl`,
+    and `resume_session` *opens and parses* that file. The traversal is over
+    before anything is in a position to refuse it.
+
+    So the check moved to the first statement of the one door every host opens a
+    session through, and to `SessionParams`, which is the wire type every
+    `session/*` method on both transports takes — a handler cannot forget a
+    check the model already made.
+    """
+    from ph_app.protocol import SessionParams
+    from ph_app.runtime import open_session
+
+    root = Context()
+    with pytest.raises(SessionForkError) as caught:
+        await open_session(root, "../../escape")
+    assert caught.value.code == "SESSION_ID_INVALID"
+    assert not (tmp_path / ".." / "escape.lock").exists()
+
+    # The wire chokepoint refuses it as a validation error, which is what the
+    # transports already turn into `invalid_params`.
+    # Through `model_validate`, which is how a frame's params actually arrive —
+    # the alias is the wire spelling and the constructor takes the field name.
+    with pytest.raises(ValidationError):
+        SessionParams.model_validate({"sessionId": "../../escape"})
+    assert SessionParams.model_validate({"sessionId": "20240101T000000-abc123"}).session_id

@@ -56,7 +56,18 @@ __all__ = [
 
 ENTRY_POINT_GROUP = "ph.plugins"
 
-_ENV_PATTERN = re.compile(r"\$\{env:(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
+_ENV_PATTERN = re.compile(
+    r"\$\{env:(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>(?:[^{}]|\{[^{}]*\})*))?\}"
+)
+"""`${env:NAME}` or `${env:NAME:-default}`.
+
+The default is **not** `[^}]*` (A10). A JSON-shaped fallback is the ordinary
+thing to want there — `${env:PH_EXTRA:-{"tier":"none"}}` — and under the old
+class it matched up to the *first* `}`, so the row silently received
+`{"tier":"none"` and whatever followed stayed literal. One level of balanced
+braces is what a default is ever written with, and it keeps the pattern a
+regular expression rather than a parser.
+"""
 _PREDICATE_PATTERN = re.compile(r"^\$\{(?P<kind>platform|env):(?P<value>[^}]*)\}$")
 
 
@@ -312,14 +323,10 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
         inserted = patch["insert"]
         if not isinstance(inserted, list):
             raise LoaderError(f"{layer}: insert: must be a list of rows")
-        existing = {row.id for row in rows}
-        for row in _as_rows(inserted, layer):
-            if row.id in existing:
-                raise LoaderError(
-                    f'{layer}: insert would duplicate row id "{row.id}"; address it '
-                    "by id to replace its config instead"
-                )
-            rows.append(row)
+        # No duplicate check here: `_check_unique_ids` runs over the composed
+        # list and subsumes it, with a better message — it names the layer that
+        # declared the id first, which an insert-local check cannot see.
+        rows.extend(_as_rows(inserted, layer))
         return rows
     row_id = patch.get("id")
     if not isinstance(row_id, str):
@@ -343,6 +350,34 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
         rows[index] = updated
         return rows
     raise LoaderError(f'{layer}: no row with id "{row_id}" to patch')
+
+
+def _check_unique_ids(rows: Sequence[Row]) -> None:
+    """No two composed rows share an id (A7).
+
+    `insert:` has refused this since it was written; a plain row list did not,
+    and the two halves of a profile are written by the same people. A duplicate
+    is not a second copy of the row — it is a row that **cannot be addressed**:
+    `_apply_patch` returns at the first match, so a later layer's `config:`
+    lands on one of them and the other keeps the old value silently, and
+    `Mount.forks` is keyed by id so only one is ever forked.
+
+    Checked over the composed list rather than per document, because the
+    collision that matters is between layers: a local profile re-declaring a row
+    `ph-base` already layers is exactly how this is reached, and neither
+    document is wrong on its own. `insert:` had its own copy of this refusal
+    until the general one existed; it is gone, because two spellings of one rule
+    means whichever somebody edits is the one that stays right.
+    """
+    seen: dict[str, str] = {}
+    for row in rows:
+        first = seen.get(row.id)
+        if first is not None:
+            raise LoaderError(
+                f'{row.layer}: row id "{row.id}" is already declared by {first}; '
+                "address it by id to replace its config instead of declaring it twice"
+            )
+        seen[row.id] = row.layer
 
 
 def _check_isolation(rows: Sequence[Row]) -> None:
@@ -397,6 +432,7 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
                 rows = _apply_patch(rows, entry, layer)
             else:
                 rows.extend(_as_rows([entry], layer))
+    _check_unique_ids(rows)
     _check_isolation(rows)
     return rows
 

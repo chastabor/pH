@@ -635,8 +635,29 @@ def _turn_reason(ends: TurnEndReason | None, capped: bool) -> TurnEndReason:
     It does not outrank the three that say more: `aborted`, `blocked` and
     `error` each name something the reader has to act on, and a cap somewhere in
     the turn is the smaller fact beside them.
+
+    **`None` means an exception left the body, so it is `aborted`** (C9). Every
+    normal exit from `_turn` assigns `ends` first — both `break`s are guarded by
+    `turn_ends is not None` and both `return` paths set it — so a `None` arriving
+    here cannot be a turn that finished. It used to read as `completed`, and each
+    `except` branch in `_turn` existed to write over that default before the
+    `finally` could believe it.
+
+    Deriving it here instead of catching it there is what makes the coverage
+    total. A branch for `anyio.get_cancelled_exc_class()` still misses the
+    `BaseExceptionGroup` an anyio task group raises around one, and
+    `KeyboardInterrupt`, and `SystemExit` — each of which would have recorded a
+    turn that finished nothing as *completed*, so the resume path saw no open
+    turn to repair and a reader was told a story the run did not have.
+
+    `kind="user"` is the honest cause for that case: something outside the turn
+    decided, and the loop cannot see what. The harness's own cancellations arrive
+    as `AgentCanceled`/`Canceled`, are caught in `_turn`, and carry their real
+    cause.
     """
-    if ends is None or ends.kind == "completed":
+    if ends is None:
+        return TurnEndReason(kind="aborted", reason=AgentCancelCause(kind="user"))
+    if ends.kind == "completed":
         return TurnEndReason(kind="max-tokens" if capped else "completed")
     return ends
 

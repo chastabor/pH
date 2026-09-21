@@ -170,6 +170,39 @@ def test_the_overlap_carries_the_previous_tail_forward() -> None:
     )
 
 
+def test_no_chunk_exceeds_the_bound_however_large_the_overlap() -> None:
+    """X4 — the carry-over was added on top of the limit rather than inside it.
+
+    After a flush the next chunk was seeded with `_tail`'s blocks and the block
+    that caused the flush was appended without re-checking. An embedder's input
+    limit is a hard one: what goes over it is truncated at the far end, so the
+    index holds a chunk whose tail no search can ever match, and nothing
+    anywhere reports it.
+
+    **The paragraphs are deliberately uneven.** With blocks of one size the
+    overshoot is a couple of characters — tail-plus-one is roughly a chunk by
+    construction — and a fixture built that way passes against the broken code,
+    which is how this nearly shipped untested. A small-small-large chunk carries
+    a tail that is almost the whole limit, and the large block behind it then
+    lands on top: 324 characters against a bound of 200.
+    """
+    small, large = "s" * 20, "L" * 150
+    text = "\n\n".join([small, small, large, large, small, large])
+
+    for overlap in (0, 180):
+        chunks = chunk_text(text, max_chars=200, overlap_chars=overlap)
+        assert chunks, overlap
+        widest = max(len(chunk.text) for chunk in chunks)
+        assert widest <= 200, f"overlap={overlap} produced a {widest}-character chunk"
+
+    # And the overlap still carries something where there is room for it, so
+    # this is a trim rather than the feature being switched off.
+    even = "\n\n".join(f"para {number} " + "word " * 10 for number in range(20))
+    assert len(chunk_text(even, max_chars=200, overlap_chars=150)) > len(
+        chunk_text(even, max_chars=200, overlap_chars=0)
+    )
+
+
 def test_the_overlap_never_repeats_a_whole_chunk() -> None:
     """`_tail`'s guard: a carry-over of everything would stop the walk advancing."""
     text = "\n\n".join(f"paragraph {number} " + "word " * 30 for number in range(6))
@@ -1113,3 +1146,38 @@ async def test_without_version_control_the_behavior_is_what_it_was(
     assert first.value["chunks_added"] > 0
     assert again.value["unchanged"] == 0
     assert embedder.calls > before
+
+
+async def test_a_deleted_document_leaves_the_index_on_the_next_sweep(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """X3 — the walk never diffed itself against what the index already held.
+
+    A document removed from the tree kept its passages until somebody ran
+    `forget` by hand, so search went on answering with text that is not there.
+    Worse here than for the code graph: a passage is *quoted back to the model*
+    as evidence, so a stale one is not a broken pointer, it is a false claim
+    about what the project says.
+
+    Only a full sweep, which is the second half: narrowing must not empty the
+    index, or `text_index paths=["docs/one.md"]` would delete everything else.
+    """
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "workspaces.md").write_text(DOCUMENT, encoding="utf-8")
+    (tmp_path / "docs" / "billing.md").write_text(
+        "# Billing\n\nInvoices are issued monthly and paid in arrears.\n", encoding="utf-8"
+    )
+    ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
+    agent = _agent(ctx)
+    await run_tool(ctx, "text_index", {"paths": ["."]}, agent=agent)
+
+    (tmp_path / "docs" / "billing.md").unlink()
+    swept = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=agent)
+
+    assert not swept.is_error, text_of(swept.content)
+    assert swept.value["total_documents"] == 1, "the deleted document kept its passages"
+
+    found = await run_tool(ctx, "text_search", {"query": "invoices arrears", "k": 3}, agent=agent)
+    assert all("billing" not in one["path"] for one in found.value["hits"]), (
+        "search quoted a passage from a document that is gone"
+    )

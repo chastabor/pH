@@ -1473,7 +1473,12 @@ BOUND: dict[str, str] = {
     # P6-29 dissolved the objection that had kept all five unbound — "a provider
     # has no agent" was only ever about the *layer* half, and the owner half
     # needs no agent at all.
-    "AdapterHandle.adapter": "LlmRuntime.stream",
+    # `_normalized`, not `LlmRuntime.stream` (C10): both `adapter.stream(...)`
+    # and `_normalized(...)` are async-generator calls, so `stream` constructs
+    # the pipeline and runs none of it. The adapter's body runs at each
+    # `__anext__`, on whoever is consuming — which is where the binding has to
+    # be, and therefore where this now points.
+    "AdapterHandle.adapter": "_normalized",
     # A route's file API (P7-03), on `AdapterHandle.adapter`'s terms exactly:
     # row code the seam invokes later, so it enters the row's binding first.
     "_Registered.uploader": "UploadRegistry.handle_for",

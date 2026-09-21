@@ -899,3 +899,43 @@ async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
     assert (
         permissions.objection("write", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
     )
+
+
+def test_a_wildcard_that_is_not_a_star_still_makes_a_head() -> None:
+    """D11 — `fs.literal_head` and `_WILDCARD` say why the alphabet is shared.
+
+    `sec?ets/**` and `[sf]ecrets/**` are ordinary globs `matches_glob` honors,
+    and a head split on `*` alone read them as literal directory names no tree
+    contains — so the rule concealed each file it named while refusing nothing
+    and pruning nothing.
+    """
+    for pattern in ("sec?ets/**", "[sf]ecrets/**"):
+        policy = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
+        assert policy.deletion_reason(Path("/w"), recursive=True) is not None, pattern
+
+    # And a head that really is one still bounds the refusal — this is not
+    # "refuse everything", which is the other way to pass. Only the `?` pattern
+    # can show it: `[sf]ecrets/**` leads with its wildcard, so it has no head at
+    # all and a delete correctly rounds it to "could match anywhere".
+    bounded = _policy(Rule(operations=("write",), paths=("sec?ets/**",), mode="deny"))
+    assert bounded.deletion_reason(Path("/w/elsewhere"), recursive=True) is None
+
+
+def test_a_recursive_delete_of_the_workspace_root_sees_relative_rules() -> None:
+    """D11 — the root is the one path with no relative spelling.
+
+    `_spellings` strips a prefix that carries a trailing slash, so the root
+    itself never matched it and came back with its absolute name alone. A
+    relative rule then could not see that deleting the root deletes everything
+    the rule names: `rm -rf <workspace>` was refused by `deny write /w/secrets/**`
+    and allowed by `deny write secrets/**`, which is the same rule written the
+    way people write them.
+    """
+    relative = _policy(Rule(operations=("write",), paths=("secrets/**",), mode="deny"))
+
+    assert relative.deletion_reason(Path("/w"), recursive=True) is not None
+    # The absolute spelling of the same rule always worked; both now agree.
+    absolute = _policy(Rule(operations=("write",), paths=("/w/secrets/**",), mode="deny"))
+    assert absolute.deletion_reason(Path("/w"), recursive=True) is not None
+    # And a tree the rule cannot reach is still deletable.
+    assert relative.deletion_reason(Path("/w/build"), recursive=True) is None

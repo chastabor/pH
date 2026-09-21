@@ -132,6 +132,37 @@ async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
                 await anyio.sleep(0.01)
 
 
+async def test_a_detached_client_is_no_longer_asked(tmp_path: Path) -> None:
+    """E5 — `_detach` unsubscribed but never left the desk.
+
+    Attaching joins the desk and disconnecting leaves it; detaching did only
+    half, so a client that detached and stayed connected kept its seat and went
+    on being asked. That is an approval modal put to a front end which has said
+    it is no longer watching this session — and which therefore answers nothing,
+    so the turn parks behind a UI nobody is looking at.
+
+    Latent because the TUI closes the socket immediately after detaching, which
+    reaches the other half in `serve`'s teardown. A client that detaches to
+    follow a different root — which the protocol allows — does not.
+    """
+    async with running(tmp_path) as daemon:
+        asked: list[dict[str, Any]] = []
+        staying: list[dict[str, Any]] = []
+        leaving = await daemon.client("asks")
+        stays = await daemon.client("asks")
+        leaving.handlers["approval/ask"] = _answering("allowed-once", asked)
+        stays.handlers["approval/ask"] = _answering("allowed-once", staying)
+        root = await _root(daemon)
+        for client in (leaving, stays):
+            await client.call("session/attach", sessionId=root.id)
+
+        await leaving.call("session/detach", sessionId=root.id)
+        assert await _ask(root) == "allowed-once"
+
+        assert asked == [], "a detached client was still put in front of a person"
+        assert len(staying) == 1, "and the one still attached was asked"
+
+
 async def test_a_watcher_that_is_not_a_front_end_is_never_asked(tmp_path: Path) -> None:
     """`phern agents attach` follows a log; it cannot answer for anyone.
 

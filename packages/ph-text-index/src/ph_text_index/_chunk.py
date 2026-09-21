@@ -101,13 +101,21 @@ def _tail(blocks: list[_Block], overlap: int) -> list[_Block]:
     Never the whole chunk: a chunk that carried all of itself forward would make
     the next one identical whenever a single block filled it, and the walk would
     not advance.
+
+    **`overlap` is a width in the same unit `chunk_text` measures in** — each
+    block plus its two separator characters — so the caller can hand it a budget
+    rather than a wish and get back something that fits. The first cut of X4 left
+    this function summing raw `len(block)` and put a second trimming loop in the
+    caller using `width()`: two owners of one decision, counting differently, and
+    the next edit to either drifts. A budget of zero or less is `[]`, which is
+    the guarantee that loop provided.
     """
     if overlap <= 0 or len(blocks) < 2:
         return []
     carried: list[_Block] = []
     total = 0
     for block in reversed(blocks[1:]):
-        total += len(block)
+        total += len(block) + 2
         if total > overlap:
             break
         carried.append(block)
@@ -122,6 +130,13 @@ def chunk_text(text: str, *, max_chars: int, overlap_chars: int) -> list[Chunk]:
     the chunk is emitted and the next is seeded with `_tail`'s carry-over. A
     single block bigger than `max_chars` is split first, so the bound holds for
     every chunk rather than for most of them.
+
+    **The carry-over is a budget, not a wish** (X4). The seeded tail was never
+    re-checked against the block that caused the flush, so a chunk could reach
+    `overlap_chars + max_chars` — an embedder's input limit is a hard one, and a
+    chunk over it is silently truncated at the far end, indexing text the search
+    can never match. `_tail` is handed what is actually left, so the overlap
+    gives way to the bound in the one function that owns how much is carried.
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
@@ -149,7 +164,11 @@ def chunk_text(text: str, *, max_chars: int, overlap_chars: int) -> list[Chunk]:
     for block in blocks:
         if held and held_width + len(block) > max_chars:
             flush()
-            held = _tail(held, overlap_chars)
+            # The carry-over gets what is left after the block that caused the
+            # flush, so it cannot push the next chunk past the bound.
+            # `_split_block` bounds every block by `max_chars`, so this budget
+            # can go to zero and `_tail` answers `[]`.
+            held = _tail(held, min(overlap_chars, max_chars - len(block) - 2))
             held_width = width(held)
         held.append(block)
         held_width += len(block) + 2
