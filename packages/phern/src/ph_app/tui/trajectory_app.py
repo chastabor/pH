@@ -30,12 +30,20 @@ from ph.persistence import materialize, read_session, repaired
 from ph.persistence.jsonl import family_log, locate_session
 from ph.session import Session, SessionEvent, SessionHeader
 
-from .config import TuiSettings, load_tui_settings
+from .config import TuiKeybindings, TuiSettings, load_tui_settings
 from .themes import ThemeCatalog, ThemeProfile, fallback_variables, load_catalog, load_theme_profile
 from .trajectory import TrajectoryRecord, build_trajectory
 from .trajectory_screen import TrajectoryScreen
 
 __all__ = ["TrajectoryApp", "load_records", "run_trajectory"]
+
+_DEFAULT_KEYS = TuiKeybindings()
+"""The pre-keymap defaults, read rather than retyped in `BINDINGS`.
+
+An instance and not the class: `TuiKeybindings` is `slots=True`, so the class
+attribute is the slot descriptor and `Binding(TuiKeybindings.quit, …)` would bind
+a repr of one. `set_keymap` replaces both keys from `tui.json` on mount; these
+are only what stands before it runs."""
 
 
 def load_records(
@@ -123,10 +131,15 @@ class TrajectoryApp(App[None]):
     ENABLE_COMMAND_PALETTE = False
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("q", "quit", "quit", id="quit"),
+        # **Its own id** (H7). Bound as `quit`, `set_keymap` below rebinds it to
+        # whatever `tui.json` says `quit` is — `ctrl+d` by default — so `q`
+        # stopped working and the only documented way out of the viewer was
+        # gone. The ids are a *shared* namespace across apps and this binding is
+        # not the chat app's quit; the configured key is offered beside it, so
+        # somebody who remapped `quit` still gets what they asked for.
+        Binding(_DEFAULT_KEYS.trajectory_quit, "quit", "quit", id="trajectory_quit"),
+        Binding(_DEFAULT_KEYS.quit, "quit", "quit", id="quit", show=False),
     ]
-    """The one binding that is the *app's* rather than the view's. `quit`
-    carries its id so a user who rebound it in `tui.json` gets it here too."""
 
     def __init__(
         self,

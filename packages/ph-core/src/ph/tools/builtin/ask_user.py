@@ -77,6 +77,36 @@ class AskUserArgs(ToolModel):
 class AskUserValue(ToolModel):
     answer: str | None = None
     answered: bool
+    attended: bool = True
+    """Whether the question was put to anybody at all (K7).
+
+    `ask` answers `None` for three situations — nobody is attending, somebody was
+    asked and declined, an answerer failed — and the tool rendered all three as
+    `UNATTENDED`. This is what tells the first apart from the rest; `DECLINED`
+    below says why that distinction is worth a field.
+    """
+
+
+DECLINED = (
+    "The question reached somebody and they did not answer it. Do not ask again: "
+    "choose the most reasonable option yourself and state the assumption you made, "
+    "or stop and say what you would need in order to proceed."
+)
+"""What the model reads when a person was asked and declined (K7).
+
+Distinct from `UNATTENDED` because the two call for different behavior and only
+one of them was ever said. "Nobody is attending" invites the model to carry on
+alone, which is right when there is no one there and wrong when somebody has
+just dismissed the prompt — that is a person declining to direct it, and asking
+again is the one thing it must not do.
+"""
+
+
+def _rendered(value: Any) -> str:  # noqa: ANN401
+    """The three outcomes `ask` folds into `None`, told apart again."""
+    if value["answered"]:
+        return as_str(value["answer"])
+    return DECLINED if value["attended"] else UNATTENDED
 
 
 @plugin("tool-ask-user", inject=[TOOLS, USER_QUESTIONS])
@@ -84,7 +114,8 @@ async def apply(ctx: Context, config: None) -> None:
     """Register the question tool."""
 
     async def ask_user(args: AskUserArgs, run: ToolRunContext) -> dict[str, Any]:
-        answer = await ctx.require(USER_QUESTIONS).ask(
+        questions = ctx.require(USER_QUESTIONS)
+        answer = await questions.ask(
             UserQuestion(
                 question=args.question,
                 options=args.options,
@@ -98,7 +129,14 @@ async def apply(ctx: Context, config: None) -> None:
             session=run.session,
             cancel=run.signal,
         )
-        return {"answer": answer, "answered": answer is not None}
+        return {
+            "answer": answer,
+            "answered": answer is not None,
+            # Read here rather than at render time: by then the front end may
+            # have detached, and what the model is owed is what was true when
+            # its question was put.
+            "attended": questions.attended,
+        }
 
     ctx.require(TOOLS).register(
         define_tool(
@@ -107,9 +145,7 @@ async def apply(ctx: Context, config: None) -> None:
             parameters=AskUserArgs,
             output=ToolOutput(
                 schema=AskUserValue,
-                render=lambda args, value: text_content(
-                    as_str(value["answer"]) if value["answered"] else UNATTENDED
-                ),
+                render=lambda args, value: text_content(_rendered(value)),
             ),
             execute=ask_user,
             # It changes nothing and asks nobody's permission to run; what it

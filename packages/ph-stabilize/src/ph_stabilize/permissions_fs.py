@@ -63,7 +63,7 @@ from typing import Any, Literal, TypeAlias
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context, Next, ServiceKey, plugin
-from ph.keys import APPROVAL, FS
+from ph.keys import APPROVAL, FS, SPILL_STORE
 from ph.paths import canonical, is_under
 from ph.seams.approval import denial_reason
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -303,7 +303,7 @@ class FsPermissions:
                 # Computed at most once per decision, and only if a scoped rule
                 # is actually reached: the common list has none.
                 if outside is None:
-                    outside = self._outside_workspace(Path(path), agent)
+                    outside = self._outside_workspace(Path(path), agent, operation)
                 if not outside:
                     continue
             if any(
@@ -427,7 +427,7 @@ class FsPermissions:
                 if outside is None:
                     # The one branch that still wants a `Path`, and it is rare
                     # by construction: only a scoped rule reaches it.
-                    outside = self._outside_workspace(Path(path), agent)
+                    outside = self._outside_workspace(Path(path), agent, operation)
                 if not outside:
                     continue
             if any(
@@ -488,8 +488,50 @@ class FsPermissions:
                 return OUTSIDE_REASON.format(operation=operation, path=path, root=workspace.root)
         return INTERRUPT_REASON.format(operation=operation, path=path)
 
-    def _outside_workspace(self, path: Path, agent: AgentHandle | None) -> bool:
-        """Whether this write is leaving the workspace the seam gave this agent.
+    def _handed_paths(self, agent: AgentHandle | None, operation: Operation) -> tuple[Path, ...]:
+        """Paths the harness put in front of *this* agent, which a read may follow.
+
+        **A read here is not leaving the agent's reach.** `tool-result-offload`
+        replaces a result with a preview and the file it was written to, so a
+        rule that refused reads outside the workspace would hand the model a path
+        and then refuse it when it followed it: the harness telling it something
+        is on disk and then denying it, which is the failure the spill seam's own
+        docstring opens by ruling out.
+
+        **This agent's own session, not the store.** `locator_for` is
+        `root/<owner>/<digest>-<name>` and a session-owned claim's owner is the
+        session id, so naming the store root would have let any agent read every
+        *other* session's spilled results — far wider than the claim being made,
+        which is only that a path this session was handed can be followed.
+
+        Reads only. Nothing invites an agent to *write* into the harness's store,
+        and one that could would be able to forge a spilled blob under a locator
+        the log already names.
+
+        It works today because the shipped rule set restricts writes and nothing
+        else — so this changes no shipped behavior and is not meant to. What it
+        changes is that the reach is *stated*: a deployment adding
+        `deny read outside-workspace` currently breaks every retrieval hint in
+        every session, silently, and would have no way to see why.
+
+        **Attachments are deliberately not here**, and the asymmetry is
+        structural rather than an oversight: `AttachmentStore` never hands a path
+        to the model — the bytes ride in a `MediaBlock`, and `attach` returns the
+        *workspace* path. Adding an exemption for it would break the rule its
+        seam states (a model reaches a file through `ctx.fs`), not restate it.
+        """
+        if operation != "read" or self.ctx is None:
+            return ()
+        store = self.ctx.get(SPILL_STORE)
+        session = None if agent is None else agent.session
+        if store is None or session is None:
+            return ()
+        return (store.root / session.id,)
+
+    def _outside_workspace(
+        self, path: Path, agent: AgentHandle | None, operation: Operation
+    ) -> bool:
+        """Whether this operation is leaving the workspace the seam gave this agent.
 
         `None` — no workspace — means there is no scope to be outside of, so a
         scoped rule simply does not apply: a profile layering the rule without a
@@ -514,6 +556,12 @@ class FsPermissions:
         allowed = () if self.ctx is None else allowed_paths_of(self.ctx)
         roots = (*writable_roots(workspace), *allowed)
         if any(is_under(path, root) for root in roots):
+            return False
+        # Asked only once the workspace itself has said no, which is what keeps it
+        # free: nearly every screened path is inside, and this is a service lookup
+        # on a walk that reaches five figures of candidates.
+        handed = self._handed_paths(agent, operation)
+        if any(is_under(path, root) for root in handed):
             return False
         # **Only now is it worth a syscall.** Every root here is canonical, and the
         # candidate is not: `FsService.resolve` passes an absolute path through
@@ -542,7 +590,7 @@ class FsPermissions:
         resolved = canonical(path)
         if resolved == path:
             return True
-        return not any(is_under(resolved, root) for root in roots)
+        return not any(is_under(resolved, root) for root in (*roots, *handed))
 
     def _spellings(self, absolute: str, agent: AgentHandle | None = None) -> tuple[str, ...]:
         """Both ways to name this path: absolute, and relative to the workspace.

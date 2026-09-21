@@ -11,6 +11,16 @@ docstring makes the point: the harness must never tell the model something is
 gone when it is on disk. The replacement names the file and says how to page
 through it, which is why `SpillRef.retrieval_hint` exists.
 
+**A spilled result is a file, and searching it is usually what you want.**
+`read` reaches it by the absolute path the replacement names, and so do `grep`
+and `glob` given that path as their `root` — the fs tools take an absolute root
+and the default rule set restricts writes only, which `permissions-fs` now
+states rather than leaves incidental. `text_index` can index one too, when a
+caller asks for it by path with a `glob` that matches a digest-named blob; it is
+deliberately *not* in the default walk, because embedding every spilled result
+of every session unasked is minutes of model time for output nobody has
+searched. `SPILL_TOOLS_HINT` is how the model learns the first two.
+
 **Individually, per result.** A Code Mode cell that makes forty dispatches gets
 forty separate answers here, because every dispatch crosses this same waterfall
 (C5) — one oversized `tools.read` is spilled while its siblings stay inline. The
@@ -37,9 +47,12 @@ caps are per stream, so one cell can still emit twice the threshold.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
+
 from ph.cordis import Context, Next, plugin
 from ph.keys import SPILL_STORE, TOOLS
-from ph.llm.types import text_of
+from ph.llm.types import ContentBlock, text_of
 from ph.seams.spill import SpillClaim
 from ph.session import Session
 from ph.tools.definition import (
@@ -54,6 +67,7 @@ from ph.wire import WireModel
 __all__ = [
     "HISTORY_PREFIX",
     "NUM_CHARS_PER_TOKEN",
+    "SPILL_TOOLS_HINT",
     "TOOL_TOKEN_LIMIT_BEFORE_EVICT",
     "TOO_LARGE_TOOL_MSG",
     "Config",
@@ -87,6 +101,20 @@ Here is a preview showing the head and tail of the result (lines of the form `..
 {content_sample}
 """  # noqa: E501
 """Verbatim from `deepagents/middleware/_message_eviction.py`."""
+
+SPILL_TOOLS_HINT = """This path is an ordinary file on disk, so `grep` and `glob` reach it with the path above as their `path` argument — searching it is usually better than paging through it. pH's reader is `read`, not the `read_file` the paragraph above names."""  # noqa: E501
+"""pH's own sentence, appended rather than folded into the upstream text.
+
+**Two things the verbatim block cannot say.** It tells the model to page with
+`read_file`, which is not a tool pH has — its readers are `read`, `grep` and
+`glob` — and it describes paging as the only way through, so a model handed 40 MB
+reads it from the top. Search is the thing you actually want on a large result
+and nothing told the model it was available.
+
+Kept separate because the block above is tracked verbatim against upstream, and
+the whole value of that is an upgrade producing a visible diff. Correcting the
+tool name in place would make the next comparison lie.
+"""
 
 
 class Config(WireModel):
@@ -206,9 +234,12 @@ async def spill_tool_result(
         {"callId": call_id, "locator": ref.locator, "bytes": ref.bytes},
     )
     await store.commit(ref)
-    return TOO_LARGE_TOOL_MSG.format(
+    upstream = TOO_LARGE_TOOL_MSG.format(
         tool_call_id=call_id, file_path=ref.locator, content_sample=content_preview(text)
     )
+    # After the preview, not before it: the preview is what the model reads first
+    # to decide whether it needs the rest at all.
+    return f"{upstream}\n{SPILL_TOOLS_HINT}\n"
 
 
 @plugin("tool-result-offload", inject=[TOOLS, SPILL_STORE], config=Config)
@@ -229,19 +260,21 @@ async def apply(ctx: Context, config: Config) -> None:
             return decision
         if not isinstance(decision, Accept):
             return decision
-        if decision.has_value:
-            # A value replacement is re-rendered by the registry *after* this
-            # waterfall, so the content that will reach the model does not exist
-            # yet and there is nothing here to measure.
-            return decision
         # The projection as it will actually be sent, which is the earlier
         # listener's if one rewrote it. Measuring the body's own content instead
         # would let any future post-execute row — a redactor, a truncator —
         # switch this guard rail off by touching the result at all.
-        content = decision.content if decision.content is not None else result.content
+        content = _projection(execution, decision, result)
+        if content is None:
+            return decision
         text = text_of(content)
         if not oversized(text, config):
-            return decision
+            # Handing the render back rather than dropping it. The registry
+            # renders a replaced value itself when a decision carries none, so
+            # returning `decision` here would make the *second* render of a
+            # value this row already rendered to measure it — the one case where
+            # `projected`'s "not paid twice" would not have held.
+            return replace(decision, content=content) if decision.has_value else decision
         replacement = await spill_tool_result(
             ctx,
             session,
@@ -253,10 +286,44 @@ async def apply(ctx: Context, config: Config) -> None:
             # Fail open, as upstream: an offload that cannot store the content
             # must not be the reason the model loses it.
             return decision
-        return Accept(
-            content=text_content(replacement),
-            additional_contexts=decision.additional_contexts,
-        )
+        # **The value rides through untouched** (D10). It is what the program
+        # receives under Code Mode, and it is already in a variable there — the
+        # context cost was never the value, it is the render that lands in the
+        # transcript. Under native tool calling nothing reads it, so passing it
+        # on costs nothing either. One rule for both transports: spill the
+        # render, leave the value alone.
+        return replace(decision, content=text_content(replacement))
+
+    def _projection(
+        execution: ToolExecution, decision: Accept, result: ToolExecutionResult
+    ) -> Sequence[ContentBlock] | None:
+        """The content this decision will put in front of the model, or `None`.
+
+        Three cases, and the middle one is D10. A decision that replaced the
+        *content* states it outright; one that replaced neither leaves the
+        body's own. One that replaced the **value** states neither — the
+        registry re-renders from the value after this waterfall — so the content
+        that will be sent does not exist yet, and `offload` used to return early
+        rather than measure something that was not there. A structured result
+        was therefore never offloaded however large it was.
+
+        Asked of the registry rather than rendered here, because a renderer is
+        the *tool's* row code (P6-26) and `ToolRuntime.projected` is where that
+        binding lives. It is not paid twice: both callers hand the render back,
+        so the registry renders nothing after this. `None` is the one case that
+        stays unmeasurable — a call with no live run to render against, where
+        guessing at a projection would be worse than declining.
+
+        It is still an approximation of the last word, and deliberately: `finish`
+        runs `finalize_content` after this waterfall and may replace content
+        wholesale. Nothing shipped sets it; a definition that grew content there
+        would pass this guard rail, and the guard would then belong in `finish`.
+        """
+        if decision.content is not None:
+            return decision.content
+        if decision.has_value:
+            return ctx.require(TOOLS).projected(execution, decision.value)
+        return result.content
 
     def _self_limiting(execution: ToolExecution) -> bool:
         """Whether this tool bounds its own output and can page.

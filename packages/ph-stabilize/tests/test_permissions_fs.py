@@ -56,7 +56,7 @@ from stabilize_helpers import (
 
 from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT
-from ph.keys import AGENTS, FS, SANDBOX, SESSIONS, WORKSPACE
+from ph.keys import AGENTS, FS, SANDBOX, SESSIONS, SPILL_STORE, WORKSPACE
 from ph.llm.types import ToolCallBlock
 from ph.seams.fs import FsDenied
 from ph.testing import (
@@ -899,6 +899,74 @@ async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
     assert (
         permissions.objection("write", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
     )
+
+
+async def test_a_spilled_result_is_readable_but_not_writable(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The reach the retrieval hint depends on, stated rather than incidental.
+
+    `tool-result-offload` replaces an oversized result with a preview and the
+    path it was written to under `$PH_HOME/spill`. That path is outside the
+    agent's workspace, and it works today only because the shipped rule set
+    restricts *writes* and nothing else — so a deployment adding
+    `deny read outside-workspace` hands the model a path and then refuses it when
+    it follows it, silently, in every session. The harness telling the model
+    something is on disk and then denying it is the failure the spill seam's own
+    docstring opens by ruling out.
+
+    Reads only, which is the half worth pinning twice: nothing invites an agent
+    to write into the harness's store, and one that could would be able to forge
+    a blob under a locator the log already names.
+
+    And this agent's own session only. The locator is `root/<owner>/…` with the
+    session id as owner, so exempting the store *root* would have let any agent
+    read every other session's spilled results — wider than the claim, which is
+    only that a path this session was handed can be followed. The locator here is
+    asked of the store rather than spelled by hand, because a test that writes
+    the layout out is a test that passes when the layout moves.
+    """
+    ctx = await mount(
+        {
+            "insert": [
+                {
+                    "id": "permissions-fs",
+                    "name": "permissions-fs",
+                    "config": {
+                        "rules": [
+                            {
+                                "operations": ["read", "write"],
+                                "paths": ["**"],
+                                "mode": "deny",
+                                "scope": "outside-workspace",
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+    (tmp_path / "project").mkdir()
+    agent, _ = await scoped_agent(ctx, tmp_path)
+    permissions = ctx.require(FS_PERMISSIONS)
+    store = ctx.require(SPILL_STORE)
+    session = agent.session
+    assert session is not None
+    spilled = store.locator_for(
+        owner=session.id, suggested_name="large_tool_results/call-7", content=b"x"
+    )
+
+    assert permissions.objection("read", spilled, agent=agent) is None
+    assert permissions.objection("write", spilled, agent=agent) is not None
+    # Another session's blob is not this agent's to follow — the exemption is the
+    # paths it was handed, not the store.
+    other = store.locator_for(
+        owner="s-someone-else", suggested_name="large_tool_results/call-7", content=b"x"
+    )
+    assert permissions.objection("read", other, agent=agent) is not None
+    # And the rule still bites everywhere else, so this is an exemption rather
+    # than the scope being switched off.
+    assert permissions.objection("read", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
 
 
 def test_a_wildcard_that_is_not_a_star_still_makes_a_head() -> None:

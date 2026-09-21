@@ -443,11 +443,30 @@ PreToolDecision: TypeAlias = "Allow | Deny | Ask | Respond"
 
 @dataclass(frozen=True, slots=True)
 class Accept:
-    """Keep the call successful, optionally replacing one projection."""
+    """Keep the call successful, optionally replacing either projection.
+
+    **Two projections, two consumers** (D10). `value` is what the program
+    receives under Code Mode — `bridge.call` hands it back and a cell subscripts
+    it — and `content` is what reaches the model's transcript. Ordinarily the
+    second is rendered from the first, which is why a row replacing the value
+    leaves `content` alone and lets the registry re-render.
+
+    Supplying *both* is the explicit statement that they differ, and it is
+    offload's case: a result too large for the context is spilled to a file and
+    the model gets a pointer, while the program keeps the whole object in its
+    variable. That combination used to raise, on the reading that content is
+    derived from the value and two sources would disagree — true of a row that
+    means them to agree, and exactly backwards for the one row whose job is to
+    make them differ.
+    """
 
     content: Sequence[ContentBlock] | None = None
+    """What the model sees. `None` leaves it to the registry: the body's own
+    content, or the render of a replaced `value`."""
     value: Any = None
     has_value: bool = False
+    """Whether `value` is a replacement. Separate from `value is not None`,
+    because `None` is a value a tool may legitimately return."""
     additional_contexts: tuple[Message, ...] = ()
     kind: Literal["accept"] = "accept"
 

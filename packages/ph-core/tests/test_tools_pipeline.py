@@ -511,3 +511,80 @@ async def test_unknown_tool_error_is_routable() -> None:
     assert error.code == "UNKNOWN_TOOL"
     assert error.failure_kind == "denied"
     assert "call it through run_code" in str(error)
+
+
+async def test_a_projection_is_answered_for_a_tool_that_unregistered_itself() -> None:
+    """D10 — `projected` reads the live run, not the registry table.
+
+    The first cut looked the tool up again: `view(scope)`, `visible`, `by`. That
+    is the one thing `ToolRunContext.by` says not to do, because a tool that
+    unregisters itself during its own `execute` is gone from the rebuilt view by
+    the time `tools/post-execute` runs — so the lookup answered `None` and the
+    offload silently stopped guarding the largest results, or rendered under a
+    synthesized `Running`, which is the unbound-row-code regression
+    `test_registration_ownership` exists to catch.
+
+    A tool that unregisters itself is the narrowest way to stage that, and it is
+    a real shape: a one-shot registration that retires once it has answered.
+    """
+    ctx, runtime = tool_runtime()
+    agent = StubAgent(ctx.scope("agent"))
+    seen: list[Any] = []
+    retired: list[Any] = []
+
+    def retire(_args: dict[str, Any], _run: Any) -> str:  # noqa: ANN401
+        retired.pop()()
+        return "done"
+
+    async def measure(
+        execution: Any,  # noqa: ANN401
+        result: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
+        seen.append(runtime.projected(execution, "a replacement"))
+        return await next_(execution, result)
+
+    ctx.on("tools/post-execute", measure)
+    retired.append(runtime.register(simple_tool("once", retire), scope=agent.ctx))
+
+    await runtime.execute(
+        ToolExecutionInput(
+            call_id="c1",
+            name="once",
+            arguments={},
+            scope=boundary_for(None, agent),
+            agent=agent,
+        )
+    )
+
+    assert runtime.view(boundary_for(None, agent)).visible.get("once") is None, (
+        "the tool really did leave the table"
+    )
+    assert seen and seen[0] is not None, "the projection was declined for a live call"
+    assert block_text(seen[0][0]) == "a replacement", (
+        "and it rendered through the tool's own renderer"
+    )
+
+
+async def test_a_projection_outside_a_running_call_is_declined() -> None:
+    """The honest `None`: nothing is in `tools/post-execute`, so nothing can say.
+
+    Worth pinning beside the case above, because the two answers have to come
+    apart — a `projected` that fell back to a table lookup would answer here too,
+    and answering is what let the earlier version render unbound.
+    """
+    ctx, runtime = tool_runtime()
+    agent = StubAgent(ctx.scope("agent"))
+    runtime.register(simple_tool("idle", lambda _args, _run: "x"), scope=agent.ctx)
+
+    execution = runtime.create_execution(
+        ToolExecutionInput(
+            call_id="c-none",
+            name="idle",
+            arguments={},
+            scope=boundary_for(None, agent),
+            agent=agent,
+        )
+    ).execution
+
+    assert runtime.projected(execution, "anything") is None

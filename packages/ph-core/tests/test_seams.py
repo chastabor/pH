@@ -86,6 +86,46 @@ async def test_approval_records_both_halves_and_returns_the_outcome() -> None:
     assert [event.type for event in session.events] == ["approval/asked", "approval/decided"]
 
 
+async def test_a_cancel_while_a_person_is_being_asked_still_closes_the_pair() -> None:
+    """K7 — `_route` checks the token on the way *in*, and only there.
+
+    So `"canceled"` was reachable for a caller that was already cancelled and for
+    nothing else: a cancel arriving while the question is in front of somebody
+    unwound straight past `_record_decided`, leaving an `approval/asked` with
+    nothing answering it. The crash repair stamps that `interrupted` on the next
+    open — a different and less true story than "somebody pressed escape", since
+    the run was not interrupted, the question was.
+
+    A cancellation is not an `Exception`, which is why the guard that catches
+    this has to be wider than the one that would look right.
+    """
+    root = Context()
+    service = ApprovalService(ctx=root)
+    session = Session("s")
+    asked = anyio.Event()
+
+    async def answerer(request: ApprovalRequest, next_: object) -> str:
+        asked.set()
+        await anyio.sleep_forever()
+        return "allowed-once"  # pragma: no cover
+
+    root.on("approval/request", answerer)
+
+    async with anyio.create_task_group() as tasks:
+
+        async def ask() -> None:
+            await service.request(agent=_agent(session), tool_name="edit", call_id="c1")
+
+        tasks.start_soon(ask)
+        with anyio.fail_after(5):
+            await asked.wait()
+        tasks.cancel_scope.cancel()
+
+    assert [event.type for event in session.events] == ["approval/asked", "approval/decided"]
+    assert as_str(session.events[-1].data["outcome"]) == "canceled"
+    assert pending_approvals(session.events) == [], "repair would stamp this interrupted"
+
+
 async def test_register_answerer_is_the_waterfall_by_another_name() -> None:
     root = Context()
     service = ApprovalService(ctx=root)

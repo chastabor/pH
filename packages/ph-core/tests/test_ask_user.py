@@ -29,7 +29,7 @@ from ph.llm.types import text_of
 from ph.seams.user_questions import UserQuestion, pending_questions
 from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
-from ph.tools.builtin.ask_user import UNATTENDED
+from ph.tools.builtin.ask_user import DECLINED, UNATTENDED
 
 pytestmark = pytest.mark.anyio
 
@@ -198,6 +198,12 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
     are written even though there is no answer in the second. Leaving it out
     would make a question a person dismissed indistinguishable from one a crash
     interrupted, and a resume would put it back forever.
+
+    **And what the model reads says which it was** (K7). This assertion was
+    `UNATTENDED` — "nobody is attending this session, so the question was not put
+    to anyone" — for a question that reached somebody who declined it. The
+    harness contradicting what the person just did, and in the direction that
+    tells the model to carry on alone.
     """
     ctx = await mount(ROW)
     session = ctx.require(SESSIONS).create("declined")
@@ -205,7 +211,7 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
 
     result = await _ask(ctx, session)
 
-    assert text_of(result.content) == UNATTENDED
+    assert text_of(result.content) == DECLINED
     answered = session.latest("question/answered")
     assert answered is not None and answered.data.get("declined") is True
     assert pending_questions(session.events) == []

@@ -197,11 +197,14 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
     holding the full bytes and prove nothing about the model's context.
 
     The stand-in replaces the *value*, because that is what `bridge.call` hands
-    back to the program. Note the shape a real row will have to solve: an
-    `Accept(has_value=True)` re-renders content through the tool's own output
-    schema, so a generic policy cannot invent a replacement value without knowing
-    the tool. That is P4-02's problem; what Phase 3 owes, and what this asserts,
-    is that the boundary is per dispatch and one dispatch can be reshaped alone.
+    back to the program. This docstring used to record the shape a real row would
+    have to solve — an `Accept(has_value=True)` re-renders content through the
+    tool's own output schema, so a generic policy cannot invent a replacement
+    value without knowing the tool — and D10 settled it by giving up the premise:
+    a spill policy never needed to invent one. It spills the *render* and passes
+    the value through, because the program already holds the object and only the
+    render costs context. What this still asserts is Phase 3's own half: the
+    boundary is per dispatch and one dispatch can be reshaped alone.
     """
     ctx, session, agent = await shipped_profile()
     big_path, small_path = tmp_path / "gate-big.txt", tmp_path / "gate-small.txt"

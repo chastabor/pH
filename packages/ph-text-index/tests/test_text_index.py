@@ -1181,3 +1181,66 @@ async def test_a_deleted_document_leaves_the_index_on_the_next_sweep(
     assert all("billing" not in one["path"] for one in found.value["hits"]), (
         "search quoted a passage from a document that is gone"
     )
+
+
+async def test_a_spilled_result_can_be_indexed_when_it_is_asked_for(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A large result is a file, and searching it is the thing you want.
+
+    `tool-result-offload` writes an oversized result to `$PH_HOME/spill` and
+    hands the model the path. That path is outside the workspace, so it is not in
+    the default walk — deliberately: embedding every spilled result of every
+    session, unasked, is minutes of model time for output nobody has searched.
+
+    But it must work when it *is* asked for, and this pins that it does: an
+    absolute path resolves through `collect` like any other, so the request is
+    expressible with the tools that already exist rather than needing a knob. The
+    `glob` is explicit because spilled blobs are named by digest and carry no
+    extension, so the row's `**/*.md` default would match none of them.
+    """
+    spill = tmp_path / "spill" / "large_tool_results"
+    spill.mkdir(parents=True)
+    (spill / "abc123-call-7").write_text(DOCUMENT, encoding="utf-8")
+    ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
+    agent = _agent(ctx)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": [str(spill)], "glob": "*"}, agent=agent)
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert indexed.value["total_documents"] == 1
+
+    found = await run_tool(
+        ctx,
+        "text_search",
+        {"query": "which sandbox backend confines an agent on Linux", "k": 2},
+        agent=agent,
+    )
+    assert not found.is_error, text_of(found.content)
+    assert found.value["hits"], "a spilled result was indexed but cannot be found"
+
+
+async def test_a_workspace_sweep_does_not_forget_an_indexed_spill(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """X3's sweep and this have to agree, and the existence test is why they do.
+
+    A later `text_index .` walks the workspace, which a spill is not in. Had the
+    sweep differenced the index against the *walk* — the first cut of X3 — every
+    spilled document would have been forgotten by the next ordinary index call,
+    and the model's searchable copy of a large result would vanish for a reason
+    nothing reported. Asking the filesystem is what makes the two compose.
+    """
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    (spill / "result.txt").write_text(DOCUMENT, encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "note.md").write_text("# Note\n\nSomething else entirely.\n", "utf-8")
+    ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
+    agent = _agent(ctx)
+
+    await run_tool(ctx, "text_index", {"paths": [str(spill)], "glob": "*"}, agent=agent)
+    swept = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=agent)
+
+    assert swept.value["chunks_removed"] == 0, "an ordinary walk forgot the indexed spill"
+    assert swept.value["total_documents"] == 2

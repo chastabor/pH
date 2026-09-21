@@ -35,6 +35,7 @@ started when a turn starts and stopped when it ends.
 from __future__ import annotations
 
 import logging
+import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -535,7 +536,16 @@ class PHTuiApp(App[str | None]):
         if message.text.startswith("/"):
             # A command is the human's verb. Sending it as a prompt would spend
             # a turn and make the log say the model chose it.
-            await self._dispatch_command(front, message.text)
+            #
+            # **On a worker, like the two shell branches above** (H7). This is a
+            # handler on Textual's message pump, and `run_command` is a round
+            # trip to the daemon: `/compact` spends a whole model call in there.
+            # Awaited here it froze the entire UI for the duration — no
+            # keystrokes, no repaint, not even the spinner — for the command
+            # whose whole job is to take a while. `_dispatch_command` already
+            # reports its own failures through `notify`, which is a worker's
+            # contract, so nothing else had to change.
+            self.run_worker(self._dispatch_command(front, message.text), group="command")
             return
         if message.queue or front.state.busy:
             # The driver refuses a second concurrent `run()`, and a person
@@ -581,7 +591,18 @@ class PHTuiApp(App[str | None]):
         than doing nothing.
         """
         front = self.front
-        paths = argument.split()
+        # `shlex.split`, not `str.split` (H7). A path with a space in it is the
+        # ordinary case on a Mac — `~/Library/Application Support/...` — and
+        # whitespace-splitting turned one `/attach "my notes.md"` into two
+        # filenames that do not exist, reported as two failures naming neither
+        # of the things the person typed. Quoting is what a person reaches for,
+        # and it is what the shell they typed it into would have honored.
+        try:
+            paths = shlex.split(argument)
+        except ValueError:
+            # An unbalanced quote. Their text back, rather than a traceback or a
+            # silent mis-split of it.
+            paths = [argument.strip()] if argument.strip() else []
         if front is None:
             return
         if not paths:

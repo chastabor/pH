@@ -158,6 +158,24 @@ def test_the_process_table_is_unshared_along_with_proc() -> None:
     assert "--proc" in argv and "--unshare-pid" in argv
 
 
+def test_the_confined_command_gets_a_session_of_its_own() -> None:
+    """J9 — the terminal half of what `--unshare-pid` claims about the table.
+
+    Without `--new-session` the confined command keeps the host's controlling
+    terminal, so it can push characters into it with `TIOCSTI` — input the
+    *person's* shell then runs, unconfined, which is the whole tier defeated by
+    one ioctl. It also means a `^C` in that terminal signals the foreground
+    group rather than the sandbox.
+
+    `bwrap` offers the flag for exactly this, and `ph.seams.subprocess` makes the
+    same move with `start_new_session` for the children it spawns directly — so
+    this was the one spawn path in the tree without it.
+    """
+    argv = Bubblewrap().confine(("cmd",), _policy()).argv
+
+    assert "--new-session" in argv
+
+
 def test_the_network_namespace_is_unshared_unless_the_policy_asks_for_it() -> None:
     """A namespace with no interface but loopback is not a filter that can be
     talked past, which is why this is the mechanism rather than a rule."""
@@ -190,6 +208,24 @@ def test_the_profile_denies_by_default_and_allows_back() -> None:
 
     assert profile.splitlines()[1] == "(deny default)"
     assert '(allow file-write* (subpath "/w"))' in profile
+
+
+def test_a_path_with_a_quote_in_it_does_not_end_the_profile_literal() -> None:
+    """J9 — the profile is an s-expression and the paths went into it raw.
+
+    A `"` or a `\\` in a directory name ended the string literal early: the rest
+    of the path became stray atoms, and `sandbox-exec` either rejected the whole
+    profile — taking the rung down on a host where it works — or, on one that
+    still parsed, granted `file-write*` on a *prefix* of what was asked for.
+    Both characters are legal in a macOS path, and `$PH_HOME` is a path a person
+    chooses.
+    """
+    profile = seatbelt_profile(_policy('/w/say "hi"'))
+
+    assert '(allow file-write* (subpath "/w/say \\"hi\\""))' in profile
+    # A backslash escapes itself, or a path ending in one would escape the
+    # closing quote — the same hole one character over.
+    assert '(subpath "/w/back\\\\slash")' in seatbelt_profile(_policy("/w/back\\slash"))
 
 
 def test_the_network_line_is_the_one_that_changes_something() -> None:

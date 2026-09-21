@@ -94,6 +94,28 @@ class ReasoningBlock(WireModel):
 
     type: Literal["reasoning"] = "reasoning"
     text: str
+    signature: str | None = None
+    """The provider's attestation that it produced this reasoning (G8).
+
+    Anthropic signs every thinking block and **rejects a conversation that sends
+    one back without its signature**, which makes this the difference between a
+    session with extended thinking that continues and one whose every later
+    request fails. It has to live on the block rather than in the adapter,
+    because the log is the state: a resumed session rebuilds its history from
+    these events, and a signature the adapter held in memory is gone by then.
+
+    `None` for every other provider and for reasoning that predates this field —
+    the adapter that needs one decides what to do without it, which for
+    Anthropic is to leave the block out rather than have the request refused.
+    """
+    redacted: bool = False
+    """Whether `text` is an opaque blob the provider encrypted rather than prose.
+
+    Anthropic sends `redacted_thinking` when its own safety systems withhold the
+    reasoning; the payload is ciphertext that only it can read, and it must still
+    be passed back for the conversation to continue. Rendering it as ordinary
+    text put a wall of base64 in front of the model as something it had said.
+    """
 
 
 class AttachmentRef(WireModel):

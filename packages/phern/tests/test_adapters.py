@@ -41,10 +41,15 @@ from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
 from ph.llm.retry import is_transient
 from ph.llm.types import (
+    BlockEnd,
+    BlockStart,
     Finish,
     GenerateOptions,
     MediaBlock,
     Message,
+    ReasoningBlock,
+    TextBlock,
+    TextDelta,
     ToolCallBlock,
     ToolCallDelta,
     ToolSchema,
@@ -761,6 +766,109 @@ def test_anthropic_puts_tool_results_in_user_content() -> None:
     assert entry["content"][0]["type"] == "tool_result"
     assert entry["content"][0]["tool_use_id"] == "c1"
     assert entry["content"][0]["is_error"] is True
+
+
+def test_a_thinking_block_keeps_its_signature_through_the_round_trip() -> None:
+    """G8 — Anthropic rejects a thinking block sent back without its signature.
+
+    Three defects in one exchange, and they compound: the `signature_delta`
+    carrying the attestation was read by the `else` branch as a *text* delta and
+    emitted as an empty `TextDelta` on a reasoning block, so the signature was
+    discarded; the block then went back on the next request without one; and the
+    request is refused. Latent only because extended thinking is not enabled by
+    default — the first deployment that turns it on gets a session that fails on
+    its second turn.
+
+    The signature rides `ReasoningBlock` rather than the adapter because the log
+    is the state: a resumed session rebuilds history from these events, and
+    anything the adapter held in memory is gone.
+    """
+    from ph_app.adapters.anthropic import _StreamState, _to_anthropic
+
+    state = _StreamState()
+    chunks: list[Any] = []
+    for event, payload in (
+        ("content_block_start", {"index": 0, "content_block": {"type": "thinking"}}),
+        (
+            "content_block_delta",
+            {"index": 0, "delta": {"type": "thinking_delta", "thinking": "hm"}},
+        ),
+        (
+            "content_block_delta",
+            {"index": 0, "delta": {"type": "signature_delta", "signature": "sig"}},
+        ),
+        ("content_block_stop", {"index": 0}),
+    ):
+        chunks.extend(state.consume(event, payload))
+
+    assert not any(isinstance(chunk, TextDelta) for chunk in chunks), (
+        "the signature delta was emitted as an empty text chunk on a reasoning block"
+    )
+    block = as_kind(chunks[-1], BlockEnd).block
+    assert isinstance(block, ReasoningBlock)
+    assert (block.text, block.signature) == ("hm", "sig")
+
+    # And it goes back out with the block, which is the half the wire refuses
+    # without.
+    entry = _to_anthropic(
+        create_assistant_message(content=[block], provider="anthropic", model="m"), {}
+    )
+    assert entry["content"] == [{"type": "thinking", "thinking": "hm", "signature": "sig"}]
+
+
+def test_redacted_thinking_is_reasoning_and_goes_back_as_itself() -> None:
+    """G8 — it fell to the `else` and opened as a *text* block.
+
+    So the ciphertext Anthropic sends when its safety systems withhold the
+    reasoning was rendered to the person, and handed to the model, as something
+    the assistant had said. Its payload is `data` rather than `text`, and it must
+    still be passed back or the conversation cannot continue.
+    """
+    from ph_app.adapters.anthropic import _StreamState, _to_anthropic
+
+    state = _StreamState()
+    chunks: list[Any] = []
+    for event, payload in (
+        (
+            "content_block_start",
+            {"index": 0, "content_block": {"type": "redacted_thinking", "data": "AAAA"}},
+        ),
+        ("content_block_stop", {"index": 0}),
+    ):
+        chunks.extend(state.consume(event, payload))
+
+    assert as_kind(chunks[0], BlockStart).block_type == "reasoning"
+    block = as_kind(chunks[-1], BlockEnd).block
+    assert isinstance(block, ReasoningBlock)
+    assert block.redacted and block.text == "AAAA"
+
+    entry = _to_anthropic(
+        create_assistant_message(content=[block], provider="anthropic", model="m"), {}
+    )
+    assert entry["content"] == [{"type": "redacted_thinking", "data": "AAAA"}]
+
+
+def test_unsigned_reasoning_is_left_out_rather_than_refused() -> None:
+    """G8 — reasoning from another provider, or from a log written before G8.
+
+    Anthropic refuses the whole request over it, and the message is in history,
+    so every later turn in the session fails the same way. Dropped for the same
+    reading as the OpenAI wire's empty assistant message (G9): a block this wire
+    cannot carry is not sent, and nothing depends on it — reasoning is the
+    model's scratch and no result pairs with it.
+    """
+    from ph_app.adapters.anthropic import _to_anthropic
+
+    entry = _to_anthropic(
+        create_assistant_message(
+            content=[ReasoningBlock(text="from elsewhere"), TextBlock(text="the answer")],
+            provider="anthropic",
+            model="m",
+        ),
+        {},
+    )
+
+    assert entry["content"] == [{"type": "text", "text": "the answer"}]
 
 
 def test_anthropic_usage_needs_no_subtraction() -> None:

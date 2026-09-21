@@ -38,6 +38,8 @@ from functools import cache
 from pathlib import Path
 from typing import Literal, TypeAlias
 
+from filelock import FileLock, Timeout
+
 from ph.orphans import argv_digest
 
 from .protocol import PROTOCOL_VERSION
@@ -58,6 +60,17 @@ log = logging.getLogger("ph_rlm.kernel.venv")
 INTERPRETER_ENV = "PH_RUNTIME_PYTHON"
 VENV_DIR = "runtime-venv"
 MARKER_NAME = ".ph-runtime.json"
+
+_LOCK_TIMEOUT = 900.0
+"""How long to wait for another process building the same venv (F5).
+
+Generous on purpose, and the opposite trade from `schedule_index._LOCK_TIMEOUT`:
+that one bounds a stall on the event loop, where giving up costs a late run and
+waiting costs the daemon. This runs in a worker thread, once, and what it is
+waiting for is a `uv pip install` of the guest and every configured skill —
+which on a cold wheel cache is minutes. Giving up early would mean building a
+second copy over the first, which is the collision the lock exists for.
+"""
 
 InterpreterMode: TypeAlias = Literal["managed", "host"]
 
@@ -167,18 +180,51 @@ def resolve_interpreter(
 
 
 def _managed(root: Path, skills: Sequence[str]) -> RuntimeEnvironment:
+    """The managed venv, built if what is there is not what is wanted.
+
+    **The build is taken under a file lock, not a process one** (F5).
+    `PythonCodeRuntime.environment` serializes *this* process, and `$PH_CACHE` is
+    shared by every pH on the machine — a second host, a `phern` in another
+    terminal, a subagent's daemon. `_build` opens with `shutil.rmtree(root)`, so
+    two of them is one deleting the tree the other is installing into: the loser
+    gets a venv missing whatever had not been written yet, and the marker it then
+    writes says that venv is current. Every later run uses it.
+
+    Double-checked, because building is the expensive thing and the wait is the
+    common case: the process that loses the race wants the venv the winner just
+    built, not a second build of it. `_LOCK_TIMEOUT` is generous because what is
+    being waited on is a `uv pip install`.
+    """
     python = root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     marker_path = root / MARKER_NAME
     wanted = _marker(skills)
-    if python.exists() and marker_path.exists():
-        try:
-            if json.loads(marker_path.read_text(encoding="utf-8")) == wanted:
+    if _current(python, marker_path, wanted):
+        return RuntimeEnvironment(python=python, kind="managed", root=root)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with FileLock(f"{root}.lock", timeout=_LOCK_TIMEOUT, thread_local=False):
+            if _current(python, marker_path, wanted):
+                # Built by whoever held the lock. Reported as not rebuilt,
+                # because this process did not rebuild it.
                 return RuntimeEnvironment(python=python, kind="managed", root=root)
-        except (OSError, ValueError):
-            pass
-    _build(root, skills)
-    marker_path.write_text(json.dumps(wanted, indent=2) + "\n", encoding="utf-8")
+            _build(root, skills)
+            marker_path.write_text(json.dumps(wanted, indent=2) + "\n", encoding="utf-8")
+    except Timeout as timeout:
+        raise RuntimeVenvError(
+            f"another process has been building the runtime venv at {root} for over "
+            f"{_LOCK_TIMEOUT:.0f}s; if nothing is, remove {root}.lock"
+        ) from timeout
     return RuntimeEnvironment(python=python, kind="managed", root=root, rebuilt=True)
+
+
+def _current(python: Path, marker_path: Path, wanted: dict[str, object]) -> bool:
+    """Whether the venv on disk is the one `wanted` describes."""
+    if not (python.exists() and marker_path.exists()):
+        return False
+    try:
+        return bool(json.loads(marker_path.read_text(encoding="utf-8")) == wanted)
+    except (OSError, ValueError):
+        return False
 
 
 def _build(root: Path, skills: Sequence[str]) -> None:
@@ -195,7 +241,13 @@ def _build(root: Path, skills: Sequence[str]) -> None:
     _run([uv, "venv", "--seed", str(root)])
 
     project = guest_project_dir()
-    requirements = [str(project) if project is not None else "ph-runtime-guest"]
+    # **Editable when it comes from a checkout** (F5), which is the same rule the
+    # skills below state and for the same reason: `_marker` digests the guest's
+    # *version*, not its source, so a non-editable install kept serving the bytes
+    # it had at build time through every later edit — and the version does not
+    # move during development. Working on the guest meant deleting the venv by
+    # hand to see a change, or not noticing that you had not.
+    requirements = ["--editable", str(project)] if project is not None else ["ph-runtime-guest"]
     for spec in skills:
         # A local directory is installed **editable** (P3-18): the staleness
         # marker digests the specs, not their contents, so a non-editable local

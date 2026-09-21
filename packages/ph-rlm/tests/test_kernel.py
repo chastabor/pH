@@ -838,3 +838,39 @@ async def test_a_channel_closed_mid_frame_is_reported_as_a_closure(
     outcome = await kernel.run("2 + 2", (), None)
     assert outcome.error is not None or outcome.value == 4
     assert (await kernel.run("3 + 3", (), None)).value == 6
+
+
+async def test_a_path_argument_reaches_the_host_as_a_path(make_kernel: MakeKernel) -> None:
+    """F7 — `default=repr` is silently lossy for the two types a cell passes most.
+
+    `tools.read(Path("notes.md"))` arrived as the string
+    `"PosixPath('notes.md')"`, and a `datetime` as
+    `"datetime.datetime(2026, 9, 20, 0, 0)"`. Neither is an error anywhere: the
+    tool receives a string where the model wrote a value and either refuses it
+    with a message about a path that does not exist, or uses it.
+
+    A type with no JSON form still falls back to `repr`, because the guest does
+    not know the tool's schema and refusing an argument the tool would have
+    accepted is the worse error — but `repr` is then the thing that makes the
+    tool's own refusal readable.
+    """
+    seen: list[dict[str, object]] = []
+
+    async def record(**arguments: object) -> str:
+        seen.append(dict(arguments))
+        return "ok"
+
+    bindings = tools(record=record)
+    kernel = await make_kernel(namespaces=(bindings,))
+    program = (
+        "from pathlib import Path\n"
+        "from datetime import datetime\n"
+        "await tools.record(path=Path('notes.md'), when=datetime(2026, 9, 20), tags={'a'})\n"
+    )
+    result = await kernel.run(program, (bindings,), None)
+
+    assert result.error is None, result.error
+    (arguments,) = seen
+    assert arguments["path"] == "notes.md", arguments["path"]
+    assert arguments["when"] == "2026-09-20T00:00:00", arguments["when"]
+    assert arguments["tags"] == ["a"]

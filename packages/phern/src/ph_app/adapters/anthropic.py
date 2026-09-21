@@ -415,6 +415,10 @@ class _Open:
     tool_id: str = ""
     tool_name: str = ""
     arguments: str = ""
+    signature: str = ""
+    """Anthropic's attestation, arriving as its own delta after the thinking (G8)."""
+    redacted: bool = False
+    """Whether this block is `redacted_thinking` — ciphertext, not prose (G8)."""
 
 
 @dataclass(slots=True)
@@ -434,8 +438,23 @@ class _StreamState:
             index = as_int(payload.get("index"))
             block = payload.get("content_block") or {}
             block_type = as_str(block.get("type"), "text")
-            if block_type == "thinking":
-                self.blocks[index] = _Open(kind="reasoning")
+            if block_type in ("thinking", "redacted_thinking"):
+                # **`redacted_thinking` is reasoning too** (G8). It fell to the
+                # `else` and opened as *text*, so the opaque blob Anthropic
+                # encrypts when its safety systems withhold the reasoning was
+                # rendered to the person, and to the model, as something the
+                # assistant had said. Its payload is `data` rather than `text`,
+                # and it still has to be passed back or the conversation cannot
+                # continue — so it is kept, marked, and re-sent as itself.
+                self.blocks[index] = _Open(
+                    kind="reasoning",
+                    # `data` on a redacted start and absent on a plain one, so
+                    # this is the blob or the empty string a `thinking` block
+                    # would have opened with anyway.
+                    text=as_str(block.get("data")),
+                    signature=as_str(block.get("signature")),
+                    redacted=block_type == "redacted_thinking",
+                )
                 out.append(BlockStart(index=index, block_type="reasoning"))
             elif block_type == "tool_use":
                 self.blocks[index] = _Open(
@@ -457,6 +476,13 @@ class _StreamState:
                 fragment = as_str(delta.get("thinking"))
                 open_block.text += fragment
                 out.append(ReasoningDelta(index=index, text=fragment))
+            elif delta.get("type") == "signature_delta":
+                # **Captured, and nothing emitted** (G8). This arrived at the
+                # `else` below and became a `TextDelta` with `""` in it — a text
+                # chunk on a *reasoning* block, for every thinking block in every
+                # stream. What it carries is the attestation the next request has
+                # to send back, and it was being thrown away.
+                open_block.signature += as_str(delta.get("signature"))
             elif delta.get("type") == "input_json_delta":
                 fragment = as_str(delta.get("partial_json"))
                 open_block.arguments += fragment
@@ -501,7 +527,11 @@ class _StreamState:
 
 def _close(open_block: _Open, index: int) -> ContentBlock:
     if open_block.kind == "reasoning":
-        return ReasoningBlock(text=open_block.text)
+        return ReasoningBlock(
+            text=open_block.text,
+            signature=open_block.signature or None,
+            redacted=open_block.redacted,
+        )
     if open_block.kind == "tool-call":
         return ToolCallBlock(
             id=open_block.tool_id or f"call-{index}",
@@ -614,7 +644,25 @@ def _to_anthropic(
                     {"type": "tool_use", "id": block.id, "name": block.name, "input": parsed}
                 )
             case ReasoningBlock():
-                blocks.append({"type": "thinking", "thinking": block.text})
+                # **Signed, or left out** (G8). Anthropic rejects a conversation
+                # that sends a thinking block back without its signature, so an
+                # unsigned one — reasoning from another provider, or from a log
+                # written before the signature was kept — is dropped rather than
+                # made the reason every later request in the session fails. Same
+                # reading as the OpenAI wire's empty assistant message (G9): a
+                # block this wire cannot carry is not sent and nothing depends on
+                # it, since reasoning is the model's scratch and no result pairs
+                # with it.
+                if block.redacted:
+                    blocks.append({"type": "redacted_thinking", "data": block.text})
+                elif block.signature:
+                    blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": block.text,
+                            "signature": block.signature,
+                        }
+                    )
             case MediaBlock():
                 blocks.append(_media_part(block.attachment, media, handles or {}))
             case _ as unhandled:

@@ -280,6 +280,12 @@ class ToolRuntime:
     _generation: int = 0
     """Bumped on every mutation. The view cache is valid for one generation."""
     _views: dict[tuple[Context | None, ...], tuple[int, _View]] = field(default_factory=dict)
+    _projecting: dict[str, ToolRunContext] = field(default_factory=dict)
+    """The runs currently inside `tools/post-execute`, by call id — what
+    `projected` renders against.
+
+    Keyed by call because a policy row asking for a projection is answering
+    about *its* call, and several can be in the waterfall at once."""
 
     # ---------------------------------------------------------- registration --
 
@@ -816,6 +822,49 @@ class ToolRuntime:
         by = view.by.get(call.name) or Running(execution.scope, execution.scope)
         return ToolRunContext(execution=execution, definition=definition, by=by)
 
+    def _render(self, run: ToolRunContext, value: object) -> tuple[ContentBlock, ...]:
+        """The tool's renderer, bound as the row that registered the tool (P6-26).
+
+        One spelling, because two would be two answers to "who is running": the
+        renderer is row code reached through a second waterfall, so left
+        ambient it runs bound to whichever `tools/post-execute` wrapper resolved
+        last — a stranger's row, chosen by the mounted profile.
+        """
+        with running(run.by, run.execution.scope):
+            return run.definition.render(run.execution.arguments, value)
+
+    def projected(self, execution: ToolExecution, value: object) -> tuple[ContentBlock, ...] | None:
+        """What `value` would render to for this call, or `None` if nothing can say.
+
+        **For a policy row that has to measure a value before the registry
+        renders it** (D10). `tools/post-execute` runs *before* the render, so a
+        row replacing the value cannot see the content its replacement will
+        become — `tool-result-offload` returned early for exactly that reason and
+        so never offloaded a structured result however large. The row now asks
+        here instead.
+
+        **Answered from the live run, not from the table.** The first cut looked
+        the tool up again — `view(scope)`, `visible`, `by` — which is the one
+        thing `ToolRunContext.by` says not to do: resolved once in
+        `create_execution` from the very view that produced `definition`, it
+        cannot disagree with it, and a tool that unregisters itself during its
+        own `execute` is gone from the rebuilt view by the time this is asked.
+        That cut answered `None` for such a tool — offload silently stopping
+        guarding — or rendered under a synthesized `Running(scope, scope)`,
+        which is the unbound-row-code regression `test_registration_ownership`
+        exists to catch, reintroduced by the method whose docstring cites it.
+
+        `None` means there is no run of this call in `tools/post-execute` — the
+        honest answer for a caller deciding whether something is too big, where
+        guessing at a projection would be worse than declining to measure one.
+
+        It is not a second render in the ordinary case — a caller that measures
+        this way supplies the content back, and `_post_execute` then renders
+        nothing.
+        """
+        run = self._projecting.get(execution.call_id)
+        return None if run is None else self._render(run, value)
+
     async def prepare(
         self,
         call: ToolExecutionInput,
@@ -1015,9 +1064,18 @@ class ToolRuntime:
         async def inner(_exec: ToolExecution, _result: ToolExecutionResult) -> PostToolDecision:
             return Accept()
 
-        decision = await self.ctx.waterfall(
-            "tools/post-execute", execution, result, inner=inner, scope=execution.scope
-        )
+        # Published for `projected` only for as long as the waterfall runs: a
+        # row may ask what a value it is proposing would render to, and the
+        # answer has to come from this run's binding rather than a fresh
+        # lookup. Popped in a `finally` so a row that raises cannot leave the
+        # call behind to be answered about later.
+        self._projecting[execution.call_id] = run
+        try:
+            decision = await self.ctx.waterfall(
+                "tools/post-execute", execution, result, inner=inner, scope=execution.scope
+            )
+        finally:
+            self._projecting.pop(execution.call_id, None)
         if isinstance(decision, Block):
             # A block exposes only the context its own decision supplied:
             # context the body deferred belonged to an outcome that no longer
@@ -1030,21 +1088,21 @@ class ToolRuntime:
             )
         if not isinstance(decision, Accept):
             _refuse_decision(decision, hook="tools/post-execute", expected="an Accept or Block")
-        if decision.content is not None and decision.has_value:
-            raise TypeError("tools/post-execute accept cannot replace both value and content")
         changes: dict[str, Any] = {
             "additional_contexts": (*result.additional_contexts, *decision.additional_contexts)
         }
         if decision.has_value:
             changes["value"] = decision.value
-            # As the agent, like `dispatch`'s call to the same callable (P6-26).
-            # Reached through a second waterfall, so without this it would run
-            # bound to whichever `tools/post-execute` wrapper resolved last —
-            # which is a stranger's row, chosen by the mounted profile.
-            with running(run.by, execution.scope):
-                changes["content"] = run.definition.render(execution.arguments, decision.value)
-        elif decision.content is not None:
+        if decision.content is not None:
+            # **Content and a replaced value together, deliberately** (D10).
+            # This used to raise, on the reading that content is derived from
+            # the value so two sources would disagree. They are two *consumers*:
+            # see `Accept`, which owns the rule.
             changes["content"] = tuple(decision.content)
+        elif decision.has_value:
+            # Silence still means "render it", which is what a row that means
+            # value and content to agree says.
+            changes["content"] = self._render(run, decision.value)
         return replace(result, **changes)
 
     def finish(self, run: ToolRunContext, result: ToolExecutionResult) -> ToolExecutionResult:

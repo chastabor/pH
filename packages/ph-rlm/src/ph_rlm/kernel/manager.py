@@ -93,12 +93,14 @@ __all__ = ["RESET_NOTICE", "Config", "Kernel", "KernelLimits", "PythonCodeRuntim
 
 log = logging.getLogger("ph_rlm.kernel.manager")
 
-STDERR_GRACE = 2.0
-"""How long `_stderr_so_far` waits for a child that has not closed its stderr.
+_STREAM_ENDED = (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream)
+"""What a child's pipe says when there is no more of it.
 
-Named because it is reachable: the paths that quote a failed child's words include
-one where the child is still running (see `_stderr_so_far`), and an unnamed literal
-in a `move_on_after` reads as though nobody expected to wait at all."""
+The three are one outcome told three ways — the group canceled the reader, the
+child exited, the stream closed underneath it — and none of them is a failure to
+report. A reader that let one escape would replace the outcome it was called to
+explain with its own, which is the bug `_drain` and `_collect_boot_noise` both
+exist downstream of. Named for the same reason `_CHANNEL_GONE` is."""
 
 RESET_NOTICE = "<runtime_reset>"
 """Prefixed to the first result after a kernel died.
@@ -319,6 +321,10 @@ class Kernel:
     _scanned: int = 0
     """How much of `_buffer` has already been searched for a frame boundary, so
     a large frame is scanned once rather than once per chunk."""
+    _boot_noise: bytearray = field(default_factory=bytearray)
+    """Whatever the child wrote to fd 1/2 before it acked (F7). Read while boot
+    waits, so a guest cannot block on a full pipe — and quoted by `_boot_said`
+    when boot fails, which is the one moment it is worth having."""
     _alive: bool = False
     _reset_notice: bool = False
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
@@ -394,15 +400,32 @@ class Kernel:
                 namespaces=namespaces, namespace_id=self.namespace, skills=self.skills
             )
         )
+        self._boot_noise.clear()
         try:
             with anyio.fail_after(self.boot_timeout):
-                fault = await self._await_boot_ack()
+                # **The pipes are read while we wait for `boot-ack`** (F7).
+                # `_drain` only runs for the duration of a *run*, so during boot
+                # nothing consumed fd 1 or 2 — and a guest that writes more than
+                # the pipe buffer before it acks blocks on the write and never
+                # acks at all. The host then reports "did not report ready
+                # within Ns" for a child that was ready and stuck, quoting
+                # whatever fits in one late read.
+                #
+                # A group entered and exited inside this function, which is the
+                # rule the module header states: the long-lived reader task is
+                # what anyio refuses, and what reported a canceled drain instead
+                # of the real failure.
+                async with anyio.create_task_group() as booting:
+                    booting.start_soon(self._collect_boot_noise, self._process.stdout)
+                    booting.start_soon(self._collect_boot_noise, self._process.stderr)
+                    fault = await self._await_boot_ack()
+                    booting.cancel_scope.cancel()
         except TimeoutError as timeout:
             # Quoted here too, and this is the branch that catches a wrapper which
             # *hangs* rather than exits — the egress shim waiting on its readiness
             # poll, a bind that never completes. Read before `aclose`, which drops
             # the process this reads from.
-            said = first_line(await self._stderr_so_far())
+            said = first_line(self._boot_said())
             await self.aclose()
             raise KernelDied(
                 f"the runtime did not report ready within {self.boot_timeout}s "
@@ -412,26 +435,42 @@ class Kernel:
             await self.aclose()
             raise KernelDied(fault)
 
-    async def _stderr_so_far(self) -> str:
-        """One read of whatever the child has already written to stderr.
+    async def _collect_boot_noise(self, stream: Any) -> None:  # noqa: ANN401
+        """Read one pipe into `_boot_noise` until boot settles or it ends.
 
-        Bounded twice, because neither bound is redundant. `STDERR_GRACE` covers a
-        child that is still *running* — the boot timeout reached this, and so does
-        a frame flood, where `_recv_line` gives up on a child that is alive and
-        writing — and the cap is the same one `_drain` applies to a stream the
-        model can influence. `EndOfStream` on the ordinary "child died quietly"
-        path is a normal outcome, not a failure, which is why everything is
-        suppressed: this runs while reporting another failure and must not replace
-        it with its own.
+        Capped like `_drain`'s, and for the same reason: this is a stream a
+        wrapper — or, through a `sitecustomize`, the environment — can write
+        without bound, and the host is holding it in memory to quote back.
+        Every ending is ordinary here (the group cancels this, or the child
+        exits), so nothing escapes to replace the failure being reported.
         """
-        process = self._process
-        if process is None or process.stderr is None:
-            return ""
-        with suppress(Exception), anyio.move_on_after(STDERR_GRACE):
-            return (await process.stderr.receive(self.limits.max_log_bytes)).decode(
-                "utf-8", "replace"
-            )
-        return ""
+        if stream is None:
+            return
+        cap = self.limits.max_log_bytes
+        with suppress(*_STREAM_ENDED):
+            async for chunk in stream:
+                if len(self._boot_noise) < cap:
+                    self._boot_noise.extend(chunk[: cap - len(self._boot_noise)])
+
+    def _boot_said(self) -> str:
+        """Whatever the child wrote to its pipes before boot settled.
+
+        **Both pipes, not only stderr.** `_collect_boot_noise` is started on fd 1
+        and fd 2 alike, so this is the two interleaved in arrival order — and that
+        is the right answer for the callers, which are quoting a child that failed
+        to start: a wrapper explaining itself on stdout is naming the same
+        failure, and dropping it would be dropping the sentence that says why.
+
+        Reading the buffer is the whole implementation, and a second read of the
+        pipe would be wrong rather than merely redundant: both callers run inside
+        the boot window, where `_collect_boot_noise` is iterating those streams,
+        and a concurrent `receive` on one of them is a `BusyResourceError`. The
+        cap is already applied by the collector.
+
+        Empty is an ordinary answer — a child that died without a word — and the
+        callers leave the quote off rather than inventing one.
+        """
+        return bytes(self._boot_noise).decode("utf-8", "replace")
 
     async def _rehydrate(self) -> None:
         """Hand a freshly started kernel the namespace the log remembers (D17).
@@ -477,7 +516,7 @@ class Kernel:
                 # and without it every one of those reads as the same sentence.
                 # The same argument `probe_sandbox` makes about quoting a backend:
                 # "the runtime did not start" is true and useless.
-                said = first_line(await self._stderr_so_far())
+                said = first_line(self._boot_said())
                 because = f": {said}" if said else ""
                 return (
                     "the runtime exited before reporting ready; "
@@ -891,7 +930,7 @@ class Kernel:
         # `ClosedResourceError` is the ordinary end of this task: the run is over
         # and the group canceled it, or the child exited. Neither is a failure
         # to report, and letting it escape would mask the real outcome.
-        with suppress(anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream):
+        with suppress(*_STREAM_ENDED):
             async for chunk in stream:
                 if written >= cap:
                     continue
@@ -1096,6 +1135,13 @@ class PythonCodeRuntime:
     `persistence: "namespace"` would then be a promise nothing keeps, which is
     why the bundle mounts both rows together."""
     _kernels: dict[str, Kernel] = field(default_factory=dict)
+    _acquire_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    """Held across the whole of `_acquire`, so one namespace gets one kernel.
+
+    Runtime-wide rather than per namespace, which costs nothing: the suspension
+    it covers is `environment()`, and that already serializes on its own
+    `_resolve_lock` — there is no concurrency here to preserve.
+    """
     _scopes: dict[str, Context] = field(default_factory=dict)
     """Agent id → its scope, so a kernel is released *structurally* (F1).
 
@@ -1290,6 +1336,28 @@ class PythonCodeRuntime:
         return partial(seam.confine, policy=policy, agent=namespace)
 
     async def _acquire(self, namespace: str) -> Kernel:
+        """The one kernel for this namespace, built once however many ask (F6).
+
+        **Double-checked, because `environment()` suspends.** `run` reads
+        `_kernels` and finds nothing, then awaits the interpreter resolve — which
+        on a cold cache builds a venv and takes seconds. Two first runs on one
+        namespace both got past the read, both built a `Kernel`, and the second
+        overwrote the first in the dict. Both then spawned a guest on their first
+        cell, and only the one still in `_kernels` was reachable by
+        `close_namespace`: the other ran until the process exited, holding a
+        socket, a pid and whatever the cell had open.
+
+        Two first runs on one namespace is ordinary — the namespace *is* the
+        agent id, and a fan-out of parallel tool calls on one agent is what Code
+        Mode is for.
+        """
+        async with self._acquire_lock:
+            settled = self._kernels.get(namespace)
+            if settled is not None:
+                return settled
+            return await self._build(namespace)
+
+    async def _build(self, namespace: str) -> Kernel:
         workspace = self.workspace_for(namespace)
         kernel = Kernel(
             namespace=namespace,

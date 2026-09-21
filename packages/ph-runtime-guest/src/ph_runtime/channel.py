@@ -17,13 +17,49 @@ import contextlib
 import json
 import os
 import socket
+from datetime import date, datetime
+from datetime import time as time_of_day
+from decimal import Decimal
+from pathlib import PurePath
 from typing import Any
 
 from .protocol import FD_ENV, PROTOCOL_FD
 
-__all__ = ["MAX_FRAME_BYTES", "Channel"]
+__all__ = ["MAX_FRAME_BYTES", "Channel", "jsonable"]
 
 MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+
+def jsonable(value: object) -> object:
+    """One non-JSON value as something the host can use (F7).
+
+    `default=repr` was the whole rule, and it is silently lossy for the two
+    types a cell passes most: `tools.read(Path("notes.md"))` arrived as the
+    string `"PosixPath('notes.md')"`, and a `datetime` as
+    `"datetime.datetime(2026, 9, 20, 0, 0)"`. Neither is an error anywhere — the
+    tool receives a string where the model wrote a value, and either refuses it
+    with a message about a path that does not exist or, worse, uses it.
+
+    The obvious spellings for the types that have one, and `repr` for the rest:
+    a value with no JSON form is a value the tool's own schema is going to
+    reject, and `repr` is what makes *that* refusal readable. Deliberately not a
+    guest-side raise — the guest does not know the tool's schema, and refusing
+    an argument a tool would have accepted is the worse error.
+
+    It lives here, on the channel, because the lossiness is a property of *the
+    wire* and not of one frame: an argument, a cell's value and every other
+    frame leave through `send`, and a `Path` that survives as one and not the
+    others is the same bug reported twice.
+    """
+    if isinstance(value, PurePath):
+        return str(value)
+    if isinstance(value, datetime | date | time_of_day):
+        return value.isoformat()
+    if isinstance(value, set | frozenset | tuple):
+        return list(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    return repr(value)
 
 
 class Channel:
@@ -77,7 +113,7 @@ class Channel:
         # A dead host is not this process's problem to report: the
         # die-with-parent mechanism is what ends the guest (F3).
         with contextlib.suppress(BrokenPipeError, ConnectionResetError, RuntimeError):
-            self._writer.write(json.dumps(frame, default=repr).encode("utf-8") + b"\n")
+            self._writer.write(json.dumps(frame, default=jsonable).encode("utf-8") + b"\n")
 
     async def drain(self) -> None:
         with contextlib.suppress(BrokenPipeError, ConnectionResetError, RuntimeError):

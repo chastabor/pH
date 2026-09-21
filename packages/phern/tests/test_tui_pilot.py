@@ -914,6 +914,54 @@ async def test_a_typed_attach_reaches_the_verb_with_its_argument(
         assert [one.name for one in staged] == ["diagram.png"]
 
 
+async def test_a_quoted_attach_path_is_one_path(make_tui_app: MakeApp, tmp_path: Path) -> None:
+    """H7 — `argument.split()` on a path a person quoted.
+
+    A space in a path is the ordinary case on a Mac — `~/Library/Application
+    Support/...` — and whitespace-splitting turned one `/attach "my notes.md"`
+    into two filenames that do not exist, reported as two failures naming
+    neither of the things the person typed. Quoting is what they reach for, and
+    what the shell they typed it into would have honored.
+    """
+    picture = tmp_path / "my diagram.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+
+        await app._dispatch_command(front, f'/attach "{picture}"')
+        await pilot.pause()
+
+        staged = front._staged.refs  # type: ignore[attr-defined]
+        assert [one.name for one in staged] == ["my diagram.png"]
+
+
+async def test_the_trajectory_viewer_keeps_its_own_way_out() -> None:
+    """H7 — `q` was bound under the id `quit`, which the keymap then remaps.
+
+    `set_keymap` rebinds by binding id, and the ids are a namespace shared across
+    apps: the trajectory viewer's `q` and the chat app's quit are not the same
+    binding, but they had the same id, so `tui.json`'s `quit: ctrl+d` moved the
+    viewer's only documented way out onto a key its footer does not mention.
+
+    Asserted on the binding table rather than through a pilot, because what went
+    wrong is the *identity* — a pilot pressing `q` would pass against a build
+    where the default keymap happened to leave it alone.
+    """
+    from ph_app.tui.config import TuiKeybindings
+    from ph_app.tui.trajectory_app import TrajectoryApp
+
+    # `BINDINGS` is declared as a union that admits bare tuples; every entry
+    # here is a `Binding`, and narrowing says so rather than asserting it.
+    declared = [one for one in TrajectoryApp.BINDINGS if isinstance(one, Binding)]
+    keys = {one.id: one.key for one in declared}
+    remapped = set(TuiKeybindings().as_map())
+
+    assert keys.get("trajectory_quit") == "q", "`q` is bound under an id the keymap owns"
+    # The configured key is still offered, so remapping `quit` is honored too.
+    assert "quit" in keys and "quit" in remapped
+
+
 # ------------------------------------------------- the harness is elsewhere --
 
 

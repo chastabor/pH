@@ -34,12 +34,18 @@ from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
-from ph.testing import MountProfile, StubAgent, as_kind, not_none, simple_tool
+from ph.testing import MountProfile, StubAgent, as_kind, not_none, run_tool, simple_tool
 from ph.tools import ToolExecution
 from ph.tools.batch import execute_tool_calls
-from ph.tools.definition import Accept, text_content
+from ph.tools.definition import (
+    Accept,
+    ToolOutput,
+    define_tool,
+    text_content,
+)
 from ph_stabilize.offload import (
     NUM_CHARS_PER_TOKEN,
+    SPILL_TOOLS_HINT,
     TOO_LARGE_TOOL_MSG,
     TOOL_TOKEN_LIMIT_BEFORE_EVICT,
     Config,
@@ -82,6 +88,25 @@ async def _run(
     block = ToolCallBlock(id=f"call-{name}", name=name, arguments="{}")
     await execute_tool_calls(ctx, agent, 1, 1, [block], CancelToken(), lambda _c: None)
     return next(event for event in session.events if event.type == "tool/result")
+
+
+def _replaces_value(name: str, value: Any) -> Callable[..., Awaitable[Any]]:  # noqa: ANN401
+    """A `tools/post-execute` row that swaps one tool's value and leaves the rest.
+
+    The shape D10 is about: a row that states a `value` and no `content`, so the
+    content the model will see does not exist yet when the offload has to decide
+    whether it is too large.
+    """
+
+    async def row(
+        execution: ToolExecution,
+        result: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
+        decision = await next_(execution, result)
+        return Accept(value=value, has_value=True) if execution.name == name else decision
+
+    return row
 
 
 def _call_id(event: SessionEvent) -> str:
@@ -392,3 +417,108 @@ async def test_the_sweep_is_wired_to_session_open(mount: MountProfile) -> None:
     await ctx.drain()
 
     assert not Path(orphan.locator).exists(), "session open did not sweep"
+
+
+# ------------------------------------------------------ a value, not content --
+
+
+async def test_a_structured_value_is_offloaded_by_its_render(mount: MountProfile) -> None:
+    """D10 — `has_value` returned early, so a value was never offloaded at all.
+
+    A row replacing the *value* leaves `content` alone and the registry renders
+    it after this waterfall, so the content that will reach the model does not
+    exist yet. `offload` read that as "nothing to measure" and returned — and a
+    structured result went to the model whole however large it was, which is the
+    one thing this row exists to prevent.
+
+    The render is asked of `ToolRuntime.projected`, which is where the tool's own
+    binding lives (P6-26): a renderer is the *tool's* row code, not this row's.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = ctx.require(SESSIONS).create("valued")
+    agent = StubAgent(ctx.scope("agent"), session)
+    huge = blob(THRESHOLD + 1)
+
+    ctx.on("tools/post-execute", _replaces_value("structured", huge))
+    ctx.require(TOOLS).register(
+        simple_tool("structured", lambda _args, _run: "small"), scope=agent.ctx
+    )
+    settled = await run_tool(
+        ctx, "structured", agent=agent, session=agent.session, call_id="call-structured"
+    )
+
+    assert TOO_LARGE in text_of(settled.content), "a structured value went to the model whole"
+    (spilled,) = [one for one in session.events if one.type == "offload/spilled"]
+    assert Path(str(spilled.data["locator"])).read_text(encoding="utf-8") == huge
+
+
+async def test_the_program_keeps_the_value_the_model_only_gets_a_pointer(
+    mount: MountProfile,
+) -> None:
+    """D10's whole point, and the reason this is not "spill the value".
+
+    `value` is what `bridge.call` hands the program under Code Mode, and the
+    program already holds it in a variable — the context cost was never the
+    value, it is the render that lands in the transcript. Replacing the value
+    with a pointer would break the cell (`result["text"]` on a string) to save
+    context that the cell was not spending.
+
+    So the two projections deliberately differ, which is the pairing
+    `_post_execute` used to refuse outright. One rule covers both transports:
+    spill the render, leave the value alone. Under native tool calling nothing
+    reads the value, so passing it on costs nothing there either.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = ctx.require(SESSIONS).create("both")
+    agent = StubAgent(ctx.scope("agent"), session)
+    whole = {"rows": [blob(THRESHOLD + 1)], "count": 1}
+
+    ctx.on("tools/post-execute", _replaces_value("rowset", whole))
+    # `define_tool`, not `simple_tool`: this one needs an *object* output, and
+    # rendering a value is the whole mechanism under test.
+    ctx.require(TOOLS).register(
+        define_tool(
+            "rowset",
+            "a structured result",
+            parameters={"type": "object", "properties": {}},
+            output=ToolOutput(
+                schema={"type": "object"},
+                render=lambda _args, value: text_content(str(value)),
+            ),
+            execute=lambda _args, _run: {"rows": ["small"], "count": 1},
+        ),
+        scope=agent.ctx,
+    )
+
+    settled = await run_tool(
+        ctx, "rowset", agent=agent, session=agent.session, call_id="call-rowset"
+    )
+
+    assert settled.value == whole, "the program lost the object it was handed"
+    assert TOO_LARGE in text_of(settled.content), "the model was sent the whole thing"
+
+
+async def test_the_replacement_says_the_file_can_be_searched(mount: MountProfile) -> None:
+    """The capability existed and nothing told the model about it.
+
+    The upstream paragraph describes paging as the only way through, so a model
+    handed 40 MB reads it from the top — and it names `read_file`, which is not a
+    tool pH has: the readers here are `read`, `grep` and `glob`. Both are things
+    the verbatim block cannot say, which is why pH's sentence is appended rather
+    than folded in: the value of tracking that text verbatim is that an upgrade
+    produces a visible diff, and correcting the tool name in place would make the
+    next comparison lie.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = ctx.require(SESSIONS).create("hinted")
+
+    event = await _run(ctx, session, "chatty", blob(THRESHOLD + 1))
+
+    said = model_text(event)
+    assert TOO_LARGE in said, "the fixture did not offload"
+    assert SPILL_TOOLS_HINT in said
+    # The path is in it, and the hint points at that path rather than at a
+    # vocabulary the model has to map onto its own tools.
+    (spilled,) = [one for one in session.events if one.type == "offload/spilled"]
+    assert str(spilled.data["locator"]) in said
+    assert "grep" in said and "read_file" in said, "both halves of the correction"

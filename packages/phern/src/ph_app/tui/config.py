@@ -85,6 +85,13 @@ class TuiKeybindings:
     toggle_tool_results: str = "ctrl+o"
     toggle_sidebar: str = "ctrl+b"
     quit: str = "ctrl+d"
+    trajectory_quit: str = "q"
+    """The trajectory viewer's own way out (H7).
+
+    A field because it is a binding, and this class's rule is that every binding
+    id is one: bound under an id of its own so `quit`'s keymap could not move it,
+    it would otherwise have been the single key in the app nobody could remap —
+    the same rule broken in the other direction."""
     extra: Mapping[str, str] = field(default_factory=dict)
     """Binding ids this build has no field for — a plugin screen's key, under
     its screen id (P4-17).

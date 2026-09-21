@@ -334,6 +334,15 @@ class Bubblewrap:
         # With the flag, 4. The docstring claimed process isolation the flags
         # did not deliver, which is the E1 shape one level down.
         parts += ["--dev", "/dev", "--proc", "/proc", "--unshare-pid"]
+        # **A session of its own** (J9), which is the terminal half of the same
+        # claim `--unshare-pid` makes about the process table. Without it the
+        # confined command shares the host's controlling terminal, so it can
+        # push characters into it with `TIOCSTI` — input the *person's* shell
+        # then executes, unconfined — and a `^C` in that terminal signals the
+        # whole foreground group rather than the sandbox. `bwrap` offers the
+        # flag for exactly this; `ph.seams.subprocess` makes the same move with
+        # `start_new_session` for the children it spawns directly.
+        parts.append("--new-session")
         if not policy.network:
             # The namespace is the enforcement: an unshared net namespace has no
             # interface but loopback, so this is not a filter that can be talked
@@ -464,7 +473,7 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
         ' (literal "/dev/stderr"))',
     ]
     for path in writable_paths(policy):
-        lines.append(f'(allow file-write* (subpath "{path}"))')
+        lines.append(f"(allow file-write* (subpath {_sexp(path)}))")
     if policy.network:
         # Only the permitting arm is emitted: `(deny network*)` is a no-op under
         # `(deny default)` above, and a line that changes nothing is a line a
@@ -473,6 +482,23 @@ def seatbelt_profile(policy: SandboxPolicy) -> str:
     elif policy.egress is not None:
         lines.append(f'(allow network-outbound (remote ip "localhost:{policy.egress.port}"))')
     return "\n".join(lines)
+
+
+def _sexp(value: str) -> str:
+    """One path as a Seatbelt string literal (J9).
+
+    The profile is a TinyScheme s-expression and the paths went into it raw, so a
+    `"` or a `\\` in a directory name ended the literal early: the rest of the
+    path became stray atoms and `sandbox-exec` rejected the profile, taking the
+    rung down — or, worse on a profile that still parsed, granted
+    `file-write*` on a *prefix* of what was asked for.
+
+    Both characters are legal in a macOS path, and `$PH_HOME` is a path a person
+    chooses. Escaping is the same pair Scheme uses, which is what the reader on
+    the other side expects.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,9 +674,18 @@ async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> S
     await anyio.to_thread.run_sync(prepare)
     try:
         policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace))
-        confined = backend.confine(
-            ("/bin/sh", "-c", f"echo landed > {inside}; echo escaped > {outside}"), policy
+        # **Quoted** (J9). These are interpolated into a shell command, and
+        # `scratch` comes from `$PH_HOME` — which on a Mac is under
+        # `~/Library/Application Support` as often as not. Unquoted, the
+        # redirect took the first word and the probe's write landed somewhere
+        # else, so `landed` was false and the rung *declined* on a host where the
+        # sandbox works: a confinement tier switched off by a space in a
+        # directory name, reporting "the sandbox refused a write inside the
+        # workspace it was given".
+        script = (
+            f"echo landed > {shlex.quote(str(inside))}; echo escaped > {shlex.quote(str(outside))}"
         )
+        confined = backend.confine(("/bin/sh", "-c", script), policy)
         probe = await ctx.require(SUBPROCESS).run(
             SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=ctx.require(SUBPROCESS).env())
         )

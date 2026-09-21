@@ -49,7 +49,7 @@ from ph.session.events import SurfaceReplace
 from ph.text import count_of
 from ph.wire import WireModel
 
-from .offload import HISTORY_PREFIX, content_preview, over_token_limit
+from .offload import HISTORY_PREFIX, SPILL_TOOLS_HINT, content_preview, over_token_limit
 
 __all__ = [
     "HUMAN_TOKEN_LIMIT_BEFORE_EVICT",
@@ -140,9 +140,16 @@ async def apply(ctx: Context, config: Config) -> None:
             {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
         )
         await store.commit(ref)
-        preview = TOO_LARGE_HUMAN_MSG.format(
+        # The same correction its sibling makes, for the same reason: this block
+        # is upstream's too, and it names `read_file` as well. A spilled paste
+        # and a spilled result are the same kind of file in the same store, and
+        # the model cannot tell which row wrote the path it was handed — so a
+        # sentence that is true of one and absent from the other is worse than
+        # either.
+        upstream = TOO_LARGE_HUMAN_MSG.format(
             file_path=ref.locator, content_sample=content_preview(text)
         )
+        preview = f"{upstream}\n{SPILL_TOOLS_HINT}\n"
         session.append(
             "user/message",
             create_user_message(

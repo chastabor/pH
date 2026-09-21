@@ -1338,6 +1338,16 @@ in the seam whose module docstring calls itself a gate rather than a report.
   *generic* spill policy cannot invent a replacement value without knowing the
   tool. Noted in the test rather than solved.
 
+  **Settled by D10**, and the premise was the part to give up: a spill policy
+  never needed to invent a value. `value` and `content` are two *consumers* —
+  the program receives the first and the model reads the second — and under Code
+  Mode the program already holds the object in a variable, so the context cost
+  was only ever the render. So the policy spills the render and passes the value
+  through untouched, which is one rule for both transports (nothing reads the
+  value under native tool calling). `Accept` may now carry both, which
+  `_post_execute` used to refuse; `ToolRuntime.projected` renders the candidate
+  as the *tool's* row so the measurement happens inside the binding P6-26 owns.
+
 * **(d) was refusing for the wrong reason.** It sent to a name that did not
   exist, so `resolve` took the empty-roster branch — a guard denial, but not the
   out-of-family one C7 is about. It now spawns a child and a grandchild and

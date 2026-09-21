@@ -48,7 +48,7 @@ from typing import Any
 
 from . import snapshot as snapshot_module
 from .cell import CELL_FILENAME, CELL_FUNCTION, compile_cell
-from .channel import Channel
+from .channel import Channel, jsonable
 from .errors import RunStopped, ToolFailed
 from .lifecycle import die_with_parent
 from .limits import (
@@ -185,6 +185,16 @@ class Runner:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_call_id = 0
         self._run: asyncio.Task[None] | None = None
+        self._owed: int | None = None
+        """The run whose `done` has not been sent yet, or `None` (F7).
+
+        The host has no wall clock on a run — it waits for that frame — so every
+        path out of `_execute` is written to send one, and there are two
+        fallbacks for the ways settling can itself fail. A task cancelled
+        *before its first line* runs none of them: `create_task` only schedules,
+        so `run` and `cancel` arriving in one read chunk cancels a coroutine
+        that never entered its own `try`. `_abort_run` reads this and answers for
+        it."""
         self._cpu_exceeded = False
         """Set by the `SIGXCPU` handler, read by `_execute`'s cancellation arm.
 
@@ -304,6 +314,7 @@ class Runner:
                 }
             )
             return
+        self._owed = run_id
         self._run = asyncio.get_running_loop().create_task(
             self._execute(run_id, as_str(frame.get("program")))
         )
@@ -336,6 +347,16 @@ class Runner:
         run.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await run
+        if self._owed is not None:
+            # **The run never reached its own `finally`** (F7). `create_task`
+            # schedules rather than starts, so `run` and `cancel` in one read
+            # chunk cancels a coroutine whose body never ran — no `try`, no
+            # `_settle`, and none of the two fallbacks `_execute` carries for
+            # exactly this promise. The host waits for `done` with no wall clock
+            # of its own, so the kernel wedges until a person cancels it.
+            self._send_done(
+                self._owed, {"error": {"kind": "aborted", "message": "the run was canceled"}}
+            )
 
     # ------------------------------------------------------------ dispatch --
 
@@ -443,15 +464,14 @@ class Runner:
             # `RuntimeError` out of the encoder instead. A run that cannot report
             # its result must still report that, or the host waits for a frame
             # nobody is going to send.
-            self.channel.send(
+            self._send_done(
+                run_id,
                 {
-                    "type": "done",
-                    "id": run_id,
                     "error": {
                         "kind": type(raised).__name__,
                         "message": f"the run could not be settled: {raised!r}",
-                    },
-                }
+                    }
+                },
             )
 
     def _settle(
@@ -466,18 +486,37 @@ class Runner:
         # frame of a run before the frame that settles it.
         out.flush()
         err.flush()
-        frame: dict[str, Any] = {"type": "done", "id": run_id}
+        body: dict[str, Any] = {}
         if error is not None:
-            frame["error"] = error
+            body["error"] = error
         else:
             encoded, degraded = _encode_value(value, self.max_value_bytes)
             if encoded is not None:
-                frame["value"] = encoded
+                body["value"] = encoded
             if degraded:
-                frame["truncated"] = True
+                body["truncated"] = True
         if out.truncated or err.truncated:
-            frame["truncated"] = True
-        self.channel.send(frame)
+            body["truncated"] = True
+        self._send_done(run_id, body)
+
+    def _send_done(self, run_id: int, body: dict[str, Any]) -> None:
+        """Send one *started* run's terminal frame, and clear what it owed.
+
+        The three ways a started run ends go through here — the ordinary settle,
+        `_execute`'s last-resort catch, and `_abort_run`'s answer for a run that
+        never reached its own `finally` — so `_owed` cannot say a frame is
+        outstanding when it was sent, or the reverse.
+
+        Not every `done` on the wire: `_begin`'s busy refusal and `_restore`
+        answer about a run this one did not start, and routing either through
+        here would clear `_owed` for a run that is still going.
+
+        The envelope is built here rather than at each caller because a terminal
+        frame missing its `type` or `id` is one the host never pairs to the run,
+        which is indistinguishable from never sending it.
+        """
+        self._owed = None
+        self.channel.send({"type": "done", "id": run_id, **body})
 
     def _snapshot(self, run_id: int) -> None:
         """One frame per changed variable (F3).
@@ -505,7 +544,7 @@ class Runner:
 def _plain(value: object) -> object:
     """Round-trip through JSON so a proxy object cannot ride along in `args`."""
     try:
-        return json.loads(json.dumps(value, default=repr))
+        return json.loads(json.dumps(value, default=jsonable))
     except (TypeError, ValueError):  # pragma: no cover
         return {}
 
@@ -522,7 +561,7 @@ def _encode_value(value: object, cap: int) -> tuple[object, bool]:
         return None, False
     size = 0
     try:
-        for chunk in json.JSONEncoder().iterencode(value):
+        for chunk in json.JSONEncoder(default=jsonable).iterencode(value):
             size += len(chunk)
             if size > cap:
                 return _bounded_repr(value, cap), True

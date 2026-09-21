@@ -339,7 +339,11 @@ class ApprovalService:
         allowed_decisions: tuple[ApprovalDecisionName, ...] = (),
         arguments: JsonValue = None,
     ) -> ApprovalAnswer:
-        """Ask, record both halves, and return the outcome. Never raises.
+        """Ask, record both halves, and return the outcome.
+
+        Raises only what the wait itself raises — a cancellation, or a
+        `KeyboardInterrupt` — and records the pair closed before it does (K7).
+        It answers rather than raising for everything it can answer for.
 
         **`cancel` narrows; it does not enable.** The floor is the agent's own
         token, defaulted below, because "a question is not put to a person about
@@ -368,10 +372,27 @@ class ApprovalService:
         if session is not None:
             self._record_asked(session, request)
 
-        outcome = await self._route(request, cancel if cancel is not None else agent.signal)
-        if session is not None:
-            self._record_decided(session, request, outcome, automatic=False)
-        return outcome
+        # **The pair closes even when the wait does not return** (K7).
+        # `_route` checks the token on the way *in*, so `"canceled"` was reachable
+        # only for a caller that was already cancelled — a cancel arriving while
+        # the person is being asked unwound straight past the record, leaving an
+        # `approval/asked` with nothing answering it. The crash repair then stamps
+        # it `interrupted` on the next open, which is a different and less true
+        # story than "somebody pressed escape": the run was not interrupted, the
+        # question was.
+        #
+        # Stated once, in a `finally`, rather than in two arms that have to agree:
+        # the sentinel is the answer for *every* way out that is not `_route`
+        # returning one, including a `return` added between here and the record
+        # later. Only the log is touched on the way through, and `append` is
+        # synchronous so it completes inside a cancelled scope.
+        outcome: ApprovalAnswer = "canceled"
+        try:
+            outcome = await self._route(request, cancel if cancel is not None else agent.signal)
+            return outcome
+        finally:
+            if session is not None:
+                self._record_decided(session, request, outcome, automatic=False)
 
     async def _route(self, request: ApprovalRequest, cancel: Cancellation | None) -> ApprovalAnswer:
         if is_canceled(cancel):
