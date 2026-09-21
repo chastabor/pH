@@ -496,6 +496,7 @@ class ReactLoopAgent:
 
         failure = RequestFailure(
             agent=self,
+            session=self.session,
             turn=turn,
             step=step,
             provider=request.provider,
@@ -545,7 +546,9 @@ class ReactLoopAgent:
         async def inner(proposal: RequestProposal) -> LlmCallConfig:
             return proposal.config
 
-        proposal = RequestProposal(agent=self, turn=turn, step=step, config=seed)
+        proposal = RequestProposal(
+            agent=self, session=self.session, turn=turn, step=step, config=seed
+        )
         answered = await self.ctx.waterfall("agent/request", proposal, inner=inner)
         self._throw_if_canceled()
         proposed = settled("agent/request", answered, LlmCallConfig)

@@ -44,7 +44,7 @@ from ph.cordis import Context
 from ph.json import dumps
 from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
 from ph.locks import file_lock
-from ph.paths import write_text_under
+from ph.paths import write_atomic, write_text_under
 from ph.session import Session, SessionFoldCache
 
 from .state import (
@@ -427,23 +427,16 @@ class HarnessService:
         return self.directory / session.id / PROJECTION_NAME
 
     async def write_projection(self, session: Session | None) -> Path:
-        """Write `harness_state.json` for humans. Nothing reads it back."""
+        """Write `harness_state.json` for humans. Nothing reads it back.
+
+        Through a rename: a human can read this file while a refinement is
+        applying, and under the daemon two sessions project at once, so a
+        truncating write makes both of those a torn file.
+        """
         path = self.projection_path(session)
         payload = dumps(self.state(session).to_wire())
-        await anyio.to_thread.run_sync(self._write_projection, path, payload)
+        await anyio.to_thread.run_sync(write_atomic, path, f"{payload}\n")
         return path
-
-    def _write_projection(self, path: Path, payload: str) -> None:
-        """Written through a rename, so a reader never sees half a projection.
-
-        A human can read this file while a refinement is applying, and under the
-        daemon two sessions project at once; a truncating write makes both of
-        those a torn file.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        staged = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
-        staged.write_text(f"{payload}\n", encoding="utf-8")
-        staged.replace(path)
 
     def stale_projections(self) -> list[str]:
         """Every written projection that no longer equals the fold behind it (I6, P6-01).

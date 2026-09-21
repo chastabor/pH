@@ -66,13 +66,14 @@ from ph.llm.types import (
     ToolCallDelta,
     ToolResultBlock,
     UsageChunk,
+    is_error_finish,
     text_of,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
 from ph.wire import WireModel
 
-from ._http import HttpClient, resolve_secret
+from ._http import HttpClient, resolve_secret, wire_error_finish
 from ._media import forget_named_handle, load_handles, load_media, media_pointer
 
 __all__ = ["GoogleAdapter", "apply"]
@@ -495,6 +496,11 @@ class GoogleAdapter:
             ):
                 for chunk in state.consume(payload):
                     yield chunk
+                    if is_error_finish(chunk):
+                        # See the same return in the other two adapters: the
+                        # wire has said the request failed, and `finish()` would
+                        # follow that with a second `Finish` reading "stop".
+                        return
         except LlmError as error:
             raise forget_named_handle(
                 self.ctx, error, referenced, provider=self.config.provider
@@ -662,6 +668,22 @@ class _StreamState:
         return index
 
     def consume(self, payload: dict[str, Any]) -> list[StreamChunk]:
+        error = payload.get("error")
+        if isinstance(error, dict):
+            # **A failed request inside a 200** (L2). This wire reports one as a
+            # top-level `error` object mid-stream, exactly as the other two do,
+            # and reading only `usageMetadata`/`candidates` dropped it — so
+            # `finish()` went on to emit `Finish(stop)` and the turn recorded a
+            # clean end for a request that failed. The third shipped wire was
+            # the one this fix never reached. It takes both halves — this
+            # branch and `stream`'s return — because `finish()` is
+            # unconditional, so a caller that kept reading got the `stop`
+            # anyway.
+            #
+            # `status` rather than `type` is this wire's spelling of the same
+            # field (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`), so the shared map
+            # gets what it needs to say whether a retry could help.
+            return [wire_error_finish(error.get("message"), kind=error.get("status"))]
         out: list[StreamChunk] = []
         raw_usage = payload.get("usageMetadata")
         if isinstance(raw_usage, dict):

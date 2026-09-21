@@ -514,7 +514,8 @@ class _StreamState:
             if isinstance(raw, dict):
                 self.usage = _merge_usage(self.usage, raw)
         elif kind == "error":
-            out.append(wire_error_finish((payload.get("error") or {}).get("message")))
+            wire_error = payload.get("error") or {}
+            out.append(wire_error_finish(wire_error.get("message"), kind=wire_error.get("type")))
         return out
 
     def finish(self) -> list[StreamChunk]:

@@ -261,6 +261,21 @@ class JobService:
                 job.error = error
                 log.debug("ph.seams.jobs: job %s failed", job.id, exc_info=True)
             finally:
+                if job.state == "running":
+                    # **Derived, not caught** (L4). `except Exception` misses a
+                    # `BaseException` — a foreign cancel, a `BaseExceptionGroup`
+                    # from a task group, `KeyboardInterrupt` — so the state
+                    # stayed `"running"` and `job/settled` announced a job that
+                    # was still going as it went away. The `job.token.canceled`
+                    # check above only covers a cancel through the job's *own*
+                    # token.
+                    #
+                    # Settled here rather than by a third `except` for the
+                    # reason `_turn_reason` gives one file over: every ordinary
+                    # exit assigns a state first, so `"running"` arriving here
+                    # cannot be a job that finished, and a branch per exception
+                    # type is a list that the next base exception is not on.
+                    job.state = "canceled"
                 if holds:
                     for queue in waits:
                         queue.limiter.release()

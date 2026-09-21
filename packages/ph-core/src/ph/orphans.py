@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from .json import dumps
-from .paths import RuntimeDirError, resolve_roots
+from .paths import RuntimeDirError, resolve_roots, write_atomic
 from .persistence import read_records
 
 __all__ = [
@@ -272,11 +272,7 @@ class OrphanJournal:
         the lifetime of the installation.
         """
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_name(f"{self.path.name}.tmp")
-            body = "".join(dumps(record) + "\n" for record in keep)
-            temporary.write_text(body, encoding="utf-8")
-            temporary.replace(self.path)
+            write_atomic(self.path, "".join(dumps(record) + "\n" for record in keep))
         except OSError:
             log.warning("ph.orphans: could not compact the orphan journal", exc_info=True)
 

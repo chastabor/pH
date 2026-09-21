@@ -25,7 +25,7 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import default_home_path
+from ..paths import default_home_path, write_atomic
 from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -149,7 +149,7 @@ class SpillStore:
         UTF-8, so the naming rule has one implementation.
         """
         path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
-        await anyio.to_thread.run_sync(_write, path.parent, path, content)
+        await anyio.to_thread.run_sync(_write, path, content)
         return SpillRef(
             locator=str(path),
             bytes=len(content),
@@ -205,7 +205,7 @@ class SpillStore:
         """
         path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
         staged = self._staging_for(str(path))
-        await anyio.to_thread.run_sync(_write, staged.parent, staged, content)
+        await anyio.to_thread.run_sync(_write, staged, content)
         return SpillRef(
             locator=str(path),
             bytes=len(content),
@@ -391,9 +391,24 @@ def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
     return gone
 
 
-def _write(directory: Path, path: Path, payload: bytes) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(payload)
+def _write(path: Path, payload: bytes) -> None:
+    """One spilled blob, at its locator or under `.staging` (L7).
+
+    K5's identical twin, and it had the same defect: the name carries the sha256
+    of the bytes, and `write_bytes` truncates before it writes, so a crash
+    mid-write leaves a prefix under a name that says it is complete. Nothing
+    rewrites it, because the digest already matches what the caller asked for —
+    which is what makes the lie permanent and what makes `skip_if_present` safe.
+
+    **Both callers, including the staging one.** `_staging_for` keeps the
+    locator's name, so the digest promises the contents there too. It is the
+    path that needed this most: `_finish_staged` republishes a staged file whose
+    locator the log names, so a torn reservation used to be renamed into the
+    locator as a complete blob. Through the temp there is no torn file to
+    publish — only, after a kill the `except` cannot reach, a `<name>.<hex>.tmp`
+    that the recovery sweep passes over because no locator matches it.
+    """
+    write_atomic(path, payload, skip_if_present=True)
 
 
 class Config(WireModel):

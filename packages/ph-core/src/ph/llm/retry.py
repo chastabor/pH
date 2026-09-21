@@ -120,13 +120,7 @@ async def apply(ctx: Context, config: Config) -> None:
         failure = failure_payload.failure
         if not is_transient(failure):
             return await next_()
-        session = failure_payload.agent.session
-        if session is None:
-            # Nothing to count against, so nothing to bound. An agent with no log
-            # is a stub rather than a deployment, and an unbounded retry loop is
-            # the wrong way to find that out.
-            log.debug("ph.llm.retry: no session to count attempts against; not retrying")
-            return await next_()
+        session = failure_payload.session
         seen = attempts_so_far(session, failure_payload.turn, failure_payload.step)
         if seen + 1 >= settings.max_attempts:
             log.debug("ph.llm.retry: giving up on %s after %s attempts", failure.code, seen + 1)

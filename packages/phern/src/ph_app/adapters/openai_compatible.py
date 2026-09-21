@@ -471,7 +471,7 @@ class _StreamState:
         # and no retry: the wire said "over capacity", and pH said "done".
         error = payload.get("error")
         if isinstance(error, dict):
-            return [wire_error_finish(error.get("message"))]
+            return [wire_error_finish(error.get("message"), kind=error.get("type"))]
         out: list[StreamChunk] = []
         raw_usage = payload.get("usage")
         if isinstance(raw_usage, dict):

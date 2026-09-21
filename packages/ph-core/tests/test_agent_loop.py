@@ -562,3 +562,41 @@ async def test_a_turn_that_died_in_a_group_is_not_recorded_as_completed(
     ends = [event for event in session.events if event.type == "turn/end"]
     assert ends, "the turn never closed at all"
     assert as_obj(ends[-1].data["reason"])["kind"] == "aborted"
+
+
+async def test_a_failed_request_carries_the_session_the_retry_policy_counts_on(
+    mount: MountProfile,
+) -> None:
+    """L5 — a failed request carries the session rather than reaching for it.
+
+    Why: `RequestFailure.session`'s docstring.
+
+    Sabotage: drop `session=` from `RequestFailure` and the field is gone.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("carried")
+    seen: list[RequestFailure] = []
+
+    class Failing:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            yield Finish(
+                reason=FinishReason(
+                    kind="error", failure=LlmFailure(message="nope", code="UNKNOWN")
+                )
+            )
+
+    ctx.require(LLM).register_adapter(["failing"], Failing())
+
+    async def watch(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        seen.append(failure)
+        return await next_()
+
+    ctx.on("agent/request-error", watch)
+    await (
+        ctx.require(AGENTS)
+        .create(session, AgentOptions(provider="failing", model="m"))
+        .prompt("hello")
+    )
+
+    assert seen, "the failure never reached the waterfall"
+    assert seen[0].session is session, "the retry policy has no log to count attempts against"

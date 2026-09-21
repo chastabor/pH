@@ -62,7 +62,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Container, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,7 +72,7 @@ import anyio
 from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
-from ..paths import resolve_roots
+from ..paths import resolve_roots, write_atomic
 from ..session import Session, now_ms
 from ..wire import WireModel
 from ._registry import claim_key
@@ -322,20 +321,10 @@ class UploadRegistry:
         self._memo[(handle.provider, handle.attachment_id)] = handle
         path = self.path_for(handle.provider, handle.attachment_id)
         payload = json.dumps(handle.to_wire())
-        await anyio.to_thread.run_sync(_write, path, payload)
-
-
-def _write(path: Path, payload: str) -> None:
-    """Write one entry atomically.
-
-    Temp-and-rename because a reader in another process must see either the old
-    entry or the new one — a half-written handle read as JSON is the corruption
-    `cached` has to treat as absent, and there is no reason to manufacture it.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(payload, encoding="utf-8")
-    temporary.replace(path)
+        # Atomically: a reader in another process must see either the old entry
+        # or the new one, since a half-written handle read as JSON is the
+        # corruption `cached` has to treat as absent.
+        await anyio.to_thread.run_sync(write_atomic, path, payload)
 
 
 @plugin("uploads-local", config=Config)

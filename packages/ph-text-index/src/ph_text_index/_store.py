@@ -48,13 +48,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ph.json import as_int, as_str
+from ph.paths import write_atomic
 
 from ._chunk import Chunk
 
@@ -242,9 +242,7 @@ class TextIndex:
         }
         # Replace, never truncate-in-place: the sidecar is the only copy of what
         # the vectors mean, and a partial write of it loses the corpus.
-        scratch = self.sidecar_path.with_suffix(f".{secrets.token_hex(4)}.tmp")
-        scratch.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(scratch, self.sidecar_path)
+        write_atomic(self.sidecar_path, json.dumps(payload))
 
     # ------------------------------------------------------------ mutate ----
 

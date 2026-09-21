@@ -37,6 +37,7 @@ from ph.paths import (
     canonical,
     default_home_path,
     resolve_roots,
+    write_atomic,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -376,3 +377,42 @@ def test_canonical_resolves_what_exists_and_keeps_the_rest(tmp_path: Path) -> No
 
     assert canonical(link / "not" / "yet") == real / "not" / "yet"
     assert canonical(real) == real, "already canonical is a no-op"
+
+
+def test_an_atomic_write_replaces_the_file_rather_than_truncating_it(tmp_path: Path) -> None:
+    """L7 — a reader sees all of the new bytes or all of the old ones.
+
+    Why: `write_atomic`'s docstring.
+
+    Asserted on the inode, which is what tells the two apart deterministically:
+    a rename gives the path a new one, an in-place write keeps it. A test that
+    tried to stage a mid-write failure instead proved nothing, because the
+    failure it could stage happened before the truncate.
+
+    Sabotage: `path.write_bytes(payload)` in place of the temp-and-rename and
+    the inode is unchanged.
+    """
+    target = tmp_path / "blob"
+    target.write_bytes(b"the original")
+    before = target.stat().st_ino
+
+    write_atomic(target, b"the replacement")
+
+    assert target.read_bytes() == b"the replacement"
+    assert target.stat().st_ino != before, "the file was written in place"
+    assert list(tmp_path.iterdir()) == [target], "the scratch file outlived the call"
+
+
+def test_a_content_addressed_write_does_not_rewrite_what_is_there(tmp_path: Path) -> None:
+    """`skip_if_present` — the half the content-addressed callers need.
+
+    Why: `write_atomic`'s docstring.
+    """
+    target = tmp_path / "digest-name"
+    write_atomic(target, b"first", skip_if_present=True)
+    written_at = target.stat().st_mtime_ns
+
+    write_atomic(target, b"second", skip_if_present=True)
+
+    assert target.read_bytes() == b"first"
+    assert target.stat().st_mtime_ns == written_at, "the file was rewritten"

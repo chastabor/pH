@@ -170,6 +170,13 @@ class RequestProposal:
     """`agent/request`: the call config the loop proposes for one request."""
 
     agent: AgentHandle
+    session: Session
+    """Not optional here, for `PreStepRequest.session`'s reason (L5).
+
+    `input-offload` is the listener that had reached through the handle, and it
+    paid the same price `llm-retry` did: a `None` its only producer cannot
+    create, guarded by returning early — so the feature turned itself off rather
+    than failing."""
     turn: int
     step: int
     config: LlmCallConfig
@@ -180,6 +187,13 @@ class RequestFailure:
     """`agent/request-error`: a request that ended in `error` or `aborted`."""
 
     agent: AgentHandle
+    session: Session
+    """Not optional here, for `PreStepRequest.session`'s reason (L5).
+
+    Reaching through the handle instead made `llm-retry` guard a `None` its only
+    producer cannot create, and that guard does not fail loudly: it logs at
+    debug and declines the retry, so a route that had retries configured quietly
+    had none."""
     turn: int
     step: int
     provider: str

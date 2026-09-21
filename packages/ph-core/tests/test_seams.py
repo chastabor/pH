@@ -18,6 +18,7 @@ providers were handed a narrowed copy, so a `system-prompt/assemble` listener an
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from functools import partial
@@ -965,6 +966,41 @@ async def test_a_failed_job_frees_its_slot() -> None:
     assert first.state == "failed"
     assert second.state == "done", "the failure kept the slot"
     assert second.result == "ran"
+
+
+async def test_a_job_stopped_by_a_base_exception_is_not_still_running() -> None:
+    """L4 — a job stopped by something that is not an `Exception` still settles.
+
+    Why: the `finally` in `JobService.start`'s `body`.
+
+    Sabotage: drop the `if job.state == "running"` arm and the settled event
+    carries `"running"`.
+    """
+    root = Context()
+    service = JobService(ctx=root)
+    settled_states: list[str] = []
+    root.on("job/settled", lambda job: settled_states.append(job.state))
+
+    class _Interrupted(BaseException):
+        """Not an `Exception`, which is the whole of the case."""
+
+    def interrupted(_job: object) -> None:
+        raise _Interrupted
+
+    job = None
+    # A task group of this test's own, so the escape is caught here rather than
+    # taking the suite down — the body genuinely re-raises, which is the other
+    # half of the contract: the `finally` records, it does not swallow.
+    with contextlib.suppress(BaseExceptionGroup):
+        async with anyio.create_task_group() as scope:
+            service.bind(scope)
+            # No wait: `async with` does not return until the body task is
+            # done, and the body settles before it re-raises.
+            job = await service.start(kind="test", label="interrupted", run=interrupted)
+
+    assert job is not None
+    assert job.state == "canceled", f"a job stopped by a base exception reported {job.state}"
+    assert settled_states == ["canceled"], settled_states
 
 
 async def test_canceling_a_queued_job_stops_the_wait_and_takes_no_slot() -> None:

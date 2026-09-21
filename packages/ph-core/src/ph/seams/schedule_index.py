@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from ..locks import LockBusy, file_lock
+from ..paths import write_atomic
 
 __all__ = ["INDEX_NAME", "Appointment", "ScheduleIndex"]
 
@@ -205,7 +206,4 @@ class ScheduleIndex:
                 for one in found.values()
             },
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(document, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        write_atomic(self.path, json.dumps(document, indent=2))

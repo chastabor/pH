@@ -36,7 +36,6 @@ import base64
 import hashlib
 import logging
 import mimetypes
-import os
 import re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
@@ -52,7 +51,7 @@ from ..json import JsonValue
 from ..keys import ATTACHMENTS
 from ..llm.dimensions import IMAGE_MIMES, image_dimensions
 from ..llm.types import AttachmentRef
-from ..paths import default_home_path
+from ..paths import default_home_path, write_atomic
 from ..wire import WireModel
 
 if TYPE_CHECKING:
@@ -239,7 +238,7 @@ class AttachmentStore:
             pages=pages,
         )
         path = self.path_for(ref)
-        await anyio.to_thread.run_sync(_write, self.root, path, content)
+        await anyio.to_thread.run_sync(_write, path, content)
         return ref
 
     async def save_path(self, source: Path | str, *, mime: str | None = None) -> AttachmentRef:
@@ -295,41 +294,15 @@ class AttachmentStore:
         return self.path_for(ref).is_file()
 
 
-def _write(directory: Path, path: Path, payload: bytes) -> None:
+def _write(path: Path, payload: bytes) -> None:
     """Put one blob at its content-addressed name, atomically (K5).
 
-    **Temp-and-replace, because the name is a promise about the bytes.** A plain
-    `write_bytes` that is interrupted — the process killed, the disk full —
-    leaves a *truncated* file under a name that says it holds the sha256 of
-    something else. Nothing ever repairs it: the `exists()` check below is what
-    makes the store cheap, and it is also what makes the damage permanent, since
-    every later save of those bytes sees a file and returns. A session then
-    reads a short blob for an attachment that was written correctly the second
-    time.
-
-    `replace` is atomic on POSIX and on Windows, so a reader sees the whole file
-    or no file. `uploads._write` already had this; the store holding the larger
-    payloads did not.
-
-    **The temp goes with the failure**, unlike in `uploads`, because the sweep
-    reads a blob's identity off its name and takes everything before the first
-    `.` — so an abandoned `<digest>.png.<pid>.tmp` is a file `phern attachments
-    gc` would count, and report the size of, as the blob it is not.
+    The name is the sha256 of these bytes, which is what makes both halves
+    right: `skip_if_present`, because a file already at this name already holds
+    them, and the atomic write, because a truncated one would be believed
+    forever for the same reason.
     """
-    directory.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        # Content-addressed, so an existing file with this name has these bytes.
-        # Rewriting it would be one more chance to truncate something a live
-        # session is reading for no gain.
-        return
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_bytes(payload)
-        temporary.replace(path)
-    finally:
-        # A no-op on the way out — `replace` moved it — so this says "the temp
-        # never outlives the call" once rather than at each way of failing.
-        temporary.unlink(missing_ok=True)
+    write_atomic(path, payload, skip_if_present=True)
 
 
 @plugin("attachments-local", config=Config)

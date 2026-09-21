@@ -126,9 +126,9 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
     async def offload(proposal: RequestProposal, next_: Next[LlmCallConfig]) -> LlmCallConfig:
-        session = proposal.agent.session
-        pending = _pending(session, config) if session is not None else None
-        if session is None or pending is None:
+        session = proposal.session
+        pending = _pending(session, config)
+        if pending is None:
             return await next_(proposal)
         event, text = pending
         store = ctx.require(SPILL_STORE)

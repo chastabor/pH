@@ -1335,36 +1335,50 @@ _OPENAI_ERROR_STREAM: list[tuple[str, dict[str, Any]]] = [
 ]
 """And the OpenAI-compatible one — a 200 whose body carries the failure."""
 
+_GOOGLE_ERROR_STREAM: list[tuple[str, dict[str, Any]]] = [
+    ("", {"candidates": [{"content": {"parts": [{"text": "partial"}]}}]}),
+    ("", {"error": {"code": 429, "message": "overloaded", "status": "RESOURCE_EXHAUSTED"}}),
+    ("", {"candidates": [{"finishReason": "STOP"}]}),
+]
+"""And Google's, whose `status` is that wire's spelling of the other two's `type`."""
 
-@pytest.mark.parametrize("wire", ["anthropic", "openai"])
+
+@pytest.mark.parametrize("wire", ["anthropic", "openai", "google"])
 async def test_a_mid_stream_error_ends_the_turn_as_an_error(wire: str) -> None:
     """A provider that fails mid-answer must not be recorded as having finished.
 
-    Both wires report this *inside* a 200 response, so `failure_from_status`
+    All three wires report this *inside* a 200 response, so `failure_from_status`
     never sees it and the only signal is the frame itself. Anthropic's was read
     and then overwritten — the adapter's end-of-stream cleanup appended a second
-    `Finish` saying "stop" — and the OpenAI-compatible one was not read at all.
-    Either way the turn was logged as a completed answer that stops mid-sentence,
-    with no failure for the retry policy to see and nothing to tell a person why
-    the reply is short.
+    `Finish` saying "stop" — the OpenAI-compatible one was not read at all, and
+    Google's (L2) was neither read nor stopped at. Either way the turn was logged
+    as a completed answer that stops mid-sentence, with no failure for the retry
+    policy to see and nothing to tell a person why the reply is short.
 
     The frame count is asserted as well as the reason: an adapter that consumed
     the rest of the stream and merely discarded it is still holding a connection
-    open for a request that is over.
+    open for a request that is over — and, because `finish()` is unconditional,
+    is also about to overwrite the error with a `stop`.
+
+    Sabotage: drop either half of Google's fix — `consume`'s `error` branch or
+    `stream`'s `is_error_finish` return — and the google case fails.
     """
     root = Context()
     credentials = CredentialService(ctx=root)
     credentials.provide_value("PH_TEST_WIRE_KEY", "sk-test")
     root.provide("credentials", credentials)
-    adapter: AnthropicAdapter | OpenAiCompatibleAdapter
+    adapter: AnthropicAdapter | OpenAiCompatibleAdapter | GoogleAdapter
     if wire == "anthropic":
         adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig(api_key_env="PH_TEST_WIRE_KEY"))
         events = _ANTHROPIC_ERROR_STREAM
-    else:
+    elif wire == "openai":
         adapter = OpenAiCompatibleAdapter(
             ctx=root, profile=ProviderProfile(provider="p", api_key_env="PH_TEST_WIRE_KEY")
         )
         events = _OPENAI_ERROR_STREAM
+    else:
+        adapter = GoogleAdapter(ctx=root, config=GoogleConfig(api_key_env="PH_TEST_WIRE_KEY"))
+        events = _GOOGLE_ERROR_STREAM
     stub = _WireStub(events)
     adapter.http = stub  # type: ignore[assignment]
 
@@ -1429,3 +1443,34 @@ async def test_a_dropped_connection_is_transient(raised: Exception, code: str) -
     assert caught.value.code == code
     assert is_transient(caught.value.failure), "so the next attempt gets made"
     assert type(raised).__name__ in str(caught.value), "and a person can see which one it was"
+
+
+def test_the_same_overload_retries_whichever_shape_it_arrives_in() -> None:
+    """L3 — a status and an error frame were two codes for one fact.
+
+    `failure_from_status` maps a 529 to `OVERLOADED`, which is in
+    `TRANSIENT_CODES`, so the turn retries. The *same* overload arriving as an
+    `{"error": {"type": "overloaded_error"}}` frame inside a 200 became a flat
+    `PROVIDER_ERROR`, which is not — so whether a retry happened was decided by
+    which shape the provider happened to use.
+
+    An unmapped type still answers `PROVIDER_ERROR`: retrying a vocabulary
+    nobody here owns is the failure mode the narrow map exists to avoid.
+
+    Sabotage: ignore `kind` in `wire_error_finish` and the frame stops retrying.
+    """
+    from ph_app.adapters._http import wire_error_finish
+
+    overloaded = wire_error_finish("upstream is busy", kind="overloaded_error")
+    assert overloaded.reason.failure is not None
+    assert overloaded.reason.failure.code == "OVERLOADED"
+    assert is_transient(overloaded.reason.failure), "the frame form did not retry"
+
+    # And the status form it has to agree with.
+    by_status = failure_from_status(529, "overloaded", is_overflow=lambda _b: False)
+    assert by_status.failure.code == "OVERLOADED" and is_transient(by_status.failure)
+
+    unknown = wire_error_finish("something new", kind="a_type_nobody_mapped")
+    assert unknown.reason.failure is not None
+    assert unknown.reason.failure.code == "PROVIDER_ERROR"
+    assert not is_transient(unknown.reason.failure)

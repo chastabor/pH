@@ -37,6 +37,7 @@ is the one place directories are created, with the mode each tier requires.
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 import sys
 from dataclasses import dataclass
@@ -51,8 +52,10 @@ __all__ = [
     "default_home_path",
     "is_under",
     "resolve_roots",
+    "write_atomic",
     "write_text_under",
 ]
+
 
 RuntimeTier = Literal["override", "windows", "xdg-runtime", "tmpdir", "tmp-uid"]
 
@@ -343,8 +346,65 @@ def is_under(candidate: Path, root: Path) -> bool:
 def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
     """Write (or append) text, creating the parent directory first.
 
+    **Truncates in place.** For a whole document another process reads without
+    coordination, that is a window in which the file is neither the old one nor
+    the new one — use `write_atomic` below instead.
+
     Blocking; call it through `anyio.to_thread.run_sync` from async code.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a" if append else "w", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def write_atomic(path: Path, payload: bytes | str, *, skip_if_present: bool = False) -> None:
+    """Write `payload` to `path` so a reader sees all of it or none of it (L7).
+
+    **Temp-and-rename, because a torn file is worse than a missing one here.**
+    Every caller of this writes something another process reads without
+    coordination: a content-addressed blob whose name promises its sha256, a
+    JSON index read on a daemon tick, a handle cache. `write_bytes` truncates
+    and then writes, so an interrupted write leaves a prefix under the final
+    name — and for the content-addressed writers that prefix is *permanent*,
+    since the digest says the file is already correct and nothing ever rewrites
+    it. This is atomicity against a concurrent *reader*, not durability against
+    power loss: `replace` without an `fsync` of the file and its directory can
+    land the rename with the bytes still in flight.
+
+    Six sites had derived this independently, in five spellings of the temp
+    name — two of them a fixed string, which any two concurrent writers collide
+    on — and only one of the six removed the temp when the write failed. The
+    seventh, `spill._write`, had not derived it at all.
+
+    **A random suffix, not the pid**, because the colliding writers can be
+    inside one process: `ph_rlm.harness.service` writes a projection per
+    session and its own docstring names "a daemon two sessions project at
+    once". `replace` is atomic within a filesystem, and the temp is a sibling
+    so it always is one. The temp goes with the failure because a sweep that
+    reads identity off a name — `phern attachments gc` takes everything before
+    the first `.` — would otherwise count an abandoned `<digest>.png.<hex>.tmp`
+    as the blob it is not.
+
+    `skip_if_present` is the content-addressed callers' half, and only theirs:
+    where the name *is* the sha256 of the bytes, a file already at that name
+    already holds them, so rewriting it is one more chance to truncate
+    something a live reader holds, for no gain. It is not safe anywhere the
+    name does not promise the contents.
+
+    Parents are created at the default mode. A path under a directory whose
+    mode matters — `$PH_RUNTIME` at 0700 — is ensured by its owner first;
+    `PathRoots.ensure()` is still the one place that happens.
+    """
+    if skip_if_present and path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        if isinstance(payload, str):
+            temporary.write_text(payload, encoding="utf-8")
+        else:
+            temporary.write_bytes(payload)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise

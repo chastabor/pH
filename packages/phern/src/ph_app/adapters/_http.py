@@ -125,24 +125,67 @@ def _classified_transport() -> Iterator[None]:
         raise LlmError(detail, code) from error
 
 
-def wire_error_finish(message: object) -> Finish:
+_WIRE_ERROR_CODES = {
+    # Anthropic's `error.type` vocabulary.
+    "overloaded_error": "OVERLOADED",
+    "rate_limit_error": "RATE_LIMIT",
+    "api_error": "SERVER_ERROR",
+    "authentication_error": "AUTHENTICATION",
+    "permission_error": "AUTHENTICATION",
+    # The OpenAI-compatible wire's.
+    "server_error": "SERVER_ERROR",
+    "rate_limit_exceeded": "RATE_LIMIT",
+    "insufficient_quota": "RATE_LIMIT",
+    "service_unavailable": "SERVICE_UNAVAILABLE",
+    # Google's wire spells the same field `error.status`, in gRPC's vocabulary.
+    "RESOURCE_EXHAUSTED": "RATE_LIMIT",
+    "UNAVAILABLE": "SERVICE_UNAVAILABLE",
+    "INTERNAL": "SERVER_ERROR",
+    "DEADLINE_EXCEEDED": "TIMEOUT",
+    "UNAUTHENTICATED": "AUTHENTICATION",
+    "PERMISSION_DENIED": "AUTHENTICATION",
+}
+"""A mid-stream `error.type` onto the shared failure vocabulary (L3).
+
+**The same overload has to answer the same way however it arrives.** A provider
+under load reports it as a 529 on one request and an `{"error": {"type":
+"overloaded_error"}}` frame inside a 200 on the next — `failure_from_status`
+mapped the first to `OVERLOADED` and retried it, while the second became a flat
+`PROVIDER_ERROR`, which is not in `TRANSIENT_CODES`, and failed the turn. One
+fact, two codes, decided by which shape the provider happened to use.
+
+Only the types whose meaning is unambiguous are here, from all three wires;
+the three vocabularies are disjoint, so one exact-match lookup serves them and
+no adapter has to know about another's. An unrecognized type stays
+`PROVIDER_ERROR`, which is the honest answer for a
+vocabulary neither this module nor `TRANSIENT_CODES` owns: retrying something
+this does not understand is the failure mode the narrow map exists to avoid."""
+
+
+def wire_error_finish(message: object, *, kind: object) -> Finish:
     """A provider's mid-stream error frame, as the chunk that ends the turn.
 
-    The other half of `failure_from_status`, and here for the same reason. Both
-    wires report a failed request *inside* a 200 — Anthropic as an `error`
-    event, the OpenAI-compatible wire as a top-level `error` object — so the
-    status classifier never sees it and each adapter built the `Finish` itself.
+    The other half of `failure_from_status`, and here for the same reason. All
+    three wires report a failed request *inside* a 200 — Anthropic as an `error`
+    event, the other two as a top-level `error` object — so the status
+    classifier never sees it and each adapter built the `Finish` itself.
     The two copies had drifted on the first commit they both existed: one read
     the message through `str()`, which renders a non-string as `"None"` or
     `"3"`, the other through `as_str`, which falls back to the default. That is
     the drift this module's docstring gives as the reason it exists.
 
-    `PROVIDER_ERROR` is deliberately not in `TRANSIENT_CODES`: an error frame
-    says only that the request failed, and the `type` beside it is the wire's
-    own vocabulary rather than a status. Mapping those onto retryable codes is
-    worth doing and is not this function — it would change which turns retry.
+    `kind` is the frame's own `error.type`, mapped through `_WIRE_ERROR_CODES`
+    so a retryable failure is retryable whichever shape it arrived in. Required
+    and keyword-only: a fourth adapter that forgot it would silently get
+    `PROVIDER_ERROR` back — which is exactly the shape this exists to prevent —
+    and two positional `object` parameters holding two strings from the same
+    frame are a swap nothing would catch. A type nobody has mapped still answers
+    `PROVIDER_ERROR`; that is the honest case.
     """
-    failure = LlmFailure(message=as_str(message, "provider error"), code="PROVIDER_ERROR")
+    failure = LlmFailure(
+        message=as_str(message, "provider error"),
+        code=_WIRE_ERROR_CODES.get(as_str(kind), "PROVIDER_ERROR"),
+    )
     return Finish(reason=FinishReason(kind="error", failure=failure))
 
 
