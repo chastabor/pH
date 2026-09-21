@@ -55,8 +55,18 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 2
-"""Two, since `call` gained a required `run` (F4).
+PROTOCOL_VERSION: Final = 3
+"""Three, since `boot` gained a required `idleCpuSeconds` (M1).
+
+The rule that moved it to two, applied again: a guest that cannot read the field
+has no budget between runs, and a guest that reads a frame without it raises
+before `boot-ack`. Neither side can ignore the difference, so the pairing is
+refused at boot — and `venv._marker`, which keys on this number and carries no
+content digest, rebuilds a warm `$PH_CACHE/runtime-venv` instead of booting last
+week's guest against today's host. `ping`/`pong` needed no bump on their own:
+an older pairing simply never sends or answers one.
+
+Two, since `call` gained a required `run` (F4).
 
 Moved by exactly the rule below: a **required field added**, which a mismatched
 pairing would misread rather than ignore. A guest that does not send `run` has
@@ -102,8 +112,10 @@ number instead of moving the descriptor."""
 
 NAMESPACE_ENV: Final = "PH_NAMESPACE_ID"
 
-HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown"})
-GUEST_FRAMES: Final = frozenset({"boot-ack", "call", "log", "display", "snapshot", "done", "fault"})
+HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown", "ping"})
+GUEST_FRAMES: Final = frozenset(
+    {"boot-ack", "call", "log", "display", "snapshot", "done", "fault", "pong"}
+)
 
 UNPRODUCED_FRAMES: Final = frozenset({"display"})
 """Frames defined here that nothing emits yet.
@@ -127,6 +139,9 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
                 "type",
                 "protocol",
                 "cpuSeconds",
+                # See `Runner._end_runaway` (M1): what a namespace may burn while
+                # no cell is running, which is the window nothing else bounds.
+                "idleCpuSeconds",
                 "addressSpaceBytes",
                 "maxLogBytes",
                 "maxValueBytes",
@@ -154,6 +169,19 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
     "snapshot": (frozenset({"type", "id", "variables"}), frozenset()),
     "done": (frozenset({"type", "id"}), frozenset({"value", "error", "truncated"})),
     "fault": (frozenset({"type", "message"}), frozenset()),
+    # **The loop's own clock** (M2). `ping` is answered by the guest's reader
+    # task, so the round trip measures how far behind the guest's event loop
+    # is — a cell burning CPU starves that task and the answer is late or
+    # absent, which is a *load* reading and not a death certificate.
+    #
+    # `run` is the host's open run, and it rides on the *question* rather
+    # than the answer. The host waits for `done` with no wall clock of its
+    # own, so it asks the one party that knows: a guest neither running that
+    # run nor owing it a `done` settles it on the spot, through the same
+    # `_send_done` every other terminal path takes. The repair travels as an
+    # ordinary `done`, which leaves the pong carrying nothing but the clock.
+    "ping": (frozenset({"type", "id", "run"}), frozenset()),
+    "pong": (frozenset({"type", "id"}), frozenset()),
 }
 """frame type → (required fields, optional fields).
 

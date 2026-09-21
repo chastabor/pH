@@ -57,6 +57,7 @@ from pathlib import Path
 import pytest
 
 from ph_rlm.kernel import protocol as host
+from ph_rlm.kernel.manager import KernelLimits
 from ph_runtime import protocol as guest
 
 SHARED_CONSTANTS = ("PROTOCOL_VERSION", "PROTOCOL_FD", "FD_ENV", "NAMESPACE_ENV")
@@ -199,13 +200,13 @@ def test_boot_requires_every_limit() -> None:
     cap", and which applied would depend on which side was older.
     """
     required, _ = host.FRAME_FIELDS["boot"]
-    assert {
-        "cpuSeconds",
-        "addressSpaceBytes",
-        "maxLogBytes",
-        "maxValueBytes",
-        "maxSnapshotBytes",
-    } <= required
+    # Derived from the model rather than listed, which is `KernelLimits`' own
+    # argument ("a limit added here reaches the row config and the `boot` frame
+    # without being typed again in either") applied to its test. A hand-written
+    # set under `<=` is a copy that fails at nothing: `idleCpuSeconds` was added
+    # to six places and missed here, and this assertion went on passing.
+    declared = {info.alias or name for name, info in KernelLimits.model_fields.items()}
+    assert declared <= required, sorted(declared - required)
 
 
 def test_inbound_specs_are_the_frame_types_field_for_field() -> None:

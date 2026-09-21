@@ -73,6 +73,8 @@ __all__ = [
     "FieldSpec",
     "InboundFrame",
     "LogFrame",
+    "PingFrame",
+    "PongFrame",
     "ReplyFrame",
     "RestoreFrame",
     "RunFrame",
@@ -81,8 +83,10 @@ __all__ = [
     "truncation_marker",
 ]
 
-HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown"})
-GUEST_FRAMES: Final = frozenset({"boot-ack", "call", "log", "display", "snapshot", "done", "fault"})
+HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown", "ping"})
+GUEST_FRAMES: Final = frozenset(
+    {"boot-ack", "call", "log", "display", "snapshot", "done", "fault", "pong"}
+)
 
 
 # ------------------------------------------------------------ host → guest --
@@ -99,6 +103,7 @@ class BootFrame(WireModel):
     type: Literal["boot"] = "boot"
     protocol: int = PROTOCOL_VERSION
     cpu_seconds: int
+    idle_cpu_seconds: int
     address_space_bytes: int
     max_log_bytes: int
     max_value_bytes: int
@@ -156,6 +161,31 @@ class ShutdownFrame(WireModel):
     type: Literal["shutdown"] = "shutdown"
 
 
+class PingFrame(WireModel):
+    """A probe the guest's reader task answers from its event loop (M2).
+
+    **A gauge first.** The round trip is the only measurement the host has of
+    how far behind the guest's loop is, and a cell burning CPU starves the
+    reader — so a late or missing answer reads as *load*, reported by `phern
+    doctor`, and never as a reason to kill anything. `CpuBudget` bounds a busy
+    cell.
+    """
+
+    type: Literal["ping"] = "ping"
+    id: int
+    """The probe's own number, compared in `_ActiveRun.answered` so a late — or
+    unsolicited — answer is told from the current one and times nothing."""
+    run: int
+    """The run the host is waiting on, so the guest can settle it if nobody will.
+
+    The question travels outward rather than the guest's state travelling back.
+    A guest neither running this run nor owing it a `done` sends one on the
+    spot; the host learns through an ordinary terminal frame and the namespace
+    survives. Asking the other way round — publishing `_owed` and letting the
+    host conclude — left the host able only to conclude, and the remedy for a
+    conclusion is a kill."""
+
+
 _OUTBOUND: Final[tuple[type[BaseModel], ...]] = (
     BootFrame,
     RunFrame,
@@ -163,6 +193,7 @@ _OUTBOUND: Final[tuple[type[BaseModel], ...]] = (
     RestoreFrame,
     CancelFrame,
     ShutdownFrame,
+    PingFrame,
 )
 
 
@@ -254,8 +285,29 @@ class FaultFrame(TypedDict):
     message: str
 
 
+class PongFrame(TypedDict):
+    """The guest's answer to a `ping`: the clock, and nothing else (M2).
+
+    It carries no verdict because the guest acts on the question rather than
+    reporting about it — see `PingFrame.run`. What is left is the round trip,
+    which is how far behind the guest's event loop is running and is a *load*
+    reading: a slow answer is a busy cell and no answer is a starved one, and
+    `CpuBudget` is what bounds those.
+    """
+
+    type: Literal["pong"]
+    id: int
+
+
 InboundFrame: TypeAlias = (
-    BootAckFrame | CallFrame | LogFrame | DisplayFrame | SnapshotFrame | DoneFrame | FaultFrame
+    BootAckFrame
+    | CallFrame
+    | LogFrame
+    | DisplayFrame
+    | SnapshotFrame
+    | DoneFrame
+    | FaultFrame
+    | PongFrame
 )
 """What `decode` returns. A tagged union on `type`, so `if frame["type"] == "done":`
 narrows it — compared *directly*: mypy does not carry the narrowing through an

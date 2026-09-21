@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import signal
 from typing import Any
 
 __all__ = [
@@ -104,6 +105,32 @@ def apply_limits(*, address_space_bytes: int) -> dict[str, Any]:
     return applied
 
 
+def _uncaught_budget() -> bool:
+    """Whether a `SIGXCPU` would kill this process rather than reach a handler.
+
+    **Never arm a limit whose breach nothing here will catch** (M1). `RLIMIT_CPU`
+    is process-wide and `SIGXCPU`'s default disposition is to terminate, so an
+    arm made where no handler is installed points a timer at whatever process
+    this happens to be — and `Runner` is built in-process by this package's own
+    tests, where that process is pytest. It had been pointed for a while: the
+    per-run arm left the limit at `used + cpuSeconds` on the test runner, which
+    the suite reached on a long run and died of, reading as a run that finished
+    and printed no summary.
+
+    Asked of `signal` rather than remembered by the caller, because a flag on
+    the one caller that exists today is a rule every later caller has to be told
+    about — and this also covers a handler reset after install, or an
+    `install_signal_handlers` that partially failed.
+
+    `getattr` because `SIGXCPU` is POSIX; where it does not exist there is no
+    budget to arm and nothing to catch.
+    """
+    sigxcpu = getattr(signal, "SIGXCPU", None)
+    if sigxcpu is None:  # pragma: no cover - Windows
+        return True
+    return signal.getsignal(sigxcpu) in (signal.SIG_DFL, signal.SIG_IGN)
+
+
 def arm_cpu_budget(cpu_seconds: int) -> None:
     """Give the *next* run `cpu_seconds` of CPU, from whatever is spent so far."""
     if resource is None or cpu_seconds <= 0:  # pragma: no cover
@@ -111,6 +138,8 @@ def arm_cpu_budget(cpu_seconds: int) -> None:
     # `ceil`, not `int`: flooring the CPU already spent hands the next cell less
     # than `cpu_seconds` — a bomb that burned 1.9s floors to 1, so a budget of 1
     # leaves 0.1s and the *next* trivial cell dies on the previous one's spend.
+    if _uncaught_budget():
+        return
     used = math.ceil(cpu_seconds_used())
     soft = used + cpu_seconds
     _, hard = resource.getrlimit(resource.RLIMIT_CPU)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import resource
 from typing import Any
 
 import pytest
@@ -55,6 +56,7 @@ def _runner(inbound: list[dict[str, Any]]) -> tuple[Runner, _Frames]:
         "maxValueBytes": 4096,
         "maxSnapshotBytes": 4096,
         "cpuSeconds": 60,
+        "idleCpuSeconds": 2,
     }
     return Runner(channel, boot), channel  # type: ignore[arg-type]
 
@@ -122,14 +124,21 @@ async def test_a_run_that_dies_above_its_own_guards_still_sends_done(
     the bookkeeping could not answer for was a task that finished *without*
     settling: the kernel then waits for a frame nobody will send.
 
+    **The vehicle is `_CappedStream`, one of the three this docstring names.**
+    It was `arm_cpu_budget`, which is now gated on `Runner._catches_budget` and
+    so does not run in a process that installed no `SIGXCPU` handler — which is
+    this one, and is the point of that gate: arming a process-wide `RLIMIT_CPU`
+    here capped pytest itself. Any of the three proves the same property; this
+    one is reachable in-process.
+
     Sabotage: drop `task.add_done_callback(self._answer_if_owed)` from `_begin`
     and no terminal frame is sent at all.
     """
 
-    def exploding(_seconds: int) -> None:
-        raise RuntimeError("the budget could not be armed")
+    def exploding(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("the capped stream could not be built")
 
-    monkeypatch.setattr("ph_runtime.runner.arm_cpu_budget", exploding)
+    monkeypatch.setattr("ph_runtime.runner._CappedStream", exploding)
     runner, channel = _runner([{"type": "run", "id": 11, "program": "1 + 1"}])
 
     await asyncio.wait_for(runner.serve(), timeout=5)
@@ -143,7 +152,7 @@ async def test_a_run_that_dies_above_its_own_guards_still_sends_done(
     assert len(done) == 1, "a run ended without settling and the host was never told"
     assert done[0]["id"] == 11
     assert done[0]["error"]["kind"] == "RuntimeError"
-    assert "could not be armed" in done[0]["error"]["message"]
+    assert "could not be built" in done[0]["error"]["message"]
 
 
 async def test_a_stale_callback_cannot_settle_the_run_that_followed_it() -> None:
@@ -173,3 +182,31 @@ async def test_a_stale_callback_cannot_settle_the_run_that_followed_it() -> None
 
     assert channel.sent == [], "a finished run settled its successor"
     assert runner._owed == 2, "and cleared what that successor still owes"
+
+
+def test_a_runner_in_this_process_never_arms_a_limit_it_cannot_catch() -> None:
+    """`RLIMIT_CPU` is process-wide, and this process is pytest.
+
+    `arm_cpu_budget` sets a soft limit on *the process*, and `SIGXCPU`'s default
+    disposition is to terminate. A `Runner` built here has installed no handler
+    for it — `install_signal_handlers` is the real entry point's call, not a
+    test's — so every arm made in-process points a timer at the test runner.
+
+    It had been pointed for a while: `_execute`'s per-run arm left the limit at
+    `used + cpuSeconds`, which the suite reached on a long run and died of,
+    reading as a run that reached 100% and printed no summary. The standing
+    budget added by M1 is small enough to make it a matter of seconds, which is
+    how it was found.
+
+    Ordered last in this module by name, and asserted on the *process* rather
+    than on a call count, because what matters is the state left behind rather
+    than which line left it.
+
+    Sabotage: ungate either `arm_cpu_budget` call and this reports a finite
+    soft limit.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+
+    assert soft == resource.RLIM_INFINITY, (
+        f"a guest armed RLIMIT_CPU on the test runner: soft={soft}, hard={hard}"
+    )

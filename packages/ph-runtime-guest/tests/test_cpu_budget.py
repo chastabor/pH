@@ -12,11 +12,16 @@ sent no `done` frame, and the host — which has no wall clock on a run — wait
 for one forever. A test that spins a real cell and hopes to lose the race is not
 a test, so the mechanism is pinned here instead.
 
-Both functions mutate this process's own `RLIMIT_CPU`, so every test restores it.
+Both functions mutate this process's own `RLIMIT_CPU`, so every test restores
+it — and installs a handler first, because `arm_cpu_budget` now refuses to arm
+where the breach would kill the process rather than reach one (M1). Satisfying
+that rule is the honest way to test the armer; sidestepping it would leave this
+module the one place that still points an unhandled timer at pytest.
 """
 
 from __future__ import annotations
 
+import signal
 import sys
 
 import pytest
@@ -29,10 +34,20 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is P
 
 
 @pytest.fixture(autouse=True)
-def restore_cpu_limit() -> object:
-    """Put this process's own budget back, whatever a test did to it."""
+def armable() -> object:
+    """A caught `SIGXCPU` and a restored budget, around every test here.
+
+    The handler is what makes `arm_cpu_budget` willing to arm at all: its guard
+    reads `signal.getsignal`, so a module that arms the test process on purpose
+    has to be a process that would catch the breach. A no-op is enough — none
+    of these tests spends 3600 CPU-seconds — and it is removed afterwards, so
+    the invariant `test_run_settlement` asserts about this process still holds.
+    """
     before = resource.getrlimit(resource.RLIMIT_CPU)
+    handler = signal.getsignal(signal.SIGXCPU)
+    signal.signal(signal.SIGXCPU, lambda *_: None)
     yield
+    signal.signal(signal.SIGXCPU, handler)
     resource.setrlimit(resource.RLIMIT_CPU, before)
 
 

@@ -131,6 +131,7 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph_runtime/runner.py", 'int(boot["maxValueBytes"])'),
         ("ph_runtime/runner.py", 'int(boot["maxSnapshotBytes"])'),
         ("ph_runtime/runner.py", 'int(boot["cpuSeconds"])'),
+        ("ph_runtime/runner.py", 'int(boot["idleCpuSeconds"])'),
         ("ph_runtime/runner.py", 'int(boot["addressSpaceBytes"])'),
     }
 )

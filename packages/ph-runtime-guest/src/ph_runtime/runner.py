@@ -37,6 +37,7 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import reprlib
 import signal
 import sys
@@ -45,7 +46,7 @@ import traceback
 from contextvars import ContextVar
 from functools import partial
 from types import FrameType
-from typing import Any
+from typing import Any, NoReturn
 
 from . import snapshot as snapshot_module
 from .cell import CELL_FILENAME, CELL_FUNCTION, compile_cell
@@ -90,6 +91,15 @@ first line until it had produced 8 KiB; time alone would send a frame per write
 for a fast one. Together, a chatty cell sends kilobytes per frame and a slow one
 still shows progress within 50 ms.
 """
+
+
+_RUNAWAY_EXIT = 3
+"""Exit status for a runtime that ended itself over a runaway (M1).
+
+Distinct from 0 and from the signal-derived statuses a kill produces. Nothing
+branches on it — the host only ever asks whether `returncode` is `None` — so
+this is for a person reading a process table or a core-dump report, and the
+sentence on stderr is what the model and the transcript get."""
 
 
 class _CappedStream(io.TextIOBase):
@@ -176,6 +186,7 @@ class Runner:
         self.max_value_bytes = int(boot["maxValueBytes"])
         self.max_snapshot_bytes = int(boot["maxSnapshotBytes"])
         self.cpu_seconds = int(boot["cpuSeconds"])
+        self.idle_cpu_seconds = int(boot["idleCpuSeconds"])
         self.globals: dict[str, Any] = {
             "__name__": "__ph_cell__",
             "__builtins__": __builtins__,
@@ -258,10 +269,42 @@ class Runner:
         relax_cpu_budget()
         if _executing_cell(frame):
             raise CpuBudgetExceeded(CPU_BUDGET_MESSAGE)
+        if self._owed is None:
+            # **Nothing is running and something is still burning** (M1). No
+            # cell owns this CPU, so there is no run to cancel and no frame to
+            # blame — what spent the budget is a worker or a task a finished
+            # cell left behind, and it is unreachable by every cooperative
+            # route. Ending the process is the only thing left that stops it.
+            self._end_runaway()
         # Set only on the route that loses the reason: the raise carries its own
         # and is caught by name.
         self._cpu_exceeded = True
         self._on_interrupt()
+
+    def _end_runaway(self) -> NoReturn:
+        """End this process: a finished cell left something burning (M1).
+
+        **`os._exit`, and the reason is the thing being escaped.** A runaway is
+        by definition not yielding, so a clean shutdown would wait on it: a
+        non-daemon thread blocks interpreter exit, and `sys.exit` from a signal
+        handler only unwinds the main thread. `lifecycle._watch_parent` takes
+        the same exit for the same reason.
+
+        **The namespace goes, and that is the honest price.** It is already
+        holding a thread nobody can stop; the host discovers a dead child on the
+        next cell and tells the model the namespace was lost, which is the path
+        every other way of dying already takes.
+
+        Said on stderr first, because that is the only channel left that a
+        person reads — the host is not reading frames between runs, so a `fault`
+        would sit in a buffer nobody drains until a cell that will never run.
+        """
+        sys.stderr.write(
+            "ph: a finished cell left work burning CPU with no run to charge it to; "
+            "ending this runtime so it cannot spend a core until the session does\n"
+        )
+        sys.stderr.flush()
+        os._exit(_RUNAWAY_EXIT)
 
     def _install_namespaces(self, declared: list[dict[str, Any]]) -> None:
         namespaces = build_namespaces(declared, self._dispatch)
@@ -304,6 +347,47 @@ class Runner:
                 await self._abort_run()
             elif kind == "restore":
                 self._restore(frame)
+            elif kind == "ping":
+                self._pong(frame)
+
+    def _pong(self, frame: dict[str, Any]) -> None:
+        """Answer the host's probe, and settle the run it asks about if nobody will.
+
+        **Answered from here, which is the measurement** (M2). This runs on the
+        event loop, in the same reader task that takes a `cancel` frame — so the
+        round trip the host times is exactly how far behind that loop is. A cell
+        burning CPU in straight-line Python starves it and the answer is late or
+        never, which is the same reason `_interrupt`'s two routes both fail on
+        such a cell. That is a *load* reading, and the host treats it as one.
+
+        **The repair, not a report.** The host has no wall clock on a run and
+        waits for `done`, so it names the run it is waiting for and this answers
+        the only question that settles it: is anyone here still going to send
+        that frame? `_owed` says the terminal frame is outstanding and
+        `self._run` says the task is alive; with neither, the run ended without
+        anyone telling the host, and `_send_done` says so through the path
+        `_answer_if_owed` already takes for the same condition. Reporting
+        `_owed` outward and letting the host infer was the first shape, and it
+        made the host's remedy a kill: it could only conclude, not repair, and
+        the price of concluding was the namespace.
+
+        Synchronous and buffered, like every other send here: taking a lock or
+        awaiting would put the answer behind whatever is already wedged, and an
+        answer that waits for the wedge measures nothing.
+        """
+        probe, asked = frame.get("id"), frame.get("run")
+        if not isinstance(probe, int):
+            return
+        self.channel.send({"type": "pong", "id": probe})
+        if not isinstance(asked, int) or self._owed == asked:
+            return
+        if self._run is not None and not self._run.done():
+            # A task still going for a run this guest has already answered for
+            # is not this function's business; `_owed` is the frame's clock.
+            return
+        self._send_done(
+            asked, {"error": {"kind": "aborted", "message": "the run ended without settling"}}
+        )
 
     def _begin(self, frame: dict[str, Any]) -> None:
         run_id = frame.get("id")
@@ -567,6 +651,31 @@ class Runner:
         """
         self._owed = None
         self.channel.send({"type": "done", "id": run_id, **body})
+        # **The window nothing else bounds** (M1). `relax_cpu_budget` switched
+        # the limit off at the first breach — it has to, or the second delivery
+        # lands in the teardown above and costs this very frame — and the next
+        # `arm_cpu_budget` is not until the next cell. Between the two, a
+        # `to_thread` worker or a detached task spinning in pure Python burns
+        # freely: a cancel reaches neither, so the run reported `cpu` and the
+        # thread carried on with nothing left to notice.
+        #
+        # Armed here rather than in `_execute`'s `finally` because this is the
+        # one point every started run passes through, including the two
+        # last-resort paths that exist precisely because the ordinary one
+        # failed.
+        #
+        # **After the send, and it may not raise.** This function's whole
+        # contract is that the terminal frame goes out — the host waits for it
+        # with no clock of its own — so anything added below the send is a new
+        # way for the one path that must complete to stop half way.
+        # `arm_cpu_budget` already suppresses what `setrlimit` throws, so
+        # reaching this is something unforeseen, and what it costs is the
+        # standing budget: the behavior this replaced, not a lost run.
+        #
+        # Whether it is safe to arm at all is `arm_cpu_budget`'s own question —
+        # see `_uncaught_budget`.
+        with contextlib.suppress(Exception):
+            arm_cpu_budget(self.idle_cpu_seconds)
 
     def _snapshot(self, run_id: int) -> None:
         """One frame per changed variable (F3).
@@ -575,7 +684,7 @@ class Runner:
         them.** `max_snapshot_bytes` is applied by `changed` to each value it
         encodes, so a cell that leaves three variables just under it produces a
         frame three times the size — and the host refuses a frame over
-        `MAX_FRAME_BYTES` on the reasonable ground that a peer writing megabytes
+        the host's `frame_cap` on the reasonable ground that a peer writing megabytes
         with no newline is hostile. A legitimate namespace was therefore read as
         an attack: the channel closed and the model was told the runtime had
         exited, with the namespace gone and nothing naming the real cause.

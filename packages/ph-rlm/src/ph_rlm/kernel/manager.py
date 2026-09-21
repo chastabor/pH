@@ -67,6 +67,7 @@ from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy, SandboxSeam
 from ph.seams.subprocess import first_line, scrub_env, signal_group
 from ph.seams.workspace import Workspace, workspace_of, workspace_policy
+from ph.text import count_of
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
 from ph.wire import WireModel
@@ -81,6 +82,7 @@ from .protocol import (
     CancelFrame,
     DoneFrame,
     InboundFrame,
+    PingFrame,
     ReplyFrame,
     RestoreFrame,
     RunFrame,
@@ -110,12 +112,15 @@ a model that reads this and re-derives what it needs is behaving correctly. Left
 unsaid, it would re-run one cell at a time discovering `NameError`s."""
 
 MAX_FRAME_BYTES = 64 * 1024 * 1024
-"""The largest inbound frame the host will assemble.
+"""The floor under `frame_cap`. The reason a cap exists at all is that the child
+can write whatever it likes onto fd 3 (C10).
 
-The guest caps its own reads at the same number; this is the host's side of it,
-and the reason it exists is that the child can write whatever it likes onto
-fd 3 (C10). Sized to hold a `maxSnapshotBytes` payload with base64 and JSON
-overhead."""
+**Not the same number as the guest's read limit any more.** It was, by
+coincidence, until `frame_cap` made this side elastic; `ph_runtime.channel`
+still hard-codes its own 64 MiB and cannot do otherwise, because it opens the
+connection before it has read a `boot` frame to size itself from. The direction
+that leaves exposed is host→guest `restore`, which still carries a whole
+namespace in one frame — recorded as O3 rather than fixed here."""
 
 
 class KernelLimits(WireModel):
@@ -128,6 +133,20 @@ class KernelLimits(WireModel):
     """
 
     cpu_seconds: int = 30
+    idle_cpu_seconds: int = 2
+    """CPU a namespace may burn while **no cell is running** (M1).
+
+    The window nothing else bounds. `cpu_seconds` is armed at the start of a run
+    and disarmed by the first `SIGXCPU` — disarmed rather than lowered, because
+    a second delivery lands in the guest's teardown and costs the `done` frame.
+    What that leaves is a `to_thread` worker or a detached task spinning in pure
+    Python, which a cancel reaches neither of: the run reports `cpu`, the thread
+    keeps burning, and with the budget off no second signal ever comes.
+
+    Small, because nothing legitimate spends it: a background thread a cell left
+    on purpose is *waiting*, and waiting costs no CPU. Only a runaway reaches
+    this, and the guest ends its own process when it does — the namespace is
+    already lost, and the alternative is a core burned until the session ends."""
     address_space_bytes: int = 2 * 1024**3
     max_log_bytes: int = 65_536
     max_value_bytes: int = 65_536
@@ -148,6 +167,26 @@ class KernelLimits(WireModel):
         )
 
 
+def frame_cap(limits: KernelLimits) -> int:
+    """The largest inbound frame *this* kernel will assemble (M3).
+
+    **Derived, because the ratio is load-bearing.** F3's fix made the guest send
+    one frame per changed variable, so a frame holds one `maxSnapshotBytes`
+    payload — and the constant above used to assert on its own that 64 MiB was
+    enough for that. It is, for the shipped 16 MiB; it stops being true the
+    moment a deployment raises the limit, and what it costs is not a rejected
+    frame but a lost namespace: the host refuses the frame, closes the channel,
+    and the model is told the runtime exited. The old docstring claimed the
+    sizing; nothing made it so, and the only thing checking it was a test that
+    monkeypatched the constant.
+
+    Twice the payload plus a megabyte: base64 is four bytes per three, the JSON
+    envelope and the variable's name are bounded by a few hundred, and the
+    slack is free because this is a ceiling on junk rather than an allocation.
+    """
+    return max(MAX_FRAME_BYTES, limits.max_snapshot_bytes * 2 + 1024 * 1024)
+
+
 @dataclass(slots=True)
 class _ActiveRun:
     """Everything one program produces, collected as its frames arrive."""
@@ -162,6 +201,24 @@ class _ActiveRun:
     truncated: bool = False
     failure: CodeRunFailure | None = None
     """A refusal or a budget, raised out of `run()` once the program unwinds (C3)."""
+    probe_id: int = 0
+    """The last probe sent, compared against the answer's `id`.
+
+    A pong whose id is not this one is unsolicited — a late duplicate, or a
+    forged frame off fd 3, which this module assumes is possible everywhere
+    else (C10). It clears nothing and times nothing."""
+    probed_at: float | None = None
+    """When the last probe went out, answered or not, or `None` before the first.
+
+    **Never moved while a probe is outstanding**, which is what makes it a
+    measurement rather than a cadence: the round trip finally recorded is the
+    whole time the loop took to get back to its reader, stall included. It also
+    carries the cadence, because a probe is due `probe_seconds` after the last
+    one *left*, not after the last one was answered — gating on the answer
+    alone would put a frame each way on every 50 ms `_watch` tick."""
+    probe: Literal["idle", "waiting", "stalled"] = "idle"
+    """Where the outstanding probe stands. `stalled` is `waiting` past its due
+    time, latched so one starved stretch is counted once rather than per tick."""
     aborting_since: float | None = None
     """When this run was asked to stop, by either route — the caller canceling,
     or a dispatch being refused. Held here rather than in `_pump` because
@@ -186,6 +243,24 @@ class _ActiveRun:
             return False
         self.aborting_since = anyio.current_time()
         return True
+
+    def answered(self, probe: int, at: float) -> float | None:
+        """Record one `pong`. Returns the round trip, or `None` if it is not ours.
+
+        One reading, because the repair travels as a `done` rather than in the
+        answer — `PingFrame.run` says why. What is left is the loop gauge, which
+        `phern doctor` prints and nothing acts on.
+
+        The id is compared rather than trusted: a frame off fd 3 can say
+        anything, and an unsolicited pong would otherwise book a round trip
+        against whichever probe happened to be outstanding.
+        """
+        if self.probe != "waiting" and self.probe != "stalled":
+            return None
+        if probe != self.probe_id or self.probed_at is None:
+            return None
+        self.probe = "idle"
+        return at - self.probed_at
 
     def settle(self, *, error: str | None = None, value: object = None) -> bool:
         """Record how this run ended. **The first writer wins**; returns whether
@@ -314,8 +389,26 @@ class Kernel:
     raw-`pathlib` non-goal (§11, Q10) and distinct from it: this one is about
     *time*, and a deployment widens it by raising this number."""
 
+    probe_seconds: float = 1.0
+    """How often a run is probed while it is open (M2).
+
+    A frame each way, answered from the guest's reader task. Cheap enough to run
+    continuously — which is the point, because a gauge that is only read when
+    something already looks wrong tells you nothing about what normal was."""
     _process: anyio.abc.Process | None = None
     _sock: socket.socket | None = None
+    loop_worst: float | None = None
+    """The worst probe round trip this kernel has seen, or `None` before the
+    first (M2). The tail is the number worth reading: a loop that is usually
+    prompt and occasionally seconds behind is a cell doing bursts of CPU, which
+    is what somebody looking at a sluggish agent is trying to see.
+
+    A plain field, like `applied_limits` above — `PythonCodeRuntime._loops`
+    reads it from outside the class either way, so a property enforced nothing
+    and put the same sentence in two places."""
+    loop_stalls: int = 0
+    """Probes that went a whole `probe_seconds` unanswered — one per starved
+    stretch, not one per tick."""
     _run_seq: int = 0
     _buffer: bytearray = field(default_factory=bytearray)
     _scanned: int = 0
@@ -729,6 +822,21 @@ class Kernel:
             if active.settled:
                 return
             if active.aborting_since is None:
+                # **The clock the host never had** (M2). Both rungs below start
+                # only because somebody pressed stop, so a run that is never
+                # canceled and never settles had nothing watching it at all —
+                # the host waits on `done` with no wall clock of its own.
+                #
+                # What this asks is narrow, and worth stating exactly because
+                # the prose here once claimed more: it catches a guest that
+                # reached `_send_done`, cleared what it owed, and left the host
+                # with no terminal frame. The guest-side failures that
+                # `_snapshot`'s guard and `relax_cpu_budget` cover all leave the
+                # run still *owed*, so `_answer_if_owed` answers those and this
+                # never sees them — those guards stay load-bearing.
+                #
+                # No rung follows it, because the guest settles the run itself.
+                self._probe(active, tasks)
                 if is_canceled(token):
                     # **The clock first, and the ask started rather than
                     # awaited.** `_interrupt` writes a frame, and a write waits
@@ -745,6 +853,39 @@ class Kernel:
                 # Killing costs the namespace; leaving it costs the session.
                 await self._kill_unresponsive(active)
                 return
+
+    def _probe(self, active: _ActiveRun, tasks: anyio.abc.TaskGroup) -> None:
+        """Keep the loop gauge fed, and give the guest a chance to settle (M2).
+
+        **Started, never awaited**, for the reason the cancel ask below it is:
+        `_send` waits on `_send_lock`, which a reply the guest is not reading
+        can hold indefinitely, and a clock parked inside the thing it is timing
+        is not a clock. One probe outstanding at a time, so a starved loop costs
+        one unanswered frame rather than a frame per tick.
+
+        **No verdict is taken here.** The frame names the run the host is
+        waiting on, and a guest that is neither running it nor owing it a `done`
+        answers by sending one — so the repair arrives as an ordinary terminal
+        frame through `_pump`, and there is no rung to add. What is left on this
+        side is the measurement: how late the answer was, and whether it came.
+        """
+        now = anyio.current_time()
+        if active.probe == "idle":
+            if active.probed_at is not None and now - active.probed_at < self.probe_seconds:
+                return
+            active.probe_id += 1
+            active.probed_at = now
+            active.probe = "waiting"
+            tasks.start_soon(self._ping, active.run_id, active.probe_id)
+        elif active.probe == "waiting" and now - (active.probed_at or now) > self.probe_seconds:
+            # Once per starved stretch; the probe keeps its own timestamp,
+            # because what is worth measuring is how long the loop took to come
+            # back and resetting the clock here would throw that away.
+            active.probe = "stalled"
+            self.loop_stalls += 1
+
+    async def _ping(self, run_id: int, probe: int) -> None:
+        await self._send(PingFrame(id=probe, run=run_id))
 
     async def _interrupt(self, run_id: int) -> None:
         """Ask twice, by two routes that fail in different ways (D5).
@@ -867,6 +1008,10 @@ class Kernel:
             # record could not be written is worse than one that did not happen.
             if frame["id"] == active.run_id and self.snapshots is not None:
                 await self.snapshots.record(self.namespace, frame["id"], frame["variables"])
+        elif frame["type"] == "pong":
+            latency = active.answered(frame["id"], anyio.current_time())
+            if latency is not None:
+                self.loop_worst = max(self.loop_worst or 0.0, latency)
         elif frame["type"] == "done":
             self._settle(frame, active)
 
@@ -1007,6 +1152,11 @@ class Kernel:
         if sock is None:
             return None
         buffer = self._buffer
+        # Hoisted, like `max_log_bytes` two readers up: `limits` is frozen and
+        # set at construction, so this is one value for the kernel's life. It
+        # measured as 0.29% of a chunk rather than anything, which is why this
+        # is a tidiness note and not a fix.
+        cap = frame_cap(self.limits)
         while True:
             index = buffer.find(b"\n", self._scanned)
             if index >= 0:
@@ -1016,7 +1166,7 @@ class Kernel:
                 self._scanned = 0
                 return line
             self._scanned = len(buffer)
-            if self._scanned > MAX_FRAME_BYTES:
+            if self._scanned > cap:
                 log.warning(
                     "ph_rlm.kernel: the runtime sent %d bytes with no frame boundary; "
                     "closing the channel",
@@ -1181,6 +1331,7 @@ class PythonCodeRuntime:
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
+    probe_seconds: float = 1.0
     snapshots: SnapshotPolicy | None = None
     """Set by the `rlm-kernel-snapshot` row. Absent, the runtime still runs — but
     `persistence: "namespace"` would then be a promise nothing keeps, which is
@@ -1204,6 +1355,38 @@ class PythonCodeRuntime:
     _environment: RuntimeEnvironment | None = None
     _resolve_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
+    def _loops(self) -> str:
+        """How far behind the guests' event loops are running (M2).
+
+        **A load reading, printed whether or not anything is wrong.** Each kernel
+        is probed every `probe_seconds` while a cell is open and answers from
+        the reader task a cell shares the loop with, so the round trip is the delay anything
+        cooperative would meet: a `cancel` frame, a `SIGINT` callback, a binding
+        reply. The worst is the number worth reading — a loop that is usually
+        prompt and occasionally seconds behind is a cell doing bursts of CPU,
+        which is what somebody looking at a sluggish agent is trying to see.
+
+        A stall is a probe that was never answered, which is a cell that did not
+        yield for a whole second. Counted, not judged: that is ordinary for
+        compute, and `CpuBudget` is what bounds it.
+        """
+        # A kernel every one of whose probes was starved has a stall count and
+        # no round trip; filtering on the round trip alone dropped it from the
+        # total *and* from the sum, so the line could report nothing measured
+        # while stalls were recorded — the case most worth seeing.
+        measured = [
+            one for one in self._kernels.values() if one.loop_worst is not None or one.loop_stalls
+        ]
+        if not measured:
+            return "no cell has run yet, so nothing has been measured"
+        stalls = sum(one.loop_stalls for one in measured)
+        worst = max((one.loop_worst or 0.0) for one in measured)
+        return (
+            f"{len(measured)} probed; worst round trip {worst * 1000:.0f} ms, "
+            f"{count_of(stalls, 'stall')} "
+            f"(a cell that did not yield for {self.probe_seconds:g}s)"
+        )
+
     def describe(self) -> list[tuple[str, str]]:
         """What `phern doctor` prints about the workers that run model code (I-2).
 
@@ -1226,6 +1409,7 @@ class PythonCodeRuntime:
             ("interpreter", interpreter),
             ("per-child limits", self._limits()),
             ("live kernels", str(len(self._kernels))),
+            ("guest loops", self._loops()),
             ("cells confined by", self._confinement()),
         ]
 
@@ -1423,6 +1607,7 @@ class PythonCodeRuntime:
             boot_timeout=self.boot_timeout,
             shutdown_grace=self.shutdown_grace,
             cancel_grace=self.cancel_grace,
+            probe_seconds=self.probe_seconds,
         )
         self._kernels[namespace] = kernel
         scope = self._scopes.get(namespace)
@@ -1477,6 +1662,13 @@ class Config(KernelLimits):
     swallowed a refusal can finish synchronous work (see `Kernel.cancel_grace`);
     shorter kills a cell that is legitimately slow to unwind, and killing costs
     the namespace."""
+    probe_seconds: float = 1.0
+    """How often an open run's guest loop is probed (M2).
+
+    A frame each way, answered by the guest's reader task, and the round trip is
+    what `phern doctor` reports as how far behind that loop is running. Lower
+    samples a bursty cell more finely; higher is cheaper on a host with many
+    namespaces. It is a measurement interval, not a deadline."""
     skills: tuple[str, ...] = ()
     sweep_orphans: bool = True
     """Vestigial: `subprocess-local` owns the one sweep now. Kept so a profile
@@ -1515,6 +1707,7 @@ async def apply(ctx: Context, config: Config) -> None:
         boot_timeout=config.boot_timeout_seconds,
         shutdown_grace=config.shutdown_grace_seconds,
         cancel_grace=config.cancel_grace_seconds,
+        probe_seconds=config.probe_seconds,
     )
 
     async def enter() -> Disposer:

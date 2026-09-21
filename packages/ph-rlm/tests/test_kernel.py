@@ -56,7 +56,13 @@ from ph.orphans import process_alive
 from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
 from ph.testing import settled
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
-from ph_rlm.kernel.manager import RESET_NOTICE
+from ph_rlm.kernel.manager import (
+    MAX_FRAME_BYTES,
+    RESET_NOTICE,
+    Kernel,
+    KernelLimits,
+    frame_cap,
+)
 from ph_runtime.cell import MAGIC_HINT
 from ph_runtime.protocol import FD_ENV, truncation_marker
 
@@ -336,7 +342,7 @@ async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
 
 
 async def test_a_namespace_larger_than_one_frame_is_still_snapshotted(
-    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+    make_kernel: MakeKernel,
 ) -> None:
     """The per-variable cap and the per-frame cap have to be the same cap (F3).
 
@@ -349,14 +355,12 @@ async def test_a_namespace_larger_than_one_frame_is_still_snapshotted(
     was told the runtime had exited, and the namespace was gone with no mention
     of a snapshot anywhere in the account.
 
-    `MAX_FRAME_BYTES` is lowered rather than the namespace inflated: the property
-    is the *ratio* between the two caps, and asserting it at 64 MiB would mean
-    base64-encoding eighty megabytes to prove something a small number proves
-    exactly as well.
+    The property is the *ratio* between the two caps, and it is now asserted at
+    whatever `max_snapshot_bytes` the kernel booted with rather than by lowering
+    the host's constant to meet it (M3): `frame_cap` derives the reader's ceiling
+    from the limit, so a deployment that raises one raises the other. The
+    companion below pins that derivation on its own.
     """
-    from ph_rlm.kernel import manager
-
-    monkeypatch.setattr(manager, "MAX_FRAME_BYTES", 256 * 1024)
     kernel = await make_kernel(max_snapshot_bytes=200 * 1024)
 
     result = await kernel.run(
@@ -921,3 +925,214 @@ async def test_a_subprocess_a_cell_started_dies_with_the_kernel(
     # and lingers for a tick as a zombie awaiting reparenting, which `kill(0)`
     # still answers `True` for.
     await settled(lambda: not process_alive(grandchild), "the cell's subprocess to be reaped")
+
+
+# ------------------------------------------------- the loop's own clock (M2) --
+
+
+async def test_a_run_the_guest_will_never_finish_is_repaired_not_waited_on(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2 — the host waits for `done` and nothing else was watching.
+
+    Both rungs of the stop ladder start only because somebody pressed stop, so a
+    run that is never canceled and never settles had no clock at all, and the
+    host waits on that frame with no wall clock of its own.
+
+    **The remedy is a repair, not a kill.** The probe names the run the host is
+    waiting on, so the guest — which is the only party that knows whether the
+    frame is still coming — settles it through the same `_send_done` every
+    other terminal path takes. The namespace survives, which is the whole point:
+    the predicate establishes that the guest is *alive and healthy*, and killing
+    something on that evidence costs everything it was holding for a fault that
+    is one missing frame.
+
+    **The wedge is staged at the host**, by losing the run's *first* terminal
+    frame. Every input is then what a guest whose `done` never arrived
+    produces: the run unsettled, the loop free, and nothing owed. Only the
+    first — the repair is a `done` too, and a host that dropped every one could
+    not be repaired by anything. Breaking the guest's own teardown would
+    reproduce one cause rather than the shape they share, and those causes
+    leave the run still *owed*, where `_answer_if_owed` already answers.
+
+    Sabotage: drop the `_probe` call from `_watch` and this waits out
+    `fail_after` instead.
+    """
+    kernel = await make_kernel(probe_seconds=0.05)
+    lost: list[int] = []
+    real = Kernel._settle
+
+    def lose_the_first(self: Kernel, frame: Any, active: Any) -> None:  # noqa: ANN401
+        if not lost:
+            lost.append(frame["id"])
+            return
+        real(self, frame, active)
+
+    monkeypatch.setattr(Kernel, "_settle", lose_the_first)
+    with anyio.fail_after(10):
+        result = await kernel.run("1 + 1", (), None)
+    monkeypatch.undo()
+
+    assert lost, "the staging never fired; this asserted nothing"
+
+    assert result.error is not None
+    assert "ended without settling" in result.error, result.error
+    # The namespace is still there, which a kill would have cost.
+    assert (await kernel.run("'alive'", (), None)).value == "alive"
+    assert RESET_NOTICE not in (await kernel.run("1", (), None)).logs
+
+
+async def test_a_cell_that_starves_the_loop_is_measured_and_not_killed(
+    make_kernel: MakeKernel,
+) -> None:
+    """The reading the probe is *not* allowed to make (M2).
+
+    A cell spinning in straight-line Python starves the reader task that answers
+    a probe — the same starvation that makes `cancel` and `SIGINT` both miss it.
+    That is what a busy cell looks like, and a busy cell is entitled to be busy:
+    `CpuBudget` bounds it, this clock does not. So the probe goes unanswered for
+    longer than `idle_grace` and the run still finishes on its own.
+
+    What the unanswered probe buys is the gauge — `phern doctor` reports the
+    worst round trip and the stalls, which is how a person sees *where* a slow
+    agent's time is going rather than only that it was slow.
+
+    Sabotage: escalate on an outstanding probe instead of on `orphan_since` and
+    this cell is killed mid-computation.
+    """
+    kernel = await make_kernel(probe_seconds=0.05)
+
+    with anyio.fail_after(30):
+        result = await kernel.run("sum(range(60_000_000))", (), None)
+
+    assert result.error is None, result.error
+    # The closed form, not a second `sum(range(...))`: recomputing it here
+    # cost 0.58 s of the test's 1.0 s to assert a number Gauss had.
+    assert result.value == 59_999_999 * 60_000_000 // 2
+    assert kernel.loop_stalls > 0, "a cell that never yielded answered every probe on time"
+
+
+async def test_the_probe_reports_how_far_behind_a_guest_loop_is(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gauge, on a loop that is *not* starved — the ordinary reading.
+
+    A cell awaiting inside asyncio leaves the reader task free, so every probe is
+    answered promptly. That is the baseline a person needs in order to read the
+    busy case as unusual, which is why this is measured continuously rather than
+    only when something already looks wrong.
+
+    **And at the cadence the knob names.** `_watch` ticks twenty times a second;
+    `probe_sent` is cleared by the answer, so gating the next probe on that
+    alone would put a frame each way on every tick — twenty times the traffic
+    `probe_seconds` says it costs, on every open run.
+
+    Sabotage: drop the `probed_at` gate from `_probe` and the count is the poll
+    rate rather than the probe rate.
+    """
+    kernel = await make_kernel(probe_seconds=0.2)
+    sent: list[int] = []
+    real = Kernel._ping
+
+    async def counting(self: Kernel, run_id: int, probe: int) -> None:
+        sent.append(probe)
+        await real(self, run_id, probe)
+
+    monkeypatch.setattr(Kernel, "_ping", counting)
+    await kernel.run("import asyncio\nawait asyncio.sleep(1.0)", (), None)
+
+    assert kernel.loop_worst is not None, "no probe was answered"
+    assert kernel.loop_worst < 0.2, f"an idle loop answered slowly: {kernel.loop_worst}"
+    assert kernel.loop_stalls == 0, "an idle loop left a probe unanswered"
+    # A second of cell against a fifth of a second of cadence. Bounded loosely
+    # on both sides: the exact count is the scheduler's, the *order* is the
+    # claim, and the poll rate it must not be is 20/s.
+    assert 2 <= len(sent) <= 10, f"{len(sent)} probes in a second at probe_seconds=0.2"
+
+
+def test_the_readers_ceiling_follows_the_limit_the_kernel_booted_with() -> None:
+    """M3 — the sizing the constant claimed and nothing enforced.
+
+    `MAX_FRAME_BYTES`'s docstring said it was "sized to hold a `maxSnapshotBytes`
+    payload with base64 and JSON overhead", and at the shipped 16 MiB that was
+    true. It is a claim about a *ratio* between two numbers, one of which a
+    deployment configures — so a profile raising `maxSnapshotBytes` past about a
+    third of the constant made it false, and what that costs is not a rejected
+    frame but a lost namespace: the host refuses the oversized snapshot, closes
+    the channel, and the model is told the runtime exited.
+
+    Asserted on the derivation rather than by round-tripping eighty megabytes,
+    which is what the sibling above used to need a monkeypatch to avoid.
+
+    Sabotage: return `MAX_FRAME_BYTES` unconditionally and the raised limit gets
+    a ceiling below its own payload.
+    """
+    shipped = KernelLimits()
+    assert frame_cap(shipped) == MAX_FRAME_BYTES, "the shipped limit needs no more than the floor"
+
+    raised = KernelLimits(max_snapshot_bytes=256 * 1024 * 1024)
+    assert frame_cap(raised) > raised.max_snapshot_bytes * 4 // 3, (
+        "a base64 payload at the configured limit would not fit the reader's ceiling"
+    )
+    # And the floor still holds underneath a deployment that lowers the limit.
+    assert frame_cap(KernelLimits(max_snapshot_bytes=1024)) == MAX_FRAME_BYTES
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is POSIX")
+async def test_a_finished_cell_cannot_leave_a_thread_burning_a_core(
+    make_kernel: MakeKernel,
+) -> None:
+    """M1 — the budget was switched off rather than down, and nothing re-armed it.
+
+    `relax_cpu_budget` disarms at the first `SIGXCPU`, which it must: the limit
+    is cumulative and Linux re-delivers every CPU-second, so a second signal
+    lands in the guest's teardown and costs the `done` frame. What that left is
+    the gap this closes. A `to_thread` worker reaches neither cooperative route
+    — a cancel does not reach a thread, and the raise route only fires where the
+    cell is — so the run reported `cpu`, the worker carried on, and with the
+    budget off no second signal was ever coming. A core, until the session ended.
+
+    A standing `idle_cpu_seconds` is armed the moment a run stops owning the
+    process, and a breach with no run open ends the runtime: nothing legitimate
+    spends it, because a background thread a cell left on purpose is *waiting*
+    and waiting costs no CPU.
+
+    The namespace is gone afterwards, which is the honest price and is asserted
+    — it was already holding a thread nobody could stop. The guest's reason
+    reaches the model on the way out, through the stderr the host captures.
+
+    Sabotage: drop the `arm_cpu_budget` from `_send_done` and this waits out
+    `fail_after` with the thread still running.
+    """
+    kernel = await make_kernel(cpu_seconds=30, idle_cpu_seconds=1)
+
+    # Finishes immediately; the worker it starts is not reachable by any cancel.
+    left = await kernel.run(
+        "import threading\n"
+        "def burn():\n"
+        "    while True:\n"
+        "        pass\n"
+        "threading.Thread(target=burn, daemon=True).start()\n"
+        "'started'",
+        (),
+        None,
+    )
+    assert left.value == "started", left.error
+
+    with anyio.fail_after(30):
+        await settled(
+            lambda: kernel._process is not None and kernel._process.returncode is not None,
+            "the runtime to end itself over the runaway",
+        )
+
+    # The next cell meets the death, and the guest's own sentence rides out with
+    # it: the stderr the host captured is what tells a person *why* the runtime
+    # went, rather than leaving them with an unexplained exit.
+    met = await kernel.run("'alive'", (), None)
+    assert met.error is not None
+    assert "burning CPU" in met.logs, met.logs
+
+    # And the one after that is a fresh namespace, said out loud.
+    revived = await kernel.run("'alive'", (), None)
+    assert revived.value == "alive"
+    assert RESET_NOTICE in revived.logs, "the namespace went and nobody said so"

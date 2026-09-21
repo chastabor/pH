@@ -55,6 +55,7 @@ COVERED_FRAMES: frozenset[str] = frozenset(
         "restore",  # test_snapshot.py::test_a_new_kernel_gets_the_namespace_back
         "cancel",  # test_kernel.py::test_cancel_aborts_a_waiting_cell_...
         "shutdown",  # test_kernel.py::test_a_closed_kernel_leaves_no_zombie
+        "ping",  # test_kernel.py::test_the_probe_reports_how_far_behind_a_guest_loop_is
         # child → host
         "boot-ack",  # test_lifecycle.py::test_the_guest_reports_which_mechanism_it_armed
         "call",  # test_kernel.py::test_a_binding_call_round_trips_through_the_host
@@ -62,6 +63,7 @@ COVERED_FRAMES: frozenset[str] = frozenset(
         "snapshot",  # test_snapshot.py::test_a_variable_becomes_a_snapshot_event
         "done",  # every cell test: it carries the value or the error
         "fault",  # test_a_protocol_mismatch_is_refused_at_boot, below
+        "pong",  # test_kernel.py::test_a_run_the_guest_no_longer_owes_...
     }
 )
 """Frames with a test that drives them.

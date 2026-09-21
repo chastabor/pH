@@ -145,6 +145,7 @@ async def make_kernel(tmp_path: Path, guest_coverage: None) -> AsyncIterator[Mak
         *,
         namespaces: tuple[Any, ...] = (),
         cancel_grace: float = 2.0,
+        probe_seconds: float = 1.0,
         **limits: object,
     ) -> Kernel:
         kernel = Kernel(
@@ -154,6 +155,7 @@ async def make_kernel(tmp_path: Path, guest_coverage: None) -> AsyncIterator[Mak
             journal=OrphanJournal(path=tmp_path / "processes.jsonl"),
             boot_timeout=60.0,
             cancel_grace=cancel_grace,
+            probe_seconds=probe_seconds,
         )
         await kernel.start([_declare(namespace) for namespace in namespaces])
         started.append(kernel)

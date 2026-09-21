@@ -91,7 +91,7 @@ anchor, result offloading, threshold compaction, call limits, human-in-the-loop.
 **`ph-runtime-guest`** — the guest half of the Python code runtime. It runs in
 `$PH_CACHE/runtime-venv`, in a subprocess spawned per agent, and speaks to the
 host over one framed channel on **fd 3** (`ph_runtime/protocol.py`).
-`PROTOCOL_VERSION = 2`; fd 0/1/2 stay the program's own so a cell's `print` and a
+`PROTOCOL_VERSION = 3`; fd 0/1/2 stay the program's own so a cell's `print` and a
 grandchild's output need not be untangled from frames. **It imports neither
 `ph-core` nor `ph-rlm`** — verified, zero such imports — because "the process
 boundary exists so that model code cannot reach the harness, and importing the
