@@ -213,6 +213,22 @@ class Hit:
         }
 
 
+def _fts_values(rowid: int, name: str, doc: str | None, path: str) -> tuple[int, str, str, str]:
+    """One `symbols_fts` row, for the insert **and** the delete that undoes it.
+
+    FTS5's `'delete'` command re-derives the postings to remove from the values
+    it is given, so a delete whose tuple differs from the insert's by so much as
+    one NULL removes nothing — and SQLite reports no error for it. `_forget`
+    carried a copy of this expression with a comment saying it mirrored the
+    insert, which is a reader being asked to check two expressions in two
+    methods rather than a compiler being asked to.
+
+    `doc or ""` is the whole substance: `symbols.doc` is nullable and the FTS
+    column is not.
+    """
+    return (rowid, name, doc or "", path)
+
+
 @dataclass(slots=True)
 class CodeGraphStore:
     """The index. **Blocking**; the seam calls it in a worker thread."""
@@ -375,11 +391,11 @@ class CodeGraphStore:
             # back to `symbols`, so the old name returned the new symbol: worse
             # than a miss, because it reads like an answer.
             #
-            # `doc or ""` mirrors the insert below: `symbols.doc` may be NULL
-            # where the FTS row was given `""`, and a value that differs by one
-            # NULL deletes as little as three empty strings did.
+            # Both tuples come from `_fts_values`, so the agreement the paragraph
+            # above depends on is structural rather than a comment asking a
+            # reader to check two expressions in two methods.
             stale = [
-                (row["id"], row["name"], row["doc"] or "", row["path"])
+                _fts_values(row["id"], row["name"], row["doc"], row["path"])
                 for row in connection.execute(
                     "SELECT id, name, doc, path FROM symbols WHERE path = ?", (path,)
                 )
@@ -436,7 +452,7 @@ class CodeGraphStore:
                 by_line[definition.start_line] = identifier
                 connection.execute(
                     "INSERT INTO symbols_fts(rowid, name, doc, path) VALUES (?, ?, ?, ?)",
-                    (identifier, definition.name, definition.doc or "", path),
+                    _fts_values(identifier, definition.name, definition.doc, path),
                 )
             # One `{line: tightest definition}` table for the whole file, rather
             # than a scan of every definition per reference: that was

@@ -78,6 +78,7 @@ from ph.seams.fs import (
     EditIntent,
     FileTooLarge,
     FsDenied,
+    FsRefused,
     FsService,
     WalkDecision,
     WriteIntent,
@@ -899,3 +900,42 @@ async def test_a_write_records_the_workspace_relative_name_too(tmp_path: Path) -
     observed = [one.data["path"] for one in session.events if one.type == "fs/observed"]
     assert observed == ["notes.md", "fresh.md", "notes.md"]
     assert str(worktree) not in repr([one.data for one in session.events])
+
+
+async def test_every_edit_refusal_is_routable_rather_than_a_bare_value_error(
+    tmp_path: Path,
+) -> None:
+    """L11 — three refusals a model reads, in a module whose other two are coded.
+
+    `FsDenied` and `FileTooLarge` carry a code; these four did not, so the
+    refusal reached the durable `tool/result` event as an anonymous `failed`
+    beside a disk error. See `FsRefused` for what the code does and does not
+    buy — in particular it does **not** reach a Code Mode program today.
+
+    Sabotage: raise a bare `ValueError` from any of the four.
+    """
+    _root, fs = _fs(tmp_path)
+    (tmp_path / "notes.md").write_text("alpha\nalpha\n", encoding="utf-8")
+    (tmp_path / "latin.txt").write_bytes(b"caf\xe9\nsecond\n")
+
+    refusals = []
+    for name, old, new in (
+        ("notes.md", "nowhere", "x"),  # no occurrence
+        ("notes.md", "alpha", "beta"),  # two, without replace_all
+        ("latin.txt", "second", "third"),  # not decodable
+    ):
+        with pytest.raises(FsRefused) as raised:
+            await fs.edit(name, old, new, scope=DEPLOYMENT)
+        refusals.append(raised.value)
+    # The fourth of the same population, one method over: a pattern that is not
+    # a regex is the model describing something the seam cannot use.
+    with pytest.raises(FsRefused) as bad_pattern:
+        await fs.grep("a(", scope=DEPLOYMENT)
+    refusals.append(bad_pattern.value)
+
+    assert [one.code for one in refusals] == ["FS_REFUSED"] * 4
+    assert [one.failure_kind for one in refusals] == ["failed"] * 4
+    # Still a `ValueError`, the way `FsDenied` is still a `PermissionError`, so
+    # the catchers that predate the code keep working.
+    assert all(isinstance(one, ValueError) for one in refusals)
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nalpha\n"

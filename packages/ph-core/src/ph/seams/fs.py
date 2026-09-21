@@ -67,6 +67,7 @@ __all__ = [
     "FileSlice",
     "FileTooLarge",
     "FsIntent",
+    "FsRefused",
     "FsService",
     "GrepMatch",
     "ReadIntent",
@@ -280,6 +281,40 @@ class FileTooLarge(HarnessError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, "FILE_TOO_LARGE")
+
+
+class FsRefused(HarnessError, ValueError):
+    """The model described something this seam cannot use (L11).
+
+    A **failure, not a denial**, for `FileTooLarge`'s reason: no policy refused
+    anything. The `old_text` an edit named appears nowhere, or twice; the file
+    is not text an edit can be written back into; a `grep` pattern is not a
+    regex. In every case the answer is to look again and describe it
+    differently.
+
+    Coded, because the four refusals it replaces were bare `ValueError`s in a
+    module whose other two errors carry a `failure_kind` and a code. What that
+    buys, precisely: `error_info` is reflective, so the code reaches
+    `ToolFailure.info` and from there the durable `tool/result` event — a replay
+    and the TUI can name the refusal — and in-process callers get a class to
+    catch. It does **not** currently reach a Code Mode program: `_CodeDispatch`
+    branches on `kind == "denied"` and folds everything else into
+    `ToolCallError`, and the RLM reply frame carries no code. Saying otherwise
+    would promise a routing that does not exist.
+
+    Named for the seam and not for `edit`, because `grep`'s invalid regex is the
+    same population one method over — three coded refusals and one bare would be
+    a worse invariant than four bare ones, since a reader could no longer tell
+    "not yet" from "deliberately".
+
+    Still a `ValueError`, the way `FsDenied` is still a `PermissionError`, so
+    every existing catcher keeps working.
+    """
+
+    failure_kind: FailureKind = "failed"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, "FS_REFUSED")
 
 
 def _decode(raw: bytes) -> tuple[str, bool]:
@@ -757,7 +792,7 @@ class FsService:
             # byte in the file. Refused here rather than papered over, because
             # the two decodes agreeing is what makes an `old_text` copied out of
             # a read mean anything at all (J7).
-            raise ValueError(
+            raise FsRefused(
                 f"{self.named(target, agent=agent)} is not valid UTF-8; editing it "
                 "would rewrite the bytes that could not be decoded"
             )
@@ -767,9 +802,9 @@ class FsService:
         named = self.named(target, agent=agent)
         count = original.count(old_text)
         if count == 0:
-            raise ValueError(f"no occurrence of the target text in {named}")
+            raise FsRefused(f"no occurrence of the target text in {named}")
         if count > 1 and not replace_all:
-            raise ValueError(
+            raise FsRefused(
                 f"{count} occurrences of the target text in {named}; pass replace_all "
                 "or include more surrounding context to make it unique"
             )
@@ -941,7 +976,7 @@ class FsService:
         try:
             expression = re.compile(pattern)
         except re.error as error:
-            raise ValueError(f"invalid regular expression: {error}") from error
+            raise FsRefused(f"invalid regular expression: {error}") from error
 
         def scan() -> list[GrepMatch]:
             matches: list[GrepMatch] = []

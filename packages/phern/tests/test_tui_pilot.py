@@ -37,7 +37,7 @@ from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, simple_tool
 from ph_app.daemon.supervisor import Root
 from ph_app.trust import TrustStore
-from ph_app.tui.app import VERB_GROUP, PHTuiApp
+from ph_app.tui.app import VERB_GROUP, PHTuiApp, run_tui
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
@@ -45,6 +45,7 @@ from ph_app.tui.modals.pickers import NEW_SESSION
 from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
 from ph_app.tui.state import ChatItem
 from ph_app.tui.themes import load_theme_profile
+from ph_app.tui.trajectory_app import run_trajectory
 from ph_app.tui.widgets.prompt import PromptInput
 
 pytestmark = pytest.mark.anyio
@@ -1364,3 +1365,58 @@ async def test_escape_starts_a_new_session_rather_than_exiting(
         await until(pilot, lambda: app.front is not None)
         assert app.is_running, "still here"
         assert not_none(app.front).session_id != "older"
+
+
+@pytest.mark.parametrize("code", [1, 0])
+async def test_a_terminal_answers_its_exit_code_without_exiting_the_process(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """M4 — `run_tui` answers the exit code rather than raising `SystemExit`.
+
+    Raising it made this the CLI's only exit-code mechanism — nothing else in
+    `cli.py` calls `sys.exit` — so the next command needing one would have
+    invented a second, and a caller wanting to know what happened had to catch
+    `SystemExit` to find out. `cli.py` now raises the `typer.Exit` it owns.
+
+    H3's property is the reason the value matters and is asserted both ways: a
+    terminal that *crashed* must not be indistinguishable from one the person
+    quit, or a supervisor scripting `phern --mode tui` cannot tell whether to
+    restart it.
+
+    Sabotage: `raise SystemExit(app.return_code)` and the call never returns.
+    """
+
+    class _App:
+        return_code = code
+
+        async def run_async(self) -> None:
+            return None
+
+    monkeypatch.setattr("ph_app.tui.app.PHTuiApp", lambda **_kwargs: _App())
+
+    assert await run_tui(daemon_argv=("phern", "daemon")) == code
+
+
+@pytest.mark.parametrize("code", [1, 0])
+async def test_the_trajectory_viewer_answers_its_exit_code_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: int
+) -> None:
+    """The same hole, one branch up in the same function (M4).
+
+    `--mode trajectory` is the CLI's other Textual app and its `return_code`
+    was discarded, so a viewer that crashed exited 0 — the property `run_tui`
+    had just had restored, still broken beside it.
+
+    Sabotage: drop `return app.return_code or 0` and a crash reads as success.
+    """
+
+    class _App:
+        return_code = code
+
+        async def run_async(self) -> None:
+            return None
+
+    monkeypatch.setattr("ph_app.tui.trajectory_app.TrajectoryApp", lambda *_a, **_k: _App())
+    monkeypatch.setattr("ph_app.tui.trajectory_app.load_records", lambda *_a, **_k: ("s1", []))
+
+    assert await run_trajectory("s1", home=tmp_path) == code

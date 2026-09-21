@@ -173,10 +173,18 @@ class SessionPersistence(SessionArchive, Protocol):
     """
 
     def track(self, session: Session) -> None:
-        """Start persisting this session. **Queue `events[durable_length:]`.**
+        """Start persisting this session. **Queue what you do not already hold.**
 
-        Stated as a slice rather than as "its seed is owed a write", because the
-        two stopped meaning the same thing and one backend kept the old reading:
+        `session.durable_length` is a *floor* the caller declares at
+        construction — a resume's stored length, a fork's inherited prefix — and
+        it never advances, so a store built later in a session's life is told a
+        boundary that was true when the session was built (B7). A backend that
+        can measure what its own medium holds must take the larger of the two;
+        one whose write is idempotent by seq may ignore the question. See
+        `JsonlSessionStore.flush` and `TursoSessionStore.track`.
+
+        Stated as what is owed rather than as "its seed is owed a write",
+        because the two stopped meaning the same thing and one backend kept the old reading:
         Turso queued the whole log, so a reference-forked child was written a
         full copy of its prefix, `materialize` saw a first seq of 0 and called
         the file complete, and forking silently stopped being O(1) there with
@@ -276,6 +284,10 @@ def attach(ctx: Context, store: SessionPersistence) -> None:
     ctx.provide(SESSION_PERSISTENCE, store)
     # Catch-up: a row (re)activated after sessions already exist owes them the
     # same buffering a freshly created one gets.
+    #
+    # A store built here is told a construction-time `durable_length` (B7);
+    # asking the medium what it holds is each backend's job. See
+    # `JsonlSessionStore.flush`.
     for session in ctx.require(SESSIONS).list():
         store.track(session)
     ctx.on("session/created", store.track)

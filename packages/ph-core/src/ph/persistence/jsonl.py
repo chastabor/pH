@@ -108,6 +108,51 @@ class _Buffer:
     header_written: bool = False
     writing: anyio.Lock = field(default_factory=anyio.Lock)
     """One flush of this log at a time. See `JsonlSessionStore.flush`."""
+    measured: bool = False
+    """Whether this buffer has reconciled its queue against the file (B7).
+
+    Resolved on the first flush rather than at `track`, because the answer costs
+    a read of the whole log and `track` is a synchronous `session/created`
+    listener — the thing `TursoSessionStore.track` refuses in its own docstring.
+    A session that is tracked and never flushed never pays it."""
+
+
+def _last_seq(path: Path) -> int | None:
+    """The seq of the last complete record in this log, or `None` (B7).
+
+    **The record's own seq, not a line count.** Counting lines and adding an
+    offset needs to know which index the file *starts* at, and the two numbers
+    available — `durable_length` and `header.seed_length` — disagree for a
+    reference fork, so the arithmetic silently dropped a fork's first events.
+    A seq is absolute: `Session.append` assigns `seq == len(log)` (A1) and a
+    seed preserves it, so `events[i].seq == i` for every log, forked or not.
+
+    Read from the tail rather than by scanning: only the last line is wanted,
+    so this is a seek and one small read however long the log is. An
+    unterminated final line is ignored, which is what a crash mid-write leaves
+    and exactly what should not count as written.
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            window = min(size, 64 * 1024)
+            handle.seek(size - window)
+            tail = handle.read(window)
+    except OSError:
+        # No file yet — a fresh session, or a fork that has not written — or one
+        # this process cannot read. The declared boundary then answers alone.
+        return None
+    for line in reversed(tail.split(b"\n")[:-1]):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            return None
+        seq = record.get("seq")
+        return seq if isinstance(seq, int) else None
+    return None
 
 
 @dataclass(slots=True)
@@ -143,6 +188,14 @@ class JsonlSessionStore:
         One rule now covers all three: write what the log has and the store does
         not. `header_written` stays, narrowed to the one thing it was ever about
         — whether the header line is owed.
+
+        **And the file is asked, not only the caller** (B7) — on the first
+        flush, not here: `durable_length` is declared once at construction and
+        never advances, so a second store instance for a live session is told
+        the boundary that was true when the session was built. See `flush`.
+
+                `TursoSessionStore` needs none of this — its `_write` is
+        `INSERT OR REPLACE` keyed by seq, so re-queueing is idempotent there.
         """
         if session.id in self._buffers:
             return
@@ -208,6 +261,29 @@ class JsonlSessionStore:
         if buffer is None:
             return
         async with buffer.writing:
+            if not buffer.measured:
+                # **What this file already holds, asked once** (B7).
+                # `durable_length` is declared at construction and never
+                # advances, so a store built later in a session's life — which
+                # is every store after the persistence row re-activates — is
+                # told a boundary that was true before anything was flushed and
+                # re-queues the difference. This backend appends, so that is
+                # duplicate events in the file.
+                #
+                # Asked of the last record's seq, which is absolute
+                # (`events[i].seq == i`), so nothing has to be mutated and no
+                # offset has to be guessed. The declared value stays a floor: a
+                # file *behind* it means events are missing, and re-writing them
+                # repairs a hole rather than duplicating anything.
+                #
+                # Here rather than in `track` because `track` is a synchronous
+                # listener, and because a session that never flushes never needs
+                # the answer.
+                buffer.measured = True
+                last = await anyio.to_thread.run_sync(_last_seq, buffer.path)
+                if last is not None:
+                    already = max(0, last + 1 - session.durable_length)
+                    del buffer.pending[:already]
             records: list[dict[str, Any]] = []
             header_owed = not buffer.header_written
             if header_owed:

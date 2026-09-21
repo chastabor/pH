@@ -426,6 +426,16 @@ class _Dependent:
     keys: tuple[str, ...]
     activate: Callable[[Context], Any]
     label: str
+    transparent: bool = False
+    """Whether this activation's scope is transparent, as an ordinary row's is.
+
+    Set only by the loader, for the row that asked for a realm (A9). `Context`
+    already promises that "a plugin's activation scope is transparent and
+    answers `None`" — but a realm mount inherits the realm's isolation, so the
+    promise was false there and the row became invisible to `reaches`: no
+    dispatch, and no tool, prompt section, fs screen or skill restriction it
+    registered could be seen either. Restoring the transparency fixes all of
+    them at once, rather than one knob per registry."""
     module: str = ""
     """The module whose code runs in the activation scope, when one is known.
 
@@ -525,7 +535,9 @@ class ForkScope:
 
     __slots__ = ("_config", "_dependent", "_parent", "_spec", "_unmount")
 
-    def __init__(self, parent: Context, spec: PluginSpec, config: object) -> None:
+    def __init__(
+        self, parent: Context, spec: PluginSpec, config: object, *, transparent: bool = False
+    ) -> None:
         self._parent = parent
         self._spec = spec
         self._config = config
@@ -533,6 +545,7 @@ class ForkScope:
             spec.inject,
             self._apply,
             label=f"plugin({spec.name})",
+            transparent=transparent,
             # Where the plugin's code lives, which nothing else in the mount path
             # knows: the loader has a name and an entry point, and the *module* is
             # the thing `ctx.on` reports as a consumer. Without it every scope
@@ -930,12 +943,28 @@ class Context:
     def _activation_scope(cls, dependent: _Dependent) -> Context:
         """The transparent scope a plugin's `apply` runs in."""
         owner = dependent.ctx
-        return cls(
+        scope = cls(
             owner,
             label=dependent.label,
             provide_to=owner._provide_to,
             module=dependent.module or owner._module,
         )
+        if dependent.transparent:
+            # **A deployment row mounted into its own realm is still a
+            # deployment row** (A9). `isolate:` narrows its *service lookup*,
+            # not who can see what it registers — but the scope inherits the
+            # realm's isolation, so `reaches` found it an ancestor of no
+            # dispatch target and every registry answered "nobody". Restoring
+            # the transparency an unisolated row's activation scope already has
+            # fixes dispatch, tools, prompt sections, fs screens and skills
+            # together, because they all ask `reaches`.
+            #
+            # `provide` is unaffected — it goes through `_provide_to`, still the
+            # realm — and `isolation_chain()` walks *parents*, so a lookup from
+            # here still finds the realm first.
+            parent = owner._parent
+            scope._isolation = parent._isolation if parent is not None else None
+        return scope
 
     def owner_for(self, scope: Context | None = None) -> Context:
         """Whose lifetime a registration made *now* belongs to (I2, P6-12).
@@ -1364,15 +1393,21 @@ class Context:
         child = Context(self, label=label, module=module or self._module, isolated=True)
         return child
 
-    def plugin(self, plugin: object, config: object = None) -> ForkScope:
+    def plugin(
+        self, plugin: object, config: object = None, *, transparent: bool = False
+    ) -> ForkScope:
         """Mount `plugin` as a child fork of this context.
 
         The fork's `apply` runs only once every key in its `inject` list
         resolves from this context — the load order is expressed through
         service requirements, never through file order.
+
+        `transparent` is the loader's, for an isolating row mounted into its own
+        realm (A9): see `_Dependent.transparent`. It is **not** for the private
+        copies mounted beside it, whose invisibility is the isolation working.
         """
         self._assert_active()
-        return ForkScope(self, normalize_plugin(plugin), config)
+        return ForkScope(self, normalize_plugin(plugin), config, transparent=transparent)
 
     def inject(
         self,
@@ -1396,11 +1431,13 @@ class Context:
         *,
         label: str,
         module: str = "",
+        transparent: bool = False,
     ) -> tuple[_Dependent, Disposer]:
         """The one registration path for plugins and injections alike."""
         self._assert_active()
         dependent = _Dependent(
             ctx=self,
+            transparent=transparent,
             keys=service_names(keys),
             activate=activate,
             label=label,

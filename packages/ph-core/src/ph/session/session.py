@@ -294,8 +294,9 @@ class Session:
         self.durable_length = durable
         """How many leading events a **store already holds**; 0 unless declared.
 
-        Read by a backend to tell what it still owes from what is already written:
-        `track` queues `events[durable_length:]`.
+        Read by a backend to tell what it still owes from what is already
+        written: a store queues at least `events[durable_length:]`, and may
+        measure its own medium for more — see `SessionPersistence.track`.
 
         **A constructor argument, not an attribute set afterwards.** Publishing a session
         is what makes a store queue it — `session/created` reaches `track` synchronously

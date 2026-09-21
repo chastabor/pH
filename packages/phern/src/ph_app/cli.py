@@ -206,9 +206,12 @@ def default(
         from .tui.trajectory_app import run_trajectory
 
         try:
-            anyio.run(partial(run_trajectory, session_id))
+            code = anyio.run(partial(run_trajectory, session_id))
         except (OSError, ValueError) as error:
             fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
+        if code:
+            # The viewer's own code, silent for `--mode tui`'s reason above.
+            raise typer.Exit(code)
         return
 
     # `--resume <id>` is `--session <id>`: the daemon resumes an existing id
@@ -227,7 +230,7 @@ def default(
         # script should not pay for a terminal UI it will never draw.
         from .tui.app import run_tui
 
-        anyio.run(
+        code = anyio.run(
             partial(
                 run_tui,
                 # The *name*, not the composed profile: the daemon composes it,
@@ -248,6 +251,14 @@ def default(
                 offer_sessions=not new,
             )
         )
+        if code:
+            # **Silent, and not `console.fail`** (M4). Every other refusal here
+            # goes through `fail`, which prints a sentence — but the terminal
+            # has already rendered its own crash, and a second line under it
+            # would be pH explaining an error the person just watched happen.
+            # What `run_tui` returning the code buys is that the exiting lives
+            # here rather than inside a library function.
+            raise typer.Exit(code)
         return
 
     if mode == "web":

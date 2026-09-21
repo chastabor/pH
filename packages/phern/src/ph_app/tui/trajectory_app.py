@@ -173,7 +173,16 @@ class TrajectoryApp(App[None]):
         self.theme = self.catalog.resolve(self.theme_profile.chosen).name
 
 
-async def run_trajectory(target: str, *, home: Path | None = None) -> None:
-    """Entry point for `--mode trajectory --session <id|path>`."""
+async def run_trajectory(target: str, *, home: Path | None = None) -> int:
+    """Entry point for `--mode trajectory --session <id|path>`. Answers the exit code.
+
+    The second Textual app in this CLI, and it had `run_tui`'s bug (M4/H3): its
+    `return_code` was discarded, so a viewer that crashed exited 0 and anything
+    scripting `--mode trajectory` could not tell a crash from a clean close.
+    Returned rather than raised for `run_tui`'s reason — the entry point owns
+    exiting.
+    """
     session_id, records = load_records(target, home=home)
-    await TrajectoryApp(records, session_id=session_id, home=home).run_async()
+    app = TrajectoryApp(records, session_id=session_id, home=home)
+    await app.run_async()
+    return app.return_code or 0

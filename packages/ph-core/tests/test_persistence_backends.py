@@ -1202,3 +1202,41 @@ async def test_a_failed_write_is_retried_rather_than_lost(
     assert [event.seq for event in events] == list(range(len(session.events))), (
         "the refused write consumed the events instead of owing them"
     )
+
+
+async def test_a_second_store_over_a_live_session_does_not_rewrite_what_is_there(
+    store: SessionPersistence, tmp_path: Path
+) -> None:
+    """B7 — the re-activation case, which is the only one that reaches it.
+
+    `durable_length` is declared at construction and never advances, so a store
+    built *after* a session has been flushed is told the boundary that was true
+    when the session was built. That is not a re-`track` of the same store —
+    `track` early-returns on a session it already buffers — it is a **new
+    instance**, which is what `apply` builds every time the persistence row
+    activates. `attach`'s catch-up loop then tracks every live session against
+    a boundary of zero.
+
+    JSONL appends, so the second store re-queued the whole log and the file
+    gained a second copy of every event; Turso is immune, its write being
+    `INSERT OR REPLACE` keyed by seq, and is included here to say so rather
+    than to be fixed.
+
+    Sabotage: queue `events[session.durable_length:]` and the log reads back
+    doubled.
+    """
+    session = _session(store, "relive")
+    for index in range(3):
+        _append(store, session, "turn/start", {"turn": index})
+    await store.flush(session)
+
+    # The row re-activates: same root, same live session, a store that has
+    # never heard of it.
+    second = type(store)(ctx=None, root=tmp_path)  # type: ignore[call-arg]
+    second.track(session)
+    _append(second, session, "turn/start", {"turn": 3})
+    await second.flush(session)
+
+    _header, events = second.read("relive")
+    assert [one.data["turn"] for one in events] == [0, 1, 2, 3], "the log was rewritten"
+    assert [one.seq for one in events] == [0, 1, 2, 3], "the seq space gained a duplicate"

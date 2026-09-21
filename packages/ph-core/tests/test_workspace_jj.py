@@ -1177,3 +1177,36 @@ async def test_a_file_the_base_already_tracks_reaches_children_and_that_is_the_t
     assert code == 0 and out == "the parent is mid-thought\n", (
         "the fork point is reachable from the child's bookmark, and carries it"
     )
+
+
+async def test_a_conflicted_path_with_a_space_is_named_whole(mount: MountProfile) -> None:
+    """J5's fourth site, against a real conflict rather than a captured string.
+
+    `jj resolve --list` prints a padded two-column table, and reading the path
+    out of it with `line.split()[0]` turned `My Projects/notes.md` into `My` —
+    a file that does not exist, in the sentence the model reads after a merge.
+    The obvious repair fails too: jj pads to the longest path, so the longest
+    row is separated by exactly one space.
+
+    Asked of `conflicted_files()` instead, which is the rule `strays` states one
+    method over — a template is a listing, a human table is a parse. Driven
+    through a real merge because the point is what *jj* produces, which a
+    hand-written fixture cannot keep honest across releases.
+
+    Sabotage: go back to `resolve --list` + `split()[0]` and the name truncates.
+    """
+    ctx, base, session, agent = await jj_agent(mount)
+    (base / "my notes.md").write_text("original\n", encoding="utf-8")
+    child = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    (child.root / "my notes.md").write_text("the child's version\n", encoding="utf-8")
+    await ctx.require(WORKSPACE).dispose("a1")
+    (base / "my notes.md").write_text("the person's version\n", encoding="utf-8")
+
+    shown = str(
+        await ctx.require(COMMANDS).dispatch("/workspaces merge a1", session=session, agent=agent)
+    )
+
+    assert "my notes.md" in shown, shown
+    assert "conflict" in shown, shown

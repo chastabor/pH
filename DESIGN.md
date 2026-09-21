@@ -348,25 +348,35 @@ realm. A first draft claimed the reconcile alone covered this; the test that
 showed otherwise was the one not yet written. `Mount.topology` lists each realm
 and each private copy under `<row>/<source>`.
 
-**An isolating row is deaf to every dispatch the harness makes** (A9), and
-that is a gap rather than a decision. The row mounts at `realm.plugin(...)`, so
-its listeners carry `hook.ctx = realm`, and `reaches` asks whether the
-registering scope is an ancestor of the *target*: a realm is a sibling of every
-agent and a descendant of root, so it reaches neither. A root-scoped `emit` and
-an agent-scoped one both pass it by, and nothing dispatches into a realm — so a
-row that says `isolate: [fs]` keeps its private `ctx.fs` and silently stops
-hearing `session/created`, `tools/pre-execute` and everything else it registered
-for.
+**An isolating row hears dispatches like any other row** (A9), and it took a
+fix to make that true. The row mounts at `realm.plugin(...)`, so its listeners
+carry `hook.ctx = realm`, and `reaches` asks whether the registering scope is an
+ancestor of the *target*: a realm is a sibling of every agent and a descendant
+of root, so it reaches neither. A root-scoped `emit` and an agent-scoped one
+both passed it by, and nothing dispatches into a realm — so a row that said
+`isolate: [fs]` kept its private `ctx.fs` and silently stopped hearing
+`session/created`, `tools/pre-execute` and everything else it registered for.
 
-The two halves pull against each other, which is why this is written down rather
-than patched: the realm is what makes the row's *service* lookup private, and it
-is the same property that makes its *listeners* invisible. Marking realm hooks
-`global_` is the likely answer — an isolating row is a deployment row like any
-other, with a narrower view of one service — but it is a change to what
-isolation means, and no shipped profile uses `isolate:` yet. The behavior is
-pinned by `test_cordis_loader.py::test_an_isolating_rows_listeners_hear_only_the_realm`
-so the first profile that wants one finds the limit stated rather than discovering
-it as a row that quietly does nothing.
+The two halves pulled against each other, which is why the fix separates them
+rather than choosing: the realm is what makes the row's *service* lookup
+private, and it was the same property that made its *listeners* invisible. The
+loader mounts that row with `hooks_global=True`, so `on` registers its listeners
+`global_` and they opt out of scope filtering — exactly the reach the row would
+have had without `isolate:`, since an ordinary row's activation scope is
+transparent and already answers `reaches` for every target.
+
+**It applies to one of the two mounts and not both.** The loader also mounts a
+private copy of each isolated row into the realm, and those stay deaf. A private
+copy that heard every dispatch would mean two `fs` rows handling every
+`session/created` in a profile that isolates `fs` — the shared instance and the
+private one — which is the isolation failing rather than working.
+
+Ownership is untouched by either: `_invoke` binds a listener to `hook.ctx`
+regardless of `global_`, so what an isolating row registers still unwinds with
+the row (P6-25). Visibility and lifetime are separate questions and this only
+answers the first. Both directions are pinned —
+`test_an_isolating_row_hears_a_dispatch_like_any_other_row` and
+`test_a_private_copy_in_a_realm_does_not_also_hear_the_dispatch`.
 
 What a realm does **not** do is change hands while an agent is running in it —
 the provider a realm holds is the one it was mounted with. That is the one half
@@ -844,7 +854,10 @@ the tombstone is the record.
 > **Now** `Session.durable_length` states what a store already holds, set by
 > `resume_session` — the only place holding both the events it read and the log it
 > built — and `track` queues `events[durable_length:]`. One rule covers all three
-> cases. Nothing is renumbered: seqs and timestamps are preserved verbatim, which
+> cases. It is a *floor* rather than the whole answer (B7): declared once at
+> construction, it cannot describe a store built later in the same session's
+> life, so `JsonlSessionStore.track` also counts what its own file holds. Turso
+> needs neither, upserting by seq. Nothing is renumbered: seqs and timestamps are preserved verbatim, which
 > is what keeps repair's deliberately backdated closers backdated. A side effect
 > worth having: **the repair is now durable**, so a stored log stops reading as
 > crashed after the first reopen.

@@ -1298,3 +1298,51 @@ async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
     swept = await run_tool(capped, "code_index", {"paths": ["."]}, agent=narrow_agent)
 
     assert swept.value["removed"] == 0, "a truncated walk forgot the files it never reached"
+
+
+async def test_a_forgotten_symbols_docstring_stops_being_searchable(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """N5 — the FTS delete has to carry the values the insert used.
+
+    FTS5's `'delete'` re-derives the postings to remove from the values it is
+    handed, so a delete that passes different values removes only the postings
+    those values imply. Measured against SQLite 3.45: deleting with `""` for a
+    symbol inserted with real docstring text removes the **name** posting and
+    leaves every **doc** posting behind.
+
+    A stale posting is worse than a miss: `symbols.id` has no `AUTOINCREMENT`,
+    so a later insert takes the dead row's id and the old docstring starts
+    answering with a different symbol — which is what this stages, because
+    `search` joins the rowid back to `symbols` and a posting whose symbol is
+    simply gone is invisible.
+
+    Driven through `code_index`/`code_graph` rather than against `_fts_values`,
+    which is how this first shipped: the helper was written, exported to a unit
+    test, and never called, so the test passed while both live expressions
+    stayed inline.
+
+    Sabotage: pass `""` as the doc at either call site and `zarquon` answers
+    with the symbol that took the id.
+    """
+    _tree(tmp_path)
+    (tmp_path / "pkg" / "old.py").write_text(
+        'def retired():\n    """A zarquon of the third kind."""\n    return 1\n', encoding="utf-8"
+    )
+    ctx = await _indexed(mount, tmp_path)
+    agent = _agent(ctx)
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
+    seen = await run_tool(ctx, "code_graph", {"mode": "search", "query": "zarquon"}, agent=agent)
+    assert [one["name"] for one in seen.value["symbols"]] == ["retired"], "never indexed"
+
+    # Forget it, then index a *new* symbol that recycles the dead row's id.
+    (tmp_path / "pkg" / "old.py").unlink()
+    await run_tool(ctx, "code_index", {"paths": ["pkg/old.py"], "forget": True}, agent=agent)
+    (tmp_path / "pkg" / "new.py").write_text("def arrived():\n    return 2\n", encoding="utf-8")
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
+
+    gone = await run_tool(ctx, "code_graph", {"mode": "search", "query": "zarquon"}, agent=agent)
+
+    assert gone.value["symbols"] == [], (
+        "a docstring posting outlived its symbol and answered for the one that took its id"
+    )

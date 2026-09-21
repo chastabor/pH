@@ -667,7 +667,19 @@ class Profile:
                         "provided by rows above it, or the realm would fall through to the "
                         "shared service it exists to replace"
                     )
-            forks[row.id] = realm.plugin(resolve_plugin(row.name), interpolate(row.config))
+            # **Transparent, and only this mount** (A9). This row's activation
+            # scope would otherwise inherit the realm's isolation, and `reaches`
+            # answers "nobody" for it — no dispatch, and no tool, prompt
+            # section, fs screen or skill restriction it registers is visible
+            # either. It is a deployment row with a narrower view of one
+            # service, so it gets a deployment row's visibility.
+            #
+            # Never the private copies above: a second `fs` that answered every
+            # dispatch would double-handle events with the instance it exists to
+            # shadow, and register a second copy of whatever it registers.
+            forks[row.id] = realm.plugin(
+                resolve_plugin(row.name), interpolate(row.config), transparent=True
+            )
         await ctx.reconcile()
         # The one moment a composed profile is whole and nothing has run yet, so
         # a row can refuse the deployment it finds itself in (E8). `serial`

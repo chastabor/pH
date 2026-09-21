@@ -412,26 +412,26 @@ async def test_isolate_gives_a_row_a_private_copy_of_a_service() -> None:
     await ctx.dispose()
 
 
-async def test_an_isolating_rows_listeners_hear_only_the_realm() -> None:
-    """A9 — the limit of `isolate:`, pinned because it is a gap, not a decision.
+async def test_an_isolating_row_hears_a_dispatch_like_any_other_row() -> None:
+    """A9, fixed: a row that asked for a private `ctx.fs` keeps its listeners.
 
-    The row mounts at `realm.plugin(...)`, so its listeners carry
-    `hook.ctx = realm`, and `reaches` asks whether the registering scope is an
-    ancestor of the dispatch target. A realm is a descendant of root and a
-    sibling of every agent, so it is an ancestor of neither: a root-scoped emit
-    and an agent-scoped one both pass it by, and nothing in the harness ever
-    dispatches into a realm. A row that asked for a private `ctx.fs` therefore
-    *also* stopped hearing `session/created` and everything else it registered
-    for, silently.
+    The row mounts at `realm.plugin(...)`, so its listeners carried
+    `hook.ctx = realm` and `reaches` — which asks whether the registering scope
+    is an ancestor of the dispatch target — found a realm to be an ancestor of
+    neither root nor any agent. A root-scoped emit and an agent-scoped one both
+    passed it by, and nothing in the harness dispatches into a realm: a row that
+    said `isolate: [fs]` silently stopped hearing `session/created` and
+    everything else it registered for.
 
-    The two halves pull against each other — the realm is what makes the row's
-    service lookup private, and the same property makes its listeners invisible
-    — so DESIGN.md §2.7 states the limit and this pins the behavior. No shipped
-    profile uses `isolate:`; the first one that does should find this written
-    down rather than discover a row that quietly does nothing.
+    The two halves pulled against each other — the realm is what makes the
+    service lookup private, and the same property made the listeners invisible —
+    so the fix separates them rather than choosing. `hooks_global` opts this
+    row's listeners out of scope filtering, which is exactly the reach it would
+    have had without `isolate:`, and leaves ownership alone: `_invoke` binds to
+    `hook.ctx`, so what the row registers still unwinds with the row.
 
-    **Change this test when that is decided**, rather than reading it as an
-    endorsement: it asserts what happens, not what should.
+    Sabotage: drop `hooks_global=True` from the loader's realm mount and the
+    root-scoped dispatch is heard by nobody.
     """
 
     heard: list[str] = []
@@ -461,13 +461,107 @@ async def test_an_isolating_rows_listeners_hear_only_the_realm() -> None:
     mount = await profile.mount(ctx)
 
     ctx.emit("test/realm-probe", "root-scoped")
-    assert heard == [], "an isolating row heard a root dispatch — A9 is fixed, update §2.7"
+    assert heard == ["root-scoped"], "an isolating row is deaf to the harness again"
 
-    # And the listener is registered and working — it is the *scope* that is
-    # wrong, not the row. Dispatching into the realm reaches it.
+    # And it still has the private service the realm exists for: the fix is
+    # about visibility, not about undoing the isolation.
     realm = not_none(mount.forks["isolated"].ctx)
-    realm.emit("test/realm-probe", "realm-scoped")
-    assert heard == ["realm-scoped"]
+    assert realm.require("t_fs")["owner"] != ctx.path
+    await ctx.dispose()
+
+
+async def test_an_isolating_row_registers_where_everyone_can_see_it() -> None:
+    """A9's other five consumers — dispatch was one of six.
+
+    `reaches` is "the one visibility rule, shared by event dispatch and by every
+    scoped registry", and an isolating row's activation scope failed it for all
+    of them: its tools, prompt sections, fs screens and skill restrictions were
+    as invisible as its listeners, each silently. Fixing the listeners alone
+    would have left five identical bugs and invited a third flag beside
+    `global_`.
+
+    `Context.isolation` is the question every registry files under, so it is the
+    one this asserts: a transparent scope answers `None`, which is what the
+    property's own docstring already promised and what an unisolated row gets.
+
+    Sabotage: drop `transparent=True` from the loader's realm mount and the
+    scope answers the realm instead of `None`.
+    """
+    seen: list[object] = []
+
+    class FsConfig(WireModel):
+        root: str = "shared"
+
+    @plugin("t-fs", config=FsConfig)
+    async def fs_provider(ctx: Context, config: FsConfig) -> None:
+        ctx.provide("t_fs", {"root": config.root})
+
+    @plugin("t-registrar", inject=["t_fs"])
+    async def registrar(ctx: Context, config: None) -> None:
+        seen.append(ctx.isolation)
+
+    _fake_module("ph_test_realm_visible", fs_provider=fs_provider, registrar=registrar)
+    profile = Profile.from_documents(
+        [
+            _doc(
+                "base",
+                "- id: fs\n  name: ph_test_realm_visible:fs_provider\n"
+                "- id: isolated\n  name: ph_test_realm_visible:registrar\n  isolate: [fs]\n",
+            )
+        ]
+    )
+    ctx = Context()
+    await profile.mount(ctx)
+
+    assert seen == [None], "an isolating row files its registrations under the realm"
+    await ctx.dispose()
+
+
+async def test_a_private_copy_in_a_realm_does_not_also_hear_the_dispatch() -> None:
+    """The other half of A9's fix, and the reason it is one mount and not two.
+
+    The loader mounts two things into a realm: the isolating row, and a private
+    copy of each row it isolates. Making *both* audible would mean two `fs` rows
+    handling every `session/created` in a profile that isolates `fs` — the
+    shared instance and the private one — which is the isolation failing rather
+    than working. A private copy is a second instance of a service, not a second
+    deployment row.
+
+    Sabotage: pass `hooks_global=True` to the private-copy mount as well and the
+    provider is heard twice.
+    """
+
+    heard: list[str] = []
+
+    class FsConfig(WireModel):
+        root: str = "shared"
+
+    @plugin("t-fs2", config=FsConfig)
+    async def fs_provider(ctx: Context, config: FsConfig) -> None:
+        ctx.provide("t_fs2", {"root": config.root})
+        ctx.on("test/realm-probe", lambda tag: heard.append(f"{config.root}:{tag}"))
+
+    @plugin("t-listener2", inject=["t_fs2"])
+    async def listener(ctx: Context, config: None) -> None:
+        return None
+
+    _fake_module("ph_test_realm_privates", fs_provider=fs_provider, listener=listener)
+    profile = Profile.from_documents(
+        [
+            _doc(
+                "base",
+                "- id: fs\n  name: ph_test_realm_privates:fs_provider\n"
+                "- id: isolated\n  name: ph_test_realm_privates:listener\n"
+                "  isolate:\n    fs: {root: sealed}\n",
+            )
+        ]
+    )
+    ctx = Context()
+    await profile.mount(ctx)
+
+    ctx.emit("test/realm-probe", "root-scoped")
+
+    assert heard == ["shared:root-scoped"], "the private copy answered a dispatch too"
     await ctx.dispose()
 
 

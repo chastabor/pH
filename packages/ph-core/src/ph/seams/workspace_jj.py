@@ -99,6 +99,20 @@ __all__ = ["JjWorkspaceProvider", "apply", "auto_track", "jj"]
 
 log = logging.getLogger("ph.seams.workspace_jj")
 
+_CONFLICTS = 'self.conflicted_files().map(|e| e.path() ++ "\\n").join("")'
+"""Which paths in a commit are conflicted, as jj computes them.
+
+**A template, not a parse** — the rule `strays` states next door: `jj resolve
+--list` prints a padded two-column table, and the human format is a sentence
+whose shape nobody promised to keep. Parsing it truncated a path with a space
+at the first column boundary (J5's fourth site), and the obvious repair —
+splitting on a run of whitespace — fails on the *longest* path, which jj pads
+with exactly one space. `conflicted_files()` answers with the paths themselves,
+one per line, for the same single spawn.
+
+It also answers *whether*: a clean revision prints nothing and exits 0, which is
+the half the old `@ & conflicts()` revset was a second spawn for."""
+
 
 async def jj(
     ctx: Context, cwd: Path, *args: str, env: Mapping[str, str] | None = None
@@ -499,14 +513,11 @@ class JjWorkspaceProvider:
         code, _, err = await self._commit(base, "new", "@", ref)
         if code != 0:
             return f"could not merge {ref}: {first_line(err) or f'jj exited {code}'}"
-        # `resolve --list` exits non-zero with "No conflicts found at this revision",
-        # so it answers *whether* as well as *which* — the `@ & conflicts()` revset
-        # this used to ask first was a second spawn for the half of the answer this
-        # one already carries.
-        code, out, _ = await self._read(base, "resolve", "--list")
+        # One spawn for both halves of the answer — see `_CONFLICTS`.
+        code, out, _ = await self._read(base, "log", "-r", "@", "--no-graph", "-T", _CONFLICTS)
         if code != 0 or not out.strip():
             return ""
-        paths = [line.split()[0] for line in out.splitlines() if line.strip()]
+        paths = [line for line in out.splitlines() if line]
         return (
             f"merged {ref}, with conflicts jj recorded in the commit at: "
             f"{', '.join(paths) or 'some paths'} — resolve them and describe the merge"

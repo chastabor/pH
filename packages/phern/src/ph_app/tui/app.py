@@ -1149,8 +1149,8 @@ async def run_tui(
     session_id: str | None = None,
     spawn: bool = True,
     offer_sessions: bool = True,
-) -> None:
-    """Entry point for `--mode tui`.
+) -> int:
+    """Entry point for `--mode tui`. Answers the exit code, `0` when clean (M4).
 
     Takes no profile and no route: the daemon mounts the one `daemon_argv` names,
     and reports the provider and model it chose on attach. Loops so that choosing
@@ -1158,6 +1158,15 @@ async def run_tui(
     it attached has detached, and a fresh app attaches to the chosen session. The
     *root* is untouched by that, which is the difference from before: switching
     sessions in the picker no longer ends the turn you were watching.
+
+    **Returned rather than raised.** This used to `raise SystemExit`, which made
+    it the CLI's first and only exit-code mechanism — nothing else in `cli.py`
+    calls `sys.exit` — so the next command needing one would have invented a
+    second. A library function that exits the process is also one a caller
+    cannot compose: a test, or a future `--mode` that runs the TUI and then does
+    something, would have had to catch `SystemExit` to find out what happened.
+    The entry point owns exiting, and `cli.py` translates this into the
+    `typer.Exit` it already uses everywhere else.
     """
     while True:
         app = PHTuiApp(
@@ -1169,14 +1178,14 @@ async def run_tui(
         chosen = await app.run_async()
         if app.return_code:
             # **The exit code is the app's** (H3). Textual sets `return_code` to 1
-            # when the app ended on an unhandled error, and returning `None` here
-            # reported that as success: a terminal that crashed and a terminal
-            # the person quit were indistinguishable to anything scripting
+            # when the app ended on an unhandled error, and answering `0` here
+            # would report that as success: a terminal that crashed and a terminal
+            # the person quit are indistinguishable to anything scripting
             # `phern --mode tui`, including a supervisor deciding whether to
             # restart it.
-            raise SystemExit(app.return_code)
+            return app.return_code
         if chosen is None:
-            return
+            return 0
         session_id = chosen
         # The picker has done its job once; reopening through `/sessions` is an
         # explicit choice already, and offering the list again on the way in
