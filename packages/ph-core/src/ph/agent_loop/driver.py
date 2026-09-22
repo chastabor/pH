@@ -443,6 +443,20 @@ class ReactLoopAgent:
         self._throw_if_canceled()
         system = render_prompt(assembly)
 
+        # **Which attempt this is, because a retried step keeps its coordinates**
+        # (G12). That is deliberate — `llm/retry` is legible in the log because
+        # of it — but it leaves `(turn, step)` naming a *step* where a model
+        # *call* is what needs the name. Two attempts minted the same tool-call
+        # ids and `recorded_steps` had to infer the boundary between them.
+        #
+        # **Counted here because this is the only place every retry passes.**
+        # Not `retry.attempts_so_far`, which is a different number: it folds
+        # `llm/retry` records, which only the `llm-retry` row writes, so a retry
+        # `compaction` asks for after an overflow never reaches it. That is right
+        # for a retry *budget* and wrong for a call's identity — the two used to
+        # be described as one fact, and they diverge on the first non-`llm-retry`
+        # retry.
+        attempt = 0
         while True:
             request = await self._build_request(turn, step, assembly, system)
             assembler = BlockAssembler()
@@ -457,14 +471,22 @@ class ReactLoopAgent:
                     # and the assembled message agree about it. This is the only
                     # consumer that pairs a call to a result, and the only one
                     # holding the coordinates the id is built from.
-                    chunk = named_call(chunk, turn, step)
+                    chunk = named_call(chunk, turn, step, attempt)
                     # Raw chunks are logged before assembly, so the log carries
                     # token-level replay fidelity even for a stream that later
                     # fails.
                     chunk_seqs.append(
                         self.session.append(
                             "assistant/chunk",
-                            {"turn": turn, "step": step, "chunk": chunk.to_wire()},
+                            {
+                                "turn": turn,
+                                "step": step,
+                                # The call's own coordinate, so `recorded_steps`
+                                # reads the boundary between two attempts rather
+                                # than inferring it (G12).
+                                "attempt": attempt,
+                                "chunk": chunk.to_wire(),
+                            },
                         ).seq
                     )
                     assembler.push(chunk)
@@ -488,6 +510,7 @@ class ReactLoopAgent:
                         message="model request failed", code="UNKNOWN"
                     )
                     raise LlmError(failure.message, failure.code, failure)
+                attempt += 1
                 continue
 
             blocks = assembler.blocks()

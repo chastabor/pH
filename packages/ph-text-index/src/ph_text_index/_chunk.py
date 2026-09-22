@@ -22,7 +22,10 @@ the previous chunk forward is worth the duplicated tokens.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+from ph.indexable import Paragraph, paragraphs
 
 __all__ = ["Chunk", "chunk_text"]
 
@@ -48,25 +51,6 @@ class _Block:
 
     def __len__(self) -> int:
         return len(self.text)
-
-
-def _blocks(text: str) -> list[_Block]:
-    """Paragraphs, with the line numbers they occupied."""
-    found: list[_Block] = []
-    current: list[str] = []
-    start = 1
-    for number, line in enumerate(text.splitlines(), start=1):
-        if line.strip():
-            if not current:
-                start = number
-            current.append(line)
-            continue
-        if current:
-            found.append(_Block("\n".join(current), start, number - 1))
-            current = []
-    if current:
-        found.append(_Block("\n".join(current), start, start + len(current) - 1))
-    return found
 
 
 def _split_line(line: str, limit: int, at: int) -> list[_Block]:
@@ -155,6 +139,21 @@ def _tail(blocks: list[_Block], overlap: int) -> list[_Block]:
 
 
 def chunk_text(text: str, *, max_chars: int, overlap_chars: int) -> list[Chunk]:
+    """`chunk_paragraphs` over every paragraph of `text`, with no policy applied.
+
+    The packer's own door, for a caller that has no opinion about what is worth
+    indexing. The text index is not that caller: it asks `ph.indexable.triage`
+    first and hands over only what survived, which is why dropping machine
+    output is not this module's job (X6 review — it briefly was, and a packer
+    whose tests had to know indexing policy was the sign it was in the wrong
+    place).
+    """
+    return chunk_paragraphs(paragraphs(text), max_chars=max_chars, overlap_chars=overlap_chars)
+
+
+def chunk_paragraphs(
+    blocks: Sequence[Paragraph], *, max_chars: int, overlap_chars: int
+) -> list[Chunk]:
     """Pack `text` into chunks of at most `max_chars`, each knowing its lines.
 
     Greedy: blocks accumulate until the next one would overflow, at which point
@@ -171,9 +170,9 @@ def chunk_text(text: str, *, max_chars: int, overlap_chars: int) -> list[Chunk]:
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
-    blocks: list[_Block] = []
-    for block in _blocks(text):
-        blocks.extend(_split_block(block, max_chars))
+    packed: list[_Block] = []
+    for block in blocks:
+        packed.extend(_split_block(_Block(block.text, block.start_line, block.end_line), max_chars))
     chunks: list[Chunk] = []
     held: list[_Block] = []
 
@@ -192,16 +191,16 @@ def chunk_text(text: str, *, max_chars: int, overlap_chars: int) -> list[Chunk]:
         return sum(len(one) for one in blocks) + 2 * len(blocks)
 
     held_width = 0
-    for block in blocks:
-        if held and held_width + len(block) > max_chars:
+    for piece in packed:
+        if held and held_width + len(piece) > max_chars:
             flush()
             # The carry-over gets what is left after the block that caused the
             # flush, so it cannot push the next chunk past the bound.
             # `_split_block` bounds every block by `max_chars`, so this budget
             # can go to zero and `_tail` answers `[]`.
-            held = _tail(held, min(overlap_chars, max_chars - len(block) - 2))
+            held = _tail(held, min(overlap_chars, max_chars - len(piece) - 2))
             held_width = width(held)
-        held.append(block)
-        held_width += len(block) + 2
+        held.append(piece)
+        held_width += len(piece) + 2
     flush()
     return chunks

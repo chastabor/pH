@@ -651,18 +651,6 @@ def test_two_agents_are_judged_against_their_own_roots(tmp_path: Path) -> None:
     that resolved one root for everybody would answer for the wrong one.
     """
 
-    class _Agent(StubAgent):
-        """A real `AgentHandle` carrying a workspace root.
-
-        `roots` is the only thing that looks at the agent here and it reads
-        `.root`; `objection` still declares `AgentHandle | None`, which a bare
-        three-field class never satisfied.
-        """
-
-        def __init__(self, root: Path) -> None:
-            super().__init__()
-            self.root = root
-
     policy = _policy(Rule(operations=("write",), paths=("secrets/**",)), root="/w")
     one, two = _Agent(Path("/w/a")), _Agent(Path("/w/b"))
 
@@ -1037,12 +1025,158 @@ def test_a_wildcard_that_is_not_a_star_still_makes_a_head() -> None:
         policy = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
         assert policy.deletion_reason(Path("/w"), recursive=True) is not None, pattern
 
-    # And a head that really is one still bounds the refusal — this is not
-    # "refuse everything", which is the other way to pass. Only the `?` pattern
-    # can show it: `[sf]ecrets/**` leads with its wildcard, so it has no head at
-    # all and a delete correctly rounds it to "could match anywhere".
-    bounded = _policy(Rule(operations=("write",), paths=("sec?ets/**",), mode="deny"))
-    assert bounded.deletion_reason(Path("/w/elsewhere"), recursive=True) is None
+    # And the refusal is still bounded — this is not "refuse everything", which
+    # is the other way to pass. Both spellings now show it: since the walk
+    # matches segment by segment, a leading `[sf]` constrains the first segment
+    # exactly as `sec?` does, rather than reading as "could match anywhere".
+    for pattern in ("sec?ets/**", "[sf]ecrets/**"):
+        bounded = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
+        assert bounded.deletion_reason(Path("/w/elsewhere"), recursive=True) is None, pattern
+
+
+class _Agent(StubAgent):
+    """A real `AgentHandle` carrying a workspace root.
+
+    `roots` is the only thing that looks at the agent here and it reads `.root`;
+    `objection` and `screen` still declare `AgentHandle`, which a bare
+    three-field class never satisfied — so this subclasses the stub the type
+    checker already accepts rather than casting something that is not one.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+
+def _walk(policy: FsPermissions, path: str) -> str:
+    """What the walk screen does with a directory — `screen` for `is_dir=True`."""
+    return policy.screen(path, path.rsplit("/", 1)[-1], _Agent(Path("/w")), True)
+
+
+@pytest.mark.parametrize(
+    "pattern", ["secrets/**", "sec?ets/**", "sec*ets/**", "[sf]ecrets/**", "?ecrets/**"]
+)
+def test_every_spelling_of_a_directory_rule_guards_that_directory(pattern: str) -> None:
+    """D11 — a glob was read as a path, and the answer came out inverted.
+
+    `_could_match_under` compared the pattern's *literal head* — everything
+    before the first wildcard — as a path. That is exact only when the head
+    stops at a separator. `sec?ets/**` has the head `sec`, which is an ancestor
+    of nothing the rule covers and exactly equal to a directory it can never
+    touch. So the rule **allowed** `rm -rf secrets` and walked into it, while
+    **refusing** `rm -rf sec` and pruning that — the one direction a permission
+    gate must never fail in, and its mirror, at once.
+
+    Every spelling below means "the secrets directory", so every one must
+    behave as the plain `secrets/**` does: guard `secrets`, and leave alone the
+    directories it cannot name. Matching segment by segment in the glob's own
+    dialect is what makes them agree.
+
+    Sabotage: compare `literal_head(pattern)` as a path again and the `?` and
+    `*` rows allow deleting `secrets` while refusing `sec`.
+    """
+    policy = _policy(Rule(operations=("read", "write"), paths=(pattern,), mode="deny"))
+
+    assert policy.deletion_reason(Path("/w/secrets"), recursive=True) is not None, (
+        f"{pattern} let a recursive delete destroy the directory it guards"
+    )
+    assert _walk(policy, "/w/secrets") == "prune", f"{pattern} walked into what it conceals"
+
+    for elsewhere in ("sec", "elsewhere"):
+        assert policy.deletion_reason(Path(f"/w/{elsewhere}"), recursive=True) is None, (
+            f"{pattern} refused deleting {elsewhere}/, which it can never name"
+        )
+        assert _walk(policy, f"/w/{elsewhere}") == "yield", (pattern, elsewhere)
+
+
+def test_a_walk_prunes_what_a_rule_covers_wholesale_and_nothing_else() -> None:
+    """D11 — the walk and the delete ask different questions.
+
+    A delete asks whether the rule could name *anything* it removes, and must
+    refuse on "could". A walk asks whether the rule names *everything* in a
+    directory, because only then is skipping it lossless; a rule covering part
+    of a directory is enforced file by file as the walk passes.
+
+    One function used to answer both, with a flag bending it for the walk, and
+    no setting of the flag was right for every rule below. It over-hid: `deny
+    read src/*.pem` pruned all of `src`, and every allowed file in it vanished
+    from glob and grep. It also missed: `deny read **/node_modules/**` pruned no
+    `node_modules` at all. And `**/.env` must never prune the tree, or the
+    idiomatic spelling of the commonest rule hides the whole workspace.
+
+    Sabotage: have `screen` ask the delete's question and `src` is pruned.
+    """
+    cases = [
+        ("**/.env", "/w/src", "yield"),
+        ("src/*.pem", "/w/src", "yield"),
+        ("secrets/*.key", "/w/secrets", "yield"),
+        ("a/secret/**", "/w/a", "yield"),
+        ("*/secret/**", "/w/a", "yield"),
+        ("*/secret/**", "/w/a/secret", "prune"),
+        ("**/node_modules/**", "/w/a/node_modules", "prune"),
+        ("secrets/**", "/w/secrets/a/b", "prune"),
+    ]
+    for pattern, directory, expected in cases:
+        policy = _policy(Rule(operations=("read",), paths=(pattern,), mode="deny"))
+        assert _walk(policy, directory) == expected, (pattern, directory)
+
+    # And the delete still refuses every one of them, because each could name
+    # something the delete would remove.
+    for pattern, directory, _ in cases:
+        policy = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
+        assert policy.deletion_reason(Path(directory), recursive=True) is not None, pattern
+
+
+def test_a_double_star_inside_a_segment_still_refuses_a_delete() -> None:
+    """D11 review — the permissive regression the first version introduced.
+
+    `matches_glob` compiles `**` to cross separators *wherever it appears*: `data**/key`
+    matches `data/v1/x/key`. The first segment walk recognized `**` only as a whole
+    segment, so it matched `data**` against `data` as a one-segment glob, ran out of
+    pattern, and **allowed** deleting `data/v1` — which the literal-head code it
+    replaced had refused. A second copy of the dialect, wrong in the one
+    direction a delete gate must never be.
+
+    Sabotage: treat `**` as special only when it is a whole segment, and the
+    first two cases are allowed.
+    """
+    for pattern, directory, inside in (
+        ("data**/key", "/w/data/v1", "data/v1/x/key"),
+        ("**.env", "/w/a", "a/b/.env"),
+        ("a/b**", "/w/a/bc/d", "a/bc/d/e"),
+    ):
+        assert matches_glob(inside, pattern), "the fixture no longer shows the dialect crossing"
+        policy = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
+        assert policy.deletion_reason(Path(directory), recursive=True) is not None, (
+            f"deleting {directory} would remove {inside}, which {pattern} protects"
+        )
+
+
+def test_a_rule_does_not_refuse_what_it_provably_cannot_name() -> None:
+    """The two places D11 *loosened* a refusal, stated so nobody finds them later.
+
+    Over-refusing is the safe failure for a delete, so a change in that
+    direction is the one worth writing down. Each case below was refused by the
+    literal-head approximation and is not refused now, because the pattern
+    cannot match anything the delete would remove:
+
+    * `secrets` — no `**` — names the directory entry itself. Deleting
+      `secrets/old` does not delete `secrets`, so there is nothing to refuse;
+      the old code refused it because `secrets/old` is a path descendant of the
+      head, which is true and beside the point.
+    * `*/secret/**` needs its *second* segment to be `secret`. Nothing under
+      `a/other` has one, and the old code refused it only because a headless
+      pattern rounded to "could match anywhere".
+
+    Sabotage: treat a pattern that runs out above the directory as a match and
+    the first case is refused again.
+    """
+    exact = _policy(Rule(operations=("write",), paths=("secrets",), mode="deny"))
+    assert exact.deletion_reason(Path("/w/secrets"), recursive=True) is not None
+    assert exact.deletion_reason(Path("/w/secrets/old"), recursive=True) is None
+
+    nested = _policy(Rule(operations=("write",), paths=("*/secret/**",), mode="deny"))
+    assert nested.deletion_reason(Path("/w/a/other"), recursive=True) is None
 
 
 def test_a_recursive_delete_of_the_workspace_root_sees_relative_rules() -> None:

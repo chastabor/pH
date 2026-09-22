@@ -637,6 +637,15 @@ async def apply(ctx: Context, config: Config) -> None:
                     agent=run.agent,
                     session=run.session,
                 )
+                # **No prose test here, deliberately** (X6 review). The text
+                # index refuses documents that hold no prose; source code is not
+                # prose, and the same predicate refused a module whose only
+                # statement is a long `__all__`, and a `TABLE = {...}` literal
+                # beside `def lookup()` — so `lookup` would have vanished from
+                # this index with nothing but a skip line to say so. Telling a
+                # minified bundle from a legitimate data module by shape is not
+                # reliable for code, and a false positive here loses symbols
+                # silently. `skip_reason`'s size bound stays this walk's guard.
                 # The content hash stays the authority on *whether* a file
                 # changed — the filter above only decides whether to open it, so
                 # the "content, not clock" guarantee is untouched.

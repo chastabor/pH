@@ -53,6 +53,7 @@ import anyio
 from pydantic import Field
 
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
+from ph.indexable import triage
 from ph.json import JsonObject
 from ph.keys import COMMANDS, FS, SKILLS, TOOLS
 from ph.llm.types import ContentBlock
@@ -69,7 +70,7 @@ from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
 from ph.wire import WireModel
 
-from ._chunk import Chunk, chunk_text
+from ._chunk import Chunk, chunk_paragraphs
 from ._embed import Embedder, LocalWeights, SentenceTransformerEmbedder, Vectors
 from ._store import Record, TextIndex
 
@@ -790,10 +791,18 @@ async def _passages(
         agent=run.agent,
         session=run.session,
     )
-    chunks = chunk_text(
-        slice_.text,
-        max_chars=seam.config.max_chars,
-        overlap_chars=seam.config.overlap_chars,
+    # **Asked after the read, because it is a question about the text** (X6).
+    # `skip_reason` above is the cheap door and deliberately does not read; this
+    # is the one that can tell a minified bundle from a document, and it costs
+    # nothing extra because the bytes are already here. One split and one
+    # classification answer both questions — whether to index the document, and
+    # which of its blocks — and the packer is handed only what survived, so a
+    # README with an embedded image still indexes every paragraph around it.
+    kept = triage(slice_.text)
+    if kept.reason:
+        return [], kept.reason
+    chunks = chunk_paragraphs(
+        kept.kept, max_chars=seam.config.max_chars, overlap_chars=seam.config.overlap_chars
     )
     return chunks, None if chunks else "is empty"
 

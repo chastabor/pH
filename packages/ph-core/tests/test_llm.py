@@ -160,19 +160,49 @@ def test_a_call_the_provider_did_not_name_is_named_here() -> None:
     covering only one leaves the path that actually runs unnamed. A provider
     that did name its call keeps its own id.
     """
-    delta = named_call(ToolCallDelta(index=0, id="", name="read", arguments_delta="{}"), 3, 2)
+    delta = named_call(ToolCallDelta(index=0, id="", name="read", arguments_delta="{}"), 3, 2, 0)
     closed = named_call(
-        BlockEnd(index=1, block=ToolCallBlock(id="", name="write", arguments="{}")), 3, 2
+        BlockEnd(index=1, block=ToolCallBlock(id="", name="write", arguments="{}")), 3, 2, 0
     )
     provider = named_call(
-        BlockEnd(index=2, block=ToolCallBlock(id="toolu_01abc", name="grep", arguments="{}")), 3, 2
+        BlockEnd(index=2, block=ToolCallBlock(id="toolu_01abc", name="grep", arguments="{}")),
+        3,
+        2,
+        0,
     )
-    untouched = named_call(TextDelta(index=0, text="hello"), 3, 2)
+    untouched = named_call(TextDelta(index=0, text="hello"), 3, 2, 0)
 
-    assert as_kind(delta, ToolCallDelta).id == "call-3-2-0"
-    assert as_kind(as_kind(closed, BlockEnd).block, ToolCallBlock).id == "call-3-2-1"
+    assert as_kind(delta, ToolCallDelta).id == "call-3-2-0-0"
+    assert as_kind(as_kind(closed, BlockEnd).block, ToolCallBlock).id == "call-3-2-0-1"
     assert as_kind(as_kind(provider, BlockEnd).block, ToolCallBlock).id == "toolu_01abc"
     assert untouched is not None and as_kind(untouched, TextDelta).text == "hello"
+
+
+def test_two_attempts_at_one_step_do_not_mint_the_same_id() -> None:
+    """G12 — `(turn, step)` names a step, and a call is what needed the name.
+
+    A retried step keeps its coordinates on purpose: that is what makes
+    `llm/retry` legible in the log, and `attempts_so_far` reads the pair. So
+    without a third number both attempts minted `call-T-S-0` for the same
+    position in their stream.
+
+    It was sound only by accident. An error finish skips
+    `_append_assistant_message`, so the losing attempt's blocks never reached
+    the transcript that pairing reads — the repeat lived in the raw
+    `assistant/chunk` records, where `recorded_steps` then had to tell the two
+    apart by looking for a trailing `Finish`. Two layers approximating one
+    missing number from opposite directions, which is the shape this row exists
+    to collapse.
+
+    Sabotage: drop `attempt` from `_call_id` and the two ids below are equal.
+    """
+    call = ToolCallDelta(index=0, id="", name="read", arguments_delta="{}")
+    first = as_kind(named_call(call, 1, 1, 0), ToolCallDelta).id
+    retried = as_kind(named_call(call, 1, 1, 1), ToolCallDelta).id
+
+    assert (first, retried) == ("call-1-1-0-0", "call-1-1-1-0"), (
+        "a retried step re-used the id its first attempt minted"
+    )
 
 
 def test_an_id_needs_no_history_so_a_compaction_cannot_walk_it_back() -> None:
@@ -188,11 +218,11 @@ def test_an_id_needs_no_history_so_a_compaction_cannot_walk_it_back() -> None:
     and gives a replayed run the live run's ids rather than renaming its calls.
     """
     call = ToolCallDelta(index=0, id="", name="read", arguments_delta="{}")
-    minted = {as_kind(named_call(call, turn, 1), ToolCallDelta).id for turn in (1, 2, 3)}
+    minted = {as_kind(named_call(call, turn, 1, 0), ToolCallDelta).id for turn in (1, 2, 3)}
 
-    assert minted == {"call-1-1-0", "call-2-1-0", "call-3-1-0"}
+    assert minted == {"call-1-1-0-0", "call-2-1-0-0", "call-3-1-0-0"}
     # Same coordinates, same id — the property replay rests on.
-    assert as_kind(named_call(call, 1, 1), ToolCallDelta).id == "call-1-1-0"
+    assert as_kind(named_call(call, 1, 1, 0), ToolCallDelta).id == "call-1-1-0-0"
 
 
 def test_max_tokens_drops_tool_calls() -> None:

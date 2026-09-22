@@ -43,6 +43,7 @@ import numpy as np
 import pytest
 
 from ph.cordis import DEPLOYMENT, Context
+from ph.indexable import triage
 from ph.json import as_str
 from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
@@ -50,7 +51,7 @@ from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
 from ph_text_index import TEXT_INDEX
-from ph_text_index._chunk import chunk_text
+from ph_text_index._chunk import chunk_paragraphs, chunk_text
 from ph_text_index._embed import Vectors
 from ph_text_index._store import IndexMismatch, TextIndex
 
@@ -244,13 +245,17 @@ def test_a_single_line_too_long_to_be_a_chunk_is_cut_anyway() -> None:
     exactly the lines whose line number was never a useful pointer.
 
     Sabotage: drop the `len(line) > limit` arm in `_split_block` and the first
-    case returns one 500-character chunk against a bound of 100.
+    case returns one 782-character chunk against a bound of 100.
     """
-    chunks = chunk_text("y" * 500, max_chars=100, overlap_chars=10)
+    # An honest long line: a data row somebody may search by name. X6 drops the
+    # *machine* long lines — a minified bundle, an encoded blob — so this cut is
+    # what is left for, and the fixture has to be something worth keeping.
+    row = ",".join(f"Some Name {number},Austin TX,{number * 7}" for number in range(30))
+    chunks = chunk_text(row, max_chars=100, overlap_chars=10)
 
-    assert len(chunks) == 5
+    assert len(chunks) == len(row) // 100 + 1
     assert all(len(chunk.text) <= 100 for chunk in chunks)
-    assert "".join(chunk.text for chunk in chunks) == "y" * 500, "characters were lost in the cut"
+    assert "".join(chunk.text for chunk in chunks) == row, "characters were lost in the cut"
     assert {(chunk.start_line, chunk.end_line) for chunk in chunks} == {(1, 1)}
 
     # And it is the *last* resort: a paragraph whose lines each fit is still cut
@@ -262,7 +267,7 @@ def test_a_single_line_too_long_to_be_a_chunk_is_cut_anyway() -> None:
     )
 
     # A long line among short ones does not drag its neighbours over the bound.
-    mixed = "short\n" + "z" * 450 + "\nshort again"
+    mixed = "short\n" + row + "\nshort again"
     assert all(
         len(chunk.text) <= 100 for chunk in chunk_text(mixed, max_chars=100, overlap_chars=10)
     )
@@ -1284,3 +1289,77 @@ async def test_a_workspace_sweep_does_not_forget_an_indexed_spill(
 
     assert swept.value["chunks_removed"] == 0, "an ordinary walk forgot the indexed spill"
     assert swept.value["total_documents"] == 2
+
+
+async def test_a_minified_bundle_is_skipped_and_a_doc_with_a_blob_keeps_its_prose(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """X6 — garbage in, garbage out, so the garbage does not go in.
+
+    `skip_reason` is a `stat` and deliberately reads nothing, so a minified
+    bundle under the size bound walks straight past it. X5 then made things
+    *worse* in one narrow way: before it, an over-long line became one oversized
+    chunk the embedder truncated; after it, the same bundle becomes hundreds of
+    well-formed passages of junk — each one a vector that matches nothing a
+    person will ask, and an embedder call to make it.
+
+    Both halves are asserted, because the useful behaviour is the second one:
+    the bundle is refused outright, and a document that merely *contains* an
+    encoded blob keeps every paragraph around it. Refusing that second document
+    would be the easy rule and the wrong one.
+
+    The skip is reported rather than silent, for `skip_reason`'s reason: a
+    caller that never learns what was passed over cannot tell a quiet corpus
+    from a broken one.
+
+    Sabotage: drop the `triage` reason check in `_passages` and the bundle is
+    indexed; keep every block in `triage` and the blob is too.
+    """
+    import base64
+    import textwrap
+
+    blob = "\n".join(textwrap.wrap(base64.b64encode(b"\x00" * 900).decode(), 76))
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "bundle.md").write_text(
+        ".a{margin:0;padding:0}.b{display:flex;align-items:center}" * 40, encoding="utf-8"
+    )
+    (tmp_path / "docs" / "guide.md").write_text(
+        "# Workspaces\n\nEach agent is given its own worktree so two agents editing "
+        "the same repository never see each other's half-finished changes.\n\n"
+        f"![diagram](data:image/png;base64,\n{blob})\n\n"
+        "The reclaim path waits for the tree to be released before deleting it.\n",
+        encoding="utf-8",
+    )
+    ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
+    agent = _agent(ctx)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=agent)
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert indexed.value["documents"] == ["docs/guide.md"], "the bundle was indexed"
+    skipped = {row["path"]: row["reason"] for row in indexed.value["skipped"]}
+    assert "docs/bundle.md" in skipped, "the bundle was passed over without saying so"
+    assert "prose" in skipped["docs/bundle.md"]
+
+    # And the document that merely held a blob kept the prose around it — with
+    # none of the blob. Asserted on the chunks rather than on a search result,
+    # because a ranked answer can hide an unwanted passage behind a better one:
+    # the question is what is *in* the index, not what came back first.
+    # What `_passages` hands the packer: the blocks `triage` kept. `chunk_text`
+    # on its own is policy-free by design, so asserting on it would test the
+    # packer rather than what reaches the index.
+    guide = (tmp_path / "docs" / "guide.md").read_text(encoding="utf-8")
+    passages = chunk_paragraphs(triage(guide).kept, max_chars=200, overlap_chars=0)
+    assert any("worktree" in passage.text for passage in passages), "the prose was dropped too"
+    assert not any("AAAA" in passage.text for passage in passages), (
+        "the blob was chunked into passages nobody will ever search for"
+    )
+
+    found = await run_tool(
+        ctx,
+        "text_search",
+        {"query": "why does each agent get its own worktree", "k": 2},
+        agent=agent,
+    )
+    assert not found.is_error, text_of(found.content)
+    assert "worktree" in text_of(found.content)

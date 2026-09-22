@@ -28,7 +28,7 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
-from ph.json import as_obj, as_str, thaw_json
+from ph.json import as_int, as_obj, as_str, thaw_json
 from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.replay import RecordedStep, ReplayAdapter, text_chunks, tool_call_chunks
 from ph.llm.types import (
@@ -58,6 +58,26 @@ def _plugin_snapshots(session: Any) -> list[Any]:  # noqa: ANN401
         for e in session.events
         if e.type == "user/message" and e.data["source"]["kind"] == "plugin"
     ]
+
+
+def _retry_on(code: str) -> Callable[..., Awaitable[Any]]:
+    """An `agent/request-error` listener that retries one code and passes on the rest.
+
+    **A code `llm-retry` does not own**, which is the whole reason this exists
+    rather than each test spelling it: `llm-retry` is mounted, sits ahead of a
+    test's listener in the waterfall, and retries a genuinely transient code
+    such as `RATE_LIMITED` itself — after sleeping its backoff. A test that
+    raised one of those paid half a second of nothing and was testing the policy
+    row rather than the loop. `TRANSIENT` is not in `TRANSIENT_CODES`, so the
+    policy passes it through untouched and this listener is what decides.
+    """
+
+    async def listener(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        if failure.failure.code == code:
+            return RequestErrorAction(kind="retry")
+        return await next_()
+
+    return listener
 
 
 async def test_lifecycle_events_appear_in_order(mount: MountProfile) -> None:
@@ -286,12 +306,7 @@ async def test_request_error_waterfall_can_retry(mount: MountProfile) -> None:
 
     ctx.require(LLM).register_adapter(["flaky"], Flaky())
 
-    async def retry_once(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
-        if failure.failure.code == "TRANSIENT":
-            return RequestErrorAction(kind="retry")
-        return await next_()
-
-    ctx.on("agent/request-error", retry_once)
+    ctx.on("agent/request-error", _retry_on("TRANSIENT"))
     session = ctx.require(SESSIONS).create("s")
     await (
         ctx.require(AGENTS)
@@ -730,5 +745,71 @@ async def test_an_unnamed_call_gets_one_id_in_both_durable_records(
         if isinstance(block, ToolCallBlock)
     ]
 
-    assert assembled == ["call-1-1-0"], "the call reached the transcript unnamed"
+    assert assembled == ["call-1-1-0-0"], "the call reached the transcript unnamed"
     assert logged == assembled, "the raw chunk and the assembled message disagree about the id"
+
+
+async def test_a_retried_step_records_which_attempt_each_chunk_belongs_to(
+    mount: MountProfile,
+) -> None:
+    """G12 — the boundary between two attempts is recorded, not inferred.
+
+    A retried step keeps its turn and step, so the raw `assistant/chunk` records
+    of both attempts used to be indistinguishable: `recorded_steps` recovered
+    the split by looking for a trailing `Finish`, and `named_call` minted the
+    same ids twice. The driver knows which attempt it is on — it is the loop
+    doing the retrying — so it writes the number down and both layers read it.
+
+    The first attempt's stream ends in an error finish, which is what a rate
+    limit or a dropped connection looks like here; the retry then succeeds with
+    a tool call.
+
+    Sabotage: drop `attempt += 1` and both attempts record `0`, which is the
+    state this row is about.
+    """
+    ctx = await mount()
+    ctx.require(LLM).register_adapter(
+        ["scripted"],
+        ReplayAdapter(
+            steps=[
+                RecordedStep(
+                    turn=1,
+                    step=1,
+                    chunks=(
+                        Finish(
+                            reason=FinishReason(
+                                kind="error",
+                                failure=LlmFailure(message="try again", code="TRANSIENT"),
+                            )
+                        ),
+                    ),
+                ),
+                RecordedStep(turn=1, step=1, chunks=tool_call_chunks("", "ping", "{}")),
+                RecordedStep(turn=1, step=2, chunks=text_chunks("done")),
+            ]
+        ),
+    )
+    ctx.require(TOOLS).register(simple_tool("ping"))
+
+    ctx.on("agent/request-error", _retry_on("TRANSIENT"))
+    session = ctx.require(SESSIONS).create("retried")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="scripted", model="m"))
+
+    await agent.prompt("go")
+
+    attempts = [
+        as_int(event.data.get("attempt", 0))
+        for event in session.events
+        if event.type == "assistant/chunk" and as_int(event.data.get("step")) == 1
+    ]
+    assert set(attempts) == {0, 1}, "both attempts at step 1 were recorded as the same call"
+
+    # And the id the surviving attempt minted says which attempt it was, so the
+    # losing one cannot have minted the same.
+    assembled = [
+        block.id
+        for message in session.derive_messages()
+        for block in message.content
+        if isinstance(block, ToolCallBlock)
+    ]
+    assert assembled == ["call-1-1-1-0"], "the retry re-used the first attempt's id"

@@ -41,7 +41,12 @@ from .types import (
 __all__ = ["BlockAssembler", "named_call"]
 
 
-def named_call(chunk: StreamChunk, turn: int, step: int) -> StreamChunk:
+def _call_id(turn: int, step: int, attempt: int, index: int) -> str:
+    """One model call's block, named by where in the run it happened."""
+    return f"call-{turn}-{step}-{attempt}-{index}"
+
+
+def named_call(chunk: StreamChunk, turn: int, step: int, attempt: int) -> StreamChunk:
     """Give a tool call the provider did not name an id (G1, G10, G11).
 
     **Every wire needs this.** Google issues no call id at all, and the other
@@ -71,27 +76,29 @@ def named_call(chunk: StreamChunk, turn: int, step: int) -> StreamChunk:
     ids still in the session log. These coordinates are monotonic through resume
     and compaction, and replay reproduces them rather than renumbering.
 
-    Not unique across *attempts*: a step retried after a mid-stream failure
-    keeps its turn and step, so both attempts mint the same id. That is sound
-    where it matters — an error finish skips `_append_assistant_message`, so the
-    losing attempt never reaches the transcript pairing reads — and the raw
-    `assistant/chunk` records do hold the repeat. `recorded_steps` already has
-    to tell calls apart inside one `(turn, step)` for the same reason; giving a
-    model *call* its own identity would answer both, and is filed rather than
-    guessed at here.
+    **`attempt` is what makes these the coordinates of a *call*** (G12). A
+    retried step keeps its turn and step on purpose — `llm/retry` is legible in
+    the log because of it — so without a third number two attempts minted the
+    same ids. The driver counts it, because every retry passes through the
+    driver whichever listener chose it; `retry.attempts_so_far` counts only
+    `llm-retry`'s own and is a budget, not an identity. It was sound only by
+    accident: an error finish skips `_append_assistant_message`, so the losing
+    attempt never reached the transcript that pairing reads, while the raw
+    `assistant/chunk` records held the repeat. `recorded_steps` was inferring
+    the same boundary from a trailing `Finish` for want of the same number.
 
     Applied to the chunk, before the loop logs it, so the raw `assistant/chunk`
     and the assembled `assistant/message` carry the same id — they had drifted
     while only the assembler minted.
     """
     if isinstance(chunk, ToolCallDelta) and not chunk.id:
-        return replace(chunk, id=f"call-{turn}-{step}-{chunk.index}")
+        return replace(chunk, id=_call_id(turn, step, attempt, chunk.index))
     if (
         isinstance(chunk, BlockEnd)
         and isinstance(chunk.block, ToolCallBlock)
         and not chunk.block.id
     ):
-        named = chunk.block.model_copy(update={"id": f"call-{turn}-{step}-{chunk.index}"})
+        named = chunk.block.model_copy(update={"id": _call_id(turn, step, attempt, chunk.index)})
         return replace(chunk, block=named)
     return chunk
 

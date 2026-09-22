@@ -74,7 +74,6 @@ from ph.seams.fs import (
     FsService,
     WalkDecision,
     glob_error,
-    literal_head,
     matches_glob,
 )
 from ph.seams.sandbox import allowed_paths_of, enforcement_of
@@ -398,20 +397,16 @@ class FsPermissions:
         named = self._objection_to(spellings, "read", path, agent) is not None
         if not is_dir:
             return "skip" if named else "yield"
-        # The directory's *own* path first — a rule may name it outright — then
-        # the question only a directory raises. Two passes because they are two
-        # questions: matching the directory catches a mid-segment wildcard like
-        # `sec*ts`, whose literal head (`sec`) is not a path ancestor of
-        # `secrets` and which `_could_match_under` therefore misses.
+        # The directory's own path first — a rule may name it outright — then
+        # whether a rule covers everything inside it. Pruning is lossless only
+        # in the second case; a rule covering *some* of a directory is enforced
+        # file by file as the walk passes, which is `named` above one level down.
         if named:
             return "prune"
-        return (
-            "prune"
-            if self._refuses_under(
-                spellings, "read", path, agent, honor_scope=True, require_head=True
-            )
-            else "yield"
+        covered = self._refuses_under(
+            spellings, "read", path, agent, honor_scope=True, ask=_covers_whole
         )
+        return "prune" if covered else "yield"
 
     def _refuses_under(
         self,
@@ -421,9 +416,9 @@ class FsPermissions:
         agent: AgentHandle | None,
         *,
         honor_scope: bool,
-        require_head: bool,
+        ask: Callable[[str, str], bool],
     ) -> bool:
-        """Whether a non-allow rule could match *something inside* this directory.
+        """Whether a non-allow rule answers `ask` about this directory.
 
         The rules describe paths that do not exist yet — the tree is walked by the
         operating system, not by this module — so a rule matching one file inside a
@@ -435,13 +430,14 @@ class FsPermissions:
         delete may only ever be wrong towards refusal, while enumeration over-refusing
         *hides files a person may see*.
 
-        **`require_head` is the second difference, and the same asymmetry.**
-        `_could_match_under` answers `True` for a pattern with no literal head, because
-        for a delete "could match anywhere" must round to refusal. For a walk that same
-        rounding refuses *everywhere*: `deny read **/.env` — the idiomatic spelling — has
-        an empty head, so every directory "could" hold a match and the whole tree is
-        pruned. The file such a rule names is still concealed on the way past; what a
-        leading wildcard cannot justify is refusing to *look*.
+        **`ask` is the second difference, and it is a different question rather
+        than a different rounding** (D11). A delete asks `_could_match_under` —
+        could the rule name anything this removes — and must refuse on "could". A
+        walk asks `_covers_whole` — does the rule name everything in here — because
+        pruning is only lossless when it does. One function used to answer both,
+        with a `require_head` flag bending it for the walk, and no setting of the
+        flag was right for both `deny read src/*.pem` and `deny read
+        **/node_modules/**`.
         """
         outside = None
         for rule in self.rules:
@@ -458,13 +454,7 @@ class FsPermissions:
                     outside = self._outside_workspace(Path(path), agent, operation)
                 if not outside:
                     continue
-            if any(
-                _could_match_under(
-                    pattern, directory, require_head=require_head, at_root=directory == ""
-                )
-                for pattern in rule.paths
-                for directory in spellings
-            ):
+            if any(ask(pattern, directory) for pattern in rule.paths for directory in spellings):
                 return True
         return False
 
@@ -494,7 +484,9 @@ class FsPermissions:
             path.as_posix(),
             agent,
             honor_scope=False,
-            require_head=False,
+            ask=lambda pattern, directory: _could_match_under(
+                pattern, directory, at_root=directory == ""
+            ),
         ):
             return RECURSIVE_DENIAL.format(path=path)
         return None
@@ -654,39 +646,75 @@ def _prefix_of(root: Path) -> str:
     return f"{root.as_posix().rstrip('/')}/"
 
 
-def _could_match_under(pattern: str, directory: str, *, require_head: bool, at_root: bool) -> bool:
-    """Whether `pattern` could match anything inside `directory`.
+def _could_match_under(pattern: str, directory: str, *, at_root: bool) -> bool:
+    """Whether `pattern` could match `directory` or anything a delete of it removes.
 
-    Judged from the pattern's literal head — everything before the first
-    wildcard, which `ph.seams.fs.literal_head` owns because it is a fact about
-    the glob dialect. That is the most a glob will tell you without enumerating
-    the tree. Two ways to be inside: the head already points into the tree, or
-    the head is an ancestor of it and the wildcard is free to descend.
+    **The existential question, and only a delete asks it** (D11). A recursive
+    delete removes the directory and everything under it, so it must be refused
+    if the rule could name *any* of that — and "could" rounds to refusal, because
+    a delete is the one direction a permission gate must never fail open.
+
+    **Walked segment by segment, in the glob's own dialect.** It used to compare
+    the pattern's literal head as a *path*, which is exact only when the head
+    stops at a separator. `sec?ets/**` has the head `sec` — an ancestor of
+    nothing the rule covers, and exactly the name of a directory it can never
+    touch — so the rule allowed `rm -rf secrets` and refused `rm -rf sec`. Each
+    segment is matched with `matches_glob`, so `?`, `*` and bracket classes mean
+    here exactly what they mean to the matcher; there is no second copy of the
+    alphabet to drift.
+
+    **`**` crosses separators wherever it appears, not only as a whole segment.**
+    `matches_glob` compiles `data**/key` to cross from `data` into any depth, so a
+    segment *containing* `**` is free to descend once the part before it matches.
+    A first version of this walk recognized `**` only as a whole segment and so
+    *allowed* deleting `data/v1` under `deny data**/key` — a permissive regression on
+    the case this function exists for, caught by review and pinned by a test.
+
+    A pattern that runs out *above* the directory names an ancestor, and a
+    delete of a descendant removes nothing it names — deleting `secrets/old`
+    does not delete `secrets`.
 
     **`at_root` is asked, not encoded.** The workspace root's relative spelling
-    is `""`, and every relative path is inside it — but `""` is *also* what a
-    headless pattern returns, meaning "could be anywhere", and the two are nearly
-    opposite claims. Telling them apart by the order of two guards made that
-    ordering silently load-bearing in the permissive direction, so the caller
-    states which question it is asking and `_under` stays total path
-    containment.
-
-    **`require_head` is the two callers' disagreement, in one place.** A delete
-    must read "could match anywhere" as a refusal; a walk must not read it as a
-    reason to enter nothing, or `deny read **/.env` — the idiomatic spelling —
-    prunes the whole tree. `_refuses_under` records why.
+    is `""`, and every relative path is inside it; the caller states which
+    question it is asking.
     """
     if at_root:
         return True
-    head = literal_head(pattern)
-    if not head:
-        return not require_head
-    return _under(head, directory) or _under(directory, head)
+    names, parts = directory.split("/"), pattern.split("/")
+    # Not `strict`: the lengths differ by design, and the return says why.
+    for name, segment in zip(names, parts, strict=False):
+        if "**" in segment:
+            head, _, _ = segment.partition("**")
+            return matches_glob(name, f"{head}*")
+        if not matches_glob(name, segment):
+            return False
+    return len(names) <= len(parts)
 
 
-def _under(inner: str, outer: str) -> bool:
-    """Path containment on separators, so `/home/xyz` is not inside `/home/x`."""
-    return inner == outer or inner.startswith(f"{outer}/")
+def _covers_whole(pattern: str, directory: str) -> bool:
+    """Whether `pattern` names `directory` and everything inside it.
+
+    **The universal question, and it is the walk's** (D11). Pruning a directory
+    is lossless only when the rule would conceal every entry in it anyway — so
+    the walk asks whether the rule covers the directory *wholesale*, not whether
+    it could match something inside. A rule that covers only some of what a
+    directory holds is enforced file by file on the way past, which conceals
+    exactly what it names and hides nothing else.
+
+    That is why this is not the delete's question with a different rounding. It
+    used to be: one function answered both, with a `require_head` flag bending
+    the answer for the walk. The flag could not be made right — `deny read
+    src/*.pem` pruned all of `src` and hid every allowed file in it, while `deny
+    read **/node_modules/**` pruned no `node_modules` at all. The two callers ask
+    different questions, and giving each its own is what removed the flag.
+
+    Answered entirely by `matches_glob`, so it cannot disagree with the matcher:
+    the directory itself matches, or the pattern is `Q/**` and the directory
+    matches `Q`.
+    """
+    if matches_glob(directory, pattern):
+        return True
+    return pattern.endswith("/**") and matches_glob(directory, pattern[:-3])
 
 
 @plugin("permissions-fs", inject=[FS], config=Config)

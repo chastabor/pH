@@ -131,14 +131,23 @@ def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
     thing `REPLAY_EXHAUSTED` exists to make impossible to miss, pointing at the
     loop instead of at the grouping.
 
-    A `Finish` ends a stream, so it ends a group: the adapter that emitted one
+    **The attempt is read, not inferred** (G12). The driver records which attempt
+    at `(turn, step)` each chunk belongs to, so the boundary between two attempts
+    is a fact in the log rather than something recovered from the shape of the
+    stream. The `Finish` split below stays, and earns its keep twice: a log
+    written before the driver recorded the attempt has none to read, and a
+    `Finish` ends a stream by contract either way — the adapter that emitted one
     has nothing further to say for that call.
     """
-    calls: list[tuple[tuple[int, int], list[StreamChunk]]] = []
+    calls: list[tuple[tuple[int, int, int], list[StreamChunk]]] = []
     for event in events:
         if event.type != "assistant/chunk":
             continue
-        key = (as_int(event.data["turn"]), as_int(event.data["step"]))
+        key = (
+            as_int(event.data["turn"]),
+            as_int(event.data["step"]),
+            as_int(event.data.get("attempt", 0)),
+        )
         chunk = chunk_from_wire(as_obj(event.data["chunk"]))
         # A new call when the coordinates move, and also when the last one was
         # closed — `calls[-1][1]` is never empty, because a group is only
@@ -147,7 +156,8 @@ def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
             calls.append((key, []))
         calls[-1][1].append(chunk)
     return [
-        RecordedStep(turn=turn, step=step, chunks=tuple(chunks)) for (turn, step), chunks in calls
+        RecordedStep(turn=turn, step=step, chunks=tuple(chunks))
+        for (turn, step, _attempt), chunks in calls
     ]
 
 
