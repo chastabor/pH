@@ -41,6 +41,7 @@ from ph.llm.adapter import LlmError, MediaRoute
 from ph.llm.assembler import BlockAssembler
 from ph.llm.retry import is_transient
 from ph.llm.types import (
+    CONTEXT_WINDOW_EXCEEDED,
     BlockEnd,
     BlockStart,
     Finish,
@@ -1461,16 +1462,105 @@ def test_the_same_overload_retries_whichever_shape_it_arrives_in() -> None:
     """
     from ph_app.adapters._http import wire_error_finish
 
-    overloaded = wire_error_finish("upstream is busy", kind="overloaded_error")
+    def never(_body: str) -> bool:
+        return False
+
+    overloaded = wire_error_finish(
+        {"message": "upstream is busy"},
+        kind="overloaded_error",
+        is_overflow=never,
+        is_missing_file=never,
+    )
     assert overloaded.reason.failure is not None
     assert overloaded.reason.failure.code == "OVERLOADED"
     assert is_transient(overloaded.reason.failure), "the frame form did not retry"
 
     # And the status form it has to agree with.
-    by_status = failure_from_status(529, "overloaded", is_overflow=lambda _b: False)
+    by_status = failure_from_status(529, "overloaded", is_overflow=never)
     assert by_status.failure.code == "OVERLOADED" and is_transient(by_status.failure)
 
-    unknown = wire_error_finish("something new", kind="a_type_nobody_mapped")
+    unknown = wire_error_finish(
+        {"message": "something new"},
+        kind="a_type_nobody_mapped",
+        is_overflow=never,
+        is_missing_file=never,
+    )
     assert unknown.reason.failure is not None
     assert unknown.reason.failure.code == "PROVIDER_ERROR"
     assert not is_transient(unknown.reason.failure)
+
+
+@pytest.mark.parametrize(
+    ("wire", "error"),
+    [
+        ("anthropic", {"type": "invalid_request_error", "message": "prompt is too long: 9000"}),
+        (
+            "openai",
+            {
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "message": (
+                    "This model's maximum context length is 8192 tokens, however you "
+                    "requested 9001 tokens."
+                ),
+            },
+        ),
+    ],
+)
+async def test_an_overflow_inside_a_200_reaches_the_remedy_it_has(
+    wire: str, error: dict[str, Any]
+) -> None:
+    """O1 — the frame path got L3's code map and not L3's judgements.
+
+    `failure_from_status` asks the adapter's own `is_overflow` and can answer
+    `CONTEXT_WINDOW_EXCEEDED`; the frame path could not, so the *same* overflow
+    became `PROVIDER_ERROR` when it arrived inside a 200. That code is the one
+    `compaction.on_request_error` branches on, so the single failure with a real
+    remedy was the one that never got it — the conversation would have fitted
+    after a compaction and no compaction was ever attempted.
+
+    Both wires are covered because each phrases it its own way, which is why the
+    judgement is the adapter's callback rather than anything this module knows:
+    Anthropic says "prompt is too long", the OpenAI-compatible servers name the
+    context length. The frames are the providers' own wording, not a paraphrase
+    — a fixture that invented the prose would pass against a callback that
+    matches nothing real.
+
+    Sabotage: drop `is_overflow=` from either adapter's `wire_error_finish` call
+    and the code falls back to `PROVIDER_ERROR`.
+    """
+    root = Context()
+    credentials = CredentialService(ctx=root)
+    credentials.provide_value("PH_TEST_WIRE_KEY", "sk-test")
+    root.provide("credentials", credentials)
+    adapter: AnthropicAdapter | OpenAiCompatibleAdapter
+    if wire == "anthropic":
+        adapter = AnthropicAdapter(ctx=root, config=AnthropicConfig(api_key_env="PH_TEST_WIRE_KEY"))
+        events = [("error", {"type": "error", "error": error})]
+    else:
+        adapter = OpenAiCompatibleAdapter(
+            ctx=root, profile=ProviderProfile(provider="p", api_key_env="PH_TEST_WIRE_KEY")
+        )
+        events = [("", {"error": error})]
+    adapter.http = _WireStub(events)  # type: ignore[assignment]
+
+    assembler = BlockAssembler()
+    async for chunk in adapter.stream(
+        GenerateOptions(
+            provider="p",
+            model="m",
+            messages=(
+                create_user_message(
+                    content=[{"type": "text", "text": "?"}], source={"kind": "user"}
+                ),
+            ),
+        )
+    ):
+        assembler.push(chunk)
+
+    assert assembler.finish.failure is not None
+    assert assembler.finish.failure.code == CONTEXT_WINDOW_EXCEEDED, (
+        "an overflow inside a 200 is the one failure a compaction can fix"
+    )
+    # And it is deliberately *not* retried: the request cannot fit as it stands.
+    assert not is_transient(assembler.finish.failure)

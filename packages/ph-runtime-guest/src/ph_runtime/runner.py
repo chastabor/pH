@@ -197,6 +197,10 @@ class Runner:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_call_id = 0
         self._run: asyncio.Task[None] | None = None
+        self._restored: dict[str, list[str]] = {}
+        """What the batches of the open restore have reported so far (O3).
+
+        Cleared when the answer goes out, so a second restore starts empty."""
         self._owed: int | None = None
         """The run whose `done` has not been sent yet, or `None` (F7).
 
@@ -431,11 +435,28 @@ class Runner:
             future.set_exception(ToolFailed(as_str(frame.get("name"), "the call"), message))
 
     def _restore(self, frame: dict[str, Any]) -> None:
+        """One batch of a restore, answered once the last one lands (O3).
+
+        The host sends a frame per variable, because a frame carrying the whole
+        namespace is bounded by nothing while each *value* is bounded by
+        `maxSnapshotBytes` — and this end reads with a fixed limit it cannot
+        size from a `boot` frame it has not read yet, so an over-limit line
+        kills the guest rather than failing the restore.
+
+        Accumulated rather than answered per frame: one `restore` is one `done`
+        on the host's side, and a reply per batch would settle its pump on the
+        first one and leave the rest arriving with no run open.
+        """
         variables = frame.get("variables")
         outcome = snapshot_module.restore(
             self.globals, variables if isinstance(variables, list) else []
         )
-        self.channel.send({"type": "done", "id": frame.get("id"), "value": outcome})
+        for key, names in outcome.items():
+            self._restored.setdefault(key, []).extend(names)
+        if frame.get("more"):
+            return
+        answer, self._restored = self._restored, {}
+        self.channel.send({"type": "done", "id": frame.get("id"), "value": answer})
 
     async def _abort_run(self) -> None:
         run = self._run

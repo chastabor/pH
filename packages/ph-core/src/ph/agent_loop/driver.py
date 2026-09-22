@@ -276,10 +276,18 @@ class ReactLoopAgent:
 
     async def _pre_step(self, target: InboxTarget, turn: int, step: int) -> _PreparedStep:
         self._throw_if_canceled()
-        claimed = self.inbox.claim(target, turn)
+        # **Assembled before the batch is claimed** (C4). `claim` is durable —
+        # it appends `agent/inbox/spliced`, which is what takes the messages out
+        # of the inbox for good — and `assemble` is an await that a person's
+        # interrupt can land in. Claimed first, a cancel there consumed the
+        # prompt and ran nothing: the typed line was gone from the inbox and
+        # never reached a model call. Nothing here needs the batch, so the
+        # ordering costs nothing and the claim now happens on the far side of
+        # the last cancel check before the step is proposed.
         assembly = await self.ctx.require(SYSTEM_PROMPT).assemble(self.ctx, agent=self)
         self._throw_if_canceled()
-        context_message = self._project_context(assembly)
+        claimed = self.inbox.claim(target, turn)
+        context_message, context_text = self._project_context(assembly)
         messages = (*claimed, context_message) if context_message is not None else tuple(claimed)
 
         async def inner(request: PreStepRequest) -> PreStepDecision:
@@ -293,28 +301,51 @@ class ReactLoopAgent:
         decision = settled("agent/pre-step", answered, PreStepDecision)
         if decision.kind == "reject":
             return _PreparedStep(kind="reject")
+        if context_message is not None and any(one is context_message for one in decision.messages):
+            # **Advanced where the message survives, not where it was built**
+            # (C3). The snapshot is what stops unchanged context re-invalidating
+            # the cached prefix every step, so moving it forward is a promise
+            # that the model has been told — and a pre-step that rejected, was
+            # canceled, or dropped the message from `messages` made that promise
+            # falsely. An `AGENTS.md` edit then went unseen until the file
+            # changed again, which for a file somebody edits once is never.
+            #
+            # By identity, because a listener may substitute the batch: the
+            # snapshot belongs to *this* text reaching the step, not to some
+            # equal-looking message a row put in its place.
+            self._context_snapshot = context_text
         return _PreparedStep(kind="enter", messages=decision.messages, assembly=assembly)
 
-    def _project_context(self, assembly: PromptAssembly) -> Message | None:
+    def _project_context(self, assembly: PromptAssembly) -> tuple[Message | None, str]:
         """Materialize `context()` providers, but only when the text changed.
 
         This is the whole reason `context()` exists separately from `section`:
         re-sending unchanged context on every step would invalidate the cached
         prefix each turn (A12).
+
+        **Returns the text and advances nothing** (C3). The snapshot is the
+        record of what the model has been *told*, and this only knows what was
+        built; a step that never happened would otherwise mark its context as
+        delivered. `_pre_step` commits it once the message is in the batch the
+        step will run.
+
+        The text is empty whenever the message is `None`, because the caller
+        reads it only alongside a message: the two are one answer, not two. An
+        earlier shape returned the *current* snapshot on the no-op path, which
+        made a stale commit look like a plausible reading of this function.
         """
         sections = render_context_sections(assembly)
         if not sections:
-            return None
+            return None, ""
         text = join_context_sections(sections)
         if text == self._context_snapshot:
-            return None
-        self._context_snapshot = text
+            return None, ""
         return create_user_message(
             content=[{"type": "text", "text": text}],
             source=PluginSource(
                 plugin="ph.system-prompt", form="snapshot", sections=list(sections)
             ),
-        )
+        ), text
 
     async def _turn(self) -> bool:
         phase = self._phase

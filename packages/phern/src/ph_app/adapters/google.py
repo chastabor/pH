@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -438,12 +439,12 @@ class GoogleAdapter:
             session_id=options.session_id,
         )
         media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
-        names = _call_names(options.messages)
-        contents = [
-            content
-            for message in options.messages
-            if (content := _to_google(message, media, handles, names)) is not None
-        ]
+        names: dict[str, str] = {}
+        contents: list[dict[str, Any]] = []
+        for message in options.messages:
+            _remember_calls(message, names)
+            if (content := _to_google(message, media, handles, names)) is not None:
+                contents.append(content)
         body: dict[str, Any] = {"contents": contents}
         if options.system:
             body["systemInstruction"] = {"parts": [{"text": options.system}]}
@@ -482,7 +483,7 @@ class GoogleAdapter:
         return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
-        state = _StreamState()
+        state = _StreamState(minted=_minted_so_far(options.messages))
         body, handles = await self._body(options)
         referenced = list(handles.values())
         model = options.model.removeprefix("models/")
@@ -543,22 +544,58 @@ def _expiry(stated: object) -> int | None:
         return None
 
 
-def _call_names(messages: Sequence[Message]) -> dict[str, str]:
-    """`tool_call_id → name`, so a result can be addressed the way this wire does.
+_MINTED = re.compile(r"^call-(\d+)$")
+"""The shape `_StreamState._part` mints. Read back by `_minted_so_far`."""
 
-    A `functionResponse` carries the function's **name**; pH's `ToolResultBlock`
-    carries the call's **id**, because that is what every other wire pairs on. The
-    map is rebuilt per request from the assistant messages already in history
-    rather than kept as adapter state: a resumed session's first request has no
-    state to have kept, and a map that was only right for calls this process saw
-    would silently mis-address every result after a restart.
+
+def _minted_so_far(messages: Sequence[Message]) -> int:
+    """The highest id this wire has already minted in this conversation (G1).
+
+    **The counter has to span the conversation, not the request.** `_part` mints
+    `call-<n>` from the calls in its own `_StreamState`, which lives for one
+    request — so every turn's first call was `call-1`, and a conversation with
+    three tool-using turns held three different calls under that one id. What
+    that cost is not an adapter detail: pH pairs results to calls by id
+    everywhere, and `persistence.repair` keys its pending-call table on it, so a
+    duplicate is a result attributed to the wrong call in the log as well as on
+    this wire.
+
+    Read off the history rather than kept as adapter state, for the reason the
+    name map below is: a resumed session's first request has no state to have
+    kept. `max` rather than a count, so a compaction that shadowed an earlier
+    turn cannot walk the counter backwards onto an id still in the transcript.
+
+    Ids from another provider are skipped by the pattern — a session that
+    changed models mid-conversation carries whatever that wire used, and
+    continuing *its* numbering is not the job.
     """
-    names: dict[str, str] = {}
+    highest = 0
     for message in messages:
         for block in message.content:
-            if isinstance(block, ToolCallBlock):
-                names[block.id] = block.name
-    return names
+            if isinstance(block, ToolCallBlock) and (found := _MINTED.match(block.id)):
+                highest = max(highest, int(found.group(1)))
+    return highest
+
+
+def _remember_calls(message: Message, names: dict[str, str]) -> None:
+    """Record this message's calls, so a later result resolves to the nearest one.
+
+    A `functionResponse` carries the function's **name**; pH's `ToolResultBlock`
+    carries the call's **id**, because that is what every other wire pairs on.
+
+    **Walked with the conversation rather than folded over it first** (G1). A
+    flat map built in one pass keeps the *last* binding for each id, so a
+    session carrying the duplicate ids this wire used to mint resolved every
+    earlier result to the newest call's name — silently, and in the direction
+    that tells the model a result came from a tool it did not call. Updating as
+    each message is converted means a result sees the calls that precede it,
+    which is the pairing the transcript actually describes. `_minted_so_far`
+    stops new duplicates; this is what makes the ones already in stored sessions
+    resolve correctly.
+    """
+    for block in message.content:
+        if isinstance(block, ToolCallBlock):
+            names[block.id] = block.name
 
 
 def _to_google(
@@ -653,6 +690,10 @@ class _StreamState:
     other two adapters keep, arriving in bigger pieces.
     """
 
+    minted: int = 0
+    """Ids this wire has already minted in this conversation (G1). See
+    `_minted_so_far`: the counter spans the conversation, this state spans one
+    request, and the sum is what makes an id unique."""
     text_index: int | None = None
     reasoning_index: int | None = None
     text: str = ""
@@ -683,7 +724,14 @@ class _StreamState:
             # `status` rather than `type` is this wire's spelling of the same
             # field (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`), so the shared map
             # gets what it needs to say whether a retry could help.
-            return [wire_error_finish(error.get("message"), kind=error.get("status"))]
+            return [
+                wire_error_finish(
+                    error,
+                    kind=error.get("status"),
+                    is_overflow=_is_overflow,
+                    is_missing_file=_is_missing_file,
+                )
+            ]
         out: list[StreamChunk] = []
         raw_usage = payload.get("usageMetadata")
         if isinstance(raw_usage, dict):
@@ -701,13 +749,15 @@ class _StreamState:
         out: list[StreamChunk] = []
         call = part.get("functionCall")
         if isinstance(call, dict):
-            # An id is minted here because this wire has none. `call-<n>` per
-            # request rather than a uuid: it is only ever paired within one
+            # An id is minted here because this wire has none. `call-<n>`
+            # rather than a uuid: it is only ever paired within one
             # conversation, and a stable spelling keeps a replayed session's ids
-            # identical to the live run's.
+            # identical to the live run's. Continued from `minted`, which is
+            # what makes it unique across the conversation rather than only
+            # within this request (G1).
             streamed = _Call(
                 index=self._claim(),
-                id=f"call-{len(self.calls) + 1}",
+                id=f"call-{self.minted + len(self.calls) + 1}",
                 name=as_str(call.get("name")),
                 arguments=json.dumps(call.get("args") or {}),
             )

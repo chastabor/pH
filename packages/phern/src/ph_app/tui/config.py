@@ -35,7 +35,7 @@ from typing import Any, Literal, TypeAlias
 
 from ph.documents import read_document
 from ph.json import as_bool, as_str
-from ph.paths import write_text_under
+from ph.paths import write_atomic
 
 __all__ = [
     "SidebarPosition",
@@ -197,4 +197,6 @@ def load_tui_settings(home: Path) -> TuiSettings:
 
 def save_tui_settings(home: Path, settings: TuiSettings) -> None:
     """Write `$PH_HOME/tui.json`. A `/view` toggle or a sidebar move lands here."""
-    write_text_under(tui_settings_path(home), json.dumps(settings.to_json(), indent=2) + "\n")
+    # Atomically (O2): a second front end reads this while this one writes it,
+    # and half a settings document parses as none.
+    write_atomic(tui_settings_path(home), json.dumps(settings.to_json(), indent=2) + "\n")

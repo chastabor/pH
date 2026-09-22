@@ -600,3 +600,84 @@ async def test_a_failed_request_carries_the_session_the_retry_policy_counts_on(
 
     assert seen, "the failure never reached the waterfall"
     assert seen[0].session is session, "the retry policy has no log to count attempts against"
+
+
+async def test_a_rejected_step_does_not_consume_the_context_change_it_built(
+    mount: MountProfile,
+) -> None:
+    """C3 — the snapshot recorded what was built, not what was delivered.
+
+    `_project_context` advanced `_context_snapshot` the moment it rendered the
+    text, so a pre-step that rejected afterwards left the harness believing the
+    model had been told. The next step compared against the new text, found it
+    unchanged, and sent nothing — an `AGENTS.md` edit went unseen until the file
+    changed *again*, which for a file somebody edits once is never.
+
+    The snapshot exists to keep the cached prefix stable (A12), so it has to
+    mean "delivered"; a step that never ran delivered nothing.
+
+    Sabotage: advance `_context_snapshot` inside `_project_context` and the
+    second turn sends no snapshot.
+    """
+    ctx = await mount()
+    clock = {"value": "09:00"}
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="time", text=lambda _c: clock["value"]))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+
+    await agent.prompt("first")
+    assert len(_plugin_snapshots(session)) == 1
+
+    # The context changes, and the step that would have carried it is refused.
+    clock["value"] = "10:00"
+    refusing = {"on": True}
+
+    async def reject(request: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        if refusing["on"]:
+            refusing["on"] = False
+            return PreStepDecision(kind="reject", reason="not now")
+        return await next_(request)
+
+    ctx.on("agent/pre-step", reject)
+    await agent.prompt("refused")
+    assert len(_plugin_snapshots(session)) == 1, "a rejected step delivered nothing"
+
+    # The next step must still carry it: nothing told the model yet.
+    await agent.prompt("third")
+    assert len(_plugin_snapshots(session)) == 2, "the change was dropped for good"
+
+
+async def test_an_interrupt_while_the_prompt_is_assembled_keeps_the_batch(
+    mount: MountProfile,
+) -> None:
+    """C4 — the inbox was emptied durably before anything could still fail.
+
+    `claim` appends `agent/inbox/spliced`, which is what takes a message out of
+    the inbox for good, and it ran *before* `assemble`. A person's stop landing
+    in that window is noticed by the `_throw_if_canceled` on the far side — so
+    the typed line was gone from the inbox and had never reached a model call:
+    not queued, not answered, not recoverable.
+
+    Cancelled from inside the assemble waterfall, which is the shape of the
+    real thing: a token does not interrupt an `await`, it is read at the next
+    check, and the next check is the one immediately after `assemble`.
+
+    `keep_inbox=True` so the cancel itself is not what preserves the batch —
+    the claim is what this is about.
+
+    Sabotage: claim before `assemble` again and the inbox comes back empty.
+    """
+    ctx = await mount()
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE)
+
+    async def cancel_mid_assembly(_scope: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
+        return await next_()
+
+    ctx.on("system-prompt/assemble", cancel_mid_assembly)
+    await agent.prompt("do not lose me")
+
+    pending = [*agent.inbox.next_turn, *agent.inbox.next_step]
+    assert [block_text(one.content[0]) for one in pending] == ["do not lose me"], (
+        "the interrupt consumed the prompt and ran nothing"
+    )

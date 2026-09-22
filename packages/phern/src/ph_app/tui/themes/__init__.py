@@ -42,7 +42,7 @@ from textual.theme import Theme
 
 from ph.documents import DOCUMENT_FAULTS, decode_document, read_document
 from ph.json import as_seq, as_str
-from ph.paths import write_text_under
+from ph.paths import write_atomic
 
 __all__ = [
     "BUILTIN_THEME_NAMES",
@@ -495,7 +495,10 @@ def save_theme_profile(home: Path, profile: ThemeProfile) -> None:
     written: dict[str, object] = {"default": profile.default, "order": list(profile.order)}
     document = {key: value for key, value in written.items() if value}
     body = yaml.safe_dump(document, sort_keys=False, allow_unicode=True) if document else ""
-    write_text_under(theme_profile_path(home), _PROFILE_HEADER + body)
+    # Atomically (O2), for `save_tui_settings`' reason: the profile is a whole
+    # document, and a reader that meets half of it falls back to the default
+    # theme rather than the one somebody chose.
+    write_atomic(theme_profile_path(home), _PROFILE_HEADER + body)
 
 
 def choose_theme(home: Path, profile: ThemeProfile, name: str) -> ThemeProfile:

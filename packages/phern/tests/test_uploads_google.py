@@ -32,27 +32,34 @@ from ph.llm.types import (
     FILE_EXPIRED,
     BlockEnd,
     Finish,
+    GenerateOptions,
     MediaBlock,
     Message,
     ReasoningBlock,
     TextBlock,
     ToolCallBlock,
+    ToolCallDelta,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
 )
 from ph.seams.attachments import digest_of
+from ph.seams.credentials import CredentialService
 from ph.testing import MountProfile, as_kind, block_text
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.google import (
     MAX_TRANSFERS,
     GoogleAdapter,
-    _call_names,
     _is_missing_file,
     _is_overflow,
+    _minted_so_far,
+    _remember_calls,
     _StreamState,
     _to_google,
     _to_usage,
+)
+from ph_app.adapters.google import (
+    Config as GoogleConfig,
 )
 
 pytestmark = pytest.mark.anyio
@@ -569,9 +576,10 @@ def test_a_tool_result_goes_back_addressed_by_name() -> None:
     answered = create_tool_result_message(
         call_id="call-1", content=[{"type": "text", "text": "the file"}], is_error=False
     )
-    names = _call_names([called, answered])
-
+    names: dict[str, str] = {}
+    _remember_calls(called, names)
     request = _to_google(called, {}, {}, names)
+    _remember_calls(answered, names)
     reply = _to_google(answered, {}, {}, names)
 
     assert request == {
@@ -604,3 +612,99 @@ def test_a_thought_in_history_is_not_sent_back_as_speech() -> None:
 
     assert _to_google(thinking, {}, {}, {}) == {"role": "model", "parts": [{"text": "the answer"}]}
     assert _to_google(only_thought, {}, {}, {}) is None
+
+
+class _CallingWire:
+    """An `HttpClient` whose stream is one `functionCall` part."""
+
+    async def stream_sse(self, url: str, **_: object) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        yield (
+            "",
+            {"candidates": [{"content": {"parts": [{"functionCall": {"name": "write"}}]}}]},
+        )
+
+
+def _turn(call_id: str, name: str, answer: str) -> list[Message]:
+    """One tool-using turn: the call, then the result addressed to it."""
+    return [
+        create_assistant_message(
+            content=[ToolCallBlock(id=call_id, name=name, arguments="{}")],
+            provider="google",
+            model="m",
+        ),
+        create_tool_result_message(
+            call_id=call_id, content=[{"type": "text", "text": answer}], is_error=False
+        ),
+    ]
+
+
+async def test_a_second_tool_turn_does_not_mint_the_first_turns_call_id() -> None:
+    """G1 — the counter lived for one request and the conversation outlived it.
+
+    `_part` minted `call-<n>` from the calls in its own `_StreamState`, which is
+    built per request, so every turn's first call was `call-1`. Two tool-using
+    turns then held two different calls under one id — and pH pairs results to
+    calls by id everywhere, so the damage is not confined to this wire:
+    `persistence.repair` keys its pending-call table on the same string.
+
+    Driven through `stream`, not through `_StreamState` directly: the seed is
+    computed in one place and handed to the state in another, and a test that
+    built the state itself would pin the arithmetic while leaving the wiring —
+    the half that was actually missing — uncovered.
+
+    Sabotage: drop `minted=` from the `_StreamState` in `stream` and the second
+    turn mints `call-1` again.
+    """
+    history: list[Message] = [
+        create_user_message(content=[{"type": "text", "text": "go"}], source={"kind": "user"}),
+        *_turn("call-1", "read", "the file"),
+    ]
+    root = Context()
+    credentials = CredentialService(ctx=root)
+    credentials.provide_value("GEMINI_API_KEY", "test-key")
+    root.provide("credentials", credentials)
+    adapter = GoogleAdapter(ctx=root, config=GoogleConfig())
+    adapter.http = _CallingWire()  # type: ignore[assignment]
+
+    ids = [
+        chunk.id
+        async for chunk in adapter.stream(
+            GenerateOptions(provider="google", model="m", messages=tuple(history))
+        )
+        if isinstance(chunk, ToolCallDelta)
+    ]
+
+    assert ids == ["call-2"], "the second turn re-used the first turn's id"
+    # And a conversation carrying another provider's ids does not continue them.
+    assert _minted_so_far(_turn("toolu_01abc", "read", "x")) == 0
+
+
+def test_a_result_resolves_to_the_call_it_followed_not_the_last_one_named() -> None:
+    """G1's other half — the sessions that already hold duplicate ids.
+
+    `_minted_so_far` stops new collisions; it cannot repair a stored transcript
+    that was written before it. Those resolve correctly now because the name map
+    is walked *with* the conversation rather than folded over it first: a flat
+    map keeps the last binding for each id, so every earlier result took the
+    newest call's name — telling the model a result came from a tool it did not
+    call, which is the one direction that reads as truth.
+
+    Sabotage: build `names` in one pass before the loop and the first response
+    is addressed to `write`.
+    """
+    history: list[Message] = [
+        *_turn("call-1", "read", "the file"),
+        # The duplicate a pre-fix session left behind.
+        *_turn("call-1", "write", "done"),
+    ]
+
+    names: dict[str, str] = {}
+    answered: list[str] = []
+    for message in history:
+        _remember_calls(message, names)
+        entry = _to_google(message, {}, {}, names)
+        for part in (entry or {}).get("parts") or []:
+            if "functionResponse" in part:
+                answered.append(str(part["functionResponse"]["name"]))
+
+    assert answered == ["read", "write"], "a result was addressed to the wrong function"

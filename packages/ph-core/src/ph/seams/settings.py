@@ -21,7 +21,7 @@ from ..cordis import Context, plugin
 from ..documents import read_document
 from ..json import PlainJsonValue, as_obj, thaw_json
 from ..keys import SETTINGS
-from ..paths import default_home_path, write_text_under
+from ..paths import default_home_path, write_atomic
 from ..wire import WireModel
 
 __all__ = ["SettingsService", "apply"]
@@ -78,7 +78,7 @@ class SettingsService:
             node = existing
         node[parts[-1]] = value
         text = json.dumps(values, indent=2, ensure_ascii=False)
-        await anyio.to_thread.run_sync(write_text_under, self.path, text)
+        await anyio.to_thread.run_sync(write_atomic, self.path, text)
 
 
 class Config(WireModel):

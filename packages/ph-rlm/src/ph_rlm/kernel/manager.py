@@ -967,10 +967,35 @@ class Kernel:
         """
         if not self._alive:
             return {"restored": [], "failed": [record.get("var") for record in variables]}
+        if not variables:
+            # `_rehydrate` already declines an empty namespace, so this is not
+            # reachable today — but the loop below sends one frame per variable
+            # and none for none, and the guest answers a restore by *counting*
+            # frames to the one with `more` unset. A caller that ever did reach
+            # here with nothing would wait out `boot_timeout` for an answer that
+            # was never asked for, so the precondition says so where the loop
+            # relies on it rather than a call site away.
+            return {"restored": [], "failed": []}
         self._run_seq += 1
         active = _ActiveRun(run_id=self._run_seq, bindings={})
+        # **One frame per variable, the way `snapshot` comes back** (O3).
+        # `maxSnapshotBytes` bounds each *value*, and a frame carrying the whole
+        # namespace was bounded by nothing — so F3's defect survived in mirror
+        # image on the one direction its fix did not reach. It is worse here
+        # than there: the guest reads with a fixed cap it cannot size from a
+        # `boot` frame it has not read yet, and an over-limit line is a
+        # `ValueError` in its reader, `receive` answers `None`, and the guest
+        # exits. The namespace is lost on the way back in, which is precisely
+        # what restoring it was for.
         async with anyio.create_task_group() as tasks:
-            await self._send(RestoreFrame(id=active.run_id, variables=variables))
+            for index, record in enumerate(variables):
+                await self._send(
+                    RestoreFrame(
+                        id=active.run_id,
+                        variables=[record],
+                        more=index < len(variables) - 1,
+                    )
+                )
             # No `_watch`: a restore has no bindings, so no dispatch can be
             # refused and nothing can start an abort — the clock would have
             # nothing to read. `boot_timeout` is the bound here, and it is one

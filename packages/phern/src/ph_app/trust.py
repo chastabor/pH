@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from ph.paths import resolve_roots, write_text_under
+from ph.paths import resolve_roots, write_atomic
 
 __all__ = ["TRUST_FILE", "TrustAnswer", "TrustStore", "trust_path"]
 
@@ -65,7 +65,11 @@ class TrustStore:
     def trust(self, root: Path) -> None:
         roots = self._load()
         roots.add(str(root.resolve()))
-        write_text_under(self.path, json.dumps({"trusted": sorted(roots)}, indent=2) + "\n")
+        # Atomically (O2): `phern doctor`, a second TUI and the daemon all read
+        # this file without coordination, and a truncating write leaves a
+        # window in which it is neither the old set nor the new one — read
+        # there, an unparseable trust file is an untrusted root.
+        write_atomic(self.path, json.dumps({"trusted": sorted(roots)}, indent=2) + "\n")
 
     def _load(self) -> set[str]:
         try:

@@ -17,6 +17,7 @@ client with its scope.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -63,6 +64,31 @@ def resolve_secret(ctx: Context, env_name: str, provider: str) -> str:
     return value
 
 
+def _refined_code(
+    code: str,
+    body: str,
+    *,
+    is_overflow: Callable[[str], bool],
+    is_missing_file: Callable[[str], bool] | None,
+) -> str:
+    """The wire-specific judgements, applied to a code the shape already gave.
+
+    **One ladder, because two of them is the bug this module is named for.**
+    Both entry points start from a different table — a status from
+    `_STATUS_CODES`, an error frame's `type` from `_WIRE_ERROR_CODES` — and then
+    ask the same two questions of the same body in the same order. Those four
+    lines were written twice, and the order is load-bearing: overflow is applied
+    last because it is the one a caller can act on, and a body that reads as
+    both is an overflow. Kept apart, that ordering lived in two docstrings and
+    nothing checked that they agreed.
+    """
+    if is_missing_file is not None and is_missing_file(body):
+        code = FILE_EXPIRED
+    if is_overflow(body):
+        code = CONTEXT_WINDOW_EXCEEDED
+    return code
+
+
 def failure_from_status(
     status: int,
     body: str,
@@ -83,11 +109,12 @@ def failure_from_status(
     *ours* is a separate question only the caller can answer, and it answers it
     against the code rather than the prose.
     """
-    code = _STATUS_CODES.get(status, "SERVER_ERROR" if status >= 500 else "REQUEST_FAILED")
-    if is_missing_file is not None and is_missing_file(body):
-        code = FILE_EXPIRED
-    if is_overflow(body):
-        code = CONTEXT_WINDOW_EXCEEDED
+    code = _refined_code(
+        _STATUS_CODES.get(status, "SERVER_ERROR" if status >= 500 else "REQUEST_FAILED"),
+        body,
+        is_overflow=is_overflow,
+        is_missing_file=is_missing_file,
+    )
     detail = body[:400] or f"HTTP {status}"
     return LlmError(
         f"provider returned {status}: {detail}",
@@ -162,7 +189,13 @@ vocabulary neither this module nor `TRANSIENT_CODES` owns: retrying something
 this does not understand is the failure mode the narrow map exists to avoid."""
 
 
-def wire_error_finish(message: object, *, kind: object) -> Finish:
+def wire_error_finish(
+    error: Mapping[str, Any],
+    *,
+    kind: object,
+    is_overflow: Callable[[str], bool],
+    is_missing_file: Callable[[str], bool],
+) -> Finish:
     """A provider's mid-stream error frame, as the chunk that ends the turn.
 
     The other half of `failure_from_status`, and here for the same reason. All
@@ -174,18 +207,43 @@ def wire_error_finish(message: object, *, kind: object) -> Finish:
     `"3"`, the other through `as_str`, which falls back to the default. That is
     the drift this module's docstring gives as the reason it exists.
 
+    **The same three judgements as the status path, in the same order** (O1).
+    L3 gave this half a code vocabulary and stopped there, so the two halves
+    answered differently for the one failure with a remedy: a mid-stream
+    `{"code": "context_length_exceeded"}` — which both the Anthropic and
+    OpenAI-compatible wires send — became a flat `PROVIDER_ERROR`, and
+    `compaction.on_request_error` branches on `CONTEXT_WINDOW_EXCEEDED`, so the
+    conversation that would have fitted after a compaction never got one. That
+    is the "two answers for one fact" L3 set out to close, surviving on the
+    other axis. Overflow is applied last because it is the one a caller can act
+    on.
+
+    **The whole frame is offered to the callbacks, not just its message**, which
+    is what makes the two halves classify the same text: the status path hands
+    them the raw body, `code` and all, so a callback written against one cannot
+    quietly mean something else against the other.
+
     `kind` is the frame's own `error.type`, mapped through `_WIRE_ERROR_CODES`
     so a retryable failure is retryable whichever shape it arrived in. Required
-    and keyword-only: a fourth adapter that forgot it would silently get
-    `PROVIDER_ERROR` back — which is exactly the shape this exists to prevent —
-    and two positional `object` parameters holding two strings from the same
-    frame are a swap nothing would catch. A type nobody has mapped still answers
-    `PROVIDER_ERROR`; that is the honest case.
+    and keyword-only, because an adapter that forgot it would silently get
+    `PROVIDER_ERROR` back — which is the shape this exists to prevent. A type
+    nobody has mapped still answers `PROVIDER_ERROR`; that is the honest case.
+
+    **Both predicates are required here**, unlike on the status path, for that
+    same argument: every wire that streams has a file API, so an omitted
+    `is_missing_file` is an oversight rather than a choice, and the silence it
+    buys is an expired file reported as `PROVIDER_ERROR` — a code with no
+    remedy standing in for one that has. `failure_from_status` keeps the
+    default because `post_json` and `get_json` genuinely call it from paths
+    with no file in hand.
     """
-    failure = LlmFailure(
-        message=as_str(message, "provider error"),
-        code=_WIRE_ERROR_CODES.get(as_str(kind), "PROVIDER_ERROR"),
+    code = _refined_code(
+        _WIRE_ERROR_CODES.get(as_str(kind), "PROVIDER_ERROR"),
+        json.dumps(dict(error), default=str),
+        is_overflow=is_overflow,
+        is_missing_file=is_missing_file,
     )
+    failure = LlmFailure(message=as_str(error.get("message"), "provider error"), code=code)
     return Finish(reason=FinishReason(kind="error", failure=failure))
 
 

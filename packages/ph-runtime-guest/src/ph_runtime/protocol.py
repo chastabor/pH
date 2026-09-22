@@ -55,8 +55,15 @@ __all__ = [
     "truncation_marker",
 ]
 
-PROTOCOL_VERSION: Final = 3
-"""Three, since `boot` gained a required `idleCpuSeconds` (M1).
+PROTOCOL_VERSION: Final = 4
+"""Four, since `restore` was split into one frame per variable (O3).
+
+`more` is required — `encode` drops only `None`, so a `bool` default is always
+sent — and a guest that does not read it answers `done` on the first batch,
+leaving the host settled with the namespace half restored and nothing said.
+A required field added, which is the rule the number exists for.
+
+Three, since `boot` gained a required `idleCpuSeconds` (M1).
 
 The rule that moved it to two, applied again: a guest that cannot read the field
 has no budget between runs, and a guest that reads a frame without it raises
@@ -159,7 +166,12 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
     # a budget), so the proxy raises what the program is not offered a chance to
     # catch — and the host aborts the run regardless of whether it tries.
     "reply": (frozenset({"type", "id", "ok"}), frozenset({"value", "message", "name", "fatal"})),
-    "restore": (frozenset({"type", "id", "variables"}), frozenset()),
+    # **One frame per variable, like `snapshot` coming back** (O3).
+    # `maxSnapshotBytes` bounds each *value*; a frame carrying the whole
+    # namespace was bounded by nothing, and the guest reads with a fixed cap
+    # it cannot size from a `boot` frame it has not read yet. `more` is the
+    # batch marker: the guest accumulates and answers on the frame without it.
+    "restore": (frozenset({"type", "id", "variables", "more"}), frozenset()),
     "cancel": (frozenset({"type"}), frozenset({"id"})),
     "shutdown": (frozenset({"type"}), frozenset()),
     "boot-ack": (frozenset({"type", "protocol", "python", "limits"}), frozenset()),

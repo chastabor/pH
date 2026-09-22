@@ -150,6 +150,9 @@ class RestoreFrame(WireModel):
     type: Literal["restore"] = "restore"
     id: int
     variables: list[dict[str, Any]]
+    more: bool = False
+    """Whether another batch follows (O3). The guest accumulates and answers on
+    the frame without it, so one `restore` is still one `done`."""
 
 
 class CancelFrame(WireModel):

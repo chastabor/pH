@@ -37,18 +37,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
 from ph.cordis import DEPLOYMENT
-from ph.json import as_seq
+from ph.json import as_seq, as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.llm.types import text_of
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
 from ph.session.events import SurfaceReplace
 from ph.testing import FAKE_OPTIONS, plugin_payload, prefix_of, user_payload
+from ph_rlm.kernel.manager import Kernel
 from ph_rlm.keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
 from ph_rlm.snapshot import (
     KernelSnapshotPolicy,
@@ -401,3 +403,57 @@ async def test_the_namespace_outlives_a_compaction_of_the_conversation(
 
     assert "28" in text_of(result.content), "the namespace did not survive the summary"
     assert "`frame`" in render_live_variables(session), "the fold lost it"
+
+
+async def test_a_namespace_is_restored_one_variable_to_a_frame(
+    mounted_runtime: MountedRuntime,
+) -> None:
+    """O3 — F3's defect survived in mirror image on the direction it did not reach.
+
+    `maxSnapshotBytes` bounds each snapshotted *value*, and F3 split the way
+    back so one frame carries one of them. The way *in* still carried the whole
+    namespace in a single `restore`, bounded by nothing — and this direction is
+    the worse of the two: the guest reads with a fixed limit it cannot size from
+    a `boot` frame it has not read yet, so an over-limit line is a `ValueError`
+    in its reader, `receive` answers `None`, and the guest exits. The namespace
+    is lost on the way back in, which is what restoring it was for.
+
+    Three variables each near the per-variable cap: one frame each is fine,
+    one frame for all three is three times the cap. The count is asserted as
+    well as the outcome — a host that sent one frame and got away with it on a
+    small namespace would pass on the values alone.
+
+    Sabotage: send a single `RestoreFrame` with every variable and the frame
+    count is 1.
+    """
+    ctx, session, agent = await mounted_runtime(session_id="kernel-state")
+    for index in range(3):
+        await run_cell(
+            ctx,
+            f"kept{index} = 'x' * 100_000",
+            agent=agent,
+            session=session,
+            call_id=f"c{index}",
+        )
+    runtime = ctx.require(PYTHON_RUNTIME)
+    await runtime.close_namespace(agent.id)
+
+    sent: list[int] = []
+    kernel_send = Kernel._send
+
+    async def counting(self: Kernel, frame: Any) -> None:  # noqa: ANN401
+        if getattr(frame, "type", None) == "restore":
+            sent.append(len(frame.variables))
+        await kernel_send(self, frame)
+
+    with patch.object(Kernel, "_send", counting):
+        result = await run_cell(
+            ctx, "len(kept0) + len(kept2)", agent=agent, session=session, call_id="back"
+        )
+
+    assert result.value["value"] == 200_000, "the namespace did not come back"
+    assert sent == [1, 1, 1], f"the restore was not split per variable: {sent}"
+    restored = [event for event in session.events if event.type == "kernel/restored"]
+    # One `restore` is still one report, whatever it took on the wire.
+    names = sorted(as_str(one) for one in as_seq(restored[-1].data["restored"]))
+    assert names == ["kept0", "kept1", "kept2"]

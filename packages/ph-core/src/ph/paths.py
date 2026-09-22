@@ -346,9 +346,19 @@ def is_under(candidate: Path, root: Path) -> bool:
 def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
     """Write (or append) text, creating the parent directory first.
 
-    **Truncates in place.** For a whole document another process reads without
-    coordination, that is a window in which the file is neither the old one nor
-    the new one — use `write_atomic` below instead.
+    **The append path is what this is for now** (O2). `append=False` truncates
+    in place, which for a whole document another process reads without
+    coordination is a window where the file is neither the old one nor the new
+    one; the five JSON and YAML writers that took it — the trust roots, the TUI
+    settings, the theme profile, `$PH_HOME/settings.json` and the sandbox
+    profile drop-in — are on `write_atomic` below, and
+    `tests/test_atomic_documents.py` is the gate that keeps a sixth from
+    arriving. Truncating remains the right call for a file only this process
+    reads, which is why the parameter stays.
+
+    Every production caller left is an append, so the gate reads as a rule
+    about a parameter nobody sets. That is the shape a narrower signature would
+    make unnecessary — see the gate's own docstring for why it is a gate.
 
     Blocking; call it through `anyio.to_thread.run_sync` from async code.
     """

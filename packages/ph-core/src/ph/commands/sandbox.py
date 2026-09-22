@@ -36,7 +36,7 @@ import yaml
 from ..cordis import Context, Row, plugin
 from ..json import JsonObject, thaw_json
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
-from ..paths import resolve_roots, write_text_under
+from ..paths import resolve_roots, write_atomic
 from ..seams._registry import contribute_item
 from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.invariants import contribute_fold_cache
@@ -222,7 +222,7 @@ class _Sandbox:
         path = resolve_roots().profile_dropins(name) / DROPIN
         row = {"id": row_id, "config": thaw_json(config)}
         text = HEADER + yaml.safe_dump([row], sort_keys=False)
-        await anyio.to_thread.run_sync(write_text_under, path, text)
+        await anyio.to_thread.run_sync(write_atomic, path, text)
         return f"Saved to {path}; it applies now and on the next start."
 
 
