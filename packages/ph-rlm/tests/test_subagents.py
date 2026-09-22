@@ -55,6 +55,7 @@ from ph.seams.subagents import (
     default_child_name,
     exhausted_detail,
     family_reach,
+    restarts_since_progress,
     subagent_roster,
 )
 from ph.seams.workspace import workspace_survivors
@@ -1000,7 +1001,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
         "the readmitted child to reach the model",
     )
     assert len(subagent_roster(revived)) == 2, "no child was invented or lost"
-    assert "attempts" not in subagent_roster(revived)[second.id], (
+    assert "resumes" not in subagent_roster(revived)[second.id], (
         "a child that never ran is a first attempt, not a retry"
     )
 
@@ -1031,7 +1032,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     # drive job writes a moment later — so this waits for the fact rather than
     # reading the roster before it exists.
     await _until(
-        lambda: subagent_roster(revived)[interrupted.id].get("attempts") == 1,
+        lambda: restarts_since_progress(subagent_roster(revived)[interrupted.id]) == 1,
         "the restart to be counted",
     )
     assert subagent_roster(revived)[interrupted.id]["starts"] == 2, "one first run, one restart"
@@ -1085,7 +1086,7 @@ async def test_the_ladder_gives_up_and_says_so(
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     spent = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
-    assert subagent_roster(session)[spent.id]["attempts"] == RETRIES
+    assert restarts_since_progress(subagent_roster(session)[spent.id]) == RETRIES
     await _persisted(ctx, session)
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
@@ -1111,7 +1112,9 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
     ctx, session, parent = await delegating(maxConcurrent=1)
     moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
     session.append(USAGE, {"runId": moved.id, "targetSeq": 0, "childUsage": {}, "origin": "probe"})
-    assert subagent_roster(session)[moved.id]["attempts"] == 0, "progress clears the count"
+    row = subagent_roster(session)[moved.id]
+    assert restarts_since_progress(row) == 0, "progress forgives the restarts before it"
+    assert row["resumes"] == RETRIES, "and the roster still says how many there were"
     await _persisted(ctx, session)
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
@@ -1119,11 +1122,11 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
     row = subagent_roster(revived)[moved.id]
     assert child_is_live(row), "a child that got somewhere is owed another attempt"
     assert moved.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
-    # **The restart is still recorded as one**, counting up from the cleared
-    # ladder. Derived from `attempts` instead, this readmit would look like a
-    # first run, write no `resumed`, and the ladder would never count it again.
+    # **The restart is still recorded as one**, counting up from the answer.
+    # Derived from the ladder instead, this readmit would look like a first run,
+    # write no `resumed`, and the ladder would never count it again.
     await _until(
-        lambda: subagent_roster(revived)[moved.id].get("attempts") == 1,
+        lambda: restarts_since_progress(subagent_roster(revived)[moved.id]) == 1,
         "the restart to be counted from a cleared ladder",
     )
 

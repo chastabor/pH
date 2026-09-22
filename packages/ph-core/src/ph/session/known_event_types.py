@@ -30,6 +30,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "request/header",
         "session/end-seed",
         "session/resumed",
+        # A step's model call made again, by the row named in `by` (P1). One per
+        # retry the loop accepted, so `step/start` plus these is every model
+        # call. Ignorable: a reader that skips it undercounts the calls a
+        # ceiling has seen — accounting — and the conversation is unchanged,
+        # since a failed attempt appends no message.
+        "step/retry",
         # A session continued in a fresh file (§7 step 6). The parent's own
         # terminal record, naming the log that carries on — the forward half of
         # a link whose backward half is the child's `parent_session` header.
@@ -225,6 +231,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # assemble a different prompt than the session had. Required, not
         # ignorable: the difference is model-visible.
         "todo/write",
+        # The nudge budget of the procedure `skill-steps` seeded last (D16): the
+        # skill's own `max-nudges`, or `null` for the row's default. Ignorable:
+        # a reader that skips it steers against the profile's budget instead,
+        # which changes how many nudges come *next* — every nudge already sent
+        # is a required `user/message` of its own.
+        "skill-steps/budget",
         # Compaction (P4-03, G4; emitted by `ph-stabilize`'s `compaction-summarize`).
         # The accounting for one landed summary: what it shadowed, what that
         # cost, and which model wrote it. Ignorable — the summary the model
@@ -298,6 +310,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "context/loaded",
         "offload/spilled",
         "offload/input-spilled",
+        "skill-steps/budget",
+        "step/retry",
         "compaction/summarized",
         "compaction/declined",
         "compaction/args-truncated",

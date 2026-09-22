@@ -54,6 +54,7 @@ from pydantic import ValidationError
 from ph.json import JsonObject, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
 from ph.seams.approval import INTERRUPTED
 from ph.seams.subagents import downgrade_text, fold_subagent_event
+from ph.seams.token_meter import reported_usage
 from ph.session import (
     Session,
     SessionEvent,
@@ -998,19 +999,22 @@ class TuiEventAdapter:
 
         **Both**, because usage stopped being outside the roster: the retry
         ladder reads it as the one marker a stalled child cannot forge, so it is
-        in `_ROSTER_TYPES` now and clears `attempts`. Summing it here without
+        in `_ROSTER_TYPES` now and marks `resumesAtLastAnswer`. Summing it here without
         folding it left this panel showing a restart count that only ever went
         up, which is the disagreement `_fold_roster` exists to prevent (A11).
 
-        The sum stays the panel's own: nothing else wants a running total, and
-        the seam does not keep one.
+        The sum stays the panel's own, but the *definition* of a token is not:
+        through `reported_usage` and `TokenUsage.total`, the four-term count
+        `/autonomous` charges `children` with, so the panel and the budget agree
+        on a cache-heavy child (P2 review) — and a malformed payload adds nothing
+        rather than raising.
         """
         self._fold_roster(event)
         row = self.state.subagents.get(as_str(event.data.get("runId")))
         if row is None:
             return
-        usage = as_obj(event.data.get("childUsage"))
-        row.tokens += as_int(usage.get("inputTokens")) + as_int(usage.get("outputTokens"))
+        usage = reported_usage(event, "childUsage")
+        row.tokens += 0 if usage is None else usage.total
 
     def _on_subagent_deleted(self, event: SessionEvent, frame: Frame) -> None:
         """A revoked child. The transcript stays on disk; the row says it went."""
@@ -1194,6 +1198,9 @@ RECORDLESS: frozenset[str] = frozenset(
         "sandbox/mode",
         "step/start",
         "step/end",
+        # A model call made again (P1). The transcript shows the answer, and
+        # `llm/retry` already tells a reader that a transient failure was retried.
+        "step/retry",
         "approval/mode",
         "approval/policy",
         "fs/observed",
@@ -1208,6 +1215,9 @@ RECORDLESS: frozenset[str] = frozenset(
         "client/command",
         "kernel/snapshot",
         "compaction/summarized",
+        # A skill's nudge budget (D16). The nudges it bounds each render as
+        # their own row; the number behind them is the auditor's.
+        "skill-steps/budget",
     }
 )
 """Known types that produce no transcript row on purpose — the auditor's records

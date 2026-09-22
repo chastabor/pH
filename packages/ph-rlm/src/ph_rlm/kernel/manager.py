@@ -76,6 +76,7 @@ from ..keys import PYTHON_RUNTIME
 from .codec import decode, encode
 from .protocol import (
     FD_ENV,
+    FRAME_BYTES_ENV,
     PROTOCOL_VERSION,
     BootFrame,
     CallFrame,
@@ -115,12 +116,10 @@ MAX_FRAME_BYTES = 64 * 1024 * 1024
 """The floor under `frame_cap`. The reason a cap exists at all is that the child
 can write whatever it likes onto fd 3 (C10).
 
-**Not the same number as the guest's read limit any more.** It was, by
-coincidence, until `frame_cap` made this side elastic; `ph_runtime.channel`
-still hard-codes its own 64 MiB and cannot do otherwise, because it opens the
-connection before it has read a `boot` frame to size itself from. The direction
-that leaves exposed is host→guest `restore`, which still carries a whole
-namespace in one frame — recorded as O3 rather than fixed here."""
+**The guest reads with the same derived number** (F8). It opens its connection
+before it has read a `boot` frame, so `start` hands it `frame_cap` through
+`FRAME_BYTES_ENV`, the way the descriptor itself crosses; `ph_runtime.channel`
+keeps its own 64 MiB only for a host that names none."""
 
 
 class KernelLimits(WireModel):
@@ -456,6 +455,9 @@ class Kernel:
                 "NO_COLOR": "1",
                 "PYTHONUNBUFFERED": "1",
                 FD_ENV: str(child_fd),
+                # Both readers from one expression: a variable at the
+                # snapshot limit must fit one frame going *in* as well (F8).
+                FRAME_BYTES_ENV: str(frame_cap(self.limits)),
             }
         )
         # **fd 3 crosses the boundary**, which is the property that makes confining
@@ -982,11 +984,10 @@ class Kernel:
         # `maxSnapshotBytes` bounds each *value*, and a frame carrying the whole
         # namespace was bounded by nothing — so F3's defect survived in mirror
         # image on the one direction its fix did not reach. It is worse here
-        # than there: the guest reads with a fixed cap it cannot size from a
-        # `boot` frame it has not read yet, and an over-limit line is a
-        # `ValueError` in its reader, `receive` answers `None`, and the guest
-        # exits. The namespace is lost on the way back in, which is precisely
-        # what restoring it was for.
+        # than there: an over-limit line is a `ValueError` in the guest's
+        # reader, `receive` answers `None`, and the guest exits — which is why
+        # that reader is sized from `frame_cap` too (F8). The namespace is lost
+        # on the way back in, which is precisely what restoring it was for.
         async with anyio.create_task_group() as tasks:
             for index, record in enumerate(variables):
                 await self._send(

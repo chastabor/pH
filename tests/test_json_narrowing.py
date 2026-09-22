@@ -115,10 +115,12 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph_app/tui/remote.py", "bool(self.held.get(name))"),
         ("ph/agent/inbox.py", 'bool(self._state["next-turn"] or self._state["next-step"])'),
         ("ph/cordis/loader.py", "bool(source.get(target))"),
-        # Not JSON either: a typed stats mapping and the file descriptor the guest
-        # is handed in its environment.
+        # Not JSON either: a typed stats mapping, and the file descriptor and
+        # frame limit (F8) the guest is handed in its environment — the limit's
+        # reader catches the `ValueError` and keeps the default.
         ("ph_text_index/__init__.py", 'int(store.stats()["chunks"])'),
         ("ph_runtime/channel.py", "int(os.environ.get(FD_ENV, PROTOCOL_FD))"),
+        ("ph_runtime/channel.py", 'int(os.environ.get(FRAME_BYTES_ENV, ""))'),
         # **The five boot limits, where a quiet default is the dangerous answer.**
         # `protocol.py` states the rule these keep: "there is exactly one owner of
         # every default: the host. `boot` carries every limit as a required field,

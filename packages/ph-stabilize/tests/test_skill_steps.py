@@ -19,18 +19,29 @@ state — a turn that would end with a startable step left is nudged instead.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import anyio
+import anyio.lowlevel
 import pytest
-from stabilize_helpers import PROFILE, result_text, run_tool_calls, todo_call
+from stabilize_helpers import PROFILE, result_text, row, run_tool_calls, todo_call
 
-from ph.keys import AGENTS, SESSIONS
-from ph.llm.types import text_of
+from ph.agent.types import AgentOptions
+from ph.keys import AGENTS, LLM, SESSIONS
+from ph.llm.replay import tool_call_chunks
+from ph.llm.types import GenerateOptions, text_of
 from ph.seams.skills import discover_skills, rendered_skill
 from ph.session import Session, SurfaceIntent
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool, write_skill
-from ph_stabilize.skill_steps import MAX_NAMED, MAX_NUDGES, seeded, steer_text
+from ph_stabilize.skill_steps import (
+    MAX_NAMED,
+    MAX_NUDGES,
+    nudges_since,
+    seeded,
+    steer_text,
+)
 from ph_stabilize.todo import (
     MAX_TODO_CONTENT,
     MAX_TODOS,
@@ -64,11 +75,28 @@ def _entry(
     return entry
 
 
-async def _reading(mount: MountProfile, tmp_path: Path) -> Any:  # noqa: ANN401
-    """A mounted deployment that has just read a three-step skill."""
-    write_skill(tmp_path, "port", description="port a row", extra=STEPS, body="Do it.")
+async def _reading(
+    mount: MountProfile,
+    tmp_path: Path,
+    *,
+    skill_budget: int | None = None,
+    profile_budget: int | None = None,
+) -> Any:  # noqa: ANN401
+    """A mounted deployment that has just read a three-step skill.
+
+    `skill_budget` is the skill's own `max-nudges`; `profile_budget` the row's
+    `maxNudges`. Either left out says nothing, so the default applies.
+    """
+    extra = STEPS if skill_budget is None else f"{STEPS}max-nudges: {skill_budget}\n"
+    write_skill(tmp_path, "port", description="port a row", extra=extra, body="Do it.")
+    planning, steering = ROWS
+    if profile_budget is not None:
+        steering = {**steering, "config": {"maxNudges": profile_budget}}
     ctx = await mount(
-        *ROWS, {"id": "skills-progressive", "config": {"paths": [str(tmp_path)]}}, profile=PROFILE
+        planning,
+        steering,
+        {"id": "skills-progressive", "config": {"paths": [str(tmp_path)]}},
+        profile=PROFILE,
     )
     session = ctx.require(SESSIONS).create("procedure")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -323,7 +351,7 @@ class _Stopping:
     thing `MAX_NUDGES` exists to bound and cannot be used to test itself.
 
     `steer` **appends what the driver would append**, and that is load-bearing
-    rather than decorative: `nudges_since_plan` folds those very messages out of
+    rather than decorative: `nudges_since` folds those very messages out of
     the log, so a stub that only collected them in a list would make the
     stand-down untestable and would model the boundary wrongly.
     """
@@ -335,6 +363,14 @@ class _Stopping:
     def steer(self, message: Any) -> None:  # noqa: ANN401
         self.steers.append(message)
         self.session.append("user/message", message.to_wire(), SurfaceIntent("append"))
+
+
+async def _nudges(ctx: Any, stopping: _Stopping, tries: int) -> int:  # noqa: ANN401
+    """How many of `tries` turn-stopping boundaries the row steered at."""
+    before = len(stopping.steers)
+    for _ in range(tries):
+        await ctx.serial("agent/turn-stopping", stopping, 1)
+    return len(stopping.steers) - before
 
 
 async def test_a_turn_trying_to_end_with_a_procedure_unfinished_is_steered(
@@ -397,16 +433,14 @@ async def test_the_row_stands_down_when_its_nudges_change_nothing(
     life of the session. Counted since the list last *changed*, which makes it a
     stall detector rather than a quota.
 
-    Sabotage: drop the `nudges_since_plan` check and the loop below never stops
+    Sabotage: drop the `nudges_since` check and the loop below never stops
     steering.
     """
     ctx, session, _agent = await _reading(mount, tmp_path)
-    stopping = _Stopping(session)
 
-    for _ in range(MAX_NUDGES + 2):
-        await ctx.serial("agent/turn-stopping", stopping, 1)
-
-    assert len(stopping.steers) == MAX_NUDGES, "it stops after the plan has not moved"
+    assert await _nudges(ctx, _Stopping(session), MAX_NUDGES + 2) == MAX_NUDGES, (
+        "it stops after the plan has not moved"
+    )
 
 
 async def test_progress_on_the_plan_earns_more_nudges(mount: MountProfile, tmp_path: Path) -> None:
@@ -414,8 +448,7 @@ async def test_progress_on_the_plan_earns_more_nudges(mount: MountProfile, tmp_p
     ceiling a stall detector rather than a budget."""
     ctx, session, _agent = await _reading(mount, tmp_path)
     stopping = _Stopping(session)
-    for _ in range(MAX_NUDGES):
-        await ctx.serial("agent/turn-stopping", stopping, 1)
+    await _nudges(ctx, stopping, MAX_NUDGES)
 
     steps = steps_of(todos_of(session))
     await run_tool_calls(
@@ -427,6 +460,113 @@ async def test_progress_on_the_plan_earns_more_nudges(mount: MountProfile, tmp_p
 
     assert len(stopping.steers) == MAX_NUDGES + 1
     assert "port the row" in text_of(stopping.steers[-1].content), "and it points at the next one"
+
+
+async def test_a_profile_sets_the_nudge_budget(mount: MountProfile, tmp_path: Path) -> None:
+    """D16 — the ceiling is the deployment's to choose, not a constant.
+
+    Sabotage: compare against `MAX_NUDGES` in `keep_going` again and this
+    steers three times.
+    """
+    ctx, session, _agent = await _reading(mount, tmp_path, profile_budget=1)
+
+    assert await _nudges(ctx, _Stopping(session), 5) == 1
+
+
+async def test_a_skill_budget_overrides_the_profile(mount: MountProfile, tmp_path: Path) -> None:
+    """D16 — the author knows what a half-finished run of their procedure is worth.
+
+    And it outlives the model's next plan: `write_todos` replaces the seeding
+    `todo/write`, which is why the budget is a record of its own. Sabotage: drop
+    the `skill-steps/budget` append, or read the budget off the latest
+    `todo/write`, and one of the two counts below falls to the profile's 1.
+    """
+    ctx, session, _agent = await _reading(mount, tmp_path, skill_budget=4, profile_budget=1)
+    stopping = _Stopping(session)
+    assert await _nudges(ctx, stopping, 6) == 4
+
+    steps = steps_of(todos_of(session))
+    await run_tool_calls(
+        ctx,
+        session,
+        todo_call("moved", [_entry(steps[0], "completed"), *(_entry(one) for one in steps[1:])]),
+    )
+
+    assert await _nudges(ctx, stopping, 6) == 4, "still the skill's budget after a re-plan"
+
+
+async def test_a_skill_budget_of_zero_seeds_but_never_steers(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """D16 — "a partial result is fine" is a thing an author can say."""
+    ctx, session, _agent = await _reading(mount, tmp_path, skill_budget=0)
+
+    assert steps_of(todos_of(session)) == STEP_TEXTS, "the procedure is still the plan"
+    assert await _nudges(ctx, _Stopping(session), 3) == 0
+
+
+async def test_a_later_procedure_without_a_budget_uses_the_profile(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """D16 — the procedure seeded last governs, and saying nothing means the
+    profile's budget rather than whatever the skill before it asked for."""
+    write_skill(tmp_path, "notes", description="take notes", extra="steps:\n  - write it down\n")
+    ctx, session, agent = await _reading(mount, tmp_path, skill_budget=5, profile_budget=1)
+    await run_tool(ctx, "skill", {"name": "notes"}, agent=agent, session=session)
+
+    assert await _nudges(ctx, _Stopping(session), 5) == 1
+
+
+@pytest.mark.parametrize("budget", [0, 2])
+async def test_a_spent_ceiling_steers_for_exactly_the_nudge_budget(
+    mount: MountProfile, tmp_path: Path, budget: int
+) -> None:
+    """D16 — a spent `limits` ceiling against an unfinished procedure, decided.
+
+    `_turn` re-reads the inbox after `agent/turn-stopping`, so a steer keeps a
+    turn alive past a ceiling that concluded it: the next step's call is denied,
+    concludes again, and is steered again. That is left as it is, on purpose —
+    "the budget is spent" and "the procedure is unfinished" are different facts,
+    and the skill is what knows whether its outstanding steps are load-bearing.
+    What bounds it is the nudge budget (the skill's own, else the profile's), so
+    the model calls spent past the ceiling are exactly that budget.
+
+    Driven through a real turn, because the interaction lives in the driver: a
+    model that never marks a step done, re-reading the skill every step (a read
+    that seeds nothing, so it cannot reset the count). Under a deadline, so a
+    steer that never stands down fails rather than hangs — a cap on the
+    adapter cannot do that, because whatever it answers instead is steered too.
+    """
+    write_skill(tmp_path, "port", description="port a row", extra=f"{STEPS}max-nudges: {budget}\n")
+    ctx = await mount(
+        *ROWS,
+        row("limits", toolCalls={"turnLimit": 1, "exit": "end"}),
+        {"id": "skills-progressive", "config": {"paths": [str(tmp_path)]}},
+        profile=PROFILE,
+    )
+    calls = 0
+
+    class Stubborn:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            nonlocal calls
+            calls += 1
+            # A checkpoint, so the deadline below can cancel a loop that never
+            # stops asking.
+            await anyio.lowlevel.checkpoint()
+            for chunk in tool_call_chunks("", "skill", '{"name": "port"}'):
+                yield chunk
+
+    ctx.require(LLM).register_adapter(["stubborn"], Stubborn())
+    session = ctx.require(SESSIONS).create("capped")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="stubborn", model="m"))
+
+    with anyio.fail_after(10):
+        await agent.prompt("port it")
+
+    # One call inside the ceiling, one that crosses it and concludes the turn,
+    # then one more per nudge.
+    assert calls == 2 + budget
+    assert nudges_since(session, -1) == budget, "every call past the ceiling was a nudge's"
 
 
 def test_a_step_too_long_to_be_a_todo_entry_seeds_nothing() -> None:

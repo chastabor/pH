@@ -44,6 +44,7 @@ from ._json import as_str
 
 __all__ = [
     "FD_ENV",
+    "FRAME_BYTES_ENV",
     "FRAME_FIELDS",
     "GUEST_FRAMES",
     "HOST_FRAMES",
@@ -117,6 +118,15 @@ number it has in the *parent*, and re-numbering it to 3 in the child would need
 a `preexec_fn` — which is unsafe in a threaded parent. So the host passes the
 number instead of moving the descriptor."""
 
+FRAME_BYTES_ENV: Final = "PH_RUNTIME_FRAME_BYTES"
+"""The largest frame the guest's reader will assemble, sized by the host (F8).
+
+The host derives it from `maxSnapshotBytes` — its own `frame_cap` — so both
+readers are sized by one expression. In the environment rather than in `boot`
+because the reader's limit is fixed when the connection opens, before any frame
+has been read; `FD_ENV` crosses the same way for the same reason. Absent, the
+guest keeps `channel.MAX_FRAME_BYTES`, which is what an older host expects."""
+
 NAMESPACE_ENV: Final = "PH_NAMESPACE_ID"
 
 HOST_FRAMES: Final = frozenset({"boot", "run", "reply", "restore", "cancel", "shutdown", "ping"})
@@ -168,9 +178,10 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
     "reply": (frozenset({"type", "id", "ok"}), frozenset({"value", "message", "name", "fatal"})),
     # **One frame per variable, like `snapshot` coming back** (O3).
     # `maxSnapshotBytes` bounds each *value*; a frame carrying the whole
-    # namespace was bounded by nothing, and the guest reads with a fixed cap
-    # it cannot size from a `boot` frame it has not read yet. `more` is the
-    # batch marker: the guest accumulates and answers on the frame without it.
+    # namespace was bounded by nothing, and the guest's reader is sized before
+    # any frame arrives (`FRAME_BYTES_ENV`, F8) — so one value per frame is what
+    # that size can promise to hold. `more` is the batch marker: the guest
+    # accumulates and answers on the frame without it.
     "restore": (frozenset({"type", "id", "variables", "more"}), frozenset()),
     "cancel": (frozenset({"type"}), frozenset({"id"})),
     "shutdown": (frozenset({"type"}), frozenset()),

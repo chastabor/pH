@@ -34,16 +34,18 @@ still the model's word. Gates that check the world are `ctx.goals` and
 from __future__ import annotations
 
 import logging
+from itertools import islice
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context, plugin
-from ph.json import as_obj, as_str
+from ph.json import as_int, as_obj, as_str
 from ph.llm.types import PluginSource, create_user_message
 from ph.session import Session
 from ph.text import count_of
+from ph.wire import WireModel
 
 from .todo import (
     MAX_TODOS,
@@ -57,12 +59,12 @@ from .todo import (
     todos_of,
 )
 
-__all__ = ["apply", "nudges_since_plan", "seeded", "steer_text"]
+__all__ = ["Config", "apply", "latest_skill_budget", "nudges_since", "seeded", "steer_text"]
 
 log = logging.getLogger("ph_stabilize.skill_steps")
 
 PLUGIN = "ph_stabilize.skill_steps"
-"""This row's name on the messages it steers with — the key `nudges_since_plan`
+"""This row's name on the messages it steers with — the key `nudges_since`
 reads them back by, so the tag and the fold cannot drift apart."""
 
 MAX_NAMED = 3
@@ -73,7 +75,7 @@ pointer, not a second copy of the plan, and a twenty-line reminder every time a
 turn tries to end is how a steer becomes noise the model learns to skim."""
 
 MAX_NUDGES = 3
-"""How many times this row will steer without the plan moving.
+"""How many times this row will steer without the plan moving, by default.
 
 **The ceiling the shape this row copies has and it did not.** `/autonomous` is
 the same listener on the same boundary and carries four — continuations, turns,
@@ -85,7 +87,27 @@ step done is steered for as long as the session lives.
 Counted **since the list last changed**, not since the turn began, which is what
 makes it a stall detector rather than a quota: any `write_todos` — marking a step
 done, adding an entry, re-planning — resets it, so a run making progress is never
-cut off, and one going in circles stands down and lets the person see the list."""
+cut off, and one going in circles stands down and lets the person see the list.
+
+The default, not the rule (D16): a profile sets its own with `maxNudges`, and a
+skill may set one for its procedure with `max-nudges` — see `keep_going`."""
+
+BUDGET = "skill-steps/budget"
+"""The event recording the budget of the procedure seeded last (D16).
+
+A record of its own rather than a field on the seeding `todo/write`: the model's
+next `write_todos` replaces that event, so a budget stored on it would last
+exactly one plan. Nor a field on the seeded entries, which `tool-todo` echoes
+back to the model on every write — a harness number paid for in tokens forever."""
+
+
+class Config(WireModel):
+    """Row config: the nudge budget a profile gives every procedure (D16)."""
+
+    max_nudges: int = Field(default=MAX_NUDGES, ge=0)
+    """Nudges without the plan moving before the row stands down. A skill's own
+    `max-nudges` overrides it for that skill's procedure; `0` seeds steps but
+    never steers."""
 
 
 def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, Any]] | None:
@@ -178,8 +200,23 @@ def steer_text(outstanding: list[str], blocked: int) -> str:
     )
 
 
-def nudges_since_plan(session: Session) -> int:
-    """How many times this row has steered since the todo list last changed.
+def latest_skill_budget(session: Session) -> int | None:
+    """The budget the latest seeded skill recorded, or `None` — a fact, not a rule.
+
+    `None` both when no skill has seeded and when the latest one set no budget
+    (it records `null`). Which record governs, and what `None` falls back to, is
+    `keep_going`'s to decide (P4). Folded from the log, for `nudges_since`'s
+    reason: a budget held on the listener would be gone after a resume.
+    """
+    event = session.latest(BUDGET)
+    if event is None:
+        return None
+    recorded = event.data.get("maxNudges")
+    return None if recorded is None else as_int(recorded)
+
+
+def nudges_since(session: Session, seq: int, *, up_to: int | None = None) -> int:
+    """How many times this row has steered after `seq` — a count, not a window.
 
     Folded from the log rather than counted on the row, for P5-04's reason: a
     counter on a listener starts at zero after a resume or a passivation, and the
@@ -187,20 +224,29 @@ def nudges_since_plan(session: Session) -> int:
     lands in the log as a `user/message` carrying this row's `PluginSource`, so
     the tag *is* the record — there is nothing to keep in step with it.
 
-    From the tail: the previous `todo/write` is at most a few turns back, and
-    this is only asked when the row is about to steer.
+    Where the count starts is the caller's rule (P4): it was "since the todo list
+    last changed", written in here, where it read as a fact about the log rather
+    than the stall detector's policy. `up_to` stops the walk once the count
+    reaches it — the only question `keep_going` asks is "is the budget spent",
+    and a run that stood down (or a skill whose budget is `0`) would otherwise
+    rescan an ever-growing tail on every turn.
     """
-    previous = session.latest("todo/write")
-    return sum(
-        1
-        for event in session.events_from((previous.seq if previous else -1) + 1)
-        if event.type == "user/message"
+    # By index through `Session.at`, not `events_from`: that copies the whole
+    # tail before the first event is looked at, so `up_to` saved the filtering
+    # and not the walk — and the tail of a run that stood down only grows.
+    events = (session.at(index) for index in range(seq + 1, session.seq))
+    nudges = (
+        event
+        for event in events
+        if event is not None
+        and event.type == "user/message"
         and as_str(as_obj(event.data.get("source")).get("plugin")) == PLUGIN
     )
+    return sum(1 for _ in islice(nudges, up_to))
 
 
-@plugin("skill-steps")
-async def apply(ctx: Context, config: None) -> None:
+@plugin("skill-steps", config=Config)
+async def apply(ctx: Context, config: Config) -> None:
     """Seed a read skill's steps, and object while they are unfinished.
 
     No `inject`: the body registers two listeners and touches no service. `inject`
@@ -225,6 +271,11 @@ async def apply(ctx: Context, config: None) -> None:
         # is now this" — and a second type would give `todos_of` two things to
         # fold and the sidebar two things to draw.
         session.append("todo/write", {"todos": grown})
+        # Recorded even when `null`: that is what hands a later procedure back
+        # to the profile's budget rather than the previous skill's.
+        session.append(
+            BUDGET, {"skill": payload["skill"].name, "maxNudges": payload.get("max_nudges")}
+        )
 
     async def keep_going(agent: AgentDriver, turn: int) -> None:
         session = agent.session
@@ -236,12 +287,23 @@ async def apply(ctx: Context, config: None) -> None:
         outstanding = outstanding_steps(session)
         if not outstanding:
             return
-        if nudges_since_plan(session) >= MAX_NUDGES:
-            # Stood down rather than steering into a wall. Any `write_todos`
-            # resets this, so the run that is making progress never reaches it.
+        # The stall detector's two rules, here where they are applied (P4).
+        # **The procedure seeded last governs**, because a nudge names whatever
+        # is startable and cannot be charged to one skill — and the latest read
+        # is the procedure the model was most recently asked to follow. One that
+        # set no budget hands the row back to the profile's rather than
+        # inheriting the one before it.
+        recorded = latest_skill_budget(session)
+        budget = config.max_nudges if recorded is None else recorded
+        # **Counted since the plan last changed**, so any `write_todos` — a step
+        # marked done, an entry added, a re-plan — earns fresh nudges, and only
+        # a run going in circles reaches the budget.
+        plan = session.latest("todo/write")
+        if nudges_since(session, plan.seq if plan else -1, up_to=budget) >= budget:
+            # Stood down rather than steering into a wall.
             log.info(
                 "ph_stabilize.skill_steps: %s with the plan unchanged; standing down",
-                count_of(MAX_NUDGES, "nudge"),
+                count_of(budget, "nudge"),
             )
             return
         todos = todos_of(session)

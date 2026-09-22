@@ -99,6 +99,7 @@ def test_a_skill_that_says_nothing_extra_is_unchanged(tmp_path: Path) -> None:
 
     assert found is not None
     assert (found.version, found.argument_hint, found.allowed_tools) == ("", "", [])
+    assert found.max_nudges is None, "no budget of its own: the row's applies"
     assert render_catalog([found]).endswith("- **notes** — does a thing")
 
 
@@ -112,6 +113,9 @@ def test_a_skill_that_says_nothing_extra_is_unchanged(tmp_path: Path) -> None:
             "allowed-tools:\n" + "".join(f"  - t{n}\n" for n in range(MAX_ALLOWED_TOOLS + 1)),
             "more tools than the cap",
         ),
+        ("max-nudges: -1", "a negative budget"),
+        ("max-nudges: three", "a budget that is not a number"),
+        ("max-nudges: true", "a boolean, which is an int to isinstance"),
     ],
 )
 def test_a_malformed_optional_field_refuses_the_skill(tmp_path: Path, extra: str, why: str) -> None:
@@ -123,6 +127,14 @@ def test_a_malformed_optional_field_refuses_the_skill(tmp_path: Path, extra: str
     reach a prompt.
     """
     assert read_skill(_front(tmp_path, "risky", extra)) is None, why
+
+
+def test_a_skill_may_set_its_own_nudge_budget(tmp_path: Path) -> None:
+    """D16 — including `0`, which is a budget and not an absence of one."""
+    found = read_skill(_front(tmp_path, "survey", "max-nudges: 0"))
+
+    assert found is not None
+    assert found.max_nudges == 0
 
 
 def test_a_skill_is_discovered_from_its_frontmatter(tmp_path: Path) -> None:

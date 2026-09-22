@@ -2,13 +2,15 @@
 
 Upstream's `ModelCallLimitMiddleware` and `ToolCallLimitMiddleware`, plus the
 consecutive-failure breaker the companion plan asks for, expressed as listeners
-on seams that already exist: `agent/pre-step` rejects a step, `tools/pre-execute`
-denies a call. D12 again — none of it is a parameter on the driver.
+on seams that already exist: `agent/pre-step` rejects a step,
+`agent/request-error` refuses a retry, `tools/pre-execute` denies a call. D12
+again — none of it is a parameter on the driver.
 
 **The counts are a fold over the log, not a counter in memory.** A limit that
 lives in a field is a limit a resume forgets, and "how many model calls has this
-session made" is exactly the question the log already answers: `step/start` per
-model call, `tool/call` per tool call, `turn/start` as the reset. Folded through
+session made" is exactly the question the log already answers: `step/start` for
+a step's first model call and `step/retry` for each one made again, `tool/call`
+per tool call, `turn/start` as the reset. Folded through
 `SessionFoldCache`, which folds only the slice appended since the last read —
 this runs on every step and every call, and a session's log is mostly chunks.
 
@@ -41,7 +43,12 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from ph.agent.types import PreStepDecision, PreStepRequest
+from ph.agent.types import (
+    PreStepDecision,
+    PreStepRequest,
+    RequestErrorAction,
+    RequestFailure,
+)
 from ph.cordis import Context, Next, plugin
 from ph.json import as_bool, as_str
 from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
@@ -165,8 +172,12 @@ class ModelCallLimits(CallBudget):
     exit: Literal["end", "error"] = "end"
     """`end` closes the turn as `blocked` and records why; `error` raises.
 
+    A retry is a model call too (P1): one the ceiling refuses leaves the failure
+    standing, so the turn ends with the provider's own error and the record says
+    why it was not retried.
+
     No `continue`, and upstream has none either: a model call that is not made
-    cannot be continued past — the step *is* the call."""
+    cannot be continued past."""
 
 
 class ToolCallLimits(CallBudget):
@@ -281,8 +292,10 @@ class Config(WireModel):
 class Counts:
     """Everything the limits ask, folded from one pass over the log."""
 
-    session_steps: int = 0
-    turn_steps: int = 0
+    session_calls: int = 0
+    turn_calls: int = 0
+    """Model calls: each step's first (`step/start`) and every retry of one
+    (`step/retry`, P1) — the same fact at two doors, so one count."""
     session_tools: int = 0
     turn_tools: int = 0
     session_children: int = 0
@@ -302,6 +315,7 @@ _COUNTED = frozenset(
     {
         "turn/start",
         "step/start",
+        "step/retry",
         *TOOL_DISPATCH_EVENT_TYPES,
         "tool/result",
         "tool/code-dispatch",
@@ -337,7 +351,7 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
         # is entirely `assistant/chunk`. `session.seq` bumps on every event, so
         # the cache misses on almost every read while a model is streaming.
         return previous
-    session_steps, turn_steps = previous.session_steps, previous.turn_steps
+    session_calls, turn_calls = previous.session_calls, previous.turn_calls
     session_tools, turn_tools = previous.session_tools, previous.turn_tools
     session_children, turn_children = previous.session_children, previous.turn_children
     per_session = dict(previous.per_tool_session)
@@ -347,7 +361,7 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
 
     for event in slice_:
         if event.type == "turn/start":
-            turn_steps = 0
+            turn_calls = 0
             turn_tools = 0
             turn_children = 0
             per_turn = {}
@@ -358,9 +372,9 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
             # end, and that entry is then copied on every fold for the session's
             # life (~4.7 µs at zero, ~8.8 µs at two thousand).
             names = {}
-        elif event.type == "step/start":
-            session_steps += 1
-            turn_steps += 1
+        elif event.type in ("step/start", "step/retry"):
+            session_calls += 1
+            turn_calls += 1
         elif event.type in TOOL_DISPATCH_EVENT_TYPES:
             name = as_str(event.data.get("name"))
             # `callId` for a model's call, `subCallId` for a dispatch: the id the
@@ -384,8 +398,8 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
             session_children += 1
             turn_children += 1
     return Counts(
-        session_steps=session_steps,
-        turn_steps=turn_steps,
+        session_calls=session_calls,
+        turn_calls=turn_calls,
         session_tools=session_tools,
         turn_tools=turn_tools,
         session_children=session_children,
@@ -482,37 +496,80 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------- model calls --
 
-    async def on_pre_step(
-        request: PreStepRequest,
-        next_: Next[PreStepDecision],
-    ) -> PreStepDecision:
+    def _model_breach(session: Session, **detail: object) -> str | None:
+        """The model-call ceiling's sentence if the next call would pass it, recorded.
+
+        `None` while there is room. One check for both doors a model call comes
+        through — a new step and a retry — so how a breach is recorded cannot
+        come to differ between them, as the tool limit's did before D7.
+
+        **Recorded before it is raised** (N2). D7 made this move on the tool
+        limit and left its sibling as it was, so the one posture that surfaces
+        the breach most loudly to the model was still the one that left no
+        durable trace of it — a raise unwinds the turn, and an unwound turn
+        appends nothing.
+        """
         settings = config.model_calls
-        session = request.session
         if settings.unlimited:
-            return await next_(request)
+            return None
         current = counts.read(session)
-        exceeded = _breaches(settings, current.turn_steps, current.session_steps)
+        exceeded = _breaches(settings, current.turn_calls, current.session_calls)
         if not exceeded:
-            return await next_(request)
+            return None
         message = MODEL_LIMIT_MESSAGE.format(limits=", ".join(exceeded))
-        # **Recorded before it is raised** (N2). D7 made this move on the tool
-        # limit twelve lines down and left its sibling as it was, so the one
-        # posture that surfaces the breach most loudly to the model was still
-        # the one that left no durable trace of it — a raise out of
-        # `agent/pre-step` unwinds the turn, and an unwound turn appends
-        # nothing.
         _record(
             session,
             "model-calls",
             settings.exit,
-            {"turn": current.turn_steps, "session": current.session_steps, "message": message},
+            {
+                "turn": current.turn_calls,
+                "session": current.session_calls,
+                "message": message,
+                **detail,
+            },
         )
         if settings.exit == "error":
             raise ModelCallLimitExceeded(message)
+        return message
+
+    async def on_pre_step(
+        request: PreStepRequest,
+        next_: Next[PreStepDecision],
+    ) -> PreStepDecision:
+        message = _model_breach(request.session)
+        if message is None:
+            return await next_(request)
         # Vetoed: returning without `next_` is how a policy row owns this
         # decision, and it stops every later listener doing work for a step that
         # will not happen.
         return PreStepDecision(kind="reject", reason=message)
+
+    async def on_request_error(
+        failure: RequestFailure, next_: Next[RequestErrorAction | None]
+    ) -> RequestErrorAction | None:
+        """A retry is a model call, so a granted one is held to the ceiling (P1).
+
+        `agent/pre-step` fires once per step, and a retried step makes its calls
+        without passing it again — so a ceiling asked only there bounded steps,
+        and a step retried three times cost one. This is the seam where a retry
+        is decided, whichever row grants it.
+
+        **The rest of the chain decides first; this refuses what it granted.**
+        Asked before `next_`, the ceiling would record a refusal for a failure
+        nobody meant to retry — an auth error at the limit read as "not retried
+        because of the ceiling". Prepended so it *wraps* the chain: `llm-retry`
+        answers without calling on when it grants, so a listener behind it never
+        sees the retry. Vetoing afterwards costs nothing, because the backoff is
+        the loop's to sleep, not the row's.
+
+        Refusing means returning `None`: the failure stands and the turn ends
+        with the provider's own error, recorded beside it as the reason it was
+        not retried. `exit: error` raises instead, as `on_pre_step` does.
+        """
+        action = await next_(failure)
+        if action is None or action.kind != "retry":
+            return action
+        return action if _model_breach(failure.session, retry=True) is None else None
 
     # -------------------------------------------------------- tool calls --
 
@@ -656,8 +713,8 @@ async def apply(ctx: Context, config: Config) -> None:
             return None
         current = counts.read(session)
         gauges = (
-            ("steps", current.turn_steps, model.turn_limit),
-            ("steps", current.session_steps, model.session_limit),
+            ("calls", current.turn_calls, model.turn_limit),
+            ("calls", current.session_calls, model.session_limit),
             ("tools", current.turn_tools, tools.turn_limit),
             ("tools", current.session_tools, tools.session_limit),
         )
@@ -680,6 +737,7 @@ async def apply(ctx: Context, config: Config) -> None:
         status.register(StatusField(id="limits", read=_reading, order=10), scope=ctx)
 
     ctx.on("agent/pre-step", on_pre_step)
+    ctx.on("agent/request-error", on_request_error, prepend=True)
     ctx.on("tools/pre-execute", on_pre_execute)
 
     # ----------------------------------------------------------- children --

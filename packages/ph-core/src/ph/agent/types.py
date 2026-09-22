@@ -12,6 +12,7 @@ a listener's signature *is* the contract: the limits and permissions plugins
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
@@ -198,6 +199,26 @@ class RequestFailure:
     step: int
     provider: str
     failure: LlmFailure
+    retries_by: Mapping[str, int]
+    """How many times the loop has already retried this step, by the row that asked (G13).
+
+    Keyed by the plugin whose listener granted each retry, as
+    `Context.waterfall_attributed` reports it — `""` for a listener outside any
+    plugin. Counted by the driver, because every retry passes through it.
+    Handed to the policy rather than re-derived there, so a row budgets against
+    its own retries (`retries_by["llm-retry"]`) or against all of them
+    (`retries`) by choosing a number, not by folding a log only some rows write.
+
+    **Per step, per agent, by construction**: the count is a local in the
+    driver's retry loop, so two subagents at the same coordinates cannot share
+    it (I4) — the bug a count held on the listener had. Nothing is lost on a
+    resume either, because a resumed session starts a new turn and never
+    re-enters the step it was retrying."""
+
+    @property
+    def retries(self) -> int:
+        """Every retry this step has had, whichever row asked."""
+        return sum(self.retries_by.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +227,9 @@ class RequestErrorAction:
 
     kind: Literal["retry"]
     delay_ms: int = 0
+    """How long the loop waits before the retry. The loop sleeps it, once the
+    waterfall has settled — never the row — so a listener that refuses the retry
+    costs no wait."""
 
 
 @dataclass(frozen=True, slots=True)

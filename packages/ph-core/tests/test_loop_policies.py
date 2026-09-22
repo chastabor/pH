@@ -16,9 +16,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 import pytest
 
-from ph.agent.types import AgentOptions
+from ph.agent.types import AgentOptions, RequestErrorAction
 from ph.json import as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
 from ph.llm.retry import is_transient
@@ -65,7 +66,7 @@ def test_a_context_overflow_is_never_retried() -> None:
     assert not is_transient(LlmFailure(message="x", code=CONTEXT_WINDOW_EXCEEDED, status=429))
 
 
-FAST_RETRY = {"id": "llm-retry", "config": {"maxAttempts": 3, "baseDelayMs": 1}}
+FAST_RETRY: dict[str, Any] = {"id": "llm-retry", "config": {"maxAttempts": 3, "baseDelayMs": 1}}
 
 
 async def test_retry_recovers_a_transient_failure_and_records_it(mount: MountProfile) -> None:
@@ -116,7 +117,14 @@ async def test_retry_is_bounded(mount: MountProfile) -> None:
 
     ctx.require(LLM).register_adapter(["down"], AlwaysFailing())
     session = ctx.require(SESSIONS).create("s")
-    await ctx.require(AGENTS).create(session, AgentOptions(provider="down", model="m")).prompt("hi")
+    # Under a deadline: the claim is that the retries stop, and a regression that
+    # never stops must fail rather than hang the suite.
+    with anyio.fail_after(10):
+        await (
+            ctx.require(AGENTS)
+            .create(session, AgentOptions(provider="down", model="m"))
+            .prompt("hi")
+        )
 
     # max_attempts=3: two retries, then the failure stands.
     assert attempts["count"] == 3
@@ -134,9 +142,10 @@ async def test_two_agents_do_not_share_a_retry_budget(mount: MountProfile) -> No
     refused a retry it had never used, which is precisely the storm this row
     exists for.
 
-    Counted from the log instead, so the budget is per session by construction.
-    Sabotage: key `attempts_so_far` on anything but the session and the second
-    agent ends in `error` after one call.
+    Counted by each agent's driver instead, in a local of the step's retry loop,
+    so the budget is per agent by construction. Sabotage: keep the count on the
+    row, keyed by `turn:step`, and the second agent ends in `error` after one
+    call.
     """
     ctx = await mount(FAST_RETRY)
     calls: list[str] = []
@@ -342,3 +351,66 @@ def test_measuring_a_message_covers_every_text_carrying_block() -> None:
     )
     # Nested tool-result content counts: it is context the model reads.
     assert meter.measure(message) >= 2
+
+
+@pytest.mark.parametrize(("count_all", "model_calls"), [(False, 4), (True, 3)])
+async def test_a_compaction_retry_spends_the_budget_only_when_asked(
+    mount: MountProfile, count_all: bool, model_calls: int
+) -> None:
+    """G13 — two rows retry, and only one of them wrote down that it had.
+
+    `compaction` returns `retry` after shrinking an overflowing context, and the
+    driver counts it under that row's name. `llm-retry` budgets against its own
+    share by default: "the context was too big" and "the provider was busy" are
+    unrelated problems, and a step that was compacted still gets every transient
+    retry it was configured for. `count_all_retries` opts into one
+    ceiling instead — `RequestFailure.retries`, every row's share.
+
+    Here the first call overflows and a stand-in for `compaction` retries it;
+    every call after fails transiently. With `maxAttempts: 3` the default allows
+    two transient retries on top of the compaction one (four calls); counting it
+    leaves one (three calls).
+
+    Sabotage: read `retries_by["llm-retry"]` whatever the option says and the
+    `True` case makes four calls; count the compaction retry under `llm-retry`
+    and the `False` case makes three; hand the policy an empty count and the
+    budget never runs out — which is why the adapter answers after ten calls, so
+    that fails instead of hanging.
+    """
+    ctx = await mount(
+        {
+            **FAST_RETRY,
+            "config": {**FAST_RETRY["config"], "countAllRetries": count_all},
+        }
+    )
+    calls = {"count": 0}
+
+    class OverflowThenBusy:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            calls["count"] += 1
+            if calls["count"] > 10:
+                # A budget that never runs out retries forever, and a regression
+                # must fail rather than hang: answer, so the count below reports it.
+                for chunk in text_chunks("gave up"):
+                    yield chunk
+                return
+            code = CONTEXT_WINDOW_EXCEEDED if calls["count"] == 1 else "SERVER_ERROR"
+            yield Finish(
+                reason=FinishReason(kind="error", failure=LlmFailure(message="no", code=code))
+            )
+
+    async def compacting(failure: Any, next_: Any) -> Any:  # noqa: ANN401
+        # `compaction`'s shape: retry an overflow. Registered outside any
+        # plugin, so it is counted under `""` — any row but `llm-retry`.
+        if failure.failure.code == CONTEXT_WINDOW_EXCEEDED:
+            return RequestErrorAction(kind="retry")
+        return await next_()
+
+    ctx.require(LLM).register_adapter(["flaky"], OverflowThenBusy())
+    ctx.on("agent/request-error", compacting)
+    session = ctx.require(SESSIONS).create("s")
+    await (
+        ctx.require(AGENTS).create(session, AgentOptions(provider="flaky", model="m")).prompt("hi")
+    )
+
+    assert calls["count"] == model_calls

@@ -16,16 +16,18 @@ limit say the number out loud, and one test holds the default.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 import pytest
 from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, run_tool_calls
 
-from ph.agent.types import AgentDriver
+from ph.agent.types import AgentDriver, AgentOptions, RequestErrorAction, RequestFailure
 from ph.cordis import Context
 from ph.json import as_obj, as_seq
-from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS, TUI_STATUS
-from ph.llm.types import ToolCallBlock
+from ph.keys import AGENTS, LLM, SESSIONS, SUBAGENTS, TOOLS, TUI_STATUS
+from ph.llm.types import Finish, FinishReason, GenerateOptions, LlmFailure, ToolCallBlock
 from ph.seams.subagents import ADMITTED, SubagentRequest, SubagentSpawnError
 from ph.session import Session, SurfaceIntent
 from ph.session.known_event_types import (
@@ -123,7 +125,7 @@ def test_the_counts_are_a_fold_a_resume_reproduces() -> None:
 
     counts = counts_of(session)
 
-    assert (counts.session_steps, counts.turn_steps) == (2, 1), "turn/start resets the turn"
+    assert (counts.session_calls, counts.turn_calls) == (2, 1), "turn/start resets the turn"
     assert (counts.session_tools, counts.turn_tools) == (1, 0)
     assert counts.per_tool_session == {"read": 1}
     # Reproduced from the same log by a reader that was never running.
@@ -153,6 +155,7 @@ def test_the_counts_obey_the_fold_laws() -> None:
     for turn in (1, 2):
         session.append("turn/start", {"turn": turn})
         session.append("step/start", {"turn": turn, "step": 1})
+        session.append("step/retry", {"turn": turn, "step": 1, "attempt": 1, "by": "llm-retry"})
         for index, is_error in enumerate([True, False], start=1):
             call_id = f"t{turn}c{index}"
             session.append(
@@ -172,6 +175,96 @@ def test_the_counts_obey_the_fold_laws() -> None:
 
 
 # -------------------------------------------------------------- model calls --
+
+
+def test_a_retried_call_is_a_model_call() -> None:
+    """P1 — `step/start` is written once per step, before the retry loop.
+
+    So a step retried twice was one model call to this fold. The loop records
+    each retry it accepts as `step/retry`, whichever row asked, and a call is
+    either kind. Sabotage: drop `step/retry` from `_COUNTED` and the calls are
+    the steps.
+    """
+    session = Session("retried")
+    session.append("turn/start", {"turn": 1})
+    session.append("step/start", {"turn": 1, "step": 1})
+    session.append("step/retry", {"turn": 1, "step": 1, "attempt": 1, "by": "llm-retry"})
+    session.append("step/retry", {"turn": 1, "step": 1, "attempt": 2, "by": "compaction-summarize"})
+    session.append("turn/start", {"turn": 2})
+    session.append("step/start", {"turn": 2, "step": 1})
+
+    counts = counts_of(session)
+
+    assert (counts.session_calls, counts.turn_calls) == (4, 1), "turn/start resets the turn"
+
+
+async def test_the_step_gate_counts_the_retries_already_made(mount: MountProfile) -> None:
+    """P1 — a step that was retried spent the calls a next step would want."""
+    ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
+    session = ctx.require(SESSIONS).create("capped")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    session.append("turn/start", {"turn": 1})
+    session.append("step/start", {"turn": 1, "step": 1})
+    session.append("step/retry", {"turn": 1, "step": 1, "attempt": 1, "by": "llm-retry"})
+
+    decision = await _pre_step(ctx, agent, turn=1, step=2)
+
+    assert decision.kind == "reject"
+
+
+@pytest.mark.parametrize("retrier", ["llm-retry", "another row"])
+async def test_a_retry_past_the_ceiling_is_refused_whoever_asks(
+    mount: MountProfile, retrier: str
+) -> None:
+    """P1 — the ceiling is asked where a retry is decided.
+
+    `agent/pre-step` fires once per step, so a ceiling asked only there could
+    not stop a retry at all: a model failing transiently was called up to
+    `maxAttempts` times per step against a `turnLimit` of 2. Held at
+    `agent/request-error`, wrapping every row that would grant one — including
+    `llm-retry`, which answers without calling on.
+
+    Sabotage: drop the `agent/request-error` registration and both cases make
+    five calls; register it without `prepend` and the `llm-retry` case does.
+    """
+    ctx = await mount(
+        row("llm-retry", maxAttempts=5, baseDelayMs=1),
+        row("limits", modelCalls={"turnLimit": 2}),
+        profile=PROFILE,
+    )
+    calls = 0
+
+    class Failing:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            nonlocal calls
+            calls += 1
+            # `SERVER_ERROR` is `llm-retry`'s to retry; `TRANSIENT` is not, so
+            # the stand-in below is the row that asks.
+            code = "SERVER_ERROR" if retrier == "llm-retry" else "TRANSIENT"
+            yield Finish(
+                reason=FinishReason(kind="error", failure=LlmFailure(message="no", code=code))
+            )
+
+    async def stand_in(failure: RequestFailure, next_: Any) -> Any:  # noqa: ANN401
+        if failure.failure.code == "TRANSIENT" and failure.retries < 4:
+            return RequestErrorAction(kind="retry")
+        return await next_()
+
+    ctx.require(LLM).register_adapter(["failing"], Failing())
+    ctx.on("agent/request-error", stand_in)
+    session = ctx.require(SESSIONS).create("s")
+    with anyio.fail_after(10):
+        await (
+            ctx.require(AGENTS)
+            .create(session, AgentOptions(provider="failing", model="m"))
+            .prompt("hi")
+        )
+
+    assert calls == 2
+    (breach,) = events_of(session, "limits/exceeded")
+    assert breach.data["retry"] is True
+    assert breach.data["message"] == "Model call limits exceeded: turn limit (2/2)"
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "error"
 
 
 async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: MountProfile) -> None:
@@ -200,6 +293,57 @@ async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: MountProfi
     (breach,) = events_of(session, "limits/exceeded")
     assert breach.data["message"] == "Model call limits exceeded: turn limit (2/2)"
     assert breach.ignorable
+
+
+async def _fail_once_at_the_ceiling(mount: MountProfile, code: str, **retry: object) -> Session:
+    """A turn whose only model call fails with `code`, under a `turnLimit` of 1."""
+    ctx = await mount(
+        row("llm-retry", **retry),
+        row("limits", modelCalls={"turnLimit": 1}),
+        profile=PROFILE,
+    )
+
+    class FailsOnce:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            yield Finish(
+                reason=FinishReason(kind="error", failure=LlmFailure(message="no", code=code))
+            )
+
+    ctx.require(LLM).register_adapter(["once"], FailsOnce())
+    session = ctx.require(SESSIONS).create("s")
+    await ctx.require(AGENTS).create(session, AgentOptions(provider="once", model="m")).prompt("hi")
+    return session
+
+
+async def test_a_failure_nobody_would_retry_is_not_blamed_on_the_ceiling(
+    mount: MountProfile,
+) -> None:
+    """P1 review — the ceiling refuses the retry the chain granted, nothing else.
+
+    Asked before the rest of the chain, it recorded "not retried: model call
+    limits" for an authentication failure no row was ever going to retry.
+    Sabotage: check the ceiling before `next_` and this finds one record.
+    """
+    session = await _fail_once_at_the_ceiling(mount, "AUTHENTICATION")
+
+    assert events_of(session, "limits/exceeded") == []
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "error"
+
+
+async def test_a_refused_retry_costs_no_backoff(mount: MountProfile) -> None:
+    """P1 review — the backoff is the loop's to sleep, after the waterfall settles.
+
+    `llm-retry` slept inside the waterfall and then granted, so a ceiling that
+    refused afterwards had already paid the wait. Here the wait would be ten
+    seconds. Sabotage: sleep in `llm-retry` again and the deadline trips.
+    """
+    with anyio.fail_after(2):
+        session = await _fail_once_at_the_ceiling(
+            mount, "SERVER_ERROR", baseDelayMs=10_000, maxDelayMs=10_000
+        )
+
+    (breach,) = events_of(session, "limits/exceeded")
+    assert breach.data["retry"] is True
 
 
 async def test_the_session_limit_outlives_the_turn(mount: MountProfile) -> None:

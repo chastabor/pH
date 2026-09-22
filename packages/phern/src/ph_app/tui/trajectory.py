@@ -457,6 +457,12 @@ HANDLERS: Mapping[str, Handler] = {
     "context/loaded": _on_harness_event,
     "agent/inbox/spliced": _on_harness_event,
     "todo/write": _on_harness_event,
+    # A record: when a run stopped being steered, this is why it stopped when it
+    # did — the skill's own budget rather than the profile's (D16).
+    "skill-steps/budget": _on_harness_event,
+    # A record: every model call a ceiling counts, and which row asked for it
+    # again — the one retry `llm/retry` cannot report is a compaction's (P1).
+    "step/retry": _on_harness_event,
     "offload/spilled": _on_harness_event,
     "offload/input-spilled": _on_harness_event,
     # Both, and generically: an auditor came for exactly this — what a summary

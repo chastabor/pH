@@ -11,7 +11,7 @@ So the check runs at runtime, on the request the adapter is about to receive.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
 import anyio
@@ -28,6 +28,7 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
+from ph.cordis import Context, plugin
 from ph.json import as_int, as_obj, as_str, thaw_json
 from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.replay import RecordedStep, ReplayAdapter, text_chunks, tool_call_chunks
@@ -317,6 +318,101 @@ async def test_request_error_waterfall_can_retry(mount: MountProfile) -> None:
     assert attempts["count"] == 2
     assert as_obj(session.events[-1].data["reason"])["kind"] == "completed"
     assert block_text(session.derive_messages()[-1].content[0]) == "recovered"
+
+
+async def test_the_loop_counts_each_retry_under_the_row_that_asked(mount: MountProfile) -> None:
+    """G13 — the policy is handed the count by row, so it holds no count itself.
+
+    Attributed by cordis: the retry is counted under the plugin whose listener
+    produced the answer, and a listener that hands the rest of the chain's
+    answer back unchanged is not that plugin. Each failure sees a *snapshot* —
+    the loop goes on counting after the payload is handed over.
+
+    Sabotage: count every retry under one key, attribute a pass-through, or hand
+    over the live counter rather than a copy, and the snapshots below disagree.
+    """
+    ctx = await mount()
+    seen: list[Mapping[str, int]] = []
+
+    class ThreeFailures:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            if len(seen) < 3:
+                yield Finish(
+                    reason=FinishReason(
+                        kind="error", failure=LlmFailure(message="no", code="TRANSIENT")
+                    )
+                )
+                return
+            for chunk in text_chunks("ok"):
+                yield chunk
+
+    @plugin("first")
+    async def first(scope: Context, config: None) -> None:
+        async def listener(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+            seen.append(failure.retries_by)
+            # The second failure is `second`'s to retry: this one passes the
+            # chain's answer through unchanged, and so is not its producer.
+            return await next_() if len(seen) == 2 else RequestErrorAction(kind="retry")
+
+        scope.on("agent/request-error", listener)
+
+    @plugin("second")
+    async def second(scope: Context, config: None) -> None:
+        async def listener(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+            return RequestErrorAction(kind="retry")
+
+        scope.on("agent/request-error", listener)
+
+    ctx.plugin(first)
+    ctx.plugin(second)
+    await ctx.reconcile()
+    ctx.require(LLM).register_adapter(["flaky"], ThreeFailures())
+    session = ctx.require(SESSIONS).create("s")
+    await (
+        ctx.require(AGENTS).create(session, AgentOptions(provider="flaky", model="m")).prompt("hi")
+    )
+
+    assert seen == [{}, {"first": 1}, {"first": 1, "second": 1}]
+
+
+async def test_the_loop_waits_the_delay_a_retry_asks_for(mount: MountProfile) -> None:
+    """P1 review — `RequestErrorAction.delay_ms` is the loop's to sleep.
+
+    The row that grants a retry names the wait and returns; the loop waits once
+    the waterfall has settled, so a listener that refuses the retry costs none.
+    A lower bound only: a sleep is never shorter than asked, and an upper bound
+    would be a flaky test. Sabotage: drop the loop's sleep and this finishes
+    at once.
+    """
+    ctx = await mount()
+    calls = {"count": 0}
+
+    class FailsOnce:
+        async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                yield Finish(
+                    reason=FinishReason(
+                        kind="error", failure=LlmFailure(message="no", code="TRANSIENT")
+                    )
+                )
+                return
+            for chunk in text_chunks("ok"):
+                yield chunk
+
+    async def waiting(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        return RequestErrorAction(kind="retry", delay_ms=300)
+
+    ctx.require(LLM).register_adapter(["flaky"], FailsOnce())
+    ctx.on("agent/request-error", waiting)
+    session = ctx.require(SESSIONS).create("s")
+    started = anyio.current_time()
+    await (
+        ctx.require(AGENTS).create(session, AgentOptions(provider="flaky", model="m")).prompt("hi")
+    )
+
+    assert anyio.current_time() - started >= 0.3
+    assert calls["count"] == 2
 
 
 async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: MountProfile) -> None:

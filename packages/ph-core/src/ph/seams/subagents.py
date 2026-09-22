@@ -90,6 +90,7 @@ __all__ = [
     "family_reach",
     "fold_subagent_event",
     "reachable_family",
+    "restarts_since_progress",
     "roster_name",
     "subagent_roster",
 ]
@@ -1097,7 +1098,7 @@ class SubagentService:
             # for a slot no one will ever give it — the parent held out of
             # passivation by a child nothing will move, which is the state this
             # whole sweep exists to end.
-            spent = as_int(row.get("attempts")) >= retry_limit
+            spent = restarts_since_progress(row) >= retry_limit
             recoverable = self._readmitter(row) is not None
             resumable = recoverable and not spent
             detail = INTERRUPTED_DETAIL
@@ -1226,10 +1227,10 @@ class SubagentService:
                 session_id=as_str(row.get("sessionId")),
                 # How many times this child has *already* been started, which is
                 # what tells a restart from a first run — and it is `starts`,
-                # never `attempts`: progress clears the ladder, so a child that
-                # got somewhere and was then stopped again would otherwise be
-                # readmitted as though it had never run, its restart go
-                # unrecorded, and the ladder never count it again.
+                # never `restarts_since_progress`: an answer forgives the ladder,
+                # so a child that got somewhere and was then stopped again would
+                # otherwise be readmitted as though it had never run, its restart
+                # go unrecorded, and the ladder never count it again.
                 restarts=as_int(row.get("starts")),
             )
         if run is None:
@@ -1431,12 +1432,15 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     parent asking what happened to the one it revoked deserves an answer other
     than silence.
 
-    `starts` and `attempts` ride on the row and are the interruption ladder's
-    whole state, both folded rather than carried: the log already records one
-    `running` per drive and one usage record per model answer, so "how many times
-    has this been started" and "how many of those achieved nothing" are questions
-    about events that are already there. A counter written onto a payload would be
-    a second account of the same events, free to disagree with them.
+    `starts`, `resumes` and `resumesAtLastAnswer` ride on the row and are the
+    interruption ladder's whole state, all folded rather than carried and all
+    totals: the log already records one `running` per drive and one usage record
+    per model answer, so "how many times has this been started" and "how many
+    restarts had there been at its last answer" are questions about events that
+    are already there. What the ladder *makes* of them is
+    `restarts_since_progress`, beside the sweep that decides (P3). A counter
+    written onto a payload would be a second account of the same events, free to
+    disagree with them.
 
     In the seam rather than in the bundle that produces the events, because the
     two consumers live in different packages — the model's roster tool in the
@@ -1476,10 +1480,11 @@ def fold_subagent_event(roster: dict[str, dict[str, Any]], event: SessionEvent) 
     if row is None:
         return
     if event.type == USAGE:
-        # **Progress clears the ladder**, and this is where the log already said
-        # so: a usage record is a model answer attributed to this child, so it
-        # cannot be produced by a turn that did nothing. See `attempts` below.
-        row["attempts"] = 0
+        # A model answer attributed to this child, marked by how many restarts
+        # it had had by then. A fact, not a reset: whether an answer forgives
+        # the restarts before it is `restarts_since_progress`'s rule, asked by
+        # the sweep that decides (P3).
+        row["resumesAtLastAnswer"] = as_int(row.get("resumes"))
     elif event.type == STATUS:
         row.update({key: value for key, value in event.data.items() if key != "runId"})
         if event.data.get("status") == "running":
@@ -1488,14 +1493,26 @@ def fold_subagent_event(roster: dict[str, dict[str, Any]], event: SessionEvent) 
             # already carried and nothing had yet read.
             row["starts"] = as_int(row.get("starts")) + 1
         if event.data.get("cause") == "resumed":
-            # And how many of those starts were restarts with nothing achieved
-            # since. Two counters because they answer different questions: this
-            # one is cleared by progress and `starts` never is, so deriving one
-            # from the other would lose whichever fact the ladder did not need.
-            row["attempts"] = as_int(row.get("attempts")) + 1
+            # And how many of those starts were restarts. Never cleared, like
+            # `starts`: a total the ladder reads beside `resumesAtLastAnswer`.
+            row["resumes"] = as_int(row.get("resumes")) + 1
     else:
         row["deleted"] = True
         row["deletedReason"] = event.data.get("reason")
+
+
+def restarts_since_progress(row: Mapping[str, Any]) -> int:
+    """How many times a child has been restarted since it last answered (P3).
+
+    **The ladder's rule, stated where the ladder is decided** rather than folded
+    into the roster: a child stopped, working an hour, then stopped again met two
+    incidents, not a lifetime's, so an answer forgives the restarts before it. A
+    usage record is the answer — a model reply attributed to this child, which a
+    turn that did nothing cannot produce. The roster keeps both facts as totals
+    (`resumes`, `resumesAtLastAnswer`), so a different rule is a change here and
+    not to the fold.
+    """
+    return as_int(row.get("resumes")) - as_int(row.get("resumesAtLastAnswer"))
 
 
 FamilyRole: TypeAlias = Literal["self", "parent", "sibling", "child"]

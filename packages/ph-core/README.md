@@ -119,11 +119,11 @@ phern config --row containment --profile tui # one row's knobs, defaults and wha
 | `containment` | `tier`, `childTier`, `strict` | **unset** — which is not `advisory`: unset means nobody chose, so a tier provider a profile layered is used |
 | `workspace-lifecycle` | `access`, `provision` | `write` |
 | `jobs-local` | `concurrency` (per job kind) | unset |
-| `llm-retry` | `maxAttempts`, `baseDelayMs`, `maxDelayMs` | `3`, `500`, `20000` |
+| `llm-retry` | `maxAttempts`, `baseDelayMs`, `maxDelayMs`, `countAllRetries` | `3`, `500`, `20000`, `false` — only `llm-retry`'s own retries spend its budget; `true` counts every row's, compaction's included |
 | `session-telemetry` | `enabled`, `path` | `enabled: false` in `ph-base` |
 | `subagent-presets` | `presets` | empty — a menu, never a grant: selecting a preset never widens what the parent itself holds |
 | `skills-progressive` | `paths` | **empty on purpose** — scanning a well-known directory would make "install a skill" mean "drop a file somewhere" (I7) |
-| `autonomous` | `maxContinuations`, `maxTurns`, `maxTokens`, `timeoutMs` | `3`, `12`, `80000`, `1800000` |
+| `autonomous` | `maxContinuations`, `maxTurns`, `maxTokens`, `timeoutMs`, `tokenSources` | `3`, `12`, `80000`, `1800000`, `[own]` — add `compaction` and `children` to charge summaries and subagents to `maxTokens` |
 | `subprocess-local` | `scrub`, `keep`, `maxOutputBytes` | `8388608` |
 | `tool-attach` | `maxBytes` | `33554432` |
 

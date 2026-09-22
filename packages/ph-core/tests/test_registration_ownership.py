@@ -388,6 +388,7 @@ NOT_A_LIFETIME: dict[str, str] = {
     "Context.parallel": "which scope's listeners to dispatch to",
     "Context.serial": "which scope's listeners to dispatch to",
     "Context.waterfall": "which scope's listeners to dispatch to",
+    "Context.waterfall_attributed": "which scope's listeners to dispatch to",
 }
 """Methods whose `scope=` is not a lifetime, and why each one is not."""
 

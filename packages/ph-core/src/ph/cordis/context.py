@@ -462,6 +462,10 @@ class _Dependent:
     this field is the whole reason `phern events` can name who listens to an event
     rather than printing an empty column. Blank for an `inject` callback, which
     is code the calling row already owns and which therefore inherits it."""
+    plugin: str = ""
+    """The mounted plugin's name, stamped by `ForkScope`; blank for an `inject`,
+    which runs as the row that asked. Reaches `Context.plugin_name`, which is how
+    `waterfall_attributed` names the row that answered."""
     active: bool = False
     ever_active: bool = False
     """Whether this has ever activated — the bit that tells `waiting on fs` for a
@@ -563,6 +567,7 @@ class ForkScope:
             spec.inject,
             self._apply,
             label=f"plugin({spec.name})",
+            plugin=spec.name,
             transparent=transparent,
             # Where the plugin's code lives, which nothing else in the mount path
             # knows: the loader has a name and an entry point, and the *module* is
@@ -914,6 +919,7 @@ class Context:
         "_label",
         "_module",
         "_parent",
+        "_plugin",
         "_provide_to",
         "_running_self",
         "_runtime",
@@ -924,6 +930,7 @@ class Context:
     _parent: Context | None
     _label: str
     _module: str
+    _plugin: str
     _children: list[Context]
     _effects: list[_Effect]
     _services: dict[str, _Provision]
@@ -945,6 +952,9 @@ class Context:
         self._parent = parent
         self._label = label
         self._module = module
+        # Inherited, so a scope a plugin opens for itself still answers as the
+        # plugin; `_activation_scope` is what sets it.
+        self._plugin = parent._plugin if parent is not None else ""
         self._children = []
         self._effects = []
         self._services = {}
@@ -967,6 +977,8 @@ class Context:
             provide_to=owner._provide_to,
             module=dependent.module or owner._module,
         )
+        if dependent.plugin:
+            scope._plugin = dependent.plugin
         if dependent.transparent:
             # **A deployment row mounted into its own realm is still a
             # deployment row** (A9). `isolate:` narrows its *service lookup*,
@@ -1125,6 +1137,15 @@ class Context:
     @property
     def label(self) -> str:
         return self._label
+
+    @property
+    def plugin_name(self) -> str:
+        """The mounted plugin this scope belongs to, or `""` outside one.
+
+        A field rather than a parse of `label`: the label is prose for a person
+        reading a tree, and a name a decision is keyed on should not depend on
+        how that prose is spelled."""
+        return self._plugin
 
     @property
     def parent(self) -> Context | None:
@@ -1449,6 +1470,7 @@ class Context:
         *,
         label: str,
         module: str = "",
+        plugin: str = "",
         transparent: bool = False,
     ) -> tuple[_Dependent, Disposer]:
         """The one registration path for plugins and injections alike."""
@@ -1460,6 +1482,7 @@ class Context:
             activate=activate,
             label=label,
             module=module,
+            plugin=plugin,
         )
         self._runtime.dependents.append(dependent)
         self._runtime.dirty = True
@@ -1873,8 +1896,44 @@ class Context:
         while the chain is a four-way `PreToolDecision`, and inferring `T` from
         the default there would be wrong for every other listener.
         """
+        value, _ = await self._waterfall(event, args, inner, scope)
+        return value
+
+    async def waterfall_attributed[T](
+        self,
+        event: str,
+        *args: object,
+        inner: Callable[..., Awaitable[T]],
+        scope: Context | None = None,
+    ) -> tuple[T, str]:
+        """`waterfall`, and the plugin whose listener produced the answer.
+
+        **The producer is the outermost listener that returned something other
+        than what its `next_` gave it** — or that never called `next_`. A
+        listener handing the rest of the chain's answer back unchanged is a
+        pass-through however much it inspected on the way, which is what a
+        policy row that only *might* veto looks like. `""` when the answer is
+        `inner`'s own, or came from a listener registered outside any plugin.
+
+        For a producer that must know *who* decided rather than only *what*:
+        the agent loop counts retries by the row that granted each one (G13),
+        and a row naming itself on its answer was a claim the loop could not
+        check and a second spelling of an id cordis already holds.
+        """
+        return await self._waterfall(event, args, inner, scope)
+
+    async def _waterfall[T](
+        self,
+        event: str,
+        args: tuple[object, ...],
+        inner: Callable[..., Awaitable[T]],
+        scope: Context | None,
+    ) -> tuple[T, str]:
+        """The chain, and who produced its answer — see `waterfall_attributed`."""
         event_registry.check(event, "waterfall")
         hooks = self._hooks(event, scope=scope)
+        # Appended innermost-first as frames unwind, so the last is the answer's.
+        producers: list[Hook] = []
 
         async def frame(position: int, *state: object) -> object:
             """The chain from `position` on. Its own cursor, deliberately (A6).
@@ -1904,10 +1963,17 @@ class Context:
                 # binding — exactly what it inherits here.
                 return await inner(*state)
 
-            async def next_(*replacement: object) -> object:
-                return await frame(position + 1, *(replacement or state))
+            handed: list[object] = []
 
-            return await maybe_await(_invoke(hooks[position], *state, next_))
+            async def next_(*replacement: object) -> object:
+                answer = await frame(position + 1, *(replacement or state))
+                handed.append(answer)
+                return answer
+
+            result = await maybe_await(_invoke(hooks[position], *state, next_))
+            if not handed or result is not handed[-1]:
+                producers.append(hooks[position])
+            return result
 
         # The one place the chain's type is unverifiable: `on` takes a
         # `Listener`, rows load through entry points, so a listener's return is
@@ -1920,7 +1986,8 @@ class Context:
         # omitted at ten and buy none of the can't-forget property that is its
         # whole point — while letting `T` be solved from two places, which is
         # what this signature exists to stop.
-        return cast("T", await frame(0, *args))
+        value = cast("T", await frame(0, *args))
+        return value, producers[-1].ctx.plugin_name if producers else ""
 
     def detach(self, coro: Any, *, label: str) -> None:  # noqa: ANN401
         """Run `coro` outside the caller's lifetime, tracked and drained.

@@ -195,16 +195,30 @@ def test_a_woken_child_still_reads_as_running() -> None:
 
 
 def test_attributed_usage_is_summed_per_child() -> None:
-    """The one field the seam's fold does not carry, so the panel adds it."""
+    """The one field the seam's fold does not carry, so the panel adds it.
+
+    All four terms, as `/autonomous` charges them (P2 review): summing input and
+    output alone left a cache-heavy child's panel disagreeing with the budget.
+    Sabotage: sum `inputTokens + outputTokens` again and this reads 1 800.
+    """
     session = Session("usage")
     session.append(ADMITTED, _admitted("r1", "scout"))
     for _ in range(3):
         session.append(
-            USAGE, {"runId": "r1", "childUsage": {"inputTokens": 400, "outputTokens": 200}}
+            USAGE,
+            {
+                "runId": "r1",
+                "childUsage": {
+                    "inputTokens": 400,
+                    "outputTokens": 200,
+                    "cacheReadTokens": 100,
+                    "cacheWriteTokens": 50,
+                },
+            },
         )
 
     (row,) = TuiEventAdapter().replay(session).subagents.values()
-    assert row.tokens == 1_800
+    assert row.tokens == 2_250
 
 
 def test_delegation_records_produce_no_transcript_rows() -> None:

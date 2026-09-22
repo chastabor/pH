@@ -25,7 +25,7 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import default_home_path, write_atomic
+from ..paths import default_home_path, is_atomic_temp, write_atomic
 from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -380,12 +380,19 @@ def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
 
     `.staging` is passed over because it is a directory and this collects files.
     Nothing in it is ever deleted; `sweep_session` says why.
+
+    **Nor is a `write_atomic` temp** (D17), for `.staging`'s reason one level up.
+    `save_bytes` writes its temp beside the locator, and the sweep runs on every
+    session open — off-thread, concurrently with whatever else is writing — so
+    collecting it deleted the temp of a write in flight and failed its rename. A
+    kernel snapshot's blob is written that way *after* its event is durable, so
+    the loss was a variable that would not restore.
     """
     if not directory.is_dir():
         return []
     gone: list[str] = []
     for path in sorted(directory.iterdir()):
-        if path.is_file() and str(path) not in referenced:
+        if path.is_file() and str(path) not in referenced and not is_atomic_temp(path):
             path.unlink(missing_ok=True)
             gone.append(str(path))
     return gone

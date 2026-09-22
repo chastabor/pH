@@ -334,16 +334,49 @@ def test_a_leading_word_is_read_as_a_word(text: str, dialect: str) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["git push origin :branch", "git push --delete origin branch", "git push origin +main:main"],
+    [
+        "git push origin :branch",
+        "git push --delete origin branch",
+        "git push origin +main:main",
+        "git push origin +main",
+        "git push origin +refs/heads/release",
+    ],
 )
 def test_a_push_that_deletes_or_forces_is_gated_however_it_is_spelled(command: str) -> None:
-    """Two of these carry no flag at all (D14).
+    """Three of these carry no flag at all (D14).
 
     A refspec says what it does in its own shape: `:branch` pushes nothing to a
     branch, which deletes it, and `+` forces. The rule table matches subcommands
     and flags — the right shape for almost everything, and blind to an argument.
+
+    **`+main` is the case the first fix missed.** It is the short form of
+    `+main:main`, and the force branch asked for a colon, so the spelling the
+    function's own docstring names was the one spelling that got through. This
+    parametrization had only the colon form, which is why nothing noticed.
+
+    Sabotage: require a colon in the force branch again and the last two fail.
     """
     assert _texts(command), f"{command!r} passed the gate"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push",
+        "git push origin main",
+        "git push origin main:main",
+        "git push -u origin feature",
+        "git push origin v1.0",
+    ],
+)
+def test_an_ordinary_push_is_not_reported_as_destructive(command: str) -> None:
+    """The other side of widening the force branch: it must not cry wolf.
+
+    A false finding on a human gate is not free — it is what teaches a person to
+    approve without reading. Dropping the colon requirement matches `+` alone,
+    and none of these hold one.
+    """
+    assert not _texts(command), f"{command!r} was reported as destructive"
 
 
 def test_a_fetch_and_a_shell_on_different_lines_are_not_a_pipeline() -> None:

@@ -132,6 +132,7 @@ look like in this codebase, and what a good sabotage is for a gate.
 | `allowed-tools` | no | ≤ 32 names. **A declaration, not a boundary** — see §6. |
 | `parameters` | no | ≤ 16 inputs. See below. |
 | `steps` | no | ≤ 32 non-empty, **distinct** strings. This is the half that makes the skill self-steering. |
+| `max-nudges` | no | A non-negative integer: how many times `skill-steps` may steer toward these steps with the plan unchanged. Overrides the row's `maxNudges` (default 3). `0` seeds the steps and never steers — for a procedure where a partial run is still worth something. |
 
 **A malformed value refuses the whole skill** rather than being dropped, and the
 reason is diagnostic: a skill installed with `allowed-tools` silently empty
@@ -319,7 +320,11 @@ list in its context, and a twenty-line reminder every time a turn tries to end i
 how a steer becomes noise the model learns to skim.
 
 **And it stands down.** Three nudges with the todo list unchanged and the row
-stops steering that session until something moves. It is counted since the list
+stops steering that session until something moves. Three is the default: a
+profile sets its own with `{id: skill-steps, config: {maxNudges: 5}}`, and a
+skill sets one for its own procedure with `max-nudges:` in its frontmatter,
+which wins. When several procedures are seeded, the one read last governs, and
+one that declares no budget hands the row back to the profile's. It is counted since the list
 last *changed*, not since the turn began, so any `write_todos` — marking a step
 done, adding an entry, re-planning — resets it: a run making progress is never
 cut off, and one going in circles hands the turn back rather than spending model

@@ -454,7 +454,12 @@ def _refspec_findings(argv: list[str], positional: list[str]) -> Iterator[Findin
     for token in positional[1:]:
         if token.startswith(":"):
             yield Finding("shell", f"git push {token}", "deletes a published branch or tag")
-        elif token.startswith("+") and ":" in token:
+        elif token.startswith("+") and len(token) > 1:
+            # **The `+` is the force, not the colon** (D14). `+main` is the
+            # short form of `+main:main`, and the first version asked for a
+            # colon — so the spelling this docstring names was the one spelling
+            # that passed. A remote name cannot start with `+`, so nothing else
+            # a push takes positionally is caught by it.
             yield Finding("shell", f"git push {token}", "rewrites published history")
 
 

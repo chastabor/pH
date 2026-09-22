@@ -132,6 +132,10 @@ __all__ = [
 
 log = logging.getLogger("ph_stabilize.compaction")
 
+ROW = "compaction-summarize"
+"""This row's plugin id — the name cordis counts its retries under
+(`RequestFailure.retries_by`)."""
+
 # --------------------------------------------------------------------------
 # `compute_summarization_defaults` in
 # `deepagents/middleware/summarization.py`: the fractions when the model
@@ -1357,7 +1361,7 @@ class SummarizeEngine:
 
 
 @plugin(
-    "compaction-summarize",
+    ROW,
     inject=[COMPACTION, TOKEN_METER, LLM, SPILL_STORE, TOOLS],
     config=Config,
 )

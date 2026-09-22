@@ -34,6 +34,7 @@ without a record.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
@@ -43,10 +44,11 @@ from pydantic import Field
 from ..cordis import Context, plugin
 from ..json import as_bool, as_str
 from ..keys import GOALS
-from ..llm.types import TokenUsage
 from ..session import Session, SessionEvent, SessionFoldCache
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
+from .subagents import USAGE as CHILD_USAGE
+from .token_meter import reported_usage
 
 __all__ = [
     "CONTINUED",
@@ -61,10 +63,12 @@ __all__ = [
     "Limit",
     "Outcome",
     "Spent",
+    "TokenSource",
     "apply",
     "fold_goal_event",
     "goals",
     "open_goal",
+    "own_tokens_only",
 ]
 
 log = logging.getLogger("ph.seams.goals")
@@ -92,6 +96,20 @@ A loop that reported the second as the first would be claiming work it did not
 do, which is the failure this whole layer exists to make impossible.
 """
 
+TokenSource: TypeAlias = Literal["own", "compaction", "children"]
+"""Who spent the tokens a goal's log records (P2).
+
+`own` is the agent's replies (`assistant/message`), `compaction` the summarize
+calls that shortened its context (`compaction/summarized`), `children` the
+subagents it delegated to (`subagent/usage-attributed`, in this log). The fold
+counts all three; `Budget.token_sources` decides which spend `max_tokens`."""
+
+
+def own_tokens_only() -> list[TokenSource]:
+    """`Budget.token_sources`' default: what the token budget always counted."""
+    return ["own"]
+
+
 GOAL_OUTCOMES: Mapping[str, Outcome] = literal_lookup(Outcome)
 """Every `Outcome` by its own spelling — the read-side check. See `literal_lookup`.
 
@@ -114,6 +132,14 @@ class Budget(WireModel):
     max_turns: int = 12
     max_tokens: int = 80_000
     timeout_ms: int = 30 * 60 * 1000
+    token_sources: list[TokenSource] = Field(default_factory=own_tokens_only)
+    """Whose tokens `max_tokens` charges (P2). The agent's own by default, which
+    is what this budget always counted; add `compaction` and `children` for a
+    ceiling on everything the run cost.
+
+    **Decided here, not by the fold.** The fold used to answer this by which
+    record types it read — only `assistant/message` — so a compaction's summary
+    and a child's work were free without anyone having chosen that."""
 
 
 class Goal(WireModel):
@@ -142,7 +168,13 @@ class Spent:
 
     continuations: int = 0
     turns: int = 0
-    tokens: int = 0
+    tokens: Counter[TokenSource] = field(default_factory=Counter)
+    """What each source spent — see `TokenSource`. Every source is counted;
+    which of them the budget charges is `charged_tokens`'."""
+
+    def charged_tokens(self, budget: Budget) -> int:
+        """The tokens `max_tokens` counts: the sources the budget names, once each."""
+        return sum(self.tokens[source] for source in set(budget.token_sources))
 
     def exhausted(self, budget: Budget, *, elapsed_ms: int) -> Limit | None:
         """The first limit this run has reached, or `None`.
@@ -162,7 +194,7 @@ class Spent:
             return "max_continuations"
         if self.turns >= budget.max_turns:
             return "max_turns"
-        if self.tokens >= budget.max_tokens:
+        if self.charged_tokens(budget) >= budget.max_tokens:
             return "max_tokens"
         if elapsed_ms >= budget.timeout_ms:
             return "timeout"
@@ -187,11 +219,19 @@ class GoalState:
         return self.outcome is not None
 
 
-_COUNTED = frozenset({SET, CONTINUED, GATE, SETTLED, "turn/end", "assistant/message"})
-"""The six types this fold reads. Everything else is skipped on a set test.
+_TOKEN_RECORDS: Mapping[str, tuple[TokenSource, str]] = {
+    "assistant/message": ("own", "usage"),
+    "compaction/summarized": ("compaction", "usage"),
+    CHILD_USAGE: ("children", "childUsage"),
+}
+"""Each record that spends tokens: whose they are, and the key they sit under.
+The one place a new source is added — the fold and the budget follow."""
+
+_COUNTED = frozenset({SET, CONTINUED, GATE, SETTLED, "turn/end", *_TOKEN_RECORDS})
+"""The eight types this fold reads. Everything else is skipped on a set test.
 
 A real log is mostly `assistant/chunk`, and without this every one of them pays a
-`data.get`, an open-goal scan and a six-branch `elif` to be discarded.
+`data.get`, an open-goal scan and the whole `elif` chain to be discarded.
 """
 
 
@@ -229,13 +269,23 @@ def fold_goal_event(found: dict[str, GoalState], event: SessionEvent) -> None:
         current.outcome = GOAL_OUTCOMES.get(as_str(data.get("outcome")))
     elif event.type == "turn/end":
         current.spent.turns += 1
-    elif "usage" in data:
-        # Through `TokenUsage.total`: reading `inputTokens + outputTokens` off
-        # the raw payload made this the third hand-written definition of
-        # "tokens" in the tree and the only two-term one, so a cache-heavy run
-        # spent most of its input outside the budget and `/autonomous`'s status
-        # disagreed with the footer showing the same word.
-        current.spent.tokens += TokenUsage.model_validate(data["usage"] or {}).total
+    elif event.type in _TOKEN_RECORDS:
+        source, key = _TOKEN_RECORDS[event.type]
+        current.spent.tokens[source] += _tokens(event, key)
+
+
+def _tokens(event: SessionEvent, key: str = "usage") -> int:
+    """One record's total, or `0` when it carries none or none that parses.
+
+    Through `reported_usage`, the one reader of a usage payload, and
+    `TokenUsage.total`: reading `inputTokens + outputTokens` off the raw payload
+    made this the third hand-written definition of "tokens" in the tree and the
+    only two-term one, so a cache-heavy run spent most of its input outside the
+    budget and `/autonomous`'s status disagreed with the footer showing the same
+    word. A malformed payload counts nothing rather than raising out of the fold.
+    """
+    usage = reported_usage(event, key)
+    return 0 if usage is None else usage.total
 
 
 def goals(session: Session) -> dict[str, GoalState]:

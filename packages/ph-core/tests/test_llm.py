@@ -182,7 +182,7 @@ def test_two_attempts_at_one_step_do_not_mint_the_same_id() -> None:
     """G12 — `(turn, step)` names a step, and a call is what needed the name.
 
     A retried step keeps its coordinates on purpose: that is what makes
-    `llm/retry` legible in the log, and `attempts_so_far` reads the pair. So
+    `llm/retry` legible in the log. So
     without a third number both attempts minted `call-T-S-0` for the same
     position in their stream.
 

@@ -304,8 +304,12 @@ class TokenMeter:
         )
 
 
-def reported_usage(event: SessionEvent) -> TokenUsage | None:
-    """One `assistant/message`'s usage, or `None` when it carries none.
+def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None:
+    """One event's usage, or `None` when it carries none.
+
+    `key` for the records that carry it under another name —
+    `subagent/usage-attributed`'s `childUsage` — so they are read by the same
+    rule rather than a fifth spelling.
 
     Public and here rather than private in four places: this was the fourth
     spelling of "read `TokenUsage` off an event" and the three before it
@@ -314,7 +318,7 @@ def reported_usage(event: SessionEvent) -> TokenUsage | None:
     alternative is a footer that raises on a frame it could have skipped, and
     `fold_latest` then keeps the last usage that did parse.
     """
-    usage = event.data.get("usage")
+    usage = event.data.get(key)
     if not usage:
         return None
     try:

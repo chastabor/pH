@@ -301,6 +301,49 @@ async def test_a_listener_that_retries_runs_the_rest_of_the_chain_again() -> Non
     )
 
 
+@pytest.mark.parametrize(
+    ("answering", "expected"),
+    [("outer", "outer"), ("inner", "inner"), ("both", "outer"), ("nobody", "")],
+)
+async def test_the_answer_is_attributed_to_the_plugin_that_produced_it(
+    answering: str, expected: str
+) -> None:
+    """G13 — `waterfall_attributed` names who answered, so a row need not say.
+
+    The producer is the outermost listener whose return is not what its `next_`
+    handed it. A listener that inspects the answer and passes it back unchanged —
+    a policy row that only *might* veto — is not the producer; `inner`'s own
+    answer, or one from outside any plugin, is `""`.
+
+    When both replace it, the outer one's answer is the one returned, so it is
+    the producer. Sabotage: attribute the outermost listener that ran, or the
+    innermost that produced anything, and one case below names the wrong plugin.
+    """
+    root = Context()
+
+    def listener(name: str) -> Any:  # noqa: ANN401
+        @plugin(name)
+        async def apply(ctx: Context, config: None) -> None:
+            async def decide(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
+                answer = await next_()
+                return f"{name}'s" if answering in (name, "both") else answer
+
+            ctx.on("test/waterfall", decide)
+
+        return apply
+
+    root.plugin(listener("outer"))
+    root.plugin(listener("inner"))
+    await root.reconcile()
+
+    async def built_in(payload: dict[str, Any]) -> str:
+        return "default"
+
+    _answer, by = await root.waterfall_attributed("test/waterfall", {}, inner=built_in)
+
+    assert by == expected
+
+
 async def test_a_replacement_is_scoped_to_the_call_that_passed_it() -> None:
     """The other half of A6: `state` was a list every frame mutated.
 

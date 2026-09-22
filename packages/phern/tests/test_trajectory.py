@@ -134,6 +134,10 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # Who asked for a turn, and whether they had asked before: bookkeeping
         # to a reader, provenance to an auditor of a daemon-driven run (P5-02).
         "client/command",
+        # D16: the nudges render; the budget that stopped them is the auditor's.
+        "skill-steps/budget",
+        # P1: a retried call is accounting to a reader, evidence to an auditor.
+        "step/retry",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {

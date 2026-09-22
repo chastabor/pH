@@ -23,11 +23,28 @@ from decimal import Decimal
 from pathlib import PurePath
 from typing import Any
 
-from .protocol import FD_ENV, PROTOCOL_FD
+from .protocol import FD_ENV, FRAME_BYTES_ENV, PROTOCOL_FD
 
-__all__ = ["MAX_FRAME_BYTES", "Channel", "jsonable"]
+__all__ = ["MAX_FRAME_BYTES", "Channel", "frame_limit", "jsonable"]
 
 MAX_FRAME_BYTES = 64 * 1024 * 1024
+"""The read limit when the host names none — see `FRAME_BYTES_ENV` (F8)."""
+
+
+def frame_limit() -> int:
+    """The largest frame this guest will read: the host's number, else the default.
+
+    The host sizes it from `maxSnapshotBytes`, because one snapshotted variable
+    must fit one frame in *both* directions — a fixed 64 MiB here lost the
+    namespace on restore as soon as a deployment raised the limit past ~48 MiB,
+    base64 being four bytes per three (F8). A value that is not a positive
+    integer is ignored rather than trusted: a zero limit would refuse every frame.
+    """
+    try:
+        named = int(os.environ.get(FRAME_BYTES_ENV, ""))
+    except ValueError:
+        return MAX_FRAME_BYTES
+    return named if named > 0 else MAX_FRAME_BYTES
 
 
 def jsonable(value: object) -> object:
@@ -81,7 +98,7 @@ class Channel:
             fd = int(os.environ.get(FD_ENV, PROTOCOL_FD))
         sock = socket.socket(fileno=fd)
         sock.setblocking(False)
-        reader, writer = await asyncio.open_connection(sock=sock, limit=MAX_FRAME_BYTES)
+        reader, writer = await asyncio.open_connection(sock=sock, limit=frame_limit())
         return cls(reader, writer)
 
     async def receive(self) -> dict[str, Any] | None:

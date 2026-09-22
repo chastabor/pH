@@ -26,22 +26,22 @@ from __future__ import annotations
 
 import logging
 
-import anyio
-
 from ..agent.types import RequestErrorAction, RequestFailure
 from ..cordis import Context, Next, plugin
-from ..json import as_int
 from ..keys import SESSIONS
-from ..session import Session
 from ..wire import WireModel
 from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, LlmFailure
 
-__all__ = ["RETRIED", "TRANSIENT_CODES", "apply", "attempts_so_far", "is_transient"]
+__all__ = ["RETRIED", "ROW", "TRANSIENT_CODES", "apply", "is_transient"]
 
 log = logging.getLogger("ph.llm.retry")
 
 RETRIED = "llm/retry"
-"""The attempt record, which is also where the attempt *count* is read from."""
+"""The attempt record: what was retried, when and why. An audit trail — the count
+the budget spends is the loop's, on `RequestFailure.retries_by`."""
+
+ROW = "llm-retry"
+"""This row's id, and the key its own retries are counted under."""
 
 TRANSIENT_CODES: frozenset[str] = frozenset(
     {
@@ -81,34 +81,18 @@ class Config(WireModel):
     max_attempts: int = 3
     base_delay_ms: int = 500
     max_delay_ms: int = 20_000
+    count_all_retries: bool = False
+    """Whether every row's retries spend this row's budget, or only its own (G13).
+
+    Off by default, which is what this row always did: only its own retries
+    count, so a step that was compacted and retried after an overflow still has
+    every transient retry it was configured for. On, a compaction retry — or any
+    other row's — is one fewer, for a hard ceiling on model calls per step.
+    Either way the number is the loop's (`RequestFailure.retries_by`, attributed
+    by cordis); this row holds its opt-in and nothing else."""
 
 
-def attempts_so_far(session: Session, turn: int, step: int) -> int:
-    """How many times this step has already been retried, read from the log.
-
-    **The count is derived, not held** (I4). It was a dict on the row, keyed by
-    `turn:step` — and a row is mounted once per root while every agent beneath it
-    dispatches to the same listener, so two subagents at the same coordinates
-    shared one budget. The entry was also dropped only on give-up, so a step that
-    succeeded on its second attempt left its count behind for whoever reached
-    `1:1` next. A sibling could therefore be refused every retry it had, which is
-    the case this exists for.
-
-    `llm/retry` already records each attempt, so the log is the count. The latest
-    one is enough: a step's retries are consecutive by construction — one agent
-    drives one step at a time, and the next append for a different step is the
-    one after that — so an event naming other coordinates means this step has had
-    none yet.
-    """
-    latest = session.latest(RETRIED)
-    if latest is None:
-        return 0
-    if as_int(latest.data.get("turn")) != turn or as_int(latest.data.get("step")) != step:
-        return 0
-    return as_int(latest.data.get("attempt"))
-
-
-@plugin("llm-retry", config=Config, inject=[SESSIONS])
+@plugin(ROW, config=Config, inject=[SESSIONS])
 async def apply(ctx: Context, config: Config) -> None:
     """Retry transient request failures with bounded backoff."""
     settings = config
@@ -121,7 +105,11 @@ async def apply(ctx: Context, config: Config) -> None:
         if not is_transient(failure):
             return await next_()
         session = failure_payload.session
-        seen = attempts_so_far(session, failure_payload.turn, failure_payload.step)
+        seen = (
+            failure_payload.retries
+            if settings.count_all_retries
+            else failure_payload.retries_by.get(ROW, 0)
+        )
         if seen + 1 >= settings.max_attempts:
             log.debug("ph.llm.retry: giving up on %s after %s attempts", failure.code, seen + 1)
             return await next_()
@@ -142,7 +130,6 @@ async def apply(ctx: Context, config: Config) -> None:
                 "code": failure.code,
             },
         )
-        await anyio.sleep(delay_ms / 1000)
         return RequestErrorAction(kind="retry", delay_ms=delay_ms)
 
     ctx.on("agent/request-error", on_error)

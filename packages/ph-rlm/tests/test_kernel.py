@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -54,6 +54,7 @@ from runtime_helpers import namespace
 
 from ph.orphans import process_alive
 from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
+from ph.seams.subprocess import scrub_env
 from ph.testing import settled
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph_rlm.kernel.manager import (
@@ -64,7 +65,7 @@ from ph_rlm.kernel.manager import (
     frame_cap,
 )
 from ph_runtime.cell import MAGIC_HINT
-from ph_runtime.protocol import FD_ENV, truncation_marker
+from ph_runtime.protocol import FD_ENV, FRAME_BYTES_ENV, truncation_marker
 
 pytestmark = pytest.mark.anyio
 
@@ -1076,6 +1077,35 @@ def test_the_readers_ceiling_follows_the_limit_the_kernel_booted_with() -> None:
     )
     # And the floor still holds underneath a deployment that lowers the limit.
     assert frame_cap(KernelLimits(max_snapshot_bytes=1024)) == MAX_FRAME_BYTES
+
+
+async def test_the_guest_reads_with_the_hosts_frame_cap(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F8 — both readers from one expression, handed over at spawn.
+
+    The host's ceiling followed `maxSnapshotBytes` while the guest's stayed at a
+    fixed 64 MiB, so a raised limit lost the namespace on restore. `start` puts
+    `frame_cap` in the child's environment, the way the descriptor crosses —
+    asserted on a real spawn, which the guest then boots from.
+
+    Sabotage: drop the `FRAME_BYTES_ENV` entry from `start`'s environment and
+    this finds none.
+    """
+    handed: dict[str, str] = {}
+
+    def recording(*, extra: Mapping[str, str]) -> dict[str, str]:
+        handed.update(extra)
+        return scrub_env(extra=extra)
+
+    monkeypatch.setattr("ph_rlm.kernel.manager.scrub_env", recording)
+    raised = 256 * 1024 * 1024
+
+    # `start` raises unless the guest answers `boot`, so returning is the proof
+    # that it came up reading with the number it was handed.
+    await make_kernel(max_snapshot_bytes=raised)
+
+    assert handed[FRAME_BYTES_ENV] == str(frame_cap(KernelLimits(max_snapshot_bytes=raised)))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is POSIX")

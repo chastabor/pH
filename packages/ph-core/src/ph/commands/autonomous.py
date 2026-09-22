@@ -36,12 +36,21 @@ from __future__ import annotations
 import logging
 import secrets
 
+from pydantic import Field
+
 from ..agent.types import AgentDriver
 from ..cordis import Context, plugin
 from ..keys import COMMANDS, GOALS, SHELL, WORKSPACE
 from ..llm.types import PluginSource, create_user_message
 from ..seams.commands import CommandContext, CommandDefinition
-from ..seams.goals import Budget, Goal, GoalService, GoalState
+from ..seams.goals import (
+    Budget,
+    Goal,
+    GoalService,
+    GoalState,
+    TokenSource,
+    own_tokens_only,
+)
 from ..seams.workspace import workspace_of
 from ..session import Session, now_ms
 from ..wire import WireModel
@@ -68,6 +77,8 @@ class Config(WireModel):
     max_turns: int = 12
     max_tokens: int = 80_000
     timeout_ms: int = 30 * 60 * 1000
+    token_sources: list[TokenSource] = Field(default_factory=own_tokens_only)
+    """Whose tokens `maxTokens` charges — `Budget.token_sources` (P2)."""
 
 
 async def run_gates(
@@ -227,5 +238,5 @@ def _status(state: GoalState | None) -> str:
         f"gates: {gates}\n"
         f"continuations {spent.continuations}/{budget.max_continuations}"
         f"  turns {spent.turns}/{budget.max_turns}"
-        f"  tokens {spent.tokens}/{budget.max_tokens}"
+        f"  tokens {spent.charged_tokens(budget)}/{budget.max_tokens}"
     )

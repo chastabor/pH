@@ -439,9 +439,9 @@ class Runner:
 
         The host sends a frame per variable, because a frame carrying the whole
         namespace is bounded by nothing while each *value* is bounded by
-        `maxSnapshotBytes` — and this end reads with a fixed limit it cannot
-        size from a `boot` frame it has not read yet, so an over-limit line
-        kills the guest rather than failing the restore.
+        `maxSnapshotBytes` — and this end's reader is sized for one value, from
+        the host's `frame_cap` before any frame arrives (F8), so a frame holding
+        more would kill the guest rather than fail the restore.
 
         Accumulated rather than answered per frame: one `restore` is one `done`
         on the host's side, and a reply per batch would settle its pump on the

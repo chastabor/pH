@@ -28,6 +28,8 @@ events** `Root.accepted` measured.
 
 from __future__ import annotations
 
+from collections import Counter
+
 import pytest
 
 from ph.agent.types import AgentOptions
@@ -37,8 +39,10 @@ from ph.seams.goals import (
     Goal,
     GoalService,
     Spent,
+    TokenSource,
     goals,
 )
+from ph.seams.subagents import USAGE as CHILD_USAGE
 from ph.session import Session, SurfaceIntent
 from ph.testing import MountProfile, assistant_payload, not_none
 
@@ -64,7 +68,8 @@ def test_budget_exhaustion_is_named_not_merely_reported() -> None:
     assert Spent().exhausted(budget, elapsed_ms=0) is None
     assert Spent(continuations=3).exhausted(budget, elapsed_ms=0) == "max_continuations"
     assert Spent(turns=12).exhausted(budget, elapsed_ms=0) == "max_turns"
-    assert Spent(tokens=80_000).exhausted(budget, elapsed_ms=0) == "max_tokens"
+    own: Counter[TokenSource] = Counter({"own": 80_000})
+    assert Spent(tokens=own).exhausted(budget, elapsed_ms=0) == "max_tokens"
     # The clock is the caller's, not the log's: the hung run this budget exists
     # to stop is precisely the one that appends nothing.
     assert Spent().exhausted(budget, elapsed_ms=1_800_000) == "timeout"
@@ -102,7 +107,68 @@ def test_spend_is_folded_from_the_log_not_carried_by_the_loop() -> None:
     assert spent.turns == 1
     # All four terms, through `TokenUsage.total`: a two-term count would put
     # most of a cache-heavy run's input outside the budget.
-    assert spent.tokens == 1_400
+    assert spent.tokens["own"] == 1_400
+
+
+def _spent_by_three_sources(session: Session, service: GoalService) -> Spent:
+    """A goal whose run spent 100 own, 50 on a compaction and 30 in a child."""
+    goal = _open(session, service)
+    session.append(
+        "assistant/message",
+        {**assistant_payload("done", "m1"), "usage": {"inputTokens": 90, "outputTokens": 10}},
+        SurfaceIntent("append"),
+    )
+    session.append(
+        "compaction/summarized",
+        {"trigger": "pressure", "usage": {"inputTokens": 50, "outputTokens": 0}},
+    )
+    session.append(
+        CHILD_USAGE,
+        {"runId": "r1", "targetSeq": 3, "childUsage": {"inputTokens": 0, "outputTokens": 30}},
+    )
+    return goals(session)[goal.id].spent
+
+
+def test_the_fold_counts_every_source_of_tokens() -> None:
+    """P2 — the fold reports what each source spent, and decides nothing.
+
+    It read only `assistant/message`, so a compaction's summary and a child's
+    work were outside `max_tokens` by omission rather than by anyone's choice.
+    Sabotage: drop either type from `_COUNTED` and its total stays zero.
+    """
+    spent = _spent_by_three_sources(Session("g"), GoalService())
+
+    assert spent.tokens == {"own": 100, "compaction": 50, "children": 30}
+
+
+@pytest.mark.parametrize(
+    ("sources", "charged"),
+    [
+        (None, 100),
+        (["own", "compaction"], 150),
+        (["own", "compaction", "children"], 180),
+    ],
+)
+def test_the_budget_decides_whose_tokens_it_charges(
+    sources: list[TokenSource] | None, charged: int
+) -> None:
+    """P2 — the agent's own by default, which is what this budget always counted.
+
+    Sabotage: charge `spent.tokens["own"]` in `exhausted` and the wider budgets
+    stop at 100 — the run spends 180 and is told it spent 100.
+    """
+    spent = _spent_by_three_sources(Session("g"), GoalService())
+    budget = (
+        Budget(max_tokens=charged)
+        if sources is None
+        else Budget(max_tokens=charged, token_sources=sources)
+    )
+
+    assert spent.charged_tokens(budget) == charged
+    assert spent.exhausted(budget, elapsed_ms=0) == "max_tokens"
+    assert (
+        spent.exhausted(budget.model_copy(update={"max_tokens": charged + 1}), elapsed_ms=0) is None
+    )
 
 
 def test_a_second_goal_is_refused_while_one_is_open() -> None:

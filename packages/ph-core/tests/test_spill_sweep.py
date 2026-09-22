@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import anyio.from_thread
 import pytest
 
 from ph.cordis import Context
@@ -82,6 +83,41 @@ async def test_two_producers_sharing_an_owner_do_not_collect_each_other(
 
     assert removed == [orphan.locator], removed
     assert Path(mine.locator).exists() and Path(yours.locator).exists()
+
+
+async def test_a_write_in_flight_survives_a_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D17 — a session opening mid-write deleted the write's temp.
+
+    `save_bytes` writes `<name>.<hex>.tmp` beside the locator and renames it into
+    place; the open-time sweep runs off-thread on every `session/created` and
+    collected every file the log did not name — the temp included — so the
+    rename failed with `FileNotFoundError`. `ph_rlm.snapshot` writes a kernel
+    variable's blob this way *after* its event is durable, which made the loss a
+    variable that would not restore. Reproduced here exactly: the sweep runs
+    between the temp's write and its rename.
+
+    Sabotage: drop the `is_atomic_temp` guard from `_remove_unreferenced` and
+    the write raises.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("ours", session.id))
+    rename = Path.replace
+    swept: list[list[str]] = []
+
+    def sweep_then_rename(self: Path, target: Path) -> Path:
+        if self.name.endswith(".tmp"):
+            swept.append(anyio.from_thread.run(store.sweep_session, session))
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "replace", sweep_then_rename)
+
+    ref = await store.save_text(owner=session.id, source="x", suggested_name="x", content="kept")
+
+    assert swept == [[]], "the sweep ran mid-write and collected nothing"
+    assert Path(ref.locator).read_text() == "kept"
 
 
 async def test_an_owner_no_claim_names_is_never_visited(tmp_path: Path) -> None:

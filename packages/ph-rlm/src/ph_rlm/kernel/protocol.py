@@ -51,10 +51,17 @@ from ph.wire import WireModel
 # all. Re-exported through `__all__` below, so this module stays the complete
 # host-side view and `venv`/`manager` keep importing them from here.
 # `ph_runtime.protocol` owns the reasoning for each, and says what else is shared.
-from ph_runtime.protocol import FD_ENV, NAMESPACE_ENV, PROTOCOL_FD, PROTOCOL_VERSION
+from ph_runtime.protocol import (
+    FD_ENV,
+    FRAME_BYTES_ENV,
+    NAMESPACE_ENV,
+    PROTOCOL_FD,
+    PROTOCOL_VERSION,
+)
 
 __all__ = [
     "FD_ENV",
+    "FRAME_BYTES_ENV",
     "FRAME_FIELDS",
     "GUEST_FRAMES",
     "HOST_FRAMES",

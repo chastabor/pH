@@ -147,9 +147,10 @@ events.declare(
     "emit",
     owner="ph.seams.skills",
     doc="A skill's body was read. Carries the skill, its steps with the "
-    "caller's inputs already filled in, and the session — so a row that turns "
-    "a declared procedure into work can do so without this seam knowing what a "
-    "todo list is, and without a listener needing the arguments to render them.",
+    "caller's inputs already filled in, its own nudge budget (or None), and the "
+    "session — so a row that turns a declared procedure into work can do so "
+    "without this seam knowing what a todo list is, and without a listener "
+    "needing the arguments to render them.",
 )
 
 ORDER_SKILLS = ORDER_TOOL_GUIDANCE + 50
@@ -202,6 +203,15 @@ class Skill(WireModel):
     Declared here and consumed in `ph-stabilize`, across a package boundary this
     seam cannot cross, which is why reading a skill emits `skills/read` rather
     than reaching for a todo list ph-core knows nothing about."""
+    max_nudges: int | None = None
+    """How many times `skill-steps` may steer toward this skill's steps without
+    the plan moving, or `None` for the row's own `maxNudges` (D16).
+
+    The author's to set because the author knows what a partial run is worth: a
+    release checklist abandoned at step three is worse than one that spent a
+    few more model calls finishing, while a survey that stops early has still
+    produced something — `0` says so, and seeds the steps without ever steering.
+    Declared here and read in `ph-stabilize`, the same crossing `steps` makes."""
     parameters: dict[str, Any] = Field(default_factory=dict)
     """The inputs this skill takes, as a JSON Schema object (P7-18).
 
@@ -594,12 +604,22 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
     if tools is None:
         return None
 
+    nudges = front.get("max-nudges")
+    # `bool` first: YAML's `true` is an `int` to `isinstance`, and a budget of
+    # `true` nudges is a typo rather than a number.
+    if nudges is not None and (
+        isinstance(nudges, bool) or not isinstance(nudges, int) or nudges < 0
+    ):
+        log.warning("ph.seams.skills: %s max-nudges is not a non-negative integer", path)
+        return None
+
     return {
         "version": version,
         "argument_hint": hint,
         "allowed_tools": tools,
         "parameters": schema,
         "steps": steps,
+        "max_nudges": nudges,
     }
 
 
@@ -962,7 +982,12 @@ async def progressive(ctx: Context, config: Config) -> None:
         # call in every deployment that mounts both.
         ctx.emit(
             "skills/read",
-            {"skill": skill, "steps": steps, "session": run.session},
+            {
+                "skill": skill,
+                "steps": steps,
+                "max_nudges": skill.max_nudges,
+                "session": run.session,
+            },
             contained=True,
         )
         return {

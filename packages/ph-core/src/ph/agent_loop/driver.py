@@ -41,7 +41,8 @@ seam unless something shadowed it for this agent alone.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -449,13 +450,10 @@ class ReactLoopAgent:
         # *call* is what needs the name. Two attempts minted the same tool-call
         # ids and `recorded_steps` had to infer the boundary between them.
         #
-        # **Counted here because this is the only place every retry passes.**
-        # Not `retry.attempts_so_far`, which is a different number: it folds
-        # `llm/retry` records, which only the `llm-retry` row writes, so a retry
-        # `compaction` asks for after an overflow never reaches it. That is right
-        # for a retry *budget* and wrong for a call's identity — the two used to
-        # be described as one fact, and they diverge on the first non-`llm-retry`
-        # retry.
+        # **Counted here because this is the only place every retry passes**,
+        # by the row that asked (G13): the attempt is the total, and a policy's
+        # budget is its own share or the total as it chooses.
+        retries: Counter[str] = Counter()
         attempt = 0
         while True:
             request = await self._build_request(turn, step, assembly, system)
@@ -504,13 +502,30 @@ class ReactLoopAgent:
 
             finish = assembler.finish
             if finish.kind in ("error", "aborted"):
-                action = await self._request_error(turn, step, request, finish)
+                action, by = await self._request_error(turn, step, retries, request, finish)
                 if action is None or action.kind != "retry":
                     failure = finish.failure or LlmFailure(
                         message="model request failed", code="UNKNOWN"
                     )
                     raise LlmError(failure.message, failure.code, failure)
-                attempt += 1
+                retries[by] += 1
+                attempt = retries.total()
+                # The loop's own record of the call it is about to make again,
+                # beside `step/start` for the first one (P1): the log's answer
+                # to "how many model calls", whichever row asked for the retry.
+                # `llm/retry` is `llm-retry`'s account of itself and a compaction
+                # retry writes none, so a ceiling counting those undercounts.
+                self.session.append(
+                    "step/retry",
+                    {"turn": turn, "step": step, "attempt": attempt, "by": by},
+                )
+                # **The wait is the loop's**, after the waterfall has settled: a
+                # row that slept inside it answered only after a later veto
+                # could no longer save the time, and a gate had to run *ahead*
+                # of it to refuse at all (P1 review).
+                if action.delay_ms > 0:
+                    await anyio.sleep(action.delay_ms / 1000)
+                    self._throw_if_canceled()
                 continue
 
             blocks = assembler.blocks()
@@ -549,8 +564,20 @@ class ReactLoopAgent:
         return TurnEndReason(kind="completed") if outcome.concluded else None
 
     async def _request_error(
-        self, turn: int, step: int, request: GenerateOptions, finish: FinishReason
-    ) -> RequestErrorAction | None:
+        self,
+        turn: int,
+        step: int,
+        retries: Mapping[str, int],
+        request: GenerateOptions,
+        finish: FinishReason,
+    ) -> tuple[RequestErrorAction | None, str]:
+        """The chain's answer, and the row whose listener gave it.
+
+        Attributed by cordis rather than claimed on the action (G13): the retry
+        is counted under the plugin that granted it, which a row could otherwise
+        misname and which cordis already knows.
+        """
+
         async def inner(request_failure: RequestFailure) -> RequestErrorAction | None:
             return None
 
@@ -561,10 +588,14 @@ class ReactLoopAgent:
             step=step,
             provider=request.provider,
             failure=finish.failure or LlmFailure(message="model request failed", code="UNKNOWN"),
+            # A copy: the payload is a snapshot, and the loop goes on counting.
+            retries_by=dict(retries),
         )
-        action = await self.ctx.waterfall("agent/request-error", failure, inner=inner)
+        action, by = await self.ctx.waterfall_attributed(
+            "agent/request-error", failure, inner=inner
+        )
         self._throw_if_canceled()
-        return settled_or_none("agent/request-error", action, RequestErrorAction)
+        return settled_or_none("agent/request-error", action, RequestErrorAction), by
 
     def _append_assistant_message(
         self,

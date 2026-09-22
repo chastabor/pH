@@ -37,6 +37,7 @@ is the one place directories are created, with the mode each tier requires.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import stat
 import sys
@@ -50,6 +51,7 @@ __all__ = [
     "canonical",
     "default_cache_path",
     "default_home_path",
+    "is_atomic_temp",
     "is_under",
     "resolve_roots",
     "write_atomic",
@@ -367,6 +369,23 @@ def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
         handle.write(text)
 
 
+_TEMP_SUFFIX_BYTES = 4
+_ATOMIC_TEMP = re.compile(rf".+\.[0-9a-f]{{{_TEMP_SUFFIX_BYTES * 2}}}\.tmp")
+"""`write_atomic`'s temp name — `<name>.<hex>.tmp` — built from the same width."""
+
+
+def is_atomic_temp(path: Path) -> bool:
+    """Whether `path` is a `write_atomic` temp: a write in flight, or one a crash left.
+
+    The two cannot be told apart from the file, which is the point of asking. A
+    sweep that collects unreferenced files must pass these over, or it deletes
+    the temp of a write that is running *now* and the rename fails (D17) — the
+    same reason nothing in `spill`'s `.staging` is ever collected. The cost is
+    the same leak, one file per write a kill interrupted.
+    """
+    return _ATOMIC_TEMP.fullmatch(path.name) is not None
+
+
 def write_atomic(path: Path, payload: bytes | str, *, skip_if_present: bool = False) -> None:
     """Write `payload` to `path` so a reader sees all of it or none of it (L7).
 
@@ -408,7 +427,7 @@ def write_atomic(path: Path, payload: bytes | str, *, skip_if_present: bool = Fa
     if skip_if_present and path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(_TEMP_SUFFIX_BYTES)}.tmp")
     try:
         if isinstance(payload, str):
             temporary.write_text(payload, encoding="utf-8")

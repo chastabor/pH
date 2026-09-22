@@ -80,8 +80,8 @@ def named_call(chunk: StreamChunk, turn: int, step: int, attempt: int) -> Stream
     retried step keeps its turn and step on purpose — `llm/retry` is legible in
     the log because of it — so without a third number two attempts minted the
     same ids. The driver counts it, because every retry passes through the
-    driver whichever listener chose it; `retry.attempts_so_far` counts only
-    `llm-retry`'s own and is a budget, not an identity. It was sound only by
+    driver whichever listener chose it — the total of `RequestFailure.retries_by`,
+    where a policy's budget is only its own share. It was sound only by
     accident: an error finish skips `_append_assistant_message`, so the losing
     attempt never reached the transcript that pairing reads, while the raw
     `assistant/chunk` records held the repeat. `recorded_steps` was inferring

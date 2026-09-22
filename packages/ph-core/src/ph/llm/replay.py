@@ -121,8 +121,8 @@ def recorded_steps(events: Sequence[SessionEvent]) -> list[RecordedStep]:
     """Group a log's `assistant/chunk` events into per-model-call streams, in order.
 
     **One recorded stream per *call*, not per `(turn, step)`.** A retried step
-    keeps its turn and step — that is what makes `llm/retry` legible in the log,
-    and `attempts_so_far` reads the pair — so grouping by the pair concatenated
+    keeps its turn and step — that is what makes `llm/retry` legible in the log
+    — so grouping by the pair concatenated
     every attempt into one stream with several `Finish` chunks in it. The replay
     then served the whole concatenation to the first request and had one fewer
     step left for the rest of the run: a recording of a turn that hit a rate
