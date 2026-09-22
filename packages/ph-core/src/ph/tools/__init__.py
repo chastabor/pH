@@ -30,6 +30,7 @@ from .definition import (
     text_content,
 )
 from .errors import (
+    SPAWN_REFUSED,
     TOOL_ABORTED,
     TOOL_ABORTED_BEFORE_DISPATCH,
     TOOL_BUDGET_SPENT,
@@ -59,6 +60,7 @@ transport is added by somebody with no reason to know either file exists.
 
 __all__ = [
     "RUN_CODE",
+    "SPAWN_REFUSED",
     "TOOL_ABORTED",
     "TOOL_ABORTED_BEFORE_DISPATCH",
     "TOOL_BUDGET_SPENT",

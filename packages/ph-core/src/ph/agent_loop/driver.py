@@ -64,7 +64,7 @@ from ..cordis import Context, settled, settled_or_none
 from ..json import as_int
 from ..keys import LLM, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
-from ..llm.assembler import BlockAssembler, highest_minted_id
+from ..llm.assembler import BlockAssembler, named_call
 from ..llm.types import (
     ContentBlock,
     FinishReason,
@@ -445,13 +445,19 @@ class ReactLoopAgent:
 
         while True:
             request = await self._build_request(turn, step, assembly, system)
-            assembler = BlockAssembler(mint_from=highest_minted_id(request.messages))
+            assembler = BlockAssembler()
             chunk_seqs: list[int] = []
             try:
                 stream = await self.ctx.require(LLM).stream(request)
                 self._throw_if_canceled()
                 async for chunk in stream:
                     self._throw_if_canceled()
+                    # **Named before it is logged** (G11): a tool call the
+                    # provider did not name gets its id here, so the raw record
+                    # and the assembled message agree about it. This is the only
+                    # consumer that pairs a call to a result, and the only one
+                    # holding the coordinates the id is built from.
+                    chunk = named_call(chunk, turn, step)
                     # Raw chunks are logged before assembly, so the log carries
                     # token-level replay fidelity even for a stream that later
                     # fails.

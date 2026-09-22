@@ -41,6 +41,7 @@ from ph.llm.types import (
     LlmFailure,
     TextBlock,
     TextDelta,
+    ToolCallBlock,
     create_user_message,
 )
 from ph.session import SurfaceIntent
@@ -681,3 +682,53 @@ async def test_an_interrupt_while_the_prompt_is_assembled_keeps_the_batch(
     assert [block_text(one.content[0]) for one in pending] == ["do not lose me"], (
         "the interrupt consumed the prompt and ran nothing"
     )
+
+
+async def test_an_unnamed_call_gets_one_id_in_both_durable_records(
+    mount: MountProfile,
+) -> None:
+    """G11 — the raw record and the assembled message had drifted.
+
+    A tool call the provider did not name is given an id from the turn and step
+    the loop is on. It is applied here, to the chunk, *before* `assistant/chunk`
+    is appended — so the token-level record the log keeps for replay and the
+    `assistant/message` the pairing reads say the same thing about the same
+    call. While the mint lived in `BlockAssembler` the chunk was logged with
+    `id=""` and the message with `call-N`, which nothing read today and would
+    have been a silent disagreement the moment something did.
+
+    Sabotage: move `named_call` below the `session.append` and the two records
+    disagree.
+    """
+    ctx = await mount()
+    ctx.require(LLM).register_adapter(
+        ["scripted"],
+        ReplayAdapter(
+            steps=[
+                RecordedStep(turn=1, step=1, chunks=tool_call_chunks("", "ping", "{}")),
+                RecordedStep(turn=1, step=2, chunks=text_chunks("done")),
+            ]
+        ),
+    )
+    ctx.require(TOOLS).register(simple_tool("ping"))
+    session = ctx.require(SESSIONS).create("named")
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="scripted", model="m"))
+
+    await agent.prompt("go")
+
+    logged = [
+        as_str(block.get("id"))
+        for event in session.events
+        if event.type == "assistant/chunk"
+        for block in (as_obj(as_obj(event.data.get("chunk")).get("block")),)
+        if block.get("type") == "tool-call"
+    ]
+    assembled = [
+        block.id
+        for message in session.derive_messages()
+        for block in message.content
+        if isinstance(block, ToolCallBlock)
+    ]
+
+    assert assembled == ["call-1-1-0"], "the call reached the transcript unnamed"
+    assert logged == assembled, "the raw chunk and the assembled message disagree about the id"

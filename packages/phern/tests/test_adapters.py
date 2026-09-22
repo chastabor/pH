@@ -38,7 +38,7 @@ from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS
 from ph.llm.adapter import LlmError, MediaRoute
-from ph.llm.assembler import BlockAssembler, highest_minted_id
+from ph.llm.assembler import BlockAssembler
 from ph.llm.retry import is_transient
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -1567,7 +1567,7 @@ async def test_an_overflow_inside_a_200_reaches_the_remedy_it_has(
 
 
 @pytest.mark.parametrize("wire", ["openai", "anthropic"])
-def test_a_server_that_omits_the_call_id_does_not_collide_across_turns(wire: str) -> None:
+def test_a_server_that_omits_the_call_id_leaves_it_to_the_seam(wire: str) -> None:
     """G10 — G1 was filed as a Google defect and was live on all three wires.
 
     Google has no call id on the wire at all, which is how the collision was
@@ -1577,20 +1577,18 @@ def test_a_server_that_omits_the_call_id_does_not_collide_across_turns(wire: str
     omits the id is not exotic: llama.cpp, vLLM and gateways in front of either
     all do it, and so does any Anthropic `content_block_start` without one.
 
-    Both adapters now hand up an empty id and `BlockAssembler` names it from a
-    counter seeded off the conversation, so the fix is in one place rather than
-    three that can drift.
+    Both adapters now hand up an empty id and `LlmRuntime._normalized` names it
+    from the request's own coordinates (G11), so the fix is in one place rather
+    than three that can drift.
 
-    Sabotage: restore either `or f"call-{index}"` fallback and the assembled id
-    is `call-0`/`call-1` again, colliding with the history below.
+    **This asserts the adapter's half only.** Naming is the seam's, and
+    `test_llm.py::test_the_seam_names_a_call_the_provider_did_not` owns it —
+    this test used to call `_named` itself, which meant deleting the production
+    call left it green while proving the adapters still emitted nothing.
+
+    Sabotage: restore either `or f"call-{index}"` fallback here and the id is
+    no longer empty.
     """
-    history = [
-        create_assistant_message(
-            content=[ToolCallBlock(id="call-1", name="read", arguments="{}")],
-            provider=wire,
-            model="m",
-        )
-    ]
 
     if wire == "openai":
         state = _StreamState()
@@ -1629,18 +1627,10 @@ def test_a_server_that_omits_the_call_id_does_not_collide_across_turns(wire: str
 
     streamed = [chunk for chunk in chunks if isinstance(chunk, (ToolCallDelta, BlockEnd))]
     assert streamed, "the wire produced no tool call to name"
-    named = [
+    unnamed = [
         chunk.id if isinstance(chunk, ToolCallDelta) else as_kind(chunk.block, ToolCallBlock).id
         for chunk in streamed
     ]
-    assert named == [""] * len(named), (
-        "the adapter minted an id instead of leaving it to the assembler"
-    )
-
-    assembler = BlockAssembler(mint_from=highest_minted_id(history))
-    for chunk in chunks:
-        assembler.push(chunk)
-    calls = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
-    assert [call.id for call in calls] == ["call-2"], (
-        "the unnamed call re-used an id the conversation already holds"
+    assert unnamed == [""] * len(unnamed), (
+        "the adapter named the call itself instead of leaving it to the seam"
     )

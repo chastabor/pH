@@ -18,7 +18,7 @@ import pytest
 from ph.cordis import Context, running
 from ph.json import JsonObject
 from ph.keys import LLM
-from ph.llm import BlockAssembler, highest_minted_id
+from ph.llm import BlockAssembler, named_call
 from ph.llm.adapter import apply as llm_apply
 from ph.llm.types import (
     BlockEnd,
@@ -36,7 +36,6 @@ from ph.llm.types import (
     ToolCallDelta,
     UsageChunk,
     chunk_from_wire,
-    create_assistant_message,
     is_token_delta,
     user_text,
 )
@@ -149,90 +148,51 @@ def test_delta_only_protocols_need_no_block_start() -> None:
 
 
 def test_a_call_the_provider_did_not_name_is_named_here() -> None:
-    """G10 — one minter, because every wire needs one.
+    """G1/G10/G11 — one minter, and both arrival shapes.
 
-    Google has no call id at all; the other two have one the provider *usually*
-    sends, and an OpenAI-compatible server that omits it or an Anthropic
-    `content_block_start` without one falls back to the same mint. Each adapter
-    had written its own, per stream — so G1, filed and fixed as a Google
-    defect, was live on all three.
+    Every wire needs this: Google issues no call id, and the other two omit one
+    often enough that all three had grown their own per-stream `call-<n>`
+    fallback — so every turn restarted the numbering and two calls in one
+    conversation shared an id.
 
-    Both arrival shapes are covered because both happen: every adapter sends the
-    finished block on `BlockEnd`, and `_assemble` returned a closed block whole,
-    so the fallback that existed here only ever covered delta-only streams.
+    Both shapes, because both happen: the adapters send a finished
+    `ToolCallBlock` on `BlockEnd` *and* stream `ToolCallDelta`s, and a fix
+    covering only one leaves the path that actually runs unnamed. A provider
+    that did name its call keeps its own id.
     """
-    assembler = BlockAssembler()
-    assembler.push(BlockStart(index=0, block_type="tool-call"))
-    assembler.push(BlockEnd(index=0, block=ToolCallBlock(id="", name="read", arguments="{}")))
-    assembler.push(ToolCallDelta(index=1, id="", name="write", arguments_delta="{}"))
-    assembler.push(ToolCallDelta(index=2, id="toolu_01abc", name="grep", arguments_delta="{}"))
-
-    calls = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
-    assert [call.id for call in calls] == ["call-1", "call-2", "toolu_01abc"], (
-        "a closed block, a delta-only block and a provider-issued id must all "
-        "leave here with exactly one id each"
+    delta = named_call(ToolCallDelta(index=0, id="", name="read", arguments_delta="{}"), 3, 2)
+    closed = named_call(
+        BlockEnd(index=1, block=ToolCallBlock(id="", name="write", arguments="{}")), 3, 2
     )
+    provider = named_call(
+        BlockEnd(index=2, block=ToolCallBlock(id="toolu_01abc", name="grep", arguments="{}")), 3, 2
+    )
+    untouched = named_call(TextDelta(index=0, text="hello"), 3, 2)
+
+    assert as_kind(delta, ToolCallDelta).id == "call-3-2-0"
+    assert as_kind(as_kind(closed, BlockEnd).block, ToolCallBlock).id == "call-3-2-1"
+    assert as_kind(as_kind(provider, BlockEnd).block, ToolCallBlock).id == "toolu_01abc"
+    assert untouched is not None and as_kind(untouched, TextDelta).text == "hello"
 
 
-def test_a_later_turn_does_not_re_mint_an_id_the_conversation_holds() -> None:
-    """G10's point: the stream is one request and the id has to outlive it.
+def test_an_id_needs_no_history_so_a_compaction_cannot_walk_it_back() -> None:
+    """G11's point: the coordinates are monotonic where a history scan was not.
 
-    pH pairs results to calls by id everywhere — `persistence.repair` keys its
-    pending-call table on the same string — so a second turn restarting the
-    counter attributes a result to the wrong call in the log as well as on the
-    wire, and tells the model a tool it did not call answered.
+    G10 seeded a counter from the request's messages — the *projected*
+    conversation — and a compaction shadows a range out of it while the calls
+    stay in the session log and in `persistence.repair`'s pending-call table. So
+    the counter walked backwards onto ids still in the transcript, which is the
+    hazard that version's own docstring claimed `max` prevented.
 
-    `max`, not a count, so a compaction that shadowed an earlier turn cannot
-    walk the counter backwards onto an id still in the transcript.
-
-    Sabotage: drop `mint_from=` and the second turn mints `call-1` again.
+    A pure function of `(turn, step, index)` cannot be walked back by anything,
+    and gives a replayed run the live run's ids rather than renaming its calls.
     """
-    history = [
-        create_assistant_message(
-            content=[ToolCallBlock(id="call-1", name="read", arguments="{}")],
-            provider="p",
-            model="m",
-        ),
-        create_assistant_message(
-            content=[ToolCallBlock(id="call-4", name="write", arguments="{}")],
-            provider="p",
-            model="m",
-        ),
-    ]
-    assert highest_minted_id(history) == 4
+    call = ToolCallDelta(index=0, id="", name="read", arguments_delta="{}")
+    minted = {as_kind(named_call(call, turn, 1), ToolCallDelta).id for turn in (1, 2, 3)}
 
-    assembler = BlockAssembler(mint_from=highest_minted_id(history))
-    assembler.push(ToolCallDelta(index=0, id="", name="grep", arguments_delta="{}"))
-    (call,) = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
-    assert call.id == "call-5"
-
-
-def test_a_providers_own_id_neither_raises_the_counter_nor_is_continued() -> None:
-    """Only pH's own spelling counts, and it counts whichever wire minted it.
-
-    A provider-issued id is unique by its own construction, so continuing its
-    numbering is not this function's job — and `toolu_01abc` has no numbering to
-    continue. An id minted by *another* pH wire does count, deliberately: a
-    session that changed models mid-conversation carries it, and the next mint
-    has to clear it or it collides.
-    """
-    provider_issued = [
-        create_assistant_message(
-            content=[ToolCallBlock(id="toolu_01abc", name="read", arguments="{}")],
-            provider="anthropic",
-            model="m",
-        )
-    ]
-    assert highest_minted_id(provider_issued) == 0
-
-    from_another_wire = [
-        create_assistant_message(
-            content=[ToolCallBlock(id="call-7", name="read", arguments="{}")],
-            provider="google",
-            model="m",
-        )
-    ]
-    assert highest_minted_id(from_another_wire) == 7
+    assert minted == {"call-1-1-0", "call-2-1-0", "call-3-1-0"}
+    # Same coordinates, same id — the property replay rests on.
+    assert as_kind(named_call(call, 1, 1), ToolCallDelta).id == "call-1-1-0"
 
 
 def test_max_tokens_drops_tool_calls() -> None:

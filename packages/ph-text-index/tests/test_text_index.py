@@ -228,6 +228,46 @@ def test_a_paragraph_bigger_than_a_chunk_is_split_on_line_boundaries() -> None:
         assert later.start_line == earlier.end_line + 1
 
 
+def test_a_single_line_too_long_to_be_a_chunk_is_cut_anyway() -> None:
+    """X5 — the bound was on the lines packed together, not on the chunk.
+
+    `_split_block` cut only on line boundaries, so a line longer than
+    `max_chars` had no cut to make and went out whole. That is not exotic: a
+    minified bundle, a base64 blob and a long CSV row are each one line of
+    thousands of characters, and every one of them reached the embedder over its
+    input limit and was silently truncated there — X4's failure by the route X4
+    did not cover, with the chunker's own docstring promising it could not
+    happen.
+
+    The pieces all claim the one line they came from, which is the price and is
+    asserted here rather than left to be discovered: the span is approximate for
+    exactly the lines whose line number was never a useful pointer.
+
+    Sabotage: drop the `len(line) > limit` arm in `_split_block` and the first
+    case returns one 500-character chunk against a bound of 100.
+    """
+    chunks = chunk_text("y" * 500, max_chars=100, overlap_chars=10)
+
+    assert len(chunks) == 5
+    assert all(len(chunk.text) <= 100 for chunk in chunks)
+    assert "".join(chunk.text for chunk in chunks) == "y" * 500, "characters were lost in the cut"
+    assert {(chunk.start_line, chunk.end_line) for chunk in chunks} == {(1, 1)}
+
+    # And it is the *last* resort: a paragraph whose lines each fit is still cut
+    # between them, so the ordinary case keeps its exact span.
+    ordinary = "\n".join(f"line {number} " + "x" * 60 for number in range(20))
+    assert all(
+        chunk.start_line != chunk.end_line or len(chunk.text) <= 80
+        for chunk in chunk_text(ordinary, max_chars=200, overlap_chars=0)
+    )
+
+    # A long line among short ones does not drag its neighbours over the bound.
+    mixed = "short\n" + "z" * 450 + "\nshort again"
+    assert all(
+        len(chunk.text) <= 100 for chunk in chunk_text(mixed, max_chars=100, overlap_chars=10)
+    )
+
+
 def test_an_empty_document_yields_nothing() -> None:
     assert chunk_text("", max_chars=100, overlap_chars=0) == []
     assert chunk_text("\n\n   \n", max_chars=100, overlap_chars=0) == []

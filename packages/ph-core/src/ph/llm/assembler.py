@@ -16,9 +16,7 @@ Ported from dsh `packages/llm/llm/src/assembler.ts`.
 
 from __future__ import annotations
 
-import re
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Never, NoReturn
 
 from .types import (
@@ -40,67 +38,69 @@ from .types import (
     create_assistant_message,
 )
 
-__all__ = ["BlockAssembler", "highest_minted_id"]
-
-_MINT_PREFIX = "call-"
-"""The spelling `BlockAssembler` mints, in one place.
-
-Written once because three things have to agree on it: what `_minted` produces,
-what `highest_minted_id` reads back, and the cheap test that decides whether a
-block is worth the regex at all."""
-
-_MINTED = re.compile(rf"^{re.escape(_MINT_PREFIX)}(\d+)$")
-"""The shape `BlockAssembler` mints. Read back by `highest_minted_id`."""
+__all__ = ["BlockAssembler", "named_call"]
 
 
-def highest_minted_id(messages: Sequence[Message]) -> int:
-    """The highest id pH has already minted in this conversation (G10).
+def named_call(chunk: StreamChunk, turn: int, step: int) -> StreamChunk:
+    """Give a tool call the provider did not name an id (G1, G10, G11).
 
-    **A call id has to be unique across the conversation, not the request**, and
-    nothing on a stream knows what came before it. pH pairs results to calls by
-    id everywhere — `persistence.repair` keys its pending-call table on it — so
-    two calls sharing one id is a result attributed to the wrong call in the log
-    as well as on the wire, and the model is told a tool it did not call
-    answered.
+    **Every wire needs this.** Google issues no call id at all, and the other
+    two omit one often enough that all three had grown their own `call-<n>`
+    fallback — each counting within a single stream, so every turn restarted the
+    numbering and two calls in one conversation shared an id. pH pairs results
+    to calls by id everywhere, so that is a result attributed to the wrong call
+    in the log as well as on the wire.
 
-    Every wire needs this, which is why it is here. Google has no id at all;
-    the other two have one the provider *usually* sends, and an
-    OpenAI-compatible server that omits it (llama.cpp, vLLM, a gateway in front
-    of either) or an Anthropic `content_block_start` without one falls back to
-    the same mint. Filed as a Google defect (G1) and fixed there first, it was
-    live on all three (G10).
+    **Called where the coordinates already are.** G10 put the mint in
+    `BlockAssembler`, which sees a stream and not the conversation, so a seed had
+    to be threaded in from three construction sites — two of which could never
+    mint anything, and a fourth would have collided in silence. G11 moved it to
+    the `llm/stream` seam, which was one layer better and still conditional: the
+    coordinates rode on `GenerateOptions` as two optional fields that the caller
+    had to remember to set, so "nobody has to remember" had become "nobody has
+    to remember to set turn and step". `ReactLoopAgent._step` holds them
+    already, and is the only consumer in the repo that pairs a call to a result
+    — `structured`, `compaction` and the kernel read chunks and never pair. So
+    the argument for pushing it further down was an argument about a caller that
+    does not exist, and the price was two loop-only fields on the provider
+    request type.
 
-    Read off the history rather than kept as adapter state: a resumed session's
-    first request has no state to have kept. `max` rather than a count, so a
-    compaction that shadowed an earlier turn cannot walk the counter backwards
-    onto an id still in the transcript.
+    **`(turn, step, index)` rather than a counter over the history**, which is
+    what makes it a pure function of the chunk. A seed read off the projected
+    conversation walked *backwards* after a compaction shadowed a range, onto
+    ids still in the session log. These coordinates are monotonic through resume
+    and compaction, and replay reproduces them rather than renumbering.
 
-    **Only pH's own spelling counts.** A provider-issued id — `toolu_...`,
-    `call_abc123` — does not match, so it neither raises the counter nor is
-    continued; those are unique by the provider's own construction. Ids minted
-    by *another* pH wire do match, deliberately: a session that changed models
-    mid-conversation carries them, and the next mint has to clear them.
+    Not unique across *attempts*: a step retried after a mid-stream failure
+    keeps its turn and step, so both attempts mint the same id. That is sound
+    where it matters — an error finish skips `_append_assistant_message`, so the
+    losing attempt never reaches the transcript pairing reads — and the raw
+    `assistant/chunk` records do hold the repeat. `recorded_steps` already has
+    to tell calls apart inside one `(turn, step)` for the same reason; giving a
+    model *call* its own identity would answer both, and is filed rather than
+    guessed at here.
+
+    Applied to the chunk, before the loop logs it, so the raw `assistant/chunk`
+    and the assembled `assistant/message` carry the same id — they had drifted
+    while only the assembler minted.
     """
-    highest = 0
-    for message in messages:
-        for block in message.content:
-            # `startswith` ahead of the regex, because this walks the whole
-            # conversation on every model call and almost nothing in it is a
-            # candidate: on the two wires where the provider issues ids, every
-            # block fails this test and the regex never runs. Halves the walk on
-            # a history that only grows.
-            if not isinstance(block, ToolCallBlock) or not block.id.startswith(_MINT_PREFIX):
-                continue
-            if (found := _MINTED.match(block.id)) is not None:
-                highest = max(highest, int(found.group(1)))
-    return highest
+    if isinstance(chunk, ToolCallDelta) and not chunk.id:
+        return replace(chunk, id=f"call-{turn}-{step}-{chunk.index}")
+    if (
+        isinstance(chunk, BlockEnd)
+        and isinstance(chunk.block, ToolCallBlock)
+        and not chunk.block.id
+    ):
+        named = chunk.block.model_copy(update={"id": f"call-{turn}-{step}-{chunk.index}"})
+        return replace(chunk, block=named)
+    return chunk
 
 
 @dataclass(slots=True)
 class _Partial:
     block_type: str
     text: str = ""
-    tool_call_id: str | None = None
+    tool_call_id: str = ""
     tool_call_name: str | None = None
     tool_call_arguments: str = ""
     block: ContentBlock | None = None
@@ -124,15 +124,6 @@ def _refuse(chunk: Never) -> NoReturn:
 class BlockAssembler:
     """Incrementally assembles raw chunks into blocks and a final message."""
 
-    mint_from: int = 0
-    """The highest call id already in this conversation (G10).
-
-    Seeded by the caller from `highest_minted_id(request.messages)`, because the
-    assembler sees one stream and the id has to be unique across the
-    conversation. Zero — the default — is a stream with no history to clear,
-    which is what an isolated unit test and the first turn of a session both
-    are.
-    """
     _partials: dict[int, _Partial] = field(default_factory=dict)
     _order: list[int] = field(default_factory=list)
     _usage: TokenUsage | None = None
@@ -194,40 +185,22 @@ class BlockAssembler:
             self._order.append(index)
         return partial
 
-    def _minted(self, index: int) -> str:
-        """An id for a call the provider did not name (G10).
-
-        `call-<n>` rather than a uuid: it is only ever paired within one
-        conversation, and a stable spelling keeps a replayed session's ids
-        identical to the live run's — the block index is fixed for a given
-        stream and `mint_from` is read off the same history both times, so
-        replay reproduces what was stored rather than renaming it.
-
-        Off the block index, not a running count, so the two ways a call
-        reaches here — a closed `BlockEnd` and a delta-only stream — agree on
-        the id for the same block. The numbering may skip where a stream also
-        carried text; unique and rising is the whole contract.
-        """
-        return f"{_MINT_PREFIX}{self.mint_from + index + 1}"
-
     def _assemble(self, partial: _Partial, index: int) -> ContentBlock:
         if partial.block is not None:
-            # **A closed block is authoritative about everything but an absent
-            # id** (G10). All three adapters send the finished `ToolCallBlock`
-            # on `BlockEnd`, so returning it whole meant this fallback only ever
-            # covered delta-only streams — and each adapter had written its own
-            # mint for the path that actually runs. They were per-stream to a
-            # one, which is the collision G1 names.
-            if isinstance(partial.block, ToolCallBlock) and not partial.block.id:
-                return partial.block.model_copy(update={"id": self._minted(index)})
             return partial.block
         if partial.block_type == "text":
             return TextBlock(text=partial.text)
         if partial.block_type == "reasoning":
             return ReasoningBlock(text=partial.text)
         if partial.block_type == "tool-call":
+            # **No id is invented here** (G11). `LlmRuntime._normalized` names a
+            # call the provider did not, on the chunk, before the loop logs it —
+            # the one layer holding both the conversation's coordinates and
+            # every chunk. This saw a stream and not the conversation, so the
+            # id it minted had to be seeded from three call sites, two of which
+            # could never mint and a fourth would have collided in silence.
             return ToolCallBlock(
-                id=partial.tool_call_id or self._minted(index),
+                id=partial.tool_call_id,
                 name=partial.tool_call_name or "",
                 arguments=partial.tool_call_arguments,
             )

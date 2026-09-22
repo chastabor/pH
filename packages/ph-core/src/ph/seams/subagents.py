@@ -42,6 +42,14 @@ from ..json import JsonValue, as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ..session import Session, SessionEvent, SessionFoldCache
 from ..system_prompt.assembly import PromptSection
+from ..tools.definition import Deny
+from ..tools.errors import (
+    SPAWN_REFUSED,
+    TOOL_BUDGET_SPENT,
+    TOOL_DENIED,
+    FailureKind,
+    HarnessError,
+)
 from ..tools.registry import ToolRestriction
 from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
@@ -218,12 +226,66 @@ def downgrade_text(reason: DowngradeReason | str) -> str:
     return _DOWNGRADE_TEXT.get(reason, f"access was narrowed ({reason})")
 
 
-class SubagentSpawnError(Exception):
+def _refused(reason: Deny | str) -> SubagentSpawnError:
+    """One guard's answer, as the error the pipeline already knows how to read.
+
+    **The code is derived from the reading, exactly as `registry._gate` derives
+    it** (D15). The tool side picks `budget_result` or `denied_result` off
+    `Deny.failure_kind` and carries no code on the decision at all; carrying one
+    here meant the same code arrived with two readings — `SPAWN_REFUSED` as a
+    retryable misconfiguration from a direct raise, and as a policy denial from
+    the ceiling — which is the one distinction `TOOL_DENIED`'s own docstring
+    exists to keep.
+
+    `Deny` rather than a second refusal type for the same reason: the child
+    ceiling and the tool ceiling are the same decision, and the row that governs
+    both now writes it once. A bare string is still a guard's answer and means
+    the plain refusal every guard but the ceiling wants — `ToolRuntime.guard` is
+    posture-less for that reason, and this keeps the two seams' guards the same
+    shape.
+    """
+    if isinstance(reason, str):
+        return SubagentSpawnError(reason)
+    return SubagentSpawnError(
+        reason.reason,
+        TOOL_BUDGET_SPENT if reason.failure_kind == "failed" else TOOL_DENIED,
+        failure_kind=reason.failure_kind,
+        concludes_turn=reason.concludes_turn,
+    )
+
+
+class SubagentSpawnError(HarnessError):
     """A delegation was refused before the child existed.
 
     Distinct from a child that ran and failed: this one produced no session, no
     log and no artifacts, so a caller may retry it with different arguments.
+
+    **A `HarnessError`, so the refusal keeps its shape on the way out** (D15).
+    It was a bare `Exception`, which meant it carried no code and no
+    `failure_kind` and arrived at the model as a generic failure with the turn
+    carrying on — the posture D7 replaced for tool calls, surviving here because
+    nothing had given a spawn refusal a way to say more. The two tool bodies
+    that catch it also flattened it into a `ValueError`/`ToolCallError`, so even
+    a richer error would not have reached the pipeline; they now let it through.
+
+    The defaults are the old behaviour exactly — `SPAWN_REFUSED`, a failure the
+    model may act on, the turn continuing — because most refusals here are
+    misconfiguration a retry *can* fix: no such provider, no such preset, a
+    grant the parent does not hold. Only a spent ceiling says otherwise, and it
+    says so by passing them.
     """
+
+    def __init__(
+        self,
+        message: str,
+        code: str = SPAWN_REFUSED,
+        *,
+        failure_kind: FailureKind = "failed",
+        concludes_turn: bool = False,
+    ) -> None:
+        super().__init__(message, code)
+        self.failure_kind = failure_kind
+        self.concludes_turn = concludes_turn
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,7 +584,7 @@ class _Registered:
     by: Running
 
 
-SpawnGuard: TypeAlias = Callable[[SubagentRequest], str | None]
+SpawnGuard: TypeAlias = Callable[[SubagentRequest], "Deny | str | None"]
 """A policy asked before a child exists: a reason to refuse, or `None` to allow.
 
 Deny-only and asked before the provider is, so a refusal produces no session, no
@@ -902,7 +964,7 @@ class SubagentService:
             with running(guard.by):
                 reason = guard.check(request)
             if reason is not None:
-                raise SubagentSpawnError(reason)
+                raise _refused(reason)
         # Once, then threaded — the ceiling, the brief and the containment
         # check must be answers to the *same* boundary, and one resolution
         # makes that true by construction (the `held` argument one line down

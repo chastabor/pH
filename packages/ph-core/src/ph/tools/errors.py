@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Literal, TypeAlias
 
 __all__ = [
+    "SPAWN_REFUSED",
     "TOOL_ABORTED",
     "TOOL_ABORTED_BEFORE_DISPATCH",
     "TOOL_BUDGET_SPENT",
@@ -35,6 +36,17 @@ Routable on purpose. A refusal and a failure look identical to a model reading
 content, but they are different facts and different code has to branch on them:
 Code Mode fails the whole run on a refusal and lets the program handle a failure
 (C3), which is impossible if the two are indistinguishable.
+"""
+
+
+SPAWN_REFUSED = "SPAWN_REFUSED"
+"""A delegation was refused before the child existed (D15).
+
+Distinct from the call that carried it failing: nothing ran, no session and no
+log were created, so a caller may retry with different arguments. A spawn
+refused by a *budget* carries `TOOL_BUDGET_SPENT` instead, for the reason that
+code exists — the ceiling does not move within the turn, so retrying is the one
+thing that cannot help.
 """
 
 

@@ -220,6 +220,25 @@ class ChildLimits(CallBudget):
     subagent provider answers it with a queue (`rlm-subagent-provider`'s
     `maxConcurrent`), and this row keeps to the totals."""
 
+    exit: Literal["continue", "end", "error"] = "continue"
+    """What a spawn over the ceiling does, in `ToolCallLimits.exit`'s words (D15).
+
+    This budget used to have one posture and argue for it: "a child that is not
+    created cannot be continued past or raised about". The first half is true of
+    a tool call that is not executed too, and D7 still gave that ceiling three
+    readings — so the argument did not separate them, and this was left as the
+    last ceiling on the posture D7 was filed to replace.
+
+    The three mean here exactly what they mean there. `continue` refuses the
+    spawn and lets the turn go on, which is what this always did and stays the
+    default. `end` refuses it and concludes the turn. `error` also concludes it
+    and the model reads a spent budget rather than policy — `TOOL_BUDGET_SPENT`,
+    `kind="failed"` — because nothing judged the request.
+
+    A refusal still creates nothing whichever is chosen: the guard runs before
+    the provider is asked, which is the half of the old argument that was always
+    about *this* budget rather than about postures."""
+
 
 class BreakerConfig(WireModel):
     """The consecutive-failure breaker."""
@@ -665,7 +684,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ----------------------------------------------------------- children --
 
-    def refuse_child(request: SubagentRequest) -> str | None:
+    def refuse_child(request: SubagentRequest) -> Deny | None:
         """The child caps, asked before every admission (P4-04)."""
         settings = config.children
         session = request.parent.session
@@ -676,20 +695,28 @@ async def apply(ctx: Context, config: Config) -> None:
         if not exceeded:
             return None
         message = CHILD_DENIAL.format(limits=" and ".join(exceeded))
-        # `refuse`, which is the only posture this budget has: a child that is
-        # not created cannot be continued past or raised about, so `ChildLimits`
-        # carries no `exit` and the field says so rather than being left off.
+        # The posture the deployment chose, recorded as the other two ceilings
+        # record theirs (D15). This used to be the literal `"refuse"`, because
+        # there was only one.
         _record(
             session,
             "children",
-            "refuse",
+            settings.exit,
             {
                 "turn": current.turn_children,
                 "session": current.session_children,
                 "message": message,
             },
         )
-        return message
+        # The same decision the tool ceiling returns, in the same type: `error`
+        # is the only reading that is not policy refusing, because the ceiling
+        # judged nothing about *this* request — it was simply already spent. The
+        # seam derives the code from the reading, as `registry._gate` does.
+        return Deny(
+            reason=message,
+            concludes_turn=settings.exit in ("end", "error"),
+            failure_kind="failed" if settings.exit == "error" else "denied",
+        )
 
     # `contribute_via`, which carries the wait-for-the-key rule and its reason:
     # a profile that mounts no subagent seam has nothing to cap and must not lose

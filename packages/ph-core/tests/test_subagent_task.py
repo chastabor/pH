@@ -30,7 +30,8 @@ from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
 from ph.seams.subagents import SubagentResult
 from ph.testing import FAKE_OPTIONS, MountProfile, StubSubagentProvider, run_tool
-from ph.tools.definition import ToolExecutionInput
+from ph.tools.definition import Deny, ToolExecutionInput
+from ph.tools.errors import SPAWN_REFUSED, TOOL_BUDGET_SPENT
 
 pytestmark = pytest.mark.anyio
 
@@ -144,6 +145,58 @@ async def test_a_provider_that_cannot_be_waited_on_is_refused(mount: MountProfil
 
     assert result.is_error
     assert "cannot be waited on" in text_of(result.content)
+
+
+async def test_a_refused_spawn_keeps_its_shape_on_the_way_to_the_model(
+    mount: MountProfile,
+) -> None:
+    """D15 — the tool body flattened the refusal at the one boundary that had it.
+
+    `SubagentSpawnError` was caught here and re-raised as a bare `ValueError`,
+    so the code, the `failure_kind` and whether the turn should end were all
+    dropped and the model read a generic failure. It is a `HarnessError` now and
+    goes straight through, which `registry._failure` already knows how to read.
+
+    A ceiling's refusal is the case that needs all three; an ordinary one — no
+    such preset, a grant the parent does not hold — keeps the old reading, which
+    is the default and is why nothing else in this file moved.
+
+    Sabotage: catch it here again and re-raise as a `ValueError`; the code and
+    the conclusion are gone.
+    """
+    ctx = await _mounted(mount, ("stub", StubSubagentProvider()))
+    ctx.require(SUBAGENTS).guard(
+        lambda _request: Deny(
+            reason="child limit reached", concludes_turn=True, failure_kind="failed"
+        )
+    )
+
+    result = await run_tool(ctx, "task", {"prompt": "delegate this"}, agent=_agent(ctx))
+
+    assert result.is_error and result.error is not None
+    assert result.error.kind == "failed"
+    assert (result.error.info or {}).get("code") == TOOL_BUDGET_SPENT
+    assert result.concludes_turn, "a spent child budget let the turn run on"
+
+
+async def test_an_ordinary_refusal_still_reads_as_one_the_model_may_retry(
+    mount: MountProfile,
+) -> None:
+    """The default half of D15: most refusals here are worth retrying.
+
+    No such provider, no such preset, a grant the parent does not hold — a
+    caller may fix the arguments and try again, which is why the turn does not
+    end and the reading stays a plain failure.
+    """
+    ctx = await _mounted(mount, ("stub", StubSubagentProvider()))
+    ctx.require(SUBAGENTS).guard(lambda _request: "not from here")
+
+    result = await run_tool(ctx, "task", {"prompt": "delegate this"}, agent=_agent(ctx))
+
+    assert result.is_error and result.error is not None
+    assert result.error.kind == "failed"
+    assert (result.error.info or {}).get("code") == SPAWN_REFUSED
+    assert not result.concludes_turn
 
 
 async def test_two_providers_and_no_choice_stands_the_row_down(mount: MountProfile) -> None:

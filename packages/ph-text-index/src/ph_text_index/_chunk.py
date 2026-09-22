@@ -69,13 +69,37 @@ def _blocks(text: str) -> list[_Block]:
     return found
 
 
+def _split_line(line: str, limit: int, at: int) -> list[_Block]:
+    """One line too long to be a chunk, cut on characters (X5).
+
+    **The last resort, and it costs the exact span this function otherwise
+    protects.** Cutting by lines keeps every chunk's line range true, which is
+    what a pointer into a 400-line file needs — but a line is only a unit when
+    something wrote it as one. A minified bundle, a base64 blob and a long CSV
+    row are each one "line" of thousands of characters, and for them the
+    line-only rule was not a bound at all: `max_chars` held for the number of
+    lines packed together and not for the chunk, so a single line went to the
+    embedder whole and was silently truncated there — X4's failure by the route
+    X4 did not cover.
+
+    The pieces all claim the same line, which is the price. It is the right one
+    here: a pointer that says "line 812" is worth something when line 812 is a
+    sentence and nothing when it is 40 KB of minified JavaScript, so the span
+    being approximate for exactly those lines costs a precision that was
+    already notional.
+    """
+    return [_Block(line[cut : cut + limit], at, at) for cut in range(0, len(line), limit)]
+
+
 def _split_block(block: _Block, limit: int) -> list[_Block]:
     """A paragraph longer than one chunk, cut on line boundaries.
 
     A code block, a table, or a wrapped-at-nothing paragraph of prose. Cut by
     lines rather than by characters so the span stays exact — a character cut
     would leave two chunks claiming the same line, and a pointer that is off by
-    a line in a 400-line file is a pointer a model will not trust twice.
+    a line in a 400-line file is a pointer a model will not trust twice. A line
+    that is *itself* over the limit has no such cut to make, and goes to
+    `_split_line` (X5).
     """
     if len(block) <= limit:
         return [block]
@@ -84,11 +108,18 @@ def _split_block(block: _Block, limit: int) -> list[_Block]:
     held: list[str] = []
     start = block.start_line
     for offset, line in enumerate(lines):
+        at = block.start_line + offset
         candidate = len("\n".join([*held, line]))
         if held and candidate > limit:
-            pieces.append(_Block("\n".join(held), start, block.start_line + offset - 1))
+            pieces.append(_Block("\n".join(held), start, at - 1))
             held = []
-            start = block.start_line + offset
+            start = at
+        if len(line) > limit:
+            # `held` is already empty: this line alone is over the limit, so the
+            # flush above it fired for certain.
+            pieces.extend(_split_line(line, limit, at))
+            start = at + 1
+            continue
         held.append(line)
     if held:
         pieces.append(_Block("\n".join(held), start, block.end_line))

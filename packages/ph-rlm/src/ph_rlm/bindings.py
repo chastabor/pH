@@ -42,7 +42,6 @@ from ph.seams.subagents import (
     Access,
     DowngradeReason,
     SubagentRequest,
-    SubagentSpawnError,
     downgrade_text,
 )
 from ph.tools import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -140,28 +139,26 @@ async def apply(ctx: Context, config: Config) -> None:
     async def run_child(args: RunArgs, run: ToolRunContext) -> dict[str, Any]:
         if run.agent is None:
             raise ToolCallError(RUN_TOOL, "this tool has to be called by an agent")
-        try:
-            handle = await ctx.require(SUBAGENTS).start(
-                config.provider,
-                SubagentRequest(
-                    prompt=args.prompt,
-                    parent=run.agent,
-                    # The boundary the ceiling is computed in, stated rather than
-                    # derived from the routing target (P6-31, P6-24).
-                    scope=run.scope,
-                    name=args.name,
-                    reasoning_effort=args.thinking,
-                    model=args.model,
-                    access=args.access,
-                    preset=args.preset,
-                    skills=args.skills,
-                    tools=args.tools,
-                ),
-            )
-        except SubagentSpawnError as error:
-            # The model's to handle: it can retry with a different name, a
-            # shallower plan, or by doing the work itself.
-            raise ToolCallError(RUN_TOOL, str(error)) from error
+        # **Not caught and re-raised** (D15): `SubagentSpawnError` is a
+        # `HarnessError`, so the code, the `failure_kind` and whether the turn
+        # should end reach `registry._failure` instead of being flattened here.
+        handle = await ctx.require(SUBAGENTS).start(
+            config.provider,
+            SubagentRequest(
+                prompt=args.prompt,
+                parent=run.agent,
+                # The boundary the ceiling is computed in, stated rather than
+                # derived from the routing target (P6-31, P6-24).
+                scope=run.scope,
+                name=args.name,
+                reasoning_effort=args.thinking,
+                model=args.model,
+                access=args.access,
+                preset=args.preset,
+                skills=args.skills,
+                tools=args.tools,
+            ),
+        )
         reason: DowngradeReason | None = handle.downgrade_reason
         return SpawnHandle(
             child_id=handle.id,

@@ -28,7 +28,6 @@ from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, LLM, SESSIONS, UPLOADS
-from ph.llm import BlockAssembler, highest_minted_id
 from ph.llm.types import (
     FILE_EXPIRED,
     BlockEnd,
@@ -558,12 +557,8 @@ def test_a_function_call_is_given_the_id_this_wire_does_not_have() -> None:
     (end,) = [chunk for chunk in chunks if isinstance(chunk, BlockEnd)]
     assert as_kind(end.block, ToolCallBlock).id == "", "the adapter named the call itself"
 
-    assembler = BlockAssembler()
-    for chunk in chunks:
-        assembler.push(chunk)
-    (call,) = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
-    assert call.name == "read" and call.id == "call-1"
-    assert call.arguments == '{"p": 1}'
+    call = as_kind(end.block, ToolCallBlock)
+    assert call.name == "read" and call.arguments == '{"p": 1}'
     assert as_kind(chunks[-1], Finish).reason.kind == "tool-calls"
 
 
@@ -656,13 +651,15 @@ async def test_a_second_tool_turn_does_not_mint_the_first_turns_call_id() -> Non
     calls by id everywhere, so the damage is not confined to this wire:
     `persistence.repair` keys its pending-call table on the same string.
 
-    Driven through `stream` and then through `BlockAssembler`, which is where
-    the id is now decided (G10): the adapter emits an empty one and the seed is
-    read off the conversation, so a test that built the state itself would pin
-    the arithmetic while leaving the wiring — the half that was actually
-    missing — uncovered.
+    The mint itself is the seam's now (G11) and
+    `test_llm.py::test_the_seam_names_a_call_the_provider_did_not` owns it. What
+    is this wire's own is the half asserted here: it invents nothing, on a
+    second tool-using turn as on the first. Driven through `stream` rather than
+    through `_StreamState` because the state is built in one place and used in
+    another, and the wiring is the half that was actually missing.
 
-    Sabotage: drop `mint_from=` here and the second turn mints `call-1` again.
+    Sabotage: mint an id in `_part` again and this fails while the seam's test
+    still passes — which is what "one minter" means.
     """
     history: list[Message] = [
         create_user_message(content=[{"type": "text", "text": "go"}], source={"kind": "user"}),
@@ -675,22 +672,20 @@ async def test_a_second_tool_turn_does_not_mint_the_first_turns_call_id() -> Non
     adapter = GoogleAdapter(ctx=root, config=GoogleConfig())
     adapter.http = _CallingWire()  # type: ignore[assignment]
 
-    assembler = BlockAssembler(mint_from=highest_minted_id(history))
-    async for chunk in adapter.stream(
-        GenerateOptions(provider="google", model="m", messages=tuple(history))
-    ):
-        assembler.push(chunk)
+    request = GenerateOptions(provider="google", model="m", messages=tuple(history))
+    ids = [
+        as_kind(chunk.block, ToolCallBlock).id
+        async for chunk in adapter.stream(request)
+        if isinstance(chunk, BlockEnd) and isinstance(chunk.block, ToolCallBlock)
+    ]
 
-    ids = [block.id for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
-    assert ids == ["call-2"], "the second turn re-used the first turn's id"
-    # And a conversation carrying another provider's ids does not continue them.
-    assert highest_minted_id(_turn("toolu_01abc", "read", "x")) == 0
+    assert ids == [""], "this wire invented an id of its own"
 
 
 def test_a_result_resolves_to_the_call_it_followed_not_the_last_one_named() -> None:
     """G1's other half — the sessions that already hold duplicate ids.
 
-    `highest_minted_id` stops new collisions; it cannot repair a stored transcript
+    The seam stops new collisions; it cannot repair a stored transcript
     that was written before it. Those resolve correctly now because the name map
     is walked *with* the conversation rather than folded over it first: a flat
     map keeps the last binding for each id, so every earlier result took the

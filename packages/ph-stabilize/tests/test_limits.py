@@ -42,7 +42,7 @@ from ph.testing import (
     tool_result_payload,
 )
 from ph.tools.code_mode import CodeDispatchLog
-from ph.tools.errors import TOOL_BUDGET_SPENT
+from ph.tools.errors import TOOL_BUDGET_SPENT, TOOL_DENIED
 from ph_stabilize.limits import (
     BREAKER_DENIAL,
     SIBLING_STOPPED,
@@ -609,6 +609,58 @@ async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(
     assert len(provider.requests) == 1, "refused before the provider was asked"
     breach = events_of(session, "limits/exceeded")[-1].data
     assert breach["limit"] == "children" and breach["turn"] == 1
+
+
+@pytest.mark.parametrize(
+    ("exit_", "code", "kind", "ends"),
+    [
+        ("continue", TOOL_DENIED, "denied", False),
+        ("end", TOOL_DENIED, "denied", True),
+        ("error", TOOL_BUDGET_SPENT, "failed", True),
+    ],
+)
+async def test_the_child_ceiling_has_the_postures_its_siblings_have(
+    mount: MountProfile, exit_: str, code: str, kind: str, ends: bool
+) -> None:
+    """D15 — the last ceiling still running the posture D7 replaced.
+
+    `SubagentSpawnError` was a bare `Exception`, so a refusal carried no code
+    and no `failure_kind`, and both tool bodies flattened it into a
+    `ValueError`/`ToolCallError` besides — three facts dropped at the one
+    boundary that had them. It reached the model as a generic failure with the
+    turn carrying on, and every later spawn took the same refusal.
+
+    `ChildLimits` defended having one posture with "a child that is not created
+    cannot be continued past or raised about", which is equally true of a tool
+    call that is not executed — so it never distinguished the two. It now
+    carries the same `exit` its siblings do, and a refusal says which reading it
+    is on the way out.
+
+    `continue` is the default and is the old behaviour, so a deployment that
+    chose nothing keeps what it had.
+
+    The code is *derived* from the reading rather than chosen beside it, exactly
+    as `registry._gate` derives it for the tool ceiling — so each code carries
+    one reading. `SPAWN_REFUSED` stays what it always meant: a misconfiguration
+    a caller can fix and retry, which is the other test below.
+
+    Sabotage: drop `concludes_turn` from `SpawnRefusal` and `end`/`error` stop
+    ending the turn.
+    """
+    ctx = await mount(row("limits", children={"turnLimit": 1, "exit": exit_}), profile=PROFILE)
+    session, parent, _provider = await _parent(ctx)
+
+    first = await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
+    session.append(ADMITTED, {**first.to_wire(), "prompt": "go"})
+
+    with pytest.raises(SubagentSpawnError) as caught:
+        await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="again", parent=parent))
+
+    refused = caught.value
+    assert refused.code == code
+    assert refused.failure_kind == kind
+    assert refused.concludes_turn is ends
+    assert str(events_of(session, "limits/exceeded")[-1].data["posture"]) == exit_
 
 
 async def test_no_children_budget_registers_no_guard(mount: MountProfile) -> None:

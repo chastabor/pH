@@ -43,7 +43,7 @@ from ..tools.json_schema import (
     validate_json_schema_value,
 )
 from .adapter import LlmError
-from .assembler import BlockAssembler, highest_minted_id
+from .assembler import BlockAssembler
 from .types import GenerateOptions, LlmFailure, StreamChunk, create_message, text_of
 
 __all__ = [
@@ -226,7 +226,7 @@ async def ask_for_shape[Shape: BaseModel](
     budget = max(1, attempts - 1 if enforced else attempts)
     attempt = replace(options, response_schema=wire)
     for turn in range(budget):
-        assembler = BlockAssembler(mint_from=highest_minted_id(attempt.messages))
+        assembler = BlockAssembler()
         async for chunk in await stream(attempt):
             assembler.push(chunk)
         if assembler.finish.kind == "error":
