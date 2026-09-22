@@ -21,9 +21,12 @@ wrong:
   leaves it out for exactly that reason — so this adapter adds it in. Mapping it
   across directly would under-report every thinking turn's output.
 * **A function call has no id on this wire.** pH's `ToolCallBlock` needs one and
-  the pairing every consumer relies on is by id, so ids are minted here and the
-  reverse map is rebuilt when a result goes back out as a `functionResponse`,
-  which carries the *name*.
+  the pairing every consumer relies on is by id, so the call goes up with an
+  empty id and `BlockAssembler` mints one — the same minter the other two wires
+  fall back to when a provider omits an id (G10), seeded from the conversation
+  so it cannot repeat. What stays here is the reverse map, rebuilt when a result
+  goes back out as a `functionResponse`, which carries the *name* rather than
+  the id.
 * **A thought does not go back.** There is no input shape for one, and rendering
   it as a text part would put the model's private reasoning into the conversation
   as something it said. The log still holds it; the request does not.
@@ -35,8 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, assert_never
@@ -483,7 +485,7 @@ class GoogleAdapter:
         return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
-        state = _StreamState(minted=_minted_so_far(options.messages))
+        state = _StreamState()
         body, handles = await self._body(options)
         referenced = list(handles.values())
         model = options.model.removeprefix("models/")
@@ -544,39 +546,6 @@ def _expiry(stated: object) -> int | None:
         return None
 
 
-_MINTED = re.compile(r"^call-(\d+)$")
-"""The shape `_StreamState._part` mints. Read back by `_minted_so_far`."""
-
-
-def _minted_so_far(messages: Sequence[Message]) -> int:
-    """The highest id this wire has already minted in this conversation (G1).
-
-    **The counter has to span the conversation, not the request.** `_part` mints
-    `call-<n>` from the calls in its own `_StreamState`, which lives for one
-    request — so every turn's first call was `call-1`, and a conversation with
-    three tool-using turns held three different calls under that one id. What
-    that cost is not an adapter detail: pH pairs results to calls by id
-    everywhere, and `persistence.repair` keys its pending-call table on it, so a
-    duplicate is a result attributed to the wrong call in the log as well as on
-    this wire.
-
-    Read off the history rather than kept as adapter state, for the reason the
-    name map below is: a resumed session's first request has no state to have
-    kept. `max` rather than a count, so a compaction that shadowed an earlier
-    turn cannot walk the counter backwards onto an id still in the transcript.
-
-    Ids from another provider are skipped by the pattern — a session that
-    changed models mid-conversation carries whatever that wire used, and
-    continuing *its* numbering is not the job.
-    """
-    highest = 0
-    for message in messages:
-        for block in message.content:
-            if isinstance(block, ToolCallBlock) and (found := _MINTED.match(block.id)):
-                highest = max(highest, int(found.group(1)))
-    return highest
-
-
 def _remember_calls(message: Message, names: dict[str, str]) -> None:
     """Record this message's calls, so a later result resolves to the nearest one.
 
@@ -589,7 +558,7 @@ def _remember_calls(message: Message, names: dict[str, str]) -> None:
     earlier result to the newest call's name — silently, and in the direction
     that tells the model a result came from a tool it did not call. Updating as
     each message is converted means a result sees the calls that precede it,
-    which is the pairing the transcript actually describes. `_minted_so_far`
+    which is the pairing the transcript actually describes. `highest_minted_id`
     stops new duplicates; this is what makes the ones already in stored sessions
     resolve correctly.
     """
@@ -666,16 +635,19 @@ def _media_part(
 
 @dataclass(frozen=True, slots=True)
 class _Call:
-    """One function call this wire streamed, with the id pH gave it.
+    """One function call this wire streamed.
 
-    Named fields rather than a 4-tuple because `finish` unpacks it a screen away
-    from where it is built, and two of the four read identically in the wrong
-    order. A dataclass rather than a `NamedTuple` because `index` is exactly the
-    field name a tuple already uses for a method.
+    Named fields rather than a 3-tuple because `finish` unpacks it a screen away
+    from where it is built. A dataclass rather than a `NamedTuple` because
+    `index` is exactly the field name a tuple already uses for a method.
+
+    No `id`: this wire does not issue one and this adapter no longer invents one
+    (G10). The block goes up with an empty id and `BlockAssembler` fills it from
+    a counter seeded off the whole conversation, which is where the other two
+    wires' absent ids are filled in too.
     """
 
     index: int
-    id: str
     name: str
     arguments: str
 
@@ -690,10 +662,6 @@ class _StreamState:
     other two adapters keep, arriving in bigger pieces.
     """
 
-    minted: int = 0
-    """Ids this wire has already minted in this conversation (G1). See
-    `_minted_so_far`: the counter spans the conversation, this state spans one
-    request, and the sum is what makes an id unique."""
     text_index: int | None = None
     reasoning_index: int | None = None
     text: str = ""
@@ -749,15 +717,13 @@ class _StreamState:
         out: list[StreamChunk] = []
         call = part.get("functionCall")
         if isinstance(call, dict):
-            # An id is minted here because this wire has none. `call-<n>`
-            # rather than a uuid: it is only ever paired within one
-            # conversation, and a stable spelling keeps a replayed session's ids
-            # identical to the live run's. Continued from `minted`, which is
-            # what makes it unique across the conversation rather than only
-            # within this request (G1).
+            # The id is left empty for `BlockAssembler` to mint (G10). This
+            # wire issues none, and a counter kept here could only ever span one
+            # request — which is exactly the collision G1 was filed for. The
+            # assembler is seeded from the conversation and is the one place all
+            # three wires' unnamed calls get a name.
             streamed = _Call(
                 index=self._claim(),
-                id=f"call-{self.minted + len(self.calls) + 1}",
                 name=as_str(call.get("name")),
                 arguments=json.dumps(call.get("args") or {}),
             )
@@ -766,7 +732,7 @@ class _StreamState:
             out.append(
                 ToolCallDelta(
                     index=streamed.index,
-                    id=streamed.id,
+                    id="",
                     name=streamed.name,
                     arguments_delta=streamed.arguments,
                 )
@@ -806,9 +772,7 @@ class _StreamState:
             out.append(
                 BlockEnd(
                     index=streamed.index,
-                    block=ToolCallBlock(
-                        id=streamed.id, name=streamed.name, arguments=streamed.arguments
-                    ),
+                    block=ToolCallBlock(id="", name=streamed.name, arguments=streamed.arguments),
                 )
             )
         if self.usage is not None:

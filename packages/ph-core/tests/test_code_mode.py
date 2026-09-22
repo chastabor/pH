@@ -175,6 +175,93 @@ async def test_a_denied_binding_call_fails_the_whole_run(mount: MountProfile) ->
     assert calls == ["touch:1"]
 
 
+async def test_a_ceiling_that_ends_the_turn_is_not_the_programs_to_handle(
+    mount: MountProfile,
+) -> None:
+    """A spent budget ends the run too, and it is not a denial (D7).
+
+    The rule was keyed on `kind == "denied"` alone, so a refusal that ends the
+    *turn* while reading as `failed` — which is what a spent tool-call ceiling
+    is — arrived as an ordinary `ToolCallError` the program could `except`. It
+    would then spend the rest of the turn on calls that could only fail, and the
+    posture meant to surface a breach most loudly was the one a generated
+    program could swallow.
+
+    Read off `concludes_turn` rather than a second kind, because that is the
+    flag the loop itself stops on: whatever ends the turn out there ends the run
+    in here, without this needing a list of the rows that can do it.
+
+    Sabotage: drop the `result.concludes_turn` branch in `DispatchBridge` and
+    `touch:3` runs.
+    """
+    ctx = await _code_ctx(mount)
+    calls: list[str] = []
+    ctx.require(TOOLS).register(_recorder("touch", calls))
+    ctx.require(TOOLS).register(_recorder("metered", calls))
+    ctx.on(
+        "tools/pre-execute",
+        lambda execution, next_: (
+            Deny(reason="call budget spent", concludes_turn=True, failure_kind="failed")
+            if execution.name == "metered"
+            else next_(execution)
+        ),
+    )
+
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
+        await ns["tools"].touch(n=1)
+        try:
+            await ns["tools"].metered(n=2)
+        except Exception:
+            await ns["tools"].touch(n=3)
+        return "done"
+
+    result, _session = await _run(ctx, "budget", program)
+    assert result.is_error
+    # A budget, not policy: nothing judged the call, and the model reads that.
+    assert not_none(result.error).kind == "failed"
+    assert "stopped the turn" in not_none(result.error).message
+    assert calls == ["touch:1"], "the program continued past a budget it had spent"
+
+
+async def test_a_ceiling_inside_a_program_ends_the_outer_turn_too(
+    mount: MountProfile,
+) -> None:
+    """C13 — the program stopped and the turn did not (D7's promise, half kept).
+
+    `run_code` answers with an ordinary *successful* cell value, so a ceiling
+    that ended the turn inside a program left `concludes_turn` false on the one
+    result the loop actually reads. The turn ran on, the model spent a step, and
+    the gate denied its next call — D7's "a spent budget ends the turn", off by
+    one model call, in the execution mode where most calls happen.
+
+    `ToolRunContext.conclude_turn` is the loop's own way to say a successful
+    result is terminal, and this is its first production caller.
+
+    Sabotage: drop the `bridge.concluded_turn` arm in `run_code` and the result
+    comes back with `concludes_turn` unset.
+    """
+    ctx = await _code_ctx(mount)
+    calls: list[str] = []
+    ctx.require(TOOLS).register(_recorder("metered", calls))
+    ctx.on(
+        "tools/pre-execute",
+        lambda execution, next_: (
+            Deny(reason="call budget spent", concludes_turn=True, failure_kind="failed")
+            if execution.name == "metered"
+            else next_(execution)
+        ),
+    )
+
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
+        await ns["tools"].metered(n=1)
+        return "unreachable"
+
+    result, _session = await _run(ctx, "ceiling", program)
+
+    assert result.concludes_turn, "the turn ran on after a ceiling ended it inside the cell"
+    assert calls == []
+
+
 async def test_a_failed_binding_call_is_the_programs_to_handle(mount: MountProfile) -> None:
     ctx = await _code_ctx(mount)
     ctx.require(TOOLS).register(simple_tool("flaky", raising(RuntimeError("transient"))))

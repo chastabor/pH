@@ -21,7 +21,13 @@ from ph.json import as_obj, as_seq
 from ph.llm.types import ToolCallBlock, create_user_message
 from ph.session import Session
 from ph.testing import StubAgent, parked_gate, raising, session_of, simple_tool, tool_runtime
-from ph.tools import TOOL_ABORTED_BEFORE_DISPATCH, Deny, ToolRunContext, ToolRuntime
+from ph.tools import (
+    TOOL_ABORTED_BEFORE_DISPATCH,
+    TOOL_TURN_CONCLUDED,
+    Deny,
+    ToolRunContext,
+    ToolRuntime,
+)
 from ph.tools.batch import execute_tool_calls, parse_arguments
 
 pytestmark = pytest.mark.anyio
@@ -267,6 +273,56 @@ async def test_conclude_turn_propagates_to_the_batch_outcome() -> None:
     tools.register(simple_tool("finish", lambda _a, run: run.conclude_turn() or "done"))
     outcome = await _run(root, agent, "finish")
     assert outcome.concluded
+
+
+async def test_a_group_that_ends_the_turn_stops_the_ones_behind_it() -> None:
+    """C13 — `concluded` was folded and read, and the loop went on anyway.
+
+    `Deny.concludes_turn` promises "the batch already in flight still settles —
+    what ends is what comes after it", and a group that has not started is what
+    comes after it. A parallel pool followed by an exclusive barrier is the
+    shape: the pool concludes, and the barrier dispatched after the turn was
+    over.
+
+    It bites hardest on a fan-out, which is where a ceiling is most likely to be
+    reached mid-step and where the calls behind it spawn children — a child
+    started after its turn ended is one nothing is waiting for.
+
+    The skipped call still owes a `tool/result`: a `tool_use` block with nothing
+    answering it is what the next request is rejected for. Under its own code,
+    because nobody cancelled it.
+
+    Sabotage: drop the `if concluded:` arm in `execute_tool_calls` and `after`
+    runs.
+    """
+    root, tools, agent, trace = _setup()
+    tools.register(simple_tool("stop", lambda _a, run: run.conclude_turn() or "done", safe=True))
+
+    def after(_args: object, _run: ToolRunContext) -> str:
+        trace.append("after:ran")
+        return "ran"
+
+    tools.register(simple_tool("after", after))
+
+    outcome = await _run(root, agent, "stop", "after")
+
+    assert outcome.concluded and not outcome.aborted
+    assert trace == [], "a call behind the one that ended the turn still ran"
+    results = [
+        as_obj(as_seq(as_obj(event.data.get("message")).get("content"))[0])
+        for event in session_of(agent).events
+        if event.type == "tool/result"
+    ]
+    assert len(results) == 2, "the skipped call was left without a result to pair with"
+    assert results[1].get("isError") is True
+    skipped = [
+        event
+        for event in session_of(agent).events
+        if event.type == "tool/result" and str(event.data.get("error"))
+    ][-1]
+    assert TOOL_TURN_CONCLUDED in str(skipped.data.get("error")), (
+        "the skipped call reads as a cancellation nobody performed"
+    )
 
 
 def test_malformed_arguments_survive_as_text() -> None:

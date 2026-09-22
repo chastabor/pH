@@ -14,7 +14,9 @@ from typing import Literal, TypeAlias
 __all__ = [
     "TOOL_ABORTED",
     "TOOL_ABORTED_BEFORE_DISPATCH",
+    "TOOL_BUDGET_SPENT",
     "TOOL_DENIED",
+    "TOOL_TURN_CONCLUDED",
     "HarnessError",
     "ToolNotFoundError",
     "ToolOutputError",
@@ -33,6 +35,34 @@ Routable on purpose. A refusal and a failure look identical to a model reading
 content, but they are different facts and different code has to branch on them:
 Code Mode fails the whole run on a refusal and lets the program handle a failure
 (C3), which is impossible if the two are indistinguishable.
+"""
+
+
+TOOL_BUDGET_SPENT = "TOOL_BUDGET_SPENT"
+"""A configured ceiling stopped the call: the budget is spent (D7).
+
+Routable for `TOOL_DENIED`'s reason and kept apart from it for `FailureKind`'s.
+A denial is policy refusing *this* call and a model may reasonably ask for
+permission or try another way; a spent budget refuses every later call too, and
+there is nothing to ask for — the ceiling does not move within a turn. The two
+read identically as content and are different facts, which is the distinction
+this module exists to keep.
+
+Carried with `kind="failed"` rather than `"denied"`, because no policy judged
+the call: `code_mode.CodeRunFailure` already separates `budget` from `denied`
+on exactly this line, and `fs.FileTooLarge` from `fs.FsDenied` on the same one.
+"""
+
+
+TOOL_TURN_CONCLUDED = "TOOL_TURN_CONCLUDED"
+"""The turn ended before this call ran (C13).
+
+`aborted` in kind, because that is what happened to the call: it never
+dispatched, it had no effect, and it is safe to retry. Its own code rather than
+`TOOL_ABORTED_BEFORE_DISPATCH` for the reason that pair is itself split — a
+person's interrupt and a spent budget end a call at the same moment and are not
+the same fact, and a model that reads "aborted before dispatch" will conclude
+somebody cancelled it.
 """
 
 
@@ -60,6 +90,17 @@ class HarnessError(Exception):
     """
 
     failure_kind: FailureKind = "failed"
+
+    concludes_turn: bool = False
+    """Whether raising this also ends the turn (C13).
+
+    Declared by the error that knows, for `failure_kind`'s reason and travelling
+    the same way: `registry._failure` reads both off the class rather than
+    inferring either from the code. A raise that ends a turn had no way to say
+    so, so a ceiling reached inside a Code Mode program stopped the program and
+    left the loop running — the one result the loop reads came back with the
+    flag unset, because the exception it was built from could not carry it.
+    """
 
     def __init__(self, message: str, code: str) -> None:
         super().__init__(message)

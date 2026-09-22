@@ -18,7 +18,7 @@ import pytest
 from ph.cordis import Context, running
 from ph.json import JsonObject
 from ph.keys import LLM
-from ph.llm import BlockAssembler
+from ph.llm import BlockAssembler, highest_minted_id
 from ph.llm.adapter import apply as llm_apply
 from ph.llm.types import (
     BlockEnd,
@@ -36,6 +36,7 @@ from ph.llm.types import (
     ToolCallDelta,
     UsageChunk,
     chunk_from_wire,
+    create_assistant_message,
     is_token_delta,
     user_text,
 )
@@ -145,6 +146,93 @@ def test_delta_only_protocols_need_no_block_start() -> None:
     assembler.push(TextDelta(index=0, text="a"))
     assembler.push(TextDelta(index=0, text="b"))
     assert [block_text(block) for block in assembler.blocks()] == ["ab"]
+
+
+def test_a_call_the_provider_did_not_name_is_named_here() -> None:
+    """G10 — one minter, because every wire needs one.
+
+    Google has no call id at all; the other two have one the provider *usually*
+    sends, and an OpenAI-compatible server that omits it or an Anthropic
+    `content_block_start` without one falls back to the same mint. Each adapter
+    had written its own, per stream — so G1, filed and fixed as a Google
+    defect, was live on all three.
+
+    Both arrival shapes are covered because both happen: every adapter sends the
+    finished block on `BlockEnd`, and `_assemble` returned a closed block whole,
+    so the fallback that existed here only ever covered delta-only streams.
+    """
+    assembler = BlockAssembler()
+    assembler.push(BlockStart(index=0, block_type="tool-call"))
+    assembler.push(BlockEnd(index=0, block=ToolCallBlock(id="", name="read", arguments="{}")))
+    assembler.push(ToolCallDelta(index=1, id="", name="write", arguments_delta="{}"))
+    assembler.push(ToolCallDelta(index=2, id="toolu_01abc", name="grep", arguments_delta="{}"))
+
+    calls = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
+    assert [call.id for call in calls] == ["call-1", "call-2", "toolu_01abc"], (
+        "a closed block, a delta-only block and a provider-issued id must all "
+        "leave here with exactly one id each"
+    )
+
+
+def test_a_later_turn_does_not_re_mint_an_id_the_conversation_holds() -> None:
+    """G10's point: the stream is one request and the id has to outlive it.
+
+    pH pairs results to calls by id everywhere — `persistence.repair` keys its
+    pending-call table on the same string — so a second turn restarting the
+    counter attributes a result to the wrong call in the log as well as on the
+    wire, and tells the model a tool it did not call answered.
+
+    `max`, not a count, so a compaction that shadowed an earlier turn cannot
+    walk the counter backwards onto an id still in the transcript.
+
+    Sabotage: drop `mint_from=` and the second turn mints `call-1` again.
+    """
+    history = [
+        create_assistant_message(
+            content=[ToolCallBlock(id="call-1", name="read", arguments="{}")],
+            provider="p",
+            model="m",
+        ),
+        create_assistant_message(
+            content=[ToolCallBlock(id="call-4", name="write", arguments="{}")],
+            provider="p",
+            model="m",
+        ),
+    ]
+    assert highest_minted_id(history) == 4
+
+    assembler = BlockAssembler(mint_from=highest_minted_id(history))
+    assembler.push(ToolCallDelta(index=0, id="", name="grep", arguments_delta="{}"))
+    (call,) = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
+    assert call.id == "call-5"
+
+
+def test_a_providers_own_id_neither_raises_the_counter_nor_is_continued() -> None:
+    """Only pH's own spelling counts, and it counts whichever wire minted it.
+
+    A provider-issued id is unique by its own construction, so continuing its
+    numbering is not this function's job — and `toolu_01abc` has no numbering to
+    continue. An id minted by *another* pH wire does count, deliberately: a
+    session that changed models mid-conversation carries it, and the next mint
+    has to clear it or it collides.
+    """
+    provider_issued = [
+        create_assistant_message(
+            content=[ToolCallBlock(id="toolu_01abc", name="read", arguments="{}")],
+            provider="anthropic",
+            model="m",
+        )
+    ]
+    assert highest_minted_id(provider_issued) == 0
+
+    from_another_wire = [
+        create_assistant_message(
+            content=[ToolCallBlock(id="call-7", name="read", arguments="{}")],
+            provider="google",
+            model="m",
+        )
+    ]
+    assert highest_minted_id(from_another_wire) == 7
 
 
 def test_max_tokens_drops_tool_calls() -> None:

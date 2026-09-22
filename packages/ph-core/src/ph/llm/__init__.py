@@ -11,7 +11,7 @@ from .adapter import (
     ResolvedModel,
     resolved,
 )
-from .assembler import BlockAssembler
+from .assembler import BlockAssembler, highest_minted_id
 from .types import (
     AttachmentRef,
     BlockEnd,
@@ -98,6 +98,7 @@ __all__ = [
     "create_message",
     "create_tool_result_message",
     "create_user_message",
+    "highest_minted_id",
     "is_token_delta",
     "new_message_id",
     "resolved",

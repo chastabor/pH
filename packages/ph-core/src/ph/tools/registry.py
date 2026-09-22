@@ -70,6 +70,7 @@ from .definition import (
     ToolRunContext,
     TransportPresentation,
     aborted_result,
+    budget_result,
     denied_result,
     error_result,
     text_content,
@@ -972,8 +973,19 @@ class ToolRuntime:
             # and asking a guard to confirm it would invite a re-permit.
             reason = self.guard_reason(execution) if isinstance(gate, Allow) else gate.reason
             if reason is not None:
-                concludes = isinstance(gate, Deny) and gate.concludes_turn
-                return PreparedCall(run=run, result=denied_result(reason, concludes_turn=concludes))
+                # **A refusal is not always policy refusing** (D7). A spent
+                # budget ends the call the same way and means something else to
+                # every consumer, so the row says which it is rather than having
+                # this read it off the decision type. A guard's reason takes
+                # neither flag: `guard_reason` only answers for an `Allow`, and
+                # a monotonic guard is a plain denial that does not conclude.
+                if isinstance(gate, Deny):
+                    settle = budget_result if gate.failure_kind == "failed" else denied_result
+                    return PreparedCall(
+                        run=run,
+                        result=settle(reason, concludes_turn=gate.concludes_turn),
+                    )
+                return PreparedCall(run=run, result=denied_result(reason))
             return PreparedCall(run=run)
         except Exception as error:
             return PreparedCall(run=run, result=_failure(error), needs_post=False)
@@ -1168,7 +1180,13 @@ def _failure(error: object, *, started: bool = False) -> ToolExecutionResult:
     # The error's own answer, not a mapping this function keeps: a boolean here
     # collapsed three kinds into two and silently reported an abort as a failure.
     kind: FailureKind = error.failure_kind if isinstance(error, HarnessError) else "failed"
-    return error_result(error_message(error), error_info(error), kind=kind)
+    settled = error_result(error_message(error), error_info(error), kind=kind)
+    # **And whether it ended the turn** (C13), off the same class and for the
+    # same reason: a raise that concludes a turn is a fact only the raiser has,
+    # and a result built from it that drops the fact leaves the loop running.
+    if isinstance(error, HarnessError) and error.concludes_turn:
+        return replace(settled, concludes_turn=True)
+    return settled
 
 
 def _message_from_content(content: Sequence[ContentBlock]) -> str:

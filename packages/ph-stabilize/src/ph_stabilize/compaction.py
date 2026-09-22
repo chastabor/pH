@@ -76,7 +76,7 @@ from ph.cancel import Canceled
 from ph.cordis import Context, Next, plugin
 from ph.json import as_obj, as_seq, as_str, dumps, thaw_json
 from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
-from ph.llm import BlockAssembler
+from ph.llm import BlockAssembler, highest_minted_id
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
     ContentBlock,
@@ -1215,7 +1215,7 @@ class SummarizeEngine:
         the transcript about what a reply said; `text_of` then drops reasoning
         blocks rather than pasting them into the summary.
         """
-        assembler = BlockAssembler()
+        assembler = BlockAssembler(mint_from=highest_minted_id(request.messages))
         async for chunk in await self.ctx.require(LLM).stream(request):
             assembler.push(chunk)
         if assembler.finish.kind == "error":

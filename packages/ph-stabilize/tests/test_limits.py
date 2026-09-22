@@ -23,7 +23,8 @@ from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, r
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
-from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TUI_STATUS
+from ph.json import as_obj, as_seq
+from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS, TUI_STATUS
 from ph.llm.types import ToolCallBlock
 from ph.seams.subagents import ADMITTED, SubagentRequest, SubagentSpawnError
 from ph.session import Session, SurfaceIntent
@@ -37,9 +38,11 @@ from ph.testing import (
     StubSubagentProvider,
     assert_fold_laws,
     session_of,
+    simple_tool,
     tool_result_payload,
 )
 from ph.tools.code_mode import CodeDispatchLog
+from ph.tools.errors import TOOL_BUDGET_SPENT
 from ph_stabilize.limits import (
     BREAKER_DENIAL,
     SIBLING_STOPPED,
@@ -74,6 +77,21 @@ def _failing_read(call_id: str) -> ToolCallBlock:
     former. Reading a path that is not there raises.
     """
     return ToolCallBlock(id=call_id, name="read", arguments=json.dumps({"path": "no/such/file"}))
+
+
+def _settled_event(session: Session, call_id: str) -> Any:  # noqa: ANN401
+    """The `tool/result` event for one call, found by its id.
+
+    By `toolCallId` rather than by searching the serialized message for the id:
+    `new_message_id()` is random, so a substring test matches whenever the id it
+    generated happens to contain the call's — which is a test that fails roughly
+    one run in four and blames the code.
+    """
+    for event in events_of(session, "tool/result"):
+        content = as_seq(as_obj(event.data.get("message")).get("content"))
+        if any(as_obj(block).get("toolCallId") == call_id for block in content):
+            return event
+    raise AssertionError(f"no tool/result for {call_id!r}")
 
 
 def _denied(session: Session, call_id: str, reason: str) -> bool:
@@ -271,30 +289,45 @@ async def test_continue_denies_the_call_and_keeps_the_turn(mount: MountProfile) 
     assert not events_of(session, "turn/end"), "and the turn is still going"
 
 
-async def test_error_records_the_breach_it_raises_about(mount: MountProfile) -> None:
-    """`exit: error` left no durable record, and that is what a reviewer reads (D7).
+async def test_error_records_the_breach_and_ends_the_turn_like_its_sibling(
+    mount: MountProfile,
+) -> None:
+    """`exit: error` spends the budget, says so, and stops (D7).
 
-    Only `end` wrote `limits/exceeded`, so the posture that surfaces a breach
-    most loudly to the *model* was the one that said nothing to anybody else:
-    `phern doctor`, a reviewer and a resumed session all fold that event, and for
-    this setting there was nothing to fold.
+    Two things were wrong and they were the same mistake. It left no durable
+    record — only `end` wrote `limits/exceeded`, so the posture that surfaces a
+    breach most loudly to the *model* said nothing to `phern doctor`, a reviewer
+    or a resumed session. And it did not end the turn, although the model-call
+    setting of the same name does, because it raised out of `tools/pre-execute`
+    where the pipeline turns any exception from a policy row into a failed
+    result. The ceiling inherited a posture meant to stop a *broken row* from
+    taking down the call it was asked about.
 
-    The turn continuing is the documented reading of the word here, not an
-    oversight — `ToolCallLimits.exit` says why the two postures are meant to
-    differ — so it is asserted rather than left implied.
+    Now it returns `Deny(concludes_turn=True, failure_kind="failed")`: the turn
+    ends as `end` ends it, and the model reads a spent budget rather than policy
+    refusing, which is the whole of what this word adds over `end`.
+
+    Sabotage: drop `concludes_turn=True` and the second turn runs a third call.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "error"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("tool-error")
 
     await run_tool_calls(ctx, session, bash_call("c1"))
-    await run_tool_calls(ctx, session, bash_call("c2"), step=2)
+    outcome = await run_tool_calls(ctx, session, bash_call("c2"), step=2)
 
     breaches = events_of(session, "limits/exceeded")
     assert [str(one.data.get("limit")) for one in breaches] == ["tool-calls"]
     assert str(breaches[0].data.get("posture")) == "error"
     assert "call limit reached" in str(breaches[0].data.get("message"))
-    # The call fails rather than being denied: breakage, not policy.
     assert "Error" in result_text(session, "c2")
+
+    # A spent budget, not policy refusing: nothing judged the call.
+    settled = _settled_event(session, "c2")
+    assert str(settled.data.get("failureKind")) == "failed", "a ceiling did not judge this call"
+    assert dict(settled.data.get("error") or {}).get("code") == TOOL_BUDGET_SPENT
+
+    # And the turn stops, as `end` stops it and as the model-call sibling does.
+    assert outcome.concluded, "the turn ran on past a budget it had spent"
 
 
 async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: MountProfile) -> None:
@@ -310,14 +343,22 @@ async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: MountPro
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
 
 
-async def test_end_denies_the_siblings_in_upstreams_words(mount: MountProfile) -> None:
-    """`exit: end`, and the one place pH's mechanics show through.
+async def test_end_denies_the_breach_and_the_batch_skips_what_is_behind_it(
+    mount: MountProfile,
+) -> None:
+    """`exit: end`, and where pH's mechanics stopped showing through (C13).
 
     Upstream jumps to the graph's end and synthesizes results for the calls it
-    skipped. pH's batch is already dispatched, so the breaching call is denied
-    and its siblings get upstream's own sentence — which matters because those
-    calls did nothing wrong and the model must not read the refusal as being
-    about them.
+    skipped. pH could not, and this test used to say so: the batch kept opening
+    the next group after a result concluded the turn, so a later call was
+    *dispatched* and had to be refused by the row, wearing upstream's
+    sibling sentence. Now the batch stops, which is the same thing upstream
+    does — so a later call is skipped rather than denied, and reads as the turn
+    having ended rather than as anything about itself.
+
+    `bash` is exclusive, so these three are three groups rather than one batch.
+    `SIBLING_STOPPED` is still the answer for a genuine in-flight sibling, which
+    is a *parallel* group gated concurrently — the case below.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("ending")
@@ -325,9 +366,39 @@ async def test_end_denies_the_siblings_in_upstreams_words(mount: MountProfile) -
     await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"), bash_call("c3"))
 
     assert _denied(session, "c2", TOOL_DENIAL.format(tool="bash"))
-    assert _denied(session, "c3", SIBLING_STOPPED)
+    assert _denied(session, "c3", "the turn ended before this call ran"), (
+        "a call the turn never reached was dispatched and refused instead of skipped"
+    )
     (breach,) = events_of(session, "limits/exceeded")
     assert breach.data["limit"] == "tool-calls"
+
+
+async def test_a_sibling_already_in_flight_gets_upstreams_own_sentence(
+    mount: MountProfile,
+) -> None:
+    """The half the batch cannot skip, and why `_is_first_over` is still needed (C13).
+
+    A *parallel* group is gated call by call while the whole pool is already in
+    flight, so there is no "what comes after it" for the batch to stop — the
+    siblings are here now. They did nothing wrong, and upstream's sentence is
+    what the model should read rather than a denial phrased as being about them.
+
+    Told apart by arithmetic rather than a latch: the breaching call is the one
+    that found the count *at* the ceiling, and a follower finds it past.
+
+    Sabotage: drop `_is_first_over` and the third call reads as the breach.
+    """
+    ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
+    ctx.require(TOOLS).register(simple_tool("twin", safe=True))
+    session = ctx.require(SESSIONS).create("siblings")
+
+    calls = [ToolCallBlock(id=f"p{n}", name="twin", arguments="{}") for n in (1, 2, 3)]
+    await run_tool_calls(ctx, session, *calls)
+
+    assert _denied(session, "p2", TOOL_DENIAL.format(tool="twin")), "the breach was not named"
+    assert _denied(session, "p3", SIBLING_STOPPED), (
+        "a sibling already in flight read the refusal as being about itself"
+    )
 
 
 async def test_an_end_breach_concludes_the_batch(mount: MountProfile) -> None:

@@ -67,7 +67,6 @@ __all__ = [
     "Config",
     "Counts",
     "ModelCallLimitExceeded",
-    "ToolCallLimitExceeded",
     "apply",
     "counts_of",
 ]
@@ -123,10 +122,6 @@ must stay equal is how they stop being equal."""
 
 class ModelCallLimitExceeded(RuntimeError):
     """`exit: error` on the model-call limit."""
-
-
-class ToolCallLimitExceeded(RuntimeError):
-    """`exit: error` on the tool-call limit."""
 
 
 # ------------------------------------------------------------------- config --
@@ -188,24 +183,27 @@ class ToolCallLimits(CallBudget):
 
     `continue` denies this call and lets the turn go on; the model reads a
     denial, which is policy speaking, and may do something else. `end` denies it
-    and concludes the turn. `error` makes the call **fail** — the model reads
-    breakage rather than policy — and it keeps failing for every later call,
-    because the ceiling does not move within a turn.
+    and concludes the turn. `error` also concludes the turn, and the model reads
+    a **spent budget** rather than policy — `TOOL_BUDGET_SPENT`, `kind="failed"`
+    — because nothing judged the call.
 
-    **`error` does not end the turn, and the model-call setting of the same name
-    does** (D7). The asymmetry is where each is enforced: a model-call limit sits
-    in `agent/pre-step`, where a raise unwinds the turn, while this sits in
-    `tools/pre-execute`, where the pipeline turns any exception from a policy row
-    into a failed result — deliberately, so a broken row cannot take down the
-    call it was asked about.
+    **All three stop the turn or don't, and say which fact it was** (D7). They
+    used to differ on both axes at once: `error` raised out of
+    `tools/pre-execute`, where the pipeline turns any exception from a policy
+    row into a failed result — deliberately, so a broken row cannot take down
+    the call it was asked about — and the ceiling inherited that by accident.
+    The turn carried on with every later call taking the same failure, and under
+    Code Mode a generated program could `except` it and keep calling, so the
+    posture meant to surface a breach most loudly was the one a program could
+    swallow.
 
-    **What it would take to make them agree is one field, not a new exception
-    contract** (N2). An earlier reading of this said the pipeline would have to
-    re-raise by contract; it would not. The loop already ends a turn at a policy
-    row's word — `end` does it, through `Deny(concludes_turn=True)` — so all
-    `error` adds over `end` is the `FailureKind` the model reads. The two are
-    kept apart because the *readings* are meant to differ, not because the
-    stronger one is out of reach."""
+    It was one field, not a new exception contract (N2). The loop already ends a
+    turn at a policy row's word — `end` does it, through
+    `Deny(concludes_turn=True)` — so all `error` adds over `end` is the
+    `FailureKind` the model reads, which `Deny.failure_kind` now carries. The
+    two stay apart because the *readings* are meant to differ: `end` is policy
+    refusing, `error` is a budget spent, and `code_mode.CodeRunFailure` and
+    `fs.FsDenied`/`fs.FileTooLarge` both already split on that line."""
 
 
 class ChildLimits(CallBudget):
@@ -522,14 +520,29 @@ async def apply(ctx: Context, config: Config) -> None:
         if not exceeded:
             return _breaker(session, execution, current)
         if settings.exit == "error":
-            # **Recorded before it is raised** (D7). Only the `end` path below
-            # wrote `limits/exceeded`, so the one posture that surfaces the
-            # breach most loudly to the model left no durable record of it at
-            # all — and `phern doctor`, a reviewer and a resumed session all read
-            # that record rather than the tool result.
+            # **A decision, not a raise** (D7). This used to raise out of
+            # `tools/pre-execute`, where the pipeline turns any exception from a
+            # policy row into a failed result — deliberately, so a broken row
+            # cannot take down the call it was asked about. The ceiling inherited
+            # that posture by accident: the turn carried on, every later call
+            # took the same failure, and under Code Mode the program could
+            # `except` it and keep going, which is a policy gate a generated
+            # program could defeat.
+            #
+            # `Deny` says both halves instead. `concludes_turn` ends the turn,
+            # as `end` already did; `failure_kind="failed"` is the whole of what
+            # `error` adds over it — the model reads a spent budget rather than
+            # policy refusing, which is the reading the two postures exist to
+            # differ on.
+            #
+            # Recorded before it is returned, for the reason it was recorded
+            # before it was raised: `phern doctor`, a reviewer and a resumed
+            # session all read this event rather than the tool result.
             message = f"'{name}' call limit reached: {', '.join(exceeded)}."
+            if not _is_first_over(settings, current, name):
+                return Deny(reason=SIBLING_STOPPED, concludes_turn=True, failure_kind="failed")
             _record(session, "tool-calls", settings.exit, {"tool": name, "message": message})
-            raise ToolCallLimitExceeded(message)
+            return Deny(reason=message, concludes_turn=True, failure_kind="failed")
         if settings.exit == "continue":
             # **And the quietest posture is still a breach** (N2). This one
             # denies the call and lets the turn go on, so it is the posture a
@@ -553,6 +566,13 @@ async def apply(ctx: Context, config: Config) -> None:
             # the count *at* a ceiling. Upstream's wording, because this call
             # did nothing wrong and the model should not read the denial as
             # being about it.
+            #
+            # **Both turn-ending postures take this**, which `error` did not
+            # while it raised: an exception has no siblings to suppress, so a
+            # parallel fan-out over a spent ceiling wrote one `limits/exceeded`
+            # per call and told every one of them it was the breach. The two
+            # postures are documented as differing in what the model reads, so
+            # differing in how many breaches they record was drift.
             return Deny(reason=SIBLING_STOPPED, concludes_turn=True)
         _record(
             session,

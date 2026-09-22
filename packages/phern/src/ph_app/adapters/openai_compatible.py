@@ -524,7 +524,7 @@ class _StreamState:
                 out.append(
                     ToolCallDelta(
                         index=self.tool_indexes[position],
-                        id=record["id"] or f"call-{position}",
+                        id=record["id"],
                         name=record["name"] or None,
                         arguments_delta=fragment,
                     )
@@ -545,7 +545,7 @@ class _StreamState:
                 BlockEnd(
                     index=index,
                     block=ToolCallBlock(
-                        id=record["id"] or f"call-{position}",
+                        id=record["id"],
                         name=record["name"],
                         arguments=record["arguments"],
                     ),

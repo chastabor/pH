@@ -28,6 +28,7 @@ from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, LLM, SESSIONS, UPLOADS
+from ph.llm import BlockAssembler, highest_minted_id
 from ph.llm.types import (
     FILE_EXPIRED,
     BlockEnd,
@@ -38,7 +39,6 @@ from ph.llm.types import (
     ReasoningBlock,
     TextBlock,
     ToolCallBlock,
-    ToolCallDelta,
     create_assistant_message,
     create_tool_result_message,
     create_user_message,
@@ -52,7 +52,6 @@ from ph_app.adapters.google import (
     GoogleAdapter,
     _is_missing_file,
     _is_overflow,
-    _minted_so_far,
     _remember_calls,
     _StreamState,
     _to_google,
@@ -530,9 +529,14 @@ def test_a_thought_and_an_answer_are_two_blocks() -> None:
 def test_a_function_call_is_given_the_id_this_wire_does_not_have() -> None:
     """pH pairs a result to its call by id; this wire addresses one by name.
 
-    So an id is minted, and the finish kind is derived from what was streamed
-    rather than from `finishReason` — which is `STOP` for a tool call here, and
-    would have ended the turn with the model's request unanswered.
+    So an id is minted — by `BlockAssembler` rather than here (G10), which is
+    why the block leaves this state with an empty one — and the finish kind is
+    derived from what was streamed rather than from `finishReason`, which is
+    `STOP` for a tool call here and would have ended the turn with the model's
+    request unanswered.
+
+    Sabotage: name the call in `_part` again and the assembler stops being the
+    one place an id is decided, which is what let every wire drift apart.
     """
     state = _StreamState()
     chunks = [
@@ -552,7 +556,12 @@ def test_a_function_call_is_given_the_id_this_wire_does_not_have() -> None:
     ]
 
     (end,) = [chunk for chunk in chunks if isinstance(chunk, BlockEnd)]
-    call = as_kind(end.block, ToolCallBlock)
+    assert as_kind(end.block, ToolCallBlock).id == "", "the adapter named the call itself"
+
+    assembler = BlockAssembler()
+    for chunk in chunks:
+        assembler.push(chunk)
+    (call,) = [block for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
     assert call.name == "read" and call.id == "call-1"
     assert call.arguments == '{"p": 1}'
     assert as_kind(chunks[-1], Finish).reason.kind == "tool-calls"
@@ -647,13 +656,13 @@ async def test_a_second_tool_turn_does_not_mint_the_first_turns_call_id() -> Non
     calls by id everywhere, so the damage is not confined to this wire:
     `persistence.repair` keys its pending-call table on the same string.
 
-    Driven through `stream`, not through `_StreamState` directly: the seed is
-    computed in one place and handed to the state in another, and a test that
-    built the state itself would pin the arithmetic while leaving the wiring —
-    the half that was actually missing — uncovered.
+    Driven through `stream` and then through `BlockAssembler`, which is where
+    the id is now decided (G10): the adapter emits an empty one and the seed is
+    read off the conversation, so a test that built the state itself would pin
+    the arithmetic while leaving the wiring — the half that was actually
+    missing — uncovered.
 
-    Sabotage: drop `minted=` from the `_StreamState` in `stream` and the second
-    turn mints `call-1` again.
+    Sabotage: drop `mint_from=` here and the second turn mints `call-1` again.
     """
     history: list[Message] = [
         create_user_message(content=[{"type": "text", "text": "go"}], source={"kind": "user"}),
@@ -666,23 +675,22 @@ async def test_a_second_tool_turn_does_not_mint_the_first_turns_call_id() -> Non
     adapter = GoogleAdapter(ctx=root, config=GoogleConfig())
     adapter.http = _CallingWire()  # type: ignore[assignment]
 
-    ids = [
-        chunk.id
-        async for chunk in adapter.stream(
-            GenerateOptions(provider="google", model="m", messages=tuple(history))
-        )
-        if isinstance(chunk, ToolCallDelta)
-    ]
+    assembler = BlockAssembler(mint_from=highest_minted_id(history))
+    async for chunk in adapter.stream(
+        GenerateOptions(provider="google", model="m", messages=tuple(history))
+    ):
+        assembler.push(chunk)
 
+    ids = [block.id for block in assembler.blocks() if isinstance(block, ToolCallBlock)]
     assert ids == ["call-2"], "the second turn re-used the first turn's id"
     # And a conversation carrying another provider's ids does not continue them.
-    assert _minted_so_far(_turn("toolu_01abc", "read", "x")) == 0
+    assert highest_minted_id(_turn("toolu_01abc", "read", "x")) == 0
 
 
 def test_a_result_resolves_to_the_call_it_followed_not_the_last_one_named() -> None:
     """G1's other half — the sessions that already hold duplicate ids.
 
-    `_minted_so_far` stops new collisions; it cannot repair a stored transcript
+    `highest_minted_id` stops new collisions; it cannot repair a stored transcript
     that was written before it. Those resolve correctly now because the name map
     is walked *with* the conversation rather than folded over it first: a flat
     map keeps the last binding for each id, so every earlier result took the

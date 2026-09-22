@@ -39,7 +39,9 @@ if TYPE_CHECKING:
 from .errors import (
     TOOL_ABORTED,
     TOOL_ABORTED_BEFORE_DISPATCH,
+    TOOL_BUDGET_SPENT,
     TOOL_DENIED,
+    TOOL_TURN_CONCLUDED,
     FailureKind,
     ToolOutputError,
 )
@@ -68,6 +70,8 @@ __all__ = [
     "ToolRunContext",
     "TransportPresentation",
     "aborted_result",
+    "budget_result",
+    "concluded_result",
     "define_tool",
     "denied_result",
     "error_result",
@@ -193,6 +197,22 @@ def denied_result(reason: str, *, concludes_turn: bool = False) -> ToolExecution
     )
 
 
+def budget_result(reason: str, *, concludes_turn: bool) -> ToolExecutionResult:
+    """A configured ceiling stopped the call, and by default the turn with it (D7).
+
+    The sibling of `denied_result`, and apart from it for the reason
+    `TOOL_BUDGET_SPENT` gives: nothing judged this call, so `kind` is `failed`.
+    `concludes_turn` is stated rather than defaulted, because the two facts are
+    independent and the caller knows both: a budget that does not refill within
+    the turn should end it, but a per-call ceiling that the next call could pass
+    should not, and a default would make the commoner one silent.
+    """
+    return replace(
+        error_result(reason, {"name": "ToolBudgetSpent", "code": TOOL_BUDGET_SPENT}, kind="failed"),
+        concludes_turn=concludes_turn,
+    )
+
+
 def aborted_result(*, started: bool) -> ToolExecutionResult:
     """Cancellation, before or after the body ran.
 
@@ -207,6 +227,22 @@ def aborted_result(*, started: bool) -> ToolExecutionResult:
     return error_result(
         "tool call aborted before dispatch",
         {"name": "Canceled", "code": TOOL_ABORTED_BEFORE_DISPATCH},
+        kind="aborted",
+    )
+
+
+def concluded_result() -> ToolExecutionResult:
+    """A call the turn ended before reaching (C13).
+
+    The batch stops dispatching once a result concludes the turn, and every call
+    the model asked for still owes a `tool/result`: a `tool_use` block with
+    nothing answering it is what the next request is rejected for. `aborted` in
+    kind, so it reads as "no effect, safe to retry" like the cancellation it
+    resembles, under its own code so it is not mistaken for one.
+    """
+    return error_result(
+        "the turn ended before this call ran",
+        {"name": "TurnConcluded", "code": TOOL_TURN_CONCLUDED},
         kind="aborted",
     )
 
@@ -396,6 +432,19 @@ class Deny:
     must stop the conversation says so here rather than inventing a second way
     to end a turn. The batch already in flight still settles — what ends is what
     comes after it."""
+    failure_kind: Literal["denied", "failed"] = "denied"
+    """What the model reads this as: policy refusing, or something spent (D7).
+
+    Separate from `concludes_turn`, which decides what the *loop* does, because
+    the two questions have different answers: a budget ceiling ends the turn and
+    is not policy refusing anything, and the `end` posture below refuses and
+    ends. `fs.FsDenied` and `fs.FileTooLarge` split on this same line, under the
+    same field name, and `code_mode.CodeRunFailure` splits `denied` from
+    `budget` — this is the field that lets a policy row say which one it means
+    instead of having the pipeline guess from the decision type.
+
+    Not the discriminator `kind` above, which names the decision rather than its
+    reading, and which the pipeline's `match` is closed over."""
     kind: Literal["deny"] = "deny"
 
 

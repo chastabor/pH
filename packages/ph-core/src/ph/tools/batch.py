@@ -37,7 +37,12 @@ from ..json import dumps
 from ..keys import TOOLS
 from ..llm.types import Message, ToolCallBlock, new_message_id
 from ..session import Session, SurfaceIntent
-from .definition import ToolExecutionInput, ToolExecutionResult, aborted_result
+from .definition import (
+    ToolExecutionInput,
+    ToolExecutionResult,
+    aborted_result,
+    concluded_result,
+)
 from .json_schema import parse_arguments
 from .registry import PreparedCall, ToolRuntime
 
@@ -115,6 +120,19 @@ async def execute_tool_calls(
             for skipped in planned[index:]:
                 _append_skipped(session, turn, step, skipped.block)
             return BatchOutcome(concluded=concluded, aborted=True)
+        if concluded:
+            # **A group that ended the turn ends the step** (C13). `concluded`
+            # was folded here and read by the driver, but the loop went on
+            # opening the next barrier — so an exclusive call queued behind a
+            # parallel run dispatched *after* the turn was over.
+            # `Deny.concludes_turn` promises "the batch already in flight still
+            # settles — what ends is what comes after it", and a group that has
+            # not started is what comes after it. It bites hardest on a fan-out,
+            # which is the shape where a ceiling is most likely to be reached
+            # mid-step and where the calls behind it spawn children.
+            for skipped in planned[index:]:
+                _append_skipped(session, turn, step, skipped.block, concluded_result())
+            return BatchOutcome(concluded=True, aborted=False)
     return BatchOutcome(concluded=concluded, aborted=False)
 
 
@@ -320,7 +338,19 @@ def _append_result(
     )
 
 
-def _append_skipped(session: Session, turn: int, step: int, block: ToolCallBlock) -> None:
-    """A call cancellation skipped still gets its durable call/result pair."""
+def _append_skipped(
+    session: Session,
+    turn: int,
+    step: int,
+    block: ToolCallBlock,
+    result: ToolExecutionResult | None = None,
+) -> None:
+    """A call never dispatched still gets its durable call/result pair.
+
+    The default is cancellation, which is what skipped a call before C13 added
+    the second reason. A turn that concluded passes its own result: both mean
+    "this never ran", and only one of them means somebody cancelled it.
+    """
     call_seq = _append_call(session, turn, step, block, block.arguments)
-    _append_result(session, turn, step, block, aborted_result(started=False), call_seq)
+    settled = aborted_result(started=False) if result is None else result
+    _append_result(session, turn, step, block, settled, call_seq)

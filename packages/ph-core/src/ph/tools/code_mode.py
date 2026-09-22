@@ -123,10 +123,22 @@ class CodeRunFailure(HarnessError):
         "aborted": "aborted",
     }
 
-    def __init__(self, kind: Literal["denied", "budget", "aborted"], message: str) -> None:
+    def __init__(
+        self,
+        kind: Literal["denied", "budget", "aborted"],
+        message: str,
+        *,
+        concludes_turn: bool = False,
+    ) -> None:
         super().__init__(message, f"CODE_RUN_{kind.upper()}")
         self.kind = kind
         self.failure_kind = self._FAILURE_KINDS[kind]
+        self.concludes_turn = concludes_turn
+        """Set when the sub-result that stopped the run ended the turn (C13).
+
+        Not implied by any `kind`: `max_dispatches` and `max_spawns` also settle
+        as `budget` and end only the program, which is the whole difference
+        between a cell's own ceiling and the turn's."""
 
 
 class CodeDispatchRef(WireModel):
@@ -193,6 +205,15 @@ class DispatchBridge:
     _dispatched: int = 0
     _spawned: int = 0
     _failure: CodeRunFailure | None = None
+    _concluded_turn: bool = False
+    """Whether a sub-result ended the *outer* turn, not just this program (C13).
+
+    The program stopping and the turn ending are two facts, and only the first
+    one used to travel: `run_code` returns an ordinary successful cell value, so
+    a ceiling that ended the turn inside a program left the loop running and the
+    model spent another step discovering it. Read by `run_code`, which is the
+    only thing holding both this bridge and the `ToolRunContext` that can say
+    so."""
     _limiter: anyio.CapacityLimiter = field(init=False)
 
     def __post_init__(self) -> None:
@@ -202,10 +223,21 @@ class DispatchBridge:
     def dispatch_count(self) -> int:
         return self._dispatched
 
-    def _settle(self, kind: Literal["denied", "budget", "aborted"], message: str) -> CodeRunFailure:
+    @property
+    def concluded_turn(self) -> bool:
+        """Whether a sub-call's result ended the turn this program runs in."""
+        return self._concluded_turn
+
+    def _settle(
+        self,
+        kind: Literal["denied", "budget", "aborted"],
+        message: str,
+        *,
+        concludes_turn: bool = False,
+    ) -> CodeRunFailure:
         # Once the run is settled, later awaits stop immediately rather than
         # racing to do more work the outcome has already discarded.
-        self._failure = CodeRunFailure(kind, message)
+        self._failure = CodeRunFailure(kind, message, concludes_turn=concludes_turn)
         return self._failure
 
     async def call(self, binding: CodeBinding, arguments: object) -> Any:  # noqa: ANN401
@@ -262,8 +294,30 @@ class DispatchBridge:
             )
             await self._log_settle(ref, result)
 
+        failure = result.error
+        # **A result that ends the turn ends the program** (D7), and it is asked
+        # first because it is the broadest of the three: a ceiling that stops
+        # the turn used to arrive as an ordinary `ToolCallError`, which a
+        # generated program can `except` — so the posture meant to surface a
+        # breach most loudly was the one a program could swallow, and it would
+        # then spend the rest of the turn on calls that could only fail.
+        #
+        # Read off `concludes_turn` rather than a second failure kind, because
+        # that is the flag the loop itself stops on: whatever ends the turn out
+        # there ends the run in here, without this needing a list of the rows
+        # that can do it. Above `is_error` for the same reason — `conclude_turn`
+        # is public on `ToolRunContext` and a *successful* "you are done here"
+        # result is exactly what a tool will use it for.
+        if result.concludes_turn:
+            self._concluded_turn = True
+            stopped = failure.message if failure is not None else "the turn was concluded"
+            raise self._settle(
+                "budget",
+                f"tools.{binding.name} stopped the turn: {stopped}. The program was "
+                "stopped; nothing it called after this could have succeeded.",
+                concludes_turn=True,
+            )
         if result.is_error:
-            failure = result.error
             reason = failure.message if failure is not None else "denied"
             if failure is not None and failure.kind == "denied":
                 raise self._settle(
@@ -358,6 +412,16 @@ async def apply(ctx: Context, config: Config) -> None:
                 token=bridge.token,
             )
         )
+        if bridge.concluded_turn:
+            # **The other way out** (C13). A `CodeRunFailure` that escapes this
+            # function carries `concludes_turn` on itself and `registry._failure`
+            # reads it — that is the path when the bridge raises into the caller.
+            # Over the kernel wire it does not escape: the dispatch fails, the
+            # program dies in the guest, and the runtime *returns* an outcome
+            # holding the error. Then this is the only thing still holding the
+            # fact, and `ToolRunContext.conclude_turn` is the loop's own way to
+            # say a successful result is terminal.
+            run.conclude_turn()
         return CodeCellValue(
             logs=outcome.logs,
             value=outcome.value,

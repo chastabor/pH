@@ -64,7 +64,7 @@ from ..cordis import Context, settled, settled_or_none
 from ..json import as_int
 from ..keys import LLM, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
-from ..llm.assembler import BlockAssembler
+from ..llm.assembler import BlockAssembler, highest_minted_id
 from ..llm.types import (
     ContentBlock,
     FinishReason,
@@ -445,7 +445,7 @@ class ReactLoopAgent:
 
         while True:
             request = await self._build_request(turn, step, assembly, system)
-            assembler = BlockAssembler()
+            assembler = BlockAssembler(mint_from=highest_minted_id(request.messages))
             chunk_seqs: list[int] = []
             try:
                 stream = await self.ctx.require(LLM).stream(request)

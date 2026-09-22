@@ -492,7 +492,7 @@ class _StreamState:
                 out.append(
                     ToolCallDelta(
                         index=index,
-                        id=open_block.tool_id or f"call-{index}",
+                        id=open_block.tool_id,
                         name=open_block.tool_name or None,
                         arguments_delta=fragment,
                     )
@@ -505,7 +505,7 @@ class _StreamState:
             index = as_int(payload.get("index"))
             open_block = self.blocks.pop(index, None)
             if open_block is not None:
-                out.append(BlockEnd(index=index, block=_close(open_block, index)))
+                out.append(BlockEnd(index=index, block=_close(open_block)))
         elif kind == "message_delta":
             delta = payload.get("delta") or {}
             if isinstance(delta.get("stop_reason"), str):
@@ -528,7 +528,7 @@ class _StreamState:
     def finish(self) -> list[StreamChunk]:
         out: list[StreamChunk] = []
         for index, open_block in list(self.blocks.items()):
-            out.append(BlockEnd(index=index, block=_close(open_block, index)))
+            out.append(BlockEnd(index=index, block=_close(open_block)))
         self.blocks.clear()
         if self.usage is not None:
             out.append(UsageChunk(usage=self.usage))
@@ -536,7 +536,7 @@ class _StreamState:
         return out
 
 
-def _close(open_block: _Open, index: int) -> ContentBlock:
+def _close(open_block: _Open) -> ContentBlock:
     if open_block.kind == "reasoning":
         return ReasoningBlock(
             text=open_block.text,
@@ -547,7 +547,7 @@ def _close(open_block: _Open, index: int) -> ContentBlock:
         )
     if open_block.kind == "tool-call":
         return ToolCallBlock(
-            id=open_block.tool_id or f"call-{index}",
+            id=open_block.tool_id,
             name=open_block.tool_name,
             arguments=open_block.arguments or "{}",
         )

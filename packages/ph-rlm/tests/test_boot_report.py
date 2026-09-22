@@ -24,9 +24,13 @@ layer down from the tier table.
 from __future__ import annotations
 
 import json
+import os
 import resource
 import socket
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import anyio
@@ -35,7 +39,7 @@ import pytest
 from ph.orphans import OrphanJournal
 from ph_rlm.kernel import codec
 from ph_rlm.kernel.manager import Kernel, KernelLimits, PythonCodeRuntime
-from ph_rlm.kernel.venv import resolve_interpreter
+from ph_rlm.kernel.venv import RuntimeEnvironment, resolve_interpreter
 from ph_runtime.limits import apply_limits
 from ph_runtime.protocol import PROTOCOL_VERSION
 
@@ -190,3 +194,160 @@ def test_the_design_document_names_the_version_the_guest_declares() -> None:
     assert f"`PROTOCOL_VERSION = {PROTOCOL_VERSION}`" in design, (
         "DESIGN.md §1 names a kernel protocol version the guest does not declare"
     )
+
+
+async def test_two_first_runs_on_one_namespace_build_one_kernel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 — `environment()` suspends, and two first runs both got past the read.
+
+    The namespace *is* the agent id, and a fan-out of parallel tool calls on one
+    agent is what Code Mode is for, so two first runs on one namespace is
+    ordinary rather than exotic. Both built a `Kernel` and the second overwrote
+    the first in `_kernels`; both then spawned a guest on their first cell, and
+    only the one still in the dict was reachable by `close_namespace`. The other
+    ran until the process exited, holding a socket, a pid and whatever the cell
+    had open.
+
+    Driven through `_acquire`, with `environment()` held open at exactly the
+    await that suspends in production — a cold cache shelling out to `uv` takes
+    seconds, which is the window.
+
+    Sabotage: drop `async with self._acquire_lock:` and `environment()` is
+    entered twice, returning two different kernels.
+    """
+    runtime = PythonCodeRuntime(
+        limits=KernelLimits(),
+        journal=OrphanJournal(path=tmp_path / "processes.jsonl"),
+        cache=tmp_path,
+    )
+    resolved = resolve_interpreter(cache=tmp_path, mode="host")
+    entered = 0
+    reached = anyio.Event()
+    finish = anyio.Event()
+
+    async def held(_runtime: PythonCodeRuntime) -> RuntimeEnvironment:
+        nonlocal entered
+        entered += 1
+        reached.set()
+        await finish.wait()
+        return resolved
+
+    monkeypatch.setattr(PythonCodeRuntime, "environment", held)
+
+    built: list[Kernel] = []
+
+    async def acquire() -> None:
+        built.append(await runtime._acquire("a"))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(acquire)
+        await reached.wait()  # the first is suspended inside `environment()`
+        tasks.start_soon(acquire)
+        await anyio.sleep(0)  # and the second has reached the lock
+        finish.set()
+
+    assert entered == 1, "the interpreter was resolved twice for one namespace"
+    assert built[0] is built[1], "two kernels were built and one became unreachable"
+    assert list(runtime._kernels) == ["a"]
+
+
+class _Pipe:
+    """A child's pipe, which it cannot get past until the host reads it.
+
+    The real failure is a blocking `write(2)`: a guest that puts more than the
+    pipe buffer on fd 1 or fd 2 before acking stops there. Modelled rather than
+    reproduced with an OS pipe, because a real one can only be un-blocked from a
+    worker thread, and a thread blocked in `read` is not cancellable — a host
+    that failed this test would hang it rather than fail it, which is the one
+    outcome a regression test must not have.
+
+    What is kept is the causal chain that matters: `settled` fires only once the
+    host has consumed the stream, and the child sends `boot-ack` only once it
+    fires. A host that does not read this pipe never gets the ack.
+
+    `chunks=0` and no `settled` is the other pipe in the same test: open, silent,
+    and never the reason boot finishes.
+    """
+
+    def __init__(self, settled: anyio.Event | None = None, *, chunks: int = 8) -> None:
+        self._settled = settled
+        self._chunks = chunks
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self._pump()
+
+    async def _pump(self) -> AsyncIterator[bytes]:
+        for _ in range(self._chunks):
+            yield b"x" * 4096
+        if self._settled is not None:
+            self._settled.set()
+        # Open, like a live child's: boot ends by cancelling this reader, not by
+        # the pipe running out.
+        await anyio.sleep(3600)
+
+
+@pytest.mark.parametrize("pipe", ["stderr", "stdout"])
+async def test_a_child_that_fills_a_pipe_before_acking_still_boots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe: str
+) -> None:
+    """F7(b) — during boot, nothing was consuming fd 1 or fd 2.
+
+    `_drain` only runs for the duration of a *run*, so a guest that writes more
+    than the pipe buffer before it acks blocks on that write and never acks at
+    all. The host then reported "did not report ready within Ns" for a child
+    that was ready and stuck, quoting whatever fitted in one late read — the
+    reverse of the truth, and it sends whoever reads it looking at the guest.
+
+    Both pipes, parametrized, because `_boot_said` quotes both and a wrapper
+    explaining itself on stdout is naming the same failure: draining only the
+    one that happened to be tested would leave the other deadlocking.
+
+    Sabotage: drop either `start_soon(self._collect_boot_noise, ...)` line and
+    the matching case waits out `boot_timeout` and raises `KernelDied`.
+    """
+    settled = anyio.Event()
+    opened = anyio.Event()
+    held: dict[str, Any] = {}
+
+    async def fake_open_process(*_args: object, **kwargs: object) -> object:
+        passed = kwargs["pass_fds"]
+        assert isinstance(passed, tuple)
+        (child_fd,) = passed
+        held["ack"] = os.dup(child_fd)
+        streams = {"stdout": _Pipe(chunks=0), "stderr": _Pipe(chunks=0)}
+        streams[pipe] = _Pipe(settled)
+        held["process"] = SimpleNamespace(pid=None, returncode=None, **streams)
+        opened.set()
+        return held["process"]
+
+    monkeypatch.setattr(anyio, "open_process", fake_open_process)
+
+    kernel = Kernel(
+        namespace="a",
+        environment=resolve_interpreter(cache=tmp_path, mode="host"),
+        limits=KernelLimits(),
+        journal=None,
+        boot_timeout=5.0,
+    )
+
+    async def ack_once_the_host_has_read_the_pipe() -> None:
+        await opened.wait()
+        await settled.wait()
+        os.write(held["ack"], _boot_ack({}))
+
+    try:
+        with anyio.fail_after(30):
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(ack_once_the_host_has_read_the_pipe)
+                await kernel.start(namespaces=[])
+        assert kernel._alive, "the child acked but the host did not come up"
+        assert kernel._boot_noise, f"{pipe} was not read while the host waited"
+    finally:
+        kernel._process = None
+        if kernel._sock is not None:
+            kernel._sock.close()
+            kernel._sock = None
+        if "ack" in held:
+            with suppress(OSError):
+                os.close(held["ack"])
