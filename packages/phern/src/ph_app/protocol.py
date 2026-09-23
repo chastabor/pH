@@ -79,7 +79,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -98,8 +98,15 @@ direction and are in the other: `daemon/lifetime` and the `daemon.lifetime`
 notice (P9-07). An older client never asks for them; a 0.2.x client attaching to
 a daemon still running from before them fails at the attach read, which is what
 every verb added since 0.1.0 already does and what restarting the daemon fixes.
-No second number, because 0.2.0 has not shipped: a bump inside an unreleased
-version would record a skew nothing could have been on either side of.
+
+**3 (0.3.0): a `sessionId` must be usable as a path component** (K9). Every
+`session/*` method on both transports takes it through one model, which now
+refuses an id that is not alphanumerics, dots, dashes and underscores starting
+with a letter or a digit — an id becomes a directory name in the spill store,
+the archive and the workspace scratch root. A 0.2.x client that minted any other
+id is refused where it used to be served. Released beside the kernel's fd-3
+protocol moving from 1 to 4 (`ph_runtime.protocol.PROTOCOL_VERSION`, its own
+number), which is why every package moved to 0.3.0 together.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

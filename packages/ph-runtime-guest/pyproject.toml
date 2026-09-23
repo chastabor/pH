@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-runtime-guest"
-version = "0.2.0"
+version = "0.3.0"
 description = "The guest half of pH's code runtime: the fd-3 protocol, the run loop, and the binding proxies a cell awaits."
 readme = "README.md"
 requires-python = ">=3.12"
