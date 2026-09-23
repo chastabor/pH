@@ -218,6 +218,30 @@ async def test_a_mounted_roots_own_seam_outranks_its_index_entry(tmp_path: Path)
         assert "schedule" in daemon.running.holds()
 
 
+async def test_a_prompt_the_root_has_not_started_is_already_running(tmp_path: Path) -> None:
+    """Queued work is work in hand, before the driver's phase says so.
+
+    `prompt` logs the message and rings the doorbell; the root's task starts the
+    turn at its next checkpoint. In between, the status read the driver's phase —
+    still idle — so `phern agents attach --until-idle` right after a `send` could
+    be told the work was done before it began, and stop without it: the flake
+    `test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing` hit on CI.
+
+    Read with no await between the prompt and the assertion, so the root's task
+    cannot have started the turn yet — the window, held open.
+
+    Sabotage: drop the inbox check from `Root.status` and this reads `idle`.
+    """
+    async with running(tmp_path, passivate_after=None) as daemon:
+        supervisor = daemon.running.supervisor
+        root = await supervisor.prompt("queued", "do the thing")
+
+        assert root.status == "running", "queued work reported as nothing to do"
+
+        await until(lambda: root.status == "idle", what="the turn to finish")
+        assert not root.agent.inbox.has_pending
+
+
 async def test_a_keep_alive_holds_it_for_exactly_as_long_as_it_says(tmp_path: Path) -> None:
     """Armed on the last disconnect, cleared on the next connect, and it expires.
 

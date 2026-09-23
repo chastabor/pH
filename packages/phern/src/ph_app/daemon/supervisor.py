@@ -396,7 +396,18 @@ class Root:
             return live
         if self.recovery.failed:
             return "failed"
-        return "retrying" if self.recovery.attempts else live
+        if self.recovery.attempts:
+            return "retrying"
+        # **Work in the inbox is work in hand**, before the driver has picked it
+        # up. `prompt` logs the message, rings the doorbell and returns; the
+        # root's task starts the turn at its next checkpoint. Between the two the
+        # driver's phase still says idle, so a client attaching in that window —
+        # `phern agents attach --until-idle` right after a `send` — was told the
+        # work was done before it began, and stopped without it. Derived from the
+        # inbox, which is itself folded from the log, not from a flag set here.
+        if self.agent.inbox.has_pending:
+            return "running"
+        return live
 
     @property
     def last_turn(self) -> str | None:
