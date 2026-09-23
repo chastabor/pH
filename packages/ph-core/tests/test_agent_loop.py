@@ -45,10 +45,10 @@ from ph.llm.types import (
     ToolCallBlock,
     create_user_message,
 )
-from ph.session import SurfaceIntent
+from ph.session import SurfaceIntent, SurfaceReplace
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import MountProfile, block_text, simple_tool, user_payload
+from ph.testing import MountProfile, block_text, plugin_payload, simple_tool, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -726,10 +726,12 @@ async def test_a_rejected_step_does_not_consume_the_context_change_it_built(
     changed *again*, which for a file somebody edits once is never.
 
     The snapshot exists to keep the cached prefix stable (A12), so it has to
-    mean "delivered"; a step that never ran delivered nothing.
+    mean "delivered"; a step that never ran delivered nothing. Since C12 there is
+    no field to advance: "delivered" is the newest snapshot in the transcript,
+    and a rejected step logged none.
 
-    Sabotage: advance `_context_snapshot` inside `_project_context` and the
-    second turn sends no snapshot.
+    Sabotage: compare against the text last *built* rather than the transcript
+    and the third turn sends no snapshot.
     """
     ctx = await mount()
     clock = {"value": "09:00"}
@@ -757,6 +759,92 @@ async def test_a_rejected_step_does_not_consume_the_context_change_it_built(
     # The next step must still carry it: nothing told the model yet.
     await agent.prompt("third")
     assert len(_plugin_snapshots(session)) == 2, "the change was dropped for good"
+
+
+async def test_a_resumed_driver_does_not_resend_context_it_already_sent(
+    mount: MountProfile,
+) -> None:
+    """C12 — "delivered" is read from the transcript, so a resume keeps it.
+
+    The snapshot was `__init__` state: a driver built over a session that
+    already carried the context started with nothing, sent it again, and moved
+    the cached prefix for text the model had in front of it.
+
+    Sabotage: have `_delivered_context` answer `None` — a fresh field — and the
+    resumed driver sends a second snapshot.
+    """
+    ctx = await mount()
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="time", text=lambda _c: "09:00"))
+    session = ctx.require(SESSIONS).create("s")
+    first = ctx.require(AGENTS).create(session, FAKE)
+    await first.prompt("before the restart")
+    assert len(_plugin_snapshots(session)) == 1
+    await first.dispose()
+
+    resumed = ctx.require(AGENTS).create(session, FAKE)
+    await resumed.prompt("after it")
+
+    assert len(_plugin_snapshots(session)) == 1, "context already in the transcript was sent again"
+
+
+async def test_context_is_compared_with_the_newest_snapshot(mount: MountProfile) -> None:
+    """C12 — once context has changed, the latest snapshot is what the model holds.
+
+    Compared with an earlier one, the current text never matches and is sent on
+    every step, moving the cached prefix each time — the cost `context()` exists
+    to avoid (A12).
+
+    Sabotage: find the first snapshot in the conversation rather than the last
+    and the third prompt sends a third one.
+    """
+    ctx = await mount()
+    clock = {"value": "09:00"}
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="time", text=lambda _c: clock["value"]))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    await agent.prompt("first")
+    clock["value"] = "10:00"
+    await agent.prompt("second")
+    assert len(_plugin_snapshots(session)) == 2
+
+    await agent.prompt("third")
+
+    assert len(_plugin_snapshots(session)) == 2, "unchanged context was sent again"
+
+
+async def test_context_a_compaction_took_away_is_sent_again(mount: MountProfile) -> None:
+    """C12 — the model is shown `derive_messages()`, so that is what "told" means.
+
+    A summary that shadows the snapshot message leaves the model without the
+    context, and a held snapshot still believed it had been delivered.
+
+    Sabotage: read the newest snapshot off the raw log instead of the derived
+    conversation and nothing is re-sent.
+    """
+    ctx = await mount()
+    ctx.require(SYSTEM_PROMPT).context(PromptContext(name="time", text=lambda _c: "09:00"))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    await agent.prompt("first")
+    (snapshot,) = _plugin_snapshots(session)
+
+    # The shape a compaction leaves: a summary replacing what it shadowed.
+    session.append(
+        "user/message",
+        plugin_payload("a summary of the conversation so far", "summary", plugin="compaction"),
+        SurfaceIntent(
+            surface_op=SurfaceReplace(replaces=(snapshot.seq,)),
+            source_event_seqs=(snapshot.seq,),
+        ),
+    )
+    await agent.prompt("second")
+
+    # Context snapshots only: the summary is plugin-sourced too, as compaction's is.
+    snapshots = [
+        e for e in _plugin_snapshots(session) if e.data["source"].get("form") == "snapshot"
+    ]
+    assert len(snapshots) == 2, "the model was left without its context"
+    assert "09:00" in [block_text(m.content[0]) for m in session.derive_messages()]
 
 
 async def test_an_interrupt_while_the_prompt_is_assembled_keeps_the_batch(

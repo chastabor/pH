@@ -18,7 +18,7 @@ find that out from an invoice.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
@@ -37,11 +37,19 @@ from ..cordis import (
     settled,
 )
 from ..keys import SYSTEM_PROMPT
-from ..llm.types import ContextSnapshotSection, ToolSchema
+from ..llm.types import (
+    ContextSnapshotSection,
+    Message,
+    PluginSource,
+    ToolSchema,
+    create_user_message,
+    text_of,
+)
 from ..seams._registry import claim_entry
 from ..session import Session
 
 __all__ = [
+    "CONTEXT_PLUGIN",
     "AssembleContext",
     "PromptAssembly",
     "PromptContext",
@@ -50,6 +58,7 @@ __all__ = [
     "SystemPromptService",
     "ToolsProvider",
     "apply",
+    "context_message",
     "join_context_sections",
     "render_context_sections",
     "render_prompt",
@@ -169,6 +178,52 @@ def render_context_sections(assembly: PromptAssembly) -> list[ContextSnapshotSec
 
 def join_context_sections(sections: list[ContextSnapshotSection]) -> str:
     return "\n\n".join(section.text for section in sections)
+
+
+CONTEXT_PLUGIN = "ph.system-prompt"
+"""The name a context snapshot carries — written and read here, and nowhere else."""
+
+
+def context_message(assembly: PromptAssembly, shown: Sequence[Message]) -> Message | None:
+    """The `context()` providers as a message, or `None` when `shown` already has them.
+
+    This is the whole reason `context()` exists separately from `section`:
+    re-sending unchanged context on every step would invalidate the cached
+    prefix each turn (A12).
+
+    **"Already has" is read from `shown` — the conversation the model is sent —
+    not held** (C12). A snapshot kept by the caller was a promise that the model
+    had been told, and every route around delivery broke it: a rejected step
+    (C3), a cancel before the append, a resume starting with nothing, a
+    compaction that shadowed the message. Here a step that never logged its
+    message re-sends it, and a summary that shadowed it brings it back.
+
+    Beside `render_context_sections` because the tag is this module's: the one
+    that writes a snapshot is the one that knows how to find it again.
+    """
+    sections = render_context_sections(assembly)
+    if not sections:
+        return None
+    text = join_context_sections(sections)
+    if text == _shown_context(shown):
+        return None
+    return create_user_message(
+        content=[{"type": "text", "text": text}],
+        source=PluginSource(plugin=CONTEXT_PLUGIN, form="snapshot", sections=list(sections)),
+    )
+
+
+def _shown_context(shown: Sequence[Message]) -> str | None:
+    """The newest snapshot's text in `shown`, or `None` — a later one supersedes it."""
+    for message in reversed(shown):
+        source = message.source
+        if (
+            isinstance(source, PluginSource)
+            and source.plugin == CONTEXT_PLUGIN
+            and source.form == "snapshot"
+        ):
+            return text_of(message.content)
+    return None
 
 
 ToolsProvider: TypeAlias = "Callable[[Context], list[ToolSchema]]"

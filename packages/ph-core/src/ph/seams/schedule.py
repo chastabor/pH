@@ -42,7 +42,7 @@ from ..paths import resolve_roots
 from ..session import Session, SessionFoldCache, now_ms
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
-from .schedule_index import ScheduleIndex
+from .schedule_index import IndexRecorder, IndexWriter, ScheduleIndex
 
 __all__ = [
     "CANCELED",
@@ -367,7 +367,7 @@ class ScheduleService:
     appointment changes.
     """
 
-    index: ScheduleIndex | None = None
+    index: IndexRecorder | None = None
     _states: SessionFoldCache[dict[str, ScheduleState]] = field(
         default_factory=lambda: SessionFoldCache(schedules)
     )
@@ -494,7 +494,10 @@ class Config(WireModel):
 @plugin("schedule", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Publish `ctx.schedule`."""
-    service = ScheduleService(index=ScheduleIndex(resolve_roots().home) if config.index else None)
+    # Through the writer, so an appointment changing never waits on the file
+    # lock from the event loop (K10).
+    index = IndexWriter(ScheduleIndex(resolve_roots().home), ctx) if config.index else None
+    service = ScheduleService(index=index)
     ctx.provide(SCHEDULE, service)
     # The cache is bounded by live sessions, and this is what makes that true —
     # the same line `subagents` uses for the same reason.

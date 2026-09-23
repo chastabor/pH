@@ -1506,6 +1506,7 @@ UNBOUND: dict[str, str] = {
     "InboxNotifications.claimed": "a callback back into the caller that supplied it",
     "InboxNotifications.discarded": "a callback back into the caller that supplied it",
     "InboxNotifications.inserted": "a callback back into the caller that supplied it",
+    "ScheduleService.index": "the row's own index writer (K10); detaches only drain-tracked work",
     "_Entry.unobserve": "teardown; runs as its scope unwinds",
     # The roster. The one thing the registry calls on an entry is `dispose`, which
     # is teardown (below); `run` is the loop itself — the body that *establishes*

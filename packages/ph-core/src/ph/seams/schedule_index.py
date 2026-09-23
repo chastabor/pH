@@ -41,16 +41,23 @@ stored log, which is the scan this file exists to avoid.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
+
+import anyio
 
 from ..locks import LockBusy, file_lock
 from ..paths import write_atomic
 
-__all__ = ["INDEX_NAME", "Appointment", "ScheduleIndex"]
+if TYPE_CHECKING:
+    from ..cordis import Context
+
+__all__ = ["INDEX_NAME", "Appointment", "IndexRecorder", "IndexWriter", "ScheduleIndex"]
 
 log = logging.getLogger("ph.seams.schedule_index")
 
@@ -64,29 +71,16 @@ of the access pattern a directory of files is good at.
 
 _VERSION = 1
 
-_LOCK_TIMEOUT = 0.25
-"""How long a writer waits for the file lock before giving up (K10).
+_LOCK_TIMEOUT = 5.0
+"""How long a write waits for the file lock before giving up (K10).
 
-**This is a bound on stalling the event loop, not on contention.** `record` is
-synchronous and every caller reaches it from the loop — `create`, `cancel`,
-`claim` and the `session/created` listener — so the wait is time the daemon
-spends serving nothing at all, including the schedules of every *other* root it
-is holding. At five seconds two hosts sharing a `$PH_HOME` could stop each
-other's loops for longer than the tick interval they are contending over.
-
-A quarter second is far past what the critical section costs — a read and a
-rewrite of a file the size of the outstanding work — so it is only reached when
-another process is genuinely wedged, which is exactly when waiting is worthless.
-Giving up is already the established answer here: the whole method is
-best-effort, because "an index that cannot be written costs a late run" and
-taking a session's own `create` down to protect a cache would be the projection
-outranking the log.
-
-The reconcile path no longer reaches the lock at all — `record` settles the
-no-op case before taking it — so what this bounds is a genuine contended write.
-Moving even that off the loop is a follow-up: the shape that wants no signature
-changes is a single writer task fed by a memory object stream, where `record`
-becomes a `send_nowait` and one background task drains it.
+**Patient, because the wait is a worker thread's.** It was cut to a quarter
+second while `record` ran on the event loop — every caller reaches it from the
+loop, so the wait was time the daemon served nothing, including every other
+root's schedules. `IndexWriter` moved the write off the loop, and a wait there
+costs a thread and delays only the writes queued behind it, so waiting out
+another host's write is worth more than dropping this one. Giving up is still
+the answer past it: an index that cannot be written costs a late run.
 """
 
 
@@ -149,7 +143,7 @@ class ScheduleIndex:
         return found
 
     def record(self, session_id: str, *, next_at: int | None, now: int) -> None:
-        """Set or clear one session's appointment.
+        """Set or clear one session's appointment. Blocking — see `IndexWriter`.
 
         `next_at=None` removes the entry, which is what a cancellation and a
         `once` that has fired both mean: nothing further is owed. Removing rather
@@ -166,31 +160,36 @@ class ScheduleIndex:
         session open: reconciling an entry that is already right must not cost a
         lock and a rewrite, and every fork and every subagent opens a session.
         """
-        # **The no-op is decided before the lock, not inside it** (K10). This
-        # method is documented as callable on every session open — every fork,
-        # every subagent — precisely because reconciling an entry that is already
-        # right should cost nothing, and it was paying a lock acquisition to
-        # discover that. Reading first is safe: `read` treats every failure as
-        # empty and `_write` is an atomic rename, so there is no torn state to
-        # observe, and a racing writer only means this call re-checks under the
-        # lock below and finds nothing to do.
-        settled = self.read().get(session_id)
-        if next_at is None and settled is None:
-            return
-        if next_at is not None and settled is not None and settled.next_at == next_at:
+        self.record_all({session_id: (next_at, now)})
+
+    def record_all(self, changes: Mapping[str, tuple[int | None, int]]) -> None:
+        """`record` for several sessions at once: one read, and at most one rewrite.
+
+        `changes` maps a session to its `(next_at, now)`. What `IndexWriter`
+        hands over in one thread hop, so a fan-out opening N sessions costs one
+        read of the file rather than N, and a rewrite only if something moved.
+        """
+        # **The no-op is decided before the lock, not inside it** (K10). This is
+        # called on every session open — every fork, every subagent — precisely
+        # because reconciling an entry that is already right should cost
+        # nothing, and it was paying a lock acquisition to discover that. Reading
+        # first is safe: `read` treats every failure as empty and `_write` is an
+        # atomic rename, so there is no torn state to observe, and a racing
+        # writer only means the re-check under the lock finds nothing to do.
+        if not _moves(self.read(), changes):
             return
         try:
             with file_lock(f"{self.path}.lock", timeout=_LOCK_TIMEOUT, what="the schedule index"):
                 found = self.read()
-                current = found.get(session_id)
-                if next_at is None:
-                    if current is None:
-                        return
-                    found.pop(session_id)
-                else:
-                    if current is not None and current.next_at == next_at:
-                        return
-                    found[session_id] = Appointment(session_id, next_at, now)
+                if not _moves(found, changes):
+                    return
+                for session_id, (next_at, now) in changes.items():
+                    if next_at is None:
+                        found.pop(session_id, None)
+                    else:
+                        current = found.get(session_id)
+                        if current is None or current.next_at != next_at:
+                            found[session_id] = Appointment(session_id, next_at, now)
                 self._write(found)
         except LockBusy:
             log.warning("ph.seams.schedule_index: %s is locked; not recording", self.path)
@@ -207,3 +206,73 @@ class ScheduleIndex:
             },
         }
         write_atomic(self.path, json.dumps(document, indent=2))
+
+
+def _moves(found: Mapping[str, Appointment], changes: Mapping[str, tuple[int | None, int]]) -> bool:
+    """Whether writing `changes` over `found` would change anything."""
+    for session_id, (next_at, _now) in changes.items():
+        current = found.get(session_id)
+        if next_at is None and current is not None:
+            return True
+        if next_at is not None and (current is None or current.next_at != next_at):
+            return True
+    return False
+
+
+class IndexRecorder(Protocol):
+    """What `ScheduleService` writes through: `ScheduleIndex` itself, or its writer."""
+
+    def record(self, session_id: str, *, next_at: int | None, now: int) -> None: ...
+
+
+@dataclass(slots=True)
+class IndexWriter:
+    """`ScheduleIndex.record` without the wait on the event loop (K10).
+
+    Every caller — `create`, `cancel`, `claim`, the `session/created` reconcile —
+    is synchronous and on the loop, and `record` is a file lock, a read and an
+    atomic rewrite. So `record` here only notes the change, and a writer hands
+    everything noted so far to `record_all` in one worker-thread hop.
+
+    **Latest wins, per session.** The index holds one entry per session, so only
+    the newest change for each matters: a `create` then a `cancel` noted before
+    the writer ran is one write of the cancel, not two writes in order. A change
+    noted *while* a batch is being written waits for the next one, so it still
+    lands last.
+
+    **Started on demand and finished when nothing is noted**, not a task that
+    lives as long as the row: `Context.drain` awaits detached work, so a writer
+    that never ended would hold every drain to its deadline — while one that ends
+    makes `drain` the flush, which is what a host shutting down wants.
+    """
+
+    index: ScheduleIndex
+    ctx: Context
+    _pending: dict[str, tuple[int | None, int]] = field(default_factory=dict)
+    _writing: bool = False
+
+    def record(self, session_id: str, *, next_at: int | None, now: int) -> None:
+        """Note one change; start the writer if none is running."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop, so no loop to stall — and `detach` would close the writer
+            # unstarted, leaving `_writing` set and every later change noted for
+            # a writer that never ran.
+            self.index.record(session_id, next_at=next_at, now=now)
+            return
+        self._pending[session_id] = (next_at, now)
+        if not self._writing:
+            self._writing = True
+            self.ctx.detach(self._drain(), label="schedule index writer")
+
+    async def _drain(self) -> None:
+        # No await between the emptiness check and clearing the flag, so a change
+        # noted during the last batch is either taken by the `while` or finds the
+        # flag clear and starts a writer of its own.
+        try:
+            while self._pending:
+                batch, self._pending = self._pending, {}
+                await anyio.to_thread.run_sync(self.index.record_all, batch)
+        finally:
+            self._writing = False

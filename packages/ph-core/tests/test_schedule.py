@@ -64,9 +64,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import anyio
 import pytest
 from filelock import FileLock
 
+from ph.cordis import Context
 from ph.json import as_int
 from ph.seams.schedule import (
     CANCELED,
@@ -79,7 +81,7 @@ from ph.seams.schedule import (
     next_at,
     schedules,
 )
-from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
+from ph.seams.schedule_index import INDEX_NAME, IndexWriter, ScheduleIndex
 from ph.session import Session, now_ms
 
 MINUTE = 60_000
@@ -465,25 +467,54 @@ def test_a_missing_or_unreadable_index_reads_as_empty(tmp_path: Path) -> None:
     assert _index(tmp_path).read() == {}, "a version this build does not know"
 
 
-def test_a_wedged_writer_does_not_stall_the_loop_for_long(tmp_path: Path) -> None:
-    """K10 — `_LOCK_TIMEOUT` says why the wait is bounded rather than patient.
+@pytest.mark.anyio
+async def test_a_contended_write_waits_off_the_loop_and_lands(tmp_path: Path) -> None:
+    """K10 — the lock is waited on by a worker thread, never by the event loop.
 
-    `record` runs on the event loop from four callers, so a wait is time the
-    daemon serves nothing — including the schedules of every other root it
-    holds. Giving up is already its answer to a write it cannot do.
+    Every caller of `record` is on the loop, so a wait there was time the daemon
+    served nothing — including every other root's schedules. The first fix only
+    bounded it (five seconds down to a quarter); `IndexWriter` moves it off the
+    loop, which also means the write can afford to wait out another host's.
+
+    Sabotage: have `IndexWriter.record` call `index.record` directly and the
+    call blocks on the held lock.
     """
+    root = Context()
     index = _index(tmp_path)
+    writer = IndexWriter(index, root)
     held = FileLock(f"{index.path}.lock", thread_local=False)
     held.acquire()
     try:
         started = time.monotonic()
-        index.record("s1", next_at=1_000, now=0)
-        waited = time.monotonic() - started
+        writer.record("s1", next_at=1_000, now=0)
+        assert time.monotonic() - started < 0.1, "the loop waited on another holder's lock"
+        # The loop keeps turning while the write waits behind the lock.
+        await anyio.sleep(0.3)
+        assert index.read() == {}, "the write went through a lock somebody else held"
     finally:
         held.release()
 
-    assert waited < 2.0, f"a contended write stalled the loop for {waited:.1f}s"
-    assert index.read() == {}, "the write went through a lock somebody else held"
-    # And with nobody holding it, the write lands as usual.
-    index.record("s1", next_at=1_000, now=0)
-    assert index.read()["s1"].next_at == 1_000
+    await root.drain()
+
+    assert index.read()["s1"].next_at == 1_000, "the write landed once the lock was free"
+
+
+@pytest.mark.anyio
+async def test_the_newest_change_per_session_is_the_one_that_lands(tmp_path: Path) -> None:
+    """K10 — the index holds one entry per session, so only the newest change counts.
+
+    A create then a cancel noted before the writer runs is one write of the
+    cancel; the other session's change travels in the same batch.
+
+    Sabotage: write each change in its own thread with no batch and the two race.
+    """
+    root = Context()
+    index = _index(tmp_path)
+    writer = IndexWriter(index, root)
+
+    writer.record("s1", next_at=1_000, now=0)
+    writer.record("s1", next_at=None, now=1)
+    writer.record("s2", next_at=2_000, now=2)
+    await root.drain()
+
+    assert set(index.read()) == {"s2"}

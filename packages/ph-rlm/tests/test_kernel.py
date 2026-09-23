@@ -610,6 +610,37 @@ async def test_a_failed_call_is_the_programs_to_handle(make_kernel: MakeKernel) 
     assert "no such file" in str(result.value)
 
 
+async def test_an_uncaught_failure_stops_the_calls_after_it(make_kernel: MakeKernel) -> None:
+    """C14 — inside a program, "B needs A" is just `await`.
+
+    The tool pipeline orders calls but never conditions one on another's
+    outcome: an exclusive call is a barrier that runs whether or not the calls
+    before it succeeded. That is left as it is, on purpose — in one step a model
+    cannot feed A's result into B's arguments, so only effect-ordering is at
+    stake, where B after a failed A is often what shows what broke. What makes
+    leaving it right is this: where a model does mean "B only if A succeeded",
+    a program says so, because a failed call raises and nothing after it runs.
+
+    Sabotage: have a failed dispatch return its message instead of raising, and
+    `b` runs against an `a` that never answered.
+    """
+    ran: list[str] = []
+
+    async def failing(**_arguments: object) -> NoReturn:
+        raise ToolCallError("a", "no answer")
+
+    async def recording(**_arguments: object) -> str:
+        ran.append("b")
+        return "b ran"
+
+    namespace = tools(a=failing, b=recording)
+    kernel = await make_kernel(namespaces=(namespace,))
+    result = await kernel.run("await tools.a()\nawait tools.b()", (namespace,), None)
+
+    assert result.error is not None and "no answer" in result.error
+    assert ran == [], "a call that depended on a failed one still ran"
+
+
 async def test_an_unknown_binding_says_what_exists(make_kernel: MakeKernel) -> None:
     namespace = tools(read=_ok)
     kernel = await make_kernel(namespaces=(namespace,))

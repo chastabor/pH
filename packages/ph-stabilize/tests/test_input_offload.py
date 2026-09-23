@@ -20,13 +20,14 @@ from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, SESSIONS
-from ph.llm.types import text_of
+from ph.llm.types import PluginSource, create_user_message, text_of
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SurfaceReplace
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
 )
+from ph.system_prompt.assembly import CONTEXT_PLUGIN
 from ph.testing import FAKE_OPTIONS, MountProfile, user_payload
 from ph_stabilize.input_offload import (
     HUMAN_TOKEN_LIMIT_BEFORE_EVICT,
@@ -188,6 +189,36 @@ def test_a_replacement_is_never_offloaded_again() -> None:
     )
 
     assert _pending(session, config) is None, "the replacement was offloaded again"
+
+
+def test_the_persons_paste_is_offloaded_not_the_harness_context_after_it() -> None:
+    """C12 — the newest *human* message, not the newest `user/message`.
+
+    A step whose context changed appends the harness's snapshot after the
+    person's words, in one batch. Taking the newest let the paste through whole
+    and offloaded the snapshot instead — the harness's own context, which the
+    loop then re-sent every step, because the model no longer saw it.
+
+    Sabotage: take `session.latest("user/message")` again and the snapshot is
+    the one chosen.
+    """
+    config = Config(token_limit=100)
+    session = Session("batch")
+    session.append("turn/start", {"turn": 1})
+    session.append("step/start", {"turn": 1, "step": 1})
+    paste = session.append("user/message", user_payload("p" * 2_001), SurfaceIntent("append"))
+    session.append(
+        "user/message",
+        create_user_message(
+            content=[{"type": "text", "text": "context " * 300}],
+            source=PluginSource(plugin=CONTEXT_PLUGIN, form="snapshot", sections=[]),
+        ).to_wire(),
+        SurfaceIntent("append"),
+    )
+
+    pending = _pending(session, config)
+
+    assert pending is not None and pending[0].seq == paste.seq
 
 
 # ------------------------------------------------------------------ fail open --

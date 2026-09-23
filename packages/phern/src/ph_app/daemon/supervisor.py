@@ -1321,10 +1321,22 @@ class Supervisor:
         should not pay for the index as well. The common case — nothing
         scheduled anywhere — still reaches the index, where it costs one failed
         open rather than a parse.
+
+        **The index answers only for sessions nothing has mounted.** It is a
+        cache, and the logs stay authoritative (I-6): a mounted root's own seam
+        has already said no, and an index entry for it can only be staler than
+        that. Since K10 it is stale by construction for a moment — the write
+        runs off the loop, after the `cancel` that caused it — so asking it
+        about a mounted root kept a withdrawn appointment holding the daemon
+        until the next sweep.
         """
-        return any(self._live_schedules(root) for root in self.roots.values()) or bool(
-            self.appointments()
-        )
+        if any(self._live_schedules(root) for root in self.roots.values()):
+            return True
+        appointments = self.appointments()
+        if not appointments:
+            return False
+        mounted = {root.session.id for root in self.roots.values()}
+        return any(session_id not in mounted for session_id in appointments)
 
     async def wake_and_tick(self, *, now: int | None = None) -> list[str]:
         """One scheduler pass: mount what is due, then fire what is mounted.

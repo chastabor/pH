@@ -22,9 +22,10 @@ A listener here appends the replacement and returns the config untouched; the lo
 then derives, sees the replacement, and sends the preview. There is no second copy
 of the substitution to keep in step — the loop's own re-derivation applies it.
 
-**Only the newest message, and only once.** `Session.latest("user/message")` and
-`is_replacement_surface_event` make the pass idempotent: the replacement is itself
-a `user/message`, so the next request finds it, sees a replacement, and stops.
+**Only the newest human message, and only once.** `_pending` walks back from the
+newest `user/message` past the harness's own messages to the person's, and
+`is_replacement_surface_event` makes the pass idempotent: the replacement is
+itself a `user/message`, so the next request meets it first and stops.
 
 @module ph_stabilize.input_offload
 """
@@ -36,7 +37,7 @@ from pathlib import Path
 from ph.agent.types import RequestProposal
 from ph.cordis import Context, Next, plugin
 from ph.keys import SPILL_STORE
-from ph.llm.types import LlmCallConfig, PluginSource, create_user_message, text_of
+from ph.llm.types import LlmCallConfig, PluginSource, UserSource, create_user_message, text_of
 from ph.seams.spill import SpillClaim
 from ph.session import (
     Session,
@@ -105,17 +106,30 @@ def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | Non
     one that fits. Read from the log rather than from the derived list because
     the substitution needs the *event*: a derived `Message` carries no seq, and
     the seq is what a surface replace cites.
+
+    **The newest *human* message, not the newest `user/message`** (C12). A step
+    whose context changed appends the harness's snapshot *after* the person's
+    words in the same batch, so the newest was the snapshot: a large one was
+    offloaded — the harness's own context, which the loop then re-sent, since
+    the model no longer saw it — while the paste before it went through whole.
+    So this walks back over plugin messages to the person's, within the current
+    step: every batch is asked in its own step, so nothing earlier is owed. A
+    replacement met on the way means this step's paste is already handled.
     """
-    event = session.latest("user/message")
-    if event is None or is_replacement_surface_event(event):
-        return None
-    message = derive_event_message(event)
-    if message is None:
-        return None
-    # Text blocks only. An image is not what exhausts a context window, and it
-    # is the half of a message that reading a file cannot give back.
-    text = text_of(message.content)
-    return (event, text) if over_token_limit(text, config.token_limit) else None
+    start = session.latest("step/start")
+    for event in reversed(session.events_from(start.seq + 1 if start is not None else 0)):
+        if event.type != "user/message":
+            continue
+        if is_replacement_surface_event(event):
+            return None
+        message = derive_event_message(event)
+        if message is None or not isinstance(message.source, UserSource):
+            continue
+        # Text blocks only. An image is not what exhausts a context window, and
+        # it is the half of a message that reading a file cannot give back.
+        text = text_of(message.content)
+        return (event, text) if over_token_limit(text, config.token_limit) else None
+    return None
 
 
 @plugin("input-offload", inject=[SPILL_STORE], config=Config)

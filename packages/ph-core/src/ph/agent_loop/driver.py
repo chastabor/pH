@@ -73,7 +73,6 @@ from ..llm.types import (
     LlmCallConfig,
     LlmFailure,
     Message,
-    PluginSource,
     TokenUsage,
     ToolCallBlock,
     create_assistant_message,
@@ -81,12 +80,7 @@ from ..llm.types import (
 )
 from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
-from ..system_prompt.assembly import (
-    PromptAssembly,
-    join_context_sections,
-    render_context_sections,
-    render_prompt,
-)
+from ..system_prompt.assembly import PromptAssembly, context_message, render_prompt
 from ..tools.batch import execute_tool_calls
 from ..tools.errors import error_info
 
@@ -150,7 +144,6 @@ class ReactLoopAgent:
         self.max_parallel_tool_calls = max_parallel_tool_calls
         self._phase = _Phase(turn=_last_turn_of(session))
         self._request_header_logged = False
-        self._context_snapshot: str | None = None
         self._idle = anyio.Event()
         self._idle.set()
         self.inbox = Inbox(
@@ -288,8 +281,10 @@ class ReactLoopAgent:
         assembly = await self.ctx.require(SYSTEM_PROMPT).assemble(self.ctx, agent=self)
         self._throw_if_canceled()
         claimed = self.inbox.claim(target, turn)
-        context_message, context_text = self._project_context(assembly)
-        messages = (*claimed, context_message) if context_message is not None else tuple(claimed)
+        # Only when the conversation the model is shown lacks it (C12) — see
+        # `context_message`.
+        context = context_message(assembly, self.session.derive_messages())
+        messages = (*claimed, context) if context is not None else tuple(claimed)
 
         async def inner(request: PreStepRequest) -> PreStepDecision:
             return PreStepDecision(kind="enter", messages=request.messages)
@@ -302,51 +297,7 @@ class ReactLoopAgent:
         decision = settled("agent/pre-step", answered, PreStepDecision)
         if decision.kind == "reject":
             return _PreparedStep(kind="reject")
-        if context_message is not None and any(one is context_message for one in decision.messages):
-            # **Advanced where the message survives, not where it was built**
-            # (C3). The snapshot is what stops unchanged context re-invalidating
-            # the cached prefix every step, so moving it forward is a promise
-            # that the model has been told — and a pre-step that rejected, was
-            # canceled, or dropped the message from `messages` made that promise
-            # falsely. An `AGENTS.md` edit then went unseen until the file
-            # changed again, which for a file somebody edits once is never.
-            #
-            # By identity, because a listener may substitute the batch: the
-            # snapshot belongs to *this* text reaching the step, not to some
-            # equal-looking message a row put in its place.
-            self._context_snapshot = context_text
         return _PreparedStep(kind="enter", messages=decision.messages, assembly=assembly)
-
-    def _project_context(self, assembly: PromptAssembly) -> tuple[Message | None, str]:
-        """Materialize `context()` providers, but only when the text changed.
-
-        This is the whole reason `context()` exists separately from `section`:
-        re-sending unchanged context on every step would invalidate the cached
-        prefix each turn (A12).
-
-        **Returns the text and advances nothing** (C3). The snapshot is the
-        record of what the model has been *told*, and this only knows what was
-        built; a step that never happened would otherwise mark its context as
-        delivered. `_pre_step` commits it once the message is in the batch the
-        step will run.
-
-        The text is empty whenever the message is `None`, because the caller
-        reads it only alongside a message: the two are one answer, not two. An
-        earlier shape returned the *current* snapshot on the no-op path, which
-        made a stale commit look like a plausible reading of this function.
-        """
-        sections = render_context_sections(assembly)
-        if not sections:
-            return None, ""
-        text = join_context_sections(sections)
-        if text == self._context_snapshot:
-            return None, ""
-        return create_user_message(
-            content=[{"type": "text", "text": text}],
-            source=PluginSource(
-                plugin="ph.system-prompt", form="snapshot", sections=list(sections)
-            ),
-        ), text
 
     async def _turn(self) -> bool:
         phase = self._phase

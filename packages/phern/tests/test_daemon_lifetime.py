@@ -195,6 +195,29 @@ async def test_an_appointment_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> No
         assert daemon.running.holds() == ["schedule"], "and it can say which claim that is"
 
 
+async def test_a_mounted_roots_own_seam_outranks_its_index_entry(tmp_path: Path) -> None:
+    """The index is a cache; for a session that is mounted, the root's seam decides.
+
+    Since K10 the index is written off the loop, after the `cancel` that changed
+    it, so for a moment it still names a withdrawn appointment. Asked about a
+    mounted root, it kept that appointment holding an ephemeral daemon until the
+    next sweep — a minute, on a claim the person had just withdrawn. An entry
+    for a session nothing has mounted is still the index's to answer: that is
+    what a daemon at boot has to go on.
+
+    Sabotage: consult every index entry again, and the stale one holds.
+    """
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
+        await daemon.running.supervisor.start("planner")
+        _appointment("planner")  # stale: the mounted root has no live schedule
+
+        assert "schedule" not in daemon.running.holds(), "a stale entry outranked the root"
+
+        _appointment("elsewhere")  # a session nothing has mounted
+
+        assert "schedule" in daemon.running.holds()
+
+
 async def test_a_keep_alive_holds_it_for_exactly_as_long_as_it_says(tmp_path: Path) -> None:
     """Armed on the last disconnect, cleared on the next connect, and it expires.
 
