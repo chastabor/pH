@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from ..cordis import Context, events, plugin
 from ..keys import AGENT, AGENTS, SESSIONS
-from ..session import Session
+from ..session import Session, session_written
 from .types import (
     AgentDriver,
     AgentHandle,
@@ -178,6 +178,12 @@ class AgentRegistry:
         # `_forget` rides the scope's own teardown, so the announcement and the
         # roster drop happen exactly once whichever way the scope goes.
         await agent.ctx.dispose()
+        # The teardown just appended to this agent's log — its workspace records
+        # `workspace/disposed` as it lets go — so written here, while the
+        # persistence row is still mounted, rather than whenever the mount
+        # unwinds. A mount's own unwind is `write_on_unwind`'s (F2).
+        if agent.session is not None:
+            await session_written(self.ctx, agent.session)
 
 
 @plugin("agent", inject=[SESSIONS])

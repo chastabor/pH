@@ -36,7 +36,7 @@ from __future__ import annotations
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import JsonObject, as_int, as_str
-from ph.keys import SHELL
+from ph.keys import SESSIONS, SHELL
 from ph.llm.types import PluginSource, TextBlock, create_user_message
 from ph.seams.shell import ShellResult, ShellService
 from ph.session import Session
@@ -179,6 +179,13 @@ async def run_shell(
     # here: one shape for every `shell/command` means no reader has to know that
     # an absent key encodes the quiet half.
     started = session.append("shell/command", {"command": command, "surface": surface})
+    # **On disk before the child starts** (F9) — the whole reason this is two
+    # events: a command that hangs, or takes the daemon down with it, still shows
+    # in the log what was started. Appended alone it showed nothing of the kind,
+    # because nothing flushed until the next model request. Fail-closed like the
+    # checkpoint policy's barriers: a command whose record could not be written
+    # does not run.
+    await agent.ctx.require(SESSIONS).flush(session)
     result = await shell.run(command, agent=agent)
     settled = session.append(
         "shell/result",

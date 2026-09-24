@@ -21,10 +21,13 @@ import pytest
 from ph.json import JsonValue, as_obj, as_seq
 from ph.session import (
     KNOWN_SESSION_EVENT_TYPES,
+    LogTypeError,
     Session,
     SessionEvent,
     SessionFoldCache,
     SurfaceIntent,
+    UnknownEventTypeError,
+    declare_log_type,
 )
 from ph.session.json import InvalidJsonValueError
 from ph.testing import prefix_of, user_payload
@@ -176,8 +179,9 @@ def test_every_appended_type_is_a_known_event_type() -> None:
     """A type this build can write but would refuse to read back is a trap.
 
     `KNOWN_SESSION_EVENT_TYPES` gates the seed path, so every literal `append(`
-    call site in `ph-core` must be in the set (or a plugin-owned type that
-    marks itself ignorable — none exist yet).
+    call site in `ph-core` must be in the set. `Session.append` refuses the rest
+    at runtime now (F11); this is the same rule caught before anything runs, for
+    the types ph-core itself writes.
     """
     import ph
 
@@ -189,6 +193,92 @@ def test_every_appended_type_is_a_known_event_type() -> None:
     }
     assert appended, "the scan found no append call sites — the regex is stale"
     assert appended <= KNOWN_SESSION_EVENT_TYPES, appended - KNOWN_SESSION_EVENT_TYPES
+
+
+# ---------------------------------------------------------- the vocabulary --
+
+
+@pytest.fixture
+def vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registry of declared types this test can add to without leaking.
+
+    The table is module-level because a declaration is an import-time fact
+    about a package, which is exactly what makes a test's declarations outlive
+    the test unless it is swapped out here.
+    """
+    from ph.session import known_event_types
+
+    monkeypatch.setattr(known_event_types, "_DECLARED", {})
+
+
+def test_the_write_door_refuses_a_type_the_read_door_would() -> None:
+    """F11. A type this build cannot read back is refused where it is written.
+
+    `_readmit` refuses an unknown *required* type on every seed — resume, fork,
+    replay — so a write door that accepted one wrote a log that resumed nowhere,
+    with the append itself succeeding. Reproduced: `append("myplugin/thing")`
+    returned an event with `ignorable=False`, and re-seeding the same log raised.
+
+    Sabotage: drop the `is_known` check from `append` and the log grows.
+    """
+    session = Session("s")
+    with pytest.raises(UnknownEventTypeError, match="declare_log_type"):
+        session.append("sample/thing", {"n": 1})
+    assert session.events == (), "a refused append must leave the log as it was"
+
+
+def test_a_declared_type_is_written_stamped_and_read_back(vocabulary: None) -> None:
+    """The door a package outside ph-core writes its own types through.
+
+    Ignorability comes from the declaration, the way it comes from
+    `IGNORABLE_SESSION_EVENT_TYPES` for ph-core's, so a build without the package
+    skips the record rather than refusing the whole log.
+    """
+    declare_log_type("sample/note", owner="sample.plugin", ignorable=True)
+    declare_log_type("sample/state", owner="sample.plugin", ignorable=False)
+
+    session = Session("s")
+    note = session.append("sample/note", {"n": 1})
+    state = session.append("sample/state", {"n": 2})
+    assert (note.ignorable, state.ignorable) == (True, False)
+
+    reopened = Session("s", seed=list(session.events))
+    assert [event.type for event in reopened.events][:2] == ["sample/note", "sample/state"]
+
+
+def test_a_required_declared_type_opens_only_where_it_is_declared(vocabulary: None) -> None:
+    """What `ignorable=False` promises, stated as a test: a build without the
+    declaring package refuses the log, because skipping a required record can
+    change how the rest of it reads."""
+    from ph.session import known_event_types
+
+    declare_log_type("sample/state", owner="sample.plugin", ignorable=False)
+    session = Session("s")
+    session.append("sample/state", {"n": 1})
+
+    del known_event_types._DECLARED["sample/state"]  # a build without the package
+    with pytest.raises(ValueError, match="unrecognized required type"):
+        Session("s", seed=list(session.events))
+
+
+def test_a_declaration_cannot_disagree_with_itself_or_ph_core(vocabulary: None) -> None:
+    """The refusals `EventRegistry.declare` makes for a bus event, for a log type.
+
+    Two statements of one type that disagree are a log two builds read two ways.
+    """
+    first = declare_log_type("sample/note", owner="sample.plugin", ignorable=True)
+    assert declare_log_type("sample/note", owner="sample.plugin", ignorable=True) is first
+
+    with pytest.raises(LogTypeError, match="ph-core type"):
+        declare_log_type("tool/call", owner="sample.plugin", ignorable=True)
+    with pytest.raises(LogTypeError, match="already declared by"):
+        declare_log_type("sample/note", owner="another.plugin", ignorable=True)
+    with pytest.raises(LogTypeError, match="ignorability cannot change"):
+        declare_log_type("sample/note", owner="sample.plugin", ignorable=False)
+    with pytest.raises(LogTypeError, match="namespace/type"):
+        declare_log_type("SampleNote", owner="sample.plugin", ignorable=True)
+    with pytest.raises(LogTypeError, match="needs an owner"):
+        declare_log_type("sample/other", owner="", ignorable=True)
 
 
 # ------------------------------------------------------------- fold caches --

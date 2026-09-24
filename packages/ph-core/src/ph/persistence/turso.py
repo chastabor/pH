@@ -19,9 +19,9 @@ structural: `seq == len(log)` cannot hold two events at one number.
 parity. Search over sessions is a thing built on top of a backend rather than a
 thing one backend secretly has.
 
-**The write path is the JSONL one's, deliberately.** Buffered on `record`, drained
-on `flush`, off the event-loop thread — because A1 is about `append` being I/O-free,
-and that is a property of the *seam*, not of the storage.
+**The write path is the JSONL one's, deliberately.** Read off the log past a
+cursor on `flush`, off the event-loop thread — because A1 is about `append` being
+I/O-free, and that is a property of the *seam*, not of the storage.
 
 **JSONL stays the default.** `pyturso` is pre-1.0, classified alpha, and ships no
 Windows wheels; D5's ordering — "JSONL first" — is load-bearing rather than
@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,7 +53,7 @@ from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
-from .protocol import SessionPersistence, StoredSession, attach, stored_row
+from .protocol import SessionPersistence, StoredSession, attach, stored_row, write_on_unwind
 
 __all__ = ["TursoSessionStore", "apply"]
 
@@ -86,17 +86,25 @@ def locate_db(root: Path, session_id: str) -> Path | None:
 
 
 @dataclass(slots=True)
-class _Buffer:
-    pending: list[SessionEvent] = field(default_factory=list)
+class _Progress:
+    """How far this store has written one session's log — not a copy of it."""
+
+    cursor: int = 0
+    """The first seq this database does not yet hold. The log is the queue —
+    `JsonlSessionStore`'s `_Progress.cursor` gives the reason, which is the same
+    for both backends: a list filled by a listener misses whatever is appended
+    after the listener unwinds, and teardown is when that happens."""
     header_written: bool = False
+    writing: anyio.Lock = field(default_factory=anyio.Lock)
+    """One flush of this session at a time, so a second one waits and writes only
+    what arrived since rather than a second transaction of the same rows."""
     family: str = ""
     """Which directory this session's database lives in.
 
-    On the buffer rather than in a dict of its own, because `forget` already
-    clears buffers and a parallel map keyed by session id was cleared by nothing
-    — it grew for the life of the process, which is the exact leak `_release`
-    exists to argue against one method down. JSONL keeps the same fact on
-    `_Buffer.path`.
+    Here rather than in a dict of its own, because `forget` already clears
+    these and a parallel map keyed by session id was cleared by nothing — it grew
+    for the life of the process, which is the exact leak `_release` exists to
+    argue against one method down. JSONL keeps the same fact on `_Progress.path`.
     """
 
 
@@ -106,78 +114,70 @@ class TursoSessionStore:
 
     ctx: Context
     root: Path
-    _buffers: dict[str, _Buffer] = field(default_factory=dict)
+    _progress: dict[str, _Progress] = field(default_factory=dict)
     _connections: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------- writing --
 
     def track(self, session: Session) -> None:
-        """Start buffering a session; its existing seed is owed a write.
+        """Start persisting a session; its existing seed is owed a write.
 
-        JSONL's shape exactly, and it has to be: an early return, then the seed queued
-        once. The seed offset is `durable_length` — a boundary the *caller* declares —
-        never an index into the log computed from the length of the buffer, which stop
-        agreeing after the first flush.
+        JSONL's shape exactly, and it has to be: an early return, then a cursor set
+        once. The starting point is `durable_length` — a boundary the *caller* declares —
+        never an index into the log computed from what this store happens to hold.
 
         Nothing here opens the database. This is a synchronous `session/created` listener,
         so a query would run **on the event-loop thread**, and `INSERT OR REPLACE` means
         nothing needs to ask whether a header is owed.
         """
-        if session.id in self._buffers:
+        if session.id in self._progress:
             return
         # The family is on the header in hand; remembering it here is what keeps
         # `_connect` a pure function of what this store already knows, rather
         # than a search on every write.
-        buffer = _Buffer(family=session.header.family)
-        # `events[durable_length:]`, not the whole log. What is below that line
-        # is already durable *somewhere* — in this database for a resume, in the
-        # parent's for a reference-fork — and queueing it anyway is not a
+        #
+        # From `durable_length`, not from zero. What is below that line is
+        # already durable *somewhere* — in this database for a resume, in the
+        # parent's for a reference-fork — and writing it anyway is not a
         # harmless rewrite: it writes the child a full copy of the prefix, whose
         # first event is then at seq 0, which `materialize` reads as "this file
         # is complete". Reference-forking becomes a silent no-op on this backend
-        # and nothing anywhere fails. This line said `session.events` while the
-        # docstring above claimed "JSONL's shape exactly".
-        buffer.pending.extend(session.events[session.durable_length :])
-        self._buffers[session.id] = buffer
+        # and nothing anywhere fails. This line once queued `session.events`
+        # while the docstring above claimed "JSONL's shape exactly".
+        self._progress[session.id] = _Progress(
+            cursor=session.durable_length, family=session.header.family
+        )
 
-    def record(self, session: Session, event: SessionEvent) -> None:
-        buffer = self._buffers.get(session.id)
+    async def flush(self, session: Session) -> None:
+        """Write what the log holds past the cursor.
+
+        Read off the log at flush time, so a write that does not happen owes
+        exactly what it owed before — the pairing `JsonlSessionStore.flush`
+        explains, reachable the same way: `anyio.to_thread.run_sync` checkpoints
+        before it queues the work, so a cancellation arriving with passivation or
+        teardown raises before anything is written, and the cursor has not moved.
+
+        **Cheaper to be sure of here than in the JSONL backend**, because
+        `_write` is `INSERT OR REPLACE` keyed by `seq`: a row written twice is
+        harmless, so nothing measures what the database already holds. The lock
+        is for cost, not correctness — without it two overlapping flushes each
+        commit the same batch.
+        """
+        buffer = self._progress.get(session.id)
         if buffer is None:
             log.warning("ph.persistence.turso: session %s was untracked; tracking now", session.id)
             self.track(session)
-            return
-        buffer.pending.append(event)
+            buffer = self._progress[session.id]
+        async with buffer.writing:
+            owed = session.events_from(buffer.cursor)
+            if buffer.header_written and not owed:
+                return
+            await anyio.to_thread.run_sync(self._write, session, owed)
+            buffer.header_written = True
+            if owed:
+                buffer.cursor = owed[-1].seq + 1
 
-    async def flush(self, session: Session) -> None:
-        """Write what is queued, or still owe it.
-
-        Emptied before the write so two overlapping flushes cannot both carry
-        the same rows, and put back if the write does not happen — the same
-        pairing `JsonlSessionStore.flush` explains at length, and reachable the
-        same way: `anyio.to_thread.run_sync` checkpoints before it queues the
-        work, so a cancellation arriving with passivation or teardown raises
-        with the rows already dropped from `pending`.
-
-        **Cheaper to be sure of here than in the JSONL backend**, because
-        `_write` is `INSERT OR REPLACE` keyed by `seq`: re-writing a row that
-        did land is a no-op, so restoring cannot duplicate anything. What it
-        prevents is a hole in the seq space, which `Session(seed=…)` refuses on
-        the next resume with *"seed must be contiguous from 0"*.
-        """
-        buffer = self._buffers.get(session.id)
-        if buffer is None or (buffer.header_written and not buffer.pending):
-            return
-        header_owed = not buffer.header_written
-        pending, buffer.pending = buffer.pending, []
-        buffer.header_written = True
-        try:
-            await anyio.to_thread.run_sync(self._write, session, pending)
-        except BaseException:
-            buffer.pending[:0] = pending
-            buffer.header_written = not header_owed
-            raise
-
-    def _write(self, session: Session, events: list[SessionEvent]) -> None:
+    def _write(self, session: Session, events: Sequence[SessionEvent]) -> None:
         cursor = self._connect(session.id).cursor()
         # Unconditionally: `INSERT OR REPLACE` is idempotent, so writing the
         # header row every flush costs one statement — and the flag that skipped
@@ -198,7 +198,7 @@ class TursoSessionStore:
         self._connections[session.id].commit()
 
     def forget(self, session_id: str) -> None:
-        self._buffers.pop(session_id, None)
+        self._progress.pop(session_id, None)
         self._release(session_id)
 
     def _release(self, session_id: str) -> None:
@@ -275,7 +275,7 @@ class TursoSessionStore:
         family is its own id.
         """
         if family is None:
-            buffer = self._buffers.get(session_id)
+            buffer = self._progress.get(session_id)
             family = buffer.family if buffer is not None else None
         if family:
             return session_db(self.root, session_id, family)
@@ -300,9 +300,12 @@ class TursoSessionStore:
 
         The database's own locking serializes *statements*; it does not stop a
         second process appending a second log's worth of `seq` to one session,
-        which is the hazard, so the lease is the same file lock JSONL takes.
+        which is the hazard, so the lease is the same file lock JSONL takes —
+        and, as there, every live log is written before it is let go
+        (`write_on_unwind`).
         """
         await claim_session(scope, self.root, session_id)
+        write_on_unwind(scope, self)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
@@ -369,7 +372,7 @@ class TursoSessionStore:
         try:
             yield self._connect(session_id, path)
         finally:
-            if session_id not in self._buffers:
+            if session_id not in self._progress:
                 self._release(session_id)
 
     def _connect(self, session_id: str, path: Path | None = None) -> Any:  # noqa: ANN401

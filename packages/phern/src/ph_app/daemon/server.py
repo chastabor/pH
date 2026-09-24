@@ -46,7 +46,7 @@ from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
 from ph.seams.schedule import Schedule
 from ph.seams.shell import ShellService
-from ph.session import now_ms
+from ph.session import now_ms, session_written
 from ph.text import duration
 from ph.wire import WireModel
 
@@ -497,7 +497,26 @@ class _Connection:
         plan = await mutation.prepare(self, root, parsed)
         if not root.once(_command_key(parsed)):
             return MutationRepeated(**root.describe().model_dump())
-        return await mutation.act(self, root, parsed, plan)
+        reply = await mutation.act(self, root, parsed, plan)
+        # **Durable before the client is told** (F7). A client that has its reply
+        # never re-sends, so a reply sent while the key and the act's own record
+        # were still in memory made a crash lose the act outright — and
+        # `session/prompt`'s "the message is logged" meant logged in a buffer.
+        # After the act rather than between `once` and it: a key made durable
+        # first would turn a crash before the act into a refused retry for work
+        # that never began, which is the loss `Root.once` is written to avoid.
+        # An act that records its own start before an effect it cannot take back
+        # (`!!`, `run_shell`) carries the key to disk with that record, and then a
+        # retry is refused because the log already says the command began.
+        # One flush of the root, which carries both.
+        #
+        # `written`, not `flush`: the act has happened by now, so a write that
+        # fails does not make it not have happened, and answering the verb with
+        # an error would tell the client the one thing that is false. A disk that
+        # refuses writes is the root's own flushes failing next, which is the
+        # retry ladder's to report (`supervisor/failed`).
+        await session_written(root.ctx, root.session)
+        return reply
 
     # --- the methods -----------------------------------------------------------
     # One per row of `METHODS`, each taking its own params model. Read-only

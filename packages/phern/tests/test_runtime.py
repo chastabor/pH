@@ -83,3 +83,31 @@ async def test_a_listener_that_never_settles_does_not_hold_the_unwind() -> None:
 
     assert released == ["lease"], "the unwind ran rather than waiting forever"
     assert spent < 1.0, f"the drain spent more than its budget: {spent:.3f}s"
+
+
+async def test_opening_a_session_makes_its_teardown_durable() -> None:
+    """F2, at the one door every host opens a session through.
+
+    `open_session` takes the lease through the store's `claim`, which registers
+    the mount's last write beside it: after every agent scope has unwound, before
+    the lease is given back. The shipped `headless` profile, because the defect lives
+    in the order its rows unwind — an empty composition cannot reach it.
+    """
+    from ph.keys import AGENTS, SESSIONS
+    from ph.paths import resolve_roots
+    from ph.persistence import read_session
+    from ph.seams.workspace import DISPOSED
+    from ph.testing import stored_log, workspace_disposed
+    from ph_app.profiles import profile_or_exit
+    from ph_app.runtime import open_session
+
+    async with mounted(profile_or_exit("headless")) as ctx:
+        session = await open_session(ctx, "teardown")
+        agent = ctx.require(AGENTS).create(session)
+        agent.ctx.add_disposer(
+            lambda: session.append(*workspace_disposed(agent.id)), label="release"
+        )
+        await ctx.require(SESSIONS).flush(session)
+
+    _header, events = read_session(stored_log(resolve_roots().sessions_dir(), "teardown"))
+    assert events[-1].type == DISPOSED

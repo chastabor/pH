@@ -74,7 +74,7 @@ from ph.seams.subagents import (
     default_child_name,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
-from ph.session import Session, SessionEvent, SessionObserver, derive_event_message
+from ph.session import Session, SessionEvent, SessionObserver, derive_event_message, session_written
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
@@ -609,6 +609,13 @@ class RlmChildProvider:
             await agent.run()
             answer = _last_assistant_text(child.session)
             child.result = SubagentResult(status="done", answer=answer)
+            # The child's own outcome is on disk before its parent says so (F1).
+            # Nothing else flushed it: the child's last barrier was *before* its
+            # last model request, and a parent's flush walks ancestors, never
+            # children — so a parent read "done, here is a preview" while the
+            # child's log ended before the answer, and repair called it
+            # interrupted on the next open.
+            await self._write_log(child.session)
             self._status(
                 child, "done", answerPreview=answer[: self.config.answer_preview_chars] or None
             )
@@ -632,6 +639,8 @@ class RlmChildProvider:
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
+            # The same order for a failure: the child's account of it first.
+            await self._write_log(child.session)
             self._status(child, "error", detail=message)
             self._inject(
                 parent_session,
@@ -710,6 +719,12 @@ class RlmChildProvider:
             await self.ctx.require(AGENTS).dispose(agent.id)
         except Exception:  # pragma: no cover - teardown must not mask an outcome
             log.debug("ph_rlm.subagents: disposing child %s failed", child.run.id, exc_info=True)
+
+    async def _write_log(self, session: Session | None) -> None:
+        """Flush one child's log, and never raise: a disk that refuses the write
+        must not turn a child that finished into one that failed."""
+        if session is not None:
+            await session_written(self.ctx, session)
 
     def _inject(self, parent_session: Session, text: str, summary: str) -> None:
         """Put one notice in the parent's inbox — and only if it is still there.

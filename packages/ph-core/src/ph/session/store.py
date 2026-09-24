@@ -36,6 +36,7 @@ __all__ = [
     "is_fork_boundary",
     "new_session_id",
     "open_turn_at",
+    "session_written",
     "valid_session_id",
 ]
 
@@ -259,14 +260,36 @@ class SessionStore:
         Protocol, which is why the backend parity suite could not reach it.
 
         The honest trade: one `flush(child)` is now N dispatches rather than one.
-        Both backends return early on an empty buffer, so the ancestors cost a
+        Both backends return early when nothing is owed, so the ancestors cost a
         dict lookup each.
         """
-        for ancestor in self._lineage(session):
+        for ancestor in self.lineage(session):
             await self.ctx.parallel("session/flush", ancestor)
 
-    def _lineage(self, session: Session) -> tuple[Session, ...]:
+    async def written(self, session: Session) -> bool:
+        """`flush`, answering whether it worked rather than raising.
+
+        For a caller that has to *decide* something about a record it could not
+        make durable — not put a question to a person (`approval`,
+        `user-questions`), not report a child done (`ph_rlm.subagents`) — and
+        whose own contract is to answer rather than raise. One spelling, so the
+        seams that need it do not each grow a `try` that logs differently — the
+        module's `session_written(ctx, session)` is the same for a caller holding only a
+        `Context`. Cancellation still propagates: it is not a write failing.
+        """
+        try:
+            await self.flush(session)
+        except Exception:
+            log.warning("ph.session: could not write session %s", session.id, exc_info=True)
+            return False
+        return True
+
+    def lineage(self, session: Session) -> tuple[Session, ...]:
         """`session` and every ancestor **live in this process**, oldest first.
+
+        The order every write of a lineage takes — `flush`, and the mount's last
+        write (`ph.persistence.write_on_unwind`), which cannot go through `flush`
+        because its listeners have unwound by then.
 
         An ancestor this store does not hold is one nothing here is writing, so
         its log is already whatever it is going to be. Keyed by id so the dict
@@ -487,6 +510,17 @@ def fork_boundaries(log: Sequence[SessionEvent]) -> set[int]:
         if not open_turn and event.seq == index:
             boundaries.add(event.seq)
     return boundaries
+
+
+async def session_written(ctx: Context, session: Session) -> bool:
+    """`SessionStore.written` for a caller holding a `Context`.
+
+    A deployment with no session store has nothing to write, which is not a
+    write failing — so it answers `True`, and the callers that must decide
+    (ask a person or not, cache a handle or not) need no lookup of their own.
+    """
+    sessions = ctx.get(SESSIONS)
+    return sessions is None or await sessions.written(session)
 
 
 @plugin("session")

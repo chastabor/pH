@@ -26,6 +26,7 @@ from ph.keys import COMMANDS
 from ph.llm.types import AttachmentRef
 from ph.seams.commands import CommandDefinition
 from ph.session import now_ms
+from ph.testing import stored_types
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.server import METHODS, MUTATIONS
 from ph_app.daemon.supervisor import Root
@@ -188,3 +189,28 @@ async def test_a_mutation_on_a_passivated_root_brings_it_back(tmp_path: Path) ->
 
         assert reply["preset"] == "workspace-write"
         assert "sleepy" in supervisor.roots
+
+
+async def test_a_verb_is_on_disk_before_it_is_answered(tmp_path: Path) -> None:
+    """F7. A reply means the key and the act's own record are durable.
+
+    A client that has its reply never re-sends, so a reply sent while both were
+    still in a buffer made a crash lose the act outright. `session/preset`
+    because its act appends one record and starts nothing — no turn, whose own
+    barrier would flush the same records and hide the difference.
+
+    Sabotage: drop the `written` call from `_mutate` and the store holds neither.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("durable")
+        client = await daemon.client()
+        await client.call(
+            "session/preset",
+            sessionId=root.id,
+            clientId="c",
+            commandId="1",
+            preset="workspace-write",
+        )
+        types = stored_types(root.ctx, root.id)
+        assert "client/command" in types, "the idempotence key was only in memory"
+        assert "permission/preset" in types, "the act was only in memory"

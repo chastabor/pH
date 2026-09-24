@@ -13,12 +13,30 @@ only ph-core — a producer in another package (the subagent providers,
 ph-stabilize's `tool-todo`) owes the same proof through its own bundle's tests,
 which is the deal the per-type comments below record.
 
+**And the write door now refuses what the read door refuses** (F11): `Session.append`
+raises `UnknownEventTypeError` for a type outside the vocabulary, where it used to
+write it and leave the log unopenable at the next resume. A type that belongs to a
+package outside ph-core is added with `declare_log_type`, at import, the way a bus
+event is declared with `EventRegistry.declare`.
+
 @module ph.session.known_event_types
 """
 
 from __future__ import annotations
 
-__all__ = ["IGNORABLE_SESSION_EVENT_TYPES", "KNOWN_SESSION_EVENT_TYPES"]
+import re
+from dataclasses import dataclass
+
+__all__ = [
+    "IGNORABLE_SESSION_EVENT_TYPES",
+    "KNOWN_SESSION_EVENT_TYPES",
+    "LogTypeDeclaration",
+    "LogTypeError",
+    "UnknownEventTypeError",
+    "declare_log_type",
+    "is_ignorable",
+    "is_known",
+]
 
 KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -382,3 +400,92 @@ refuse the seed, because skipping one can change how everything after it reads.
 Only purely informational records — kernel state, subagent status, usage
 attribution — belong here.
 """
+
+
+# ------------------------------------------------------------- declarations --
+
+
+class UnknownEventTypeError(ValueError):
+    """An append named a type this build would refuse to read back (F11)."""
+
+
+class LogTypeError(ValueError):
+    """A declaration that would make two statements of one type disagree."""
+
+
+@dataclass(frozen=True, slots=True)
+class LogTypeDeclaration:
+    """A session event type that belongs to a package outside ph-core."""
+
+    name: str
+    owner: str
+    """The declaring module — the type's producer of record, as for a bus event."""
+    ignorable: bool
+
+
+_NAME = re.compile(r"[a-z][a-z0-9-]*(?:/[a-z0-9-]+)+")
+"""`namespace/type`, the shape `ph.selectors` addresses the log vocabulary by."""
+
+_DECLARED: dict[str, LogTypeDeclaration] = {}
+"""What packages outside ph-core declared. The one mutable table: known and
+ignorable are asked of the frozen sets first, then of this."""
+
+
+def declare_log_type(name: str, *, owner: str, ignorable: bool) -> LogTypeDeclaration:
+    """Add a type to the vocabulary this build writes and reads. Call at import.
+
+    For a package outside ph-core, whose types this frozen set cannot list
+    without ph-core learning about it. ph-core's own types stay in
+    `KNOWN_SESSION_EVENT_TYPES`, beside the reasoning each one carries.
+
+    **Ignorable is a promise to other builds**, as it is for the core set: a
+    reader without the declaring package skips an ignorable record and refuses
+    a required one, because skipping a required record can change how the rest
+    of the log reads. So `ignorable=False` means a log carrying the type opens
+    only where the package is installed — which is the point of required.
+
+    Refused, the way `EventRegistry.declare` refuses a bus event:
+
+    * a name ph-core already owns — one type, one home;
+    * a second owner, or the same owner changing its ignorability — two
+      statements of one type that disagree are a log two builds read two ways;
+    * a name that is not `namespace/type`.
+
+    Declaring the same thing twice returns the first, so a module imported
+    twice does not refuse itself.
+    """
+    if not _NAME.fullmatch(name):
+        raise LogTypeError(f'"{name}" is not a log type name; it must be namespace/type')
+    if not owner:
+        raise LogTypeError(f'"{name}" needs an owner: the module that appends it')
+    if name in KNOWN_SESSION_EVENT_TYPES:
+        raise LogTypeError(f'"{name}" is a ph-core type; it cannot be declared again')
+    existing = _DECLARED.get(name)
+    if existing is not None:
+        if existing.owner != owner:
+            raise LogTypeError(
+                f'"{name}" is already declared by "{existing.owner}"; '
+                f'"{owner}" cannot declare it as well'
+            )
+        if existing.ignorable != ignorable:
+            raise LogTypeError(
+                f'"{name}" is already declared ignorable={existing.ignorable}; '
+                "a type's ignorability cannot change"
+            )
+        return existing
+    declaration = LogTypeDeclaration(name=name, owner=owner, ignorable=ignorable)
+    _DECLARED[name] = declaration
+    return declaration
+
+
+def is_known(event_type: str) -> bool:
+    """Whether this build writes and reads `event_type`: ph-core's, or declared."""
+    return event_type in KNOWN_SESSION_EVENT_TYPES or event_type in _DECLARED
+
+
+def is_ignorable(event_type: str) -> bool:
+    """Whether a build without this type may skip it. Stamped by `Session.append`."""
+    if event_type in IGNORABLE_SESSION_EVENT_TYPES:
+        return True
+    declared = _DECLARED.get(event_type)
+    return declared is not None and declared.ignorable

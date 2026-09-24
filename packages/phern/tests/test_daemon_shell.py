@@ -34,7 +34,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, load_profile_documents
 from ph.json import as_str
 from ph.llm.types import text_of
-from ph.testing import not_none
+from ph.testing import not_none, stored_types
 from ph.text import NO_OUTPUT
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.supervisor import Root
@@ -166,6 +166,42 @@ async def test_the_command_is_logged_before_it_runs(tmp_path: Path) -> None:
 
         result = root.session.latest("shell/result")
         assert result is not None and "released" in as_str(result.data["stdout"])
+
+
+async def test_the_command_is_on_disk_before_it_runs(tmp_path: Path) -> None:
+    """F9. The same ordering, asked of the store rather than of memory.
+
+    Logged in memory was not logged: nothing flushed until the next model
+    request, so a command that took the daemon down with it left no record at
+    all — the case the two events exist for. The child blocks, and the stored
+    log is read while it is still running.
+
+    Sabotage: drop the flush from `run_shell` and the stored log has no command.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("durable")
+        client = await daemon.client()
+        release = tmp_path / "release"
+        stored: list[str] = []
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(
+                partial(
+                    client.call,
+                    "session/shell",
+                    sessionId=root.id,
+                    command=f"while [ ! -f {release} ]; do sleep 0.01; done",
+                )
+            )
+            await until(
+                lambda: root.session.latest("shell/command") is not None,
+                what="the command to be logged while it is still running",
+            )
+            stored = stored_types(root.ctx, root.id)
+            release.touch()
+
+        assert "shell/command" in stored, "the running command was only in memory"
+        assert "shell/result" not in stored
 
 
 async def test_the_output_and_the_exit_code_reach_the_log(tmp_path: Path) -> None:

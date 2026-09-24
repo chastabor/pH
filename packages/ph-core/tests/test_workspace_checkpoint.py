@@ -56,7 +56,7 @@ from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams.workspace import CHECKPOINT, checkpoints, latest_checkpoint
 from ph.seams.workspace_git import pre_run_ref
 from ph.session import Session
-from ph.testing import MountProfile, not_none, run_tool
+from ph.testing import MountProfile, code_mode_stub, not_none, run_tool, stored_types
 from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
 
@@ -432,12 +432,7 @@ async def test_the_row_checkpoints_a_code_run_and_nothing_else(
     ctx, session, agent, _workspace = await worktree_agent(
         mount,
         tmp_path,
-        {
-            "insert": [
-                {"id": "code-runtime-stub", "name": "code-runtime-stub"},
-                {"id": "tools-code-mode", "name": "tools-code-mode"},
-            ]
-        },
+        code_mode_stub(),
     )
     ctx.require(CODE_RUNTIME_STUB).register_program("noop", lambda: None)
 
@@ -449,6 +444,40 @@ async def test_the_row_checkpoints_a_code_run_and_nothing_else(
     (event,) = [item for item in session.events if item.type == CHECKPOINT]
     assert event.data["agentId"] == agent.id
     assert event.data["tree"]
+
+
+async def test_the_restore_point_is_on_disk_before_the_cell_runs(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """F5. The record of a restore point is durable before the run it protects.
+
+    The row wrapped the transport *inside* the checkpoint policy's barrier —
+    registration order — so the barrier flushed, then the ref was pinned and
+    `workspace/checkpoint` appended, then the cell ran. A crash mid-cell left the
+    ref in the repository and no record of it, and `/revert` offered no restore
+    point for exactly the run that went wrong: recoverable state read as
+    unrecoverable, which `known_event_types` names as the thing not to do.
+
+    Asked of the store from inside the cell, through the Protocol.
+
+    Sabotage: drop `prepend=True` from the row's `ctx.on` and the cell finds no
+    restore point on disk.
+    """
+    ctx, session, agent, _workspace = await worktree_agent(
+        mount,
+        tmp_path,
+        code_mode_stub(),
+    )
+    seen: list[list[str]] = []
+
+    def cell(_namespaces: object, _emit: object) -> None:
+        seen.append(stored_types(ctx, session.id))
+
+    ctx.require(CODE_RUNTIME_STUB).register_program("cell", cell)
+    await run_tool(ctx, RUN_CODE, {"program": "cell"}, agent=agent, session=session)
+
+    assert len(seen) == 1, "the cell did not run"
+    assert CHECKPOINT in seen[0], "the restore point was only in memory when the cell ran"
 
 
 async def test_provisioned_materials_are_not_the_agents_work(

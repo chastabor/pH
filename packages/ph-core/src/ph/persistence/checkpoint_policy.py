@@ -9,10 +9,16 @@ Two barriers, and a third that turns out to be one of the first two:
 
 1. **before each model request** (`llm/stream`) — the events that motivated the
    request are durable before it is in flight;
-2. **before a top-level tool body** (`tools/execute`, `parent is None`) — the
-   `tool/call` is durable before the side effect happens, which is what makes a
-   crashed call recoverable as `TOOL_OUTCOME_UNKNOWN` rather than invisible.
-   A nested Code Mode dispatch reuses the outer call's checkpoint;
+2. **before a tool body** (`tools/execute`) — the `tool/call` is durable before
+   the side effect happens, which is what makes a crashed call recoverable as
+   `TOOL_OUTCOME_UNKNOWN` rather than invisible. For a nested Code Mode
+   dispatch the record is `tool/code-dispatch-start`, and it is flushed **unless
+   a workspace restore covers the dispatched tool** (F4) —
+   `ToolRuntime.restore_covers`, the rule `/revert` lists by, and so an unknown
+   tool is flushed. One barrier per cell used to cover every dispatch
+   in it, and under the `rlm` profile *every* tool the model calls is nested: a
+   crash mid-cell left the outer call and none of what the cell did, so
+   `/revert`'s list of what a restore does not undo came back empty;
 3. **at step end** — on the request path this *is* barrier 1: the next
    request's flush covers everything the previous step committed, and a second
    fsync microseconds earlier would buy nothing. The only step end barrier 1
@@ -33,7 +39,7 @@ from collections.abc import AsyncIterator
 from ..agent.types import PreStepDecision, PreStepRequest
 from ..cancel import is_canceled
 from ..cordis import Context, Next, plugin
-from ..keys import SESSIONS
+from ..keys import SESSIONS, TOOLS
 from ..llm.types import GenerateOptions, StreamChunk
 from ..tools.definition import ToolExecution, ToolExecutionResult, aborted_result
 
@@ -60,8 +66,14 @@ async def apply(ctx: Context, config: None) -> None:
     async def before_tool_body(
         execution: ToolExecution, next_: Next[ToolExecutionResult]
     ) -> ToolExecutionResult:
-        if execution.session is None or execution.parent is not None:
-            # A nested dispatch is already covered by its outer call's barrier.
+        if execution.session is None:
+            return await next_()
+        if execution.parent is not None and ctx.require(TOOLS).restore_covers(
+            execution.name, scope=execution.scope
+        ):
+            # A dispatch whose every effect is a file in the workspace: the cell's
+            # own barrier and its restore point cover it, and a cell of reads and
+            # edits should not pay one fsync per call.
             return await next_()
         await ctx.require(SESSIONS).flush(execution.session)
         if is_canceled(execution.signal):

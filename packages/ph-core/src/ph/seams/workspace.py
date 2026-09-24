@@ -2223,4 +2223,11 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
             log.warning("ph.seams.workspace: no restore point for this run", exc_info=True)
         return await next_()
 
-    ctx.on("tools/execute", around)
+    # **Outermost** (F5): the restore point is recorded, then the checkpoint
+    # policy's barrier makes it durable, then the cell runs. Registered in mount
+    # order this ran *inside* that barrier — flush, then pin the ref and append
+    # `workspace/checkpoint`, then the cell — so a crash mid-cell left the ref in
+    # the repository and no record of it, and `/revert` had no restore point for
+    # exactly the run that went wrong. It also keeps the snapshot out of the
+    # cell's own `tools-timeout` budget, which is the model's, not the harness's.
+    ctx.on("tools/execute", around, prepend=True)

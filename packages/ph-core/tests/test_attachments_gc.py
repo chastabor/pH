@@ -152,7 +152,17 @@ def test_an_unknown_event_type_still_counts_as_a_reference() -> None:
     not know (A3), and an unknown event that referenced a blob would otherwise
     read as no reference at all."""
     digest = digest_of(PNG)
-    session = _session("s", ("some-future-row/kept", {"nested": [{"whatever": digest}]}))
+    # How such a log arrives: read back from disk, stamped ignorable by the build
+    # that wrote it. This build cannot append the type itself — its write door
+    # refuses a type its read door would (F11) — so the fixture seeds it.
+    future = SessionEvent(
+        type="some-future-row/kept",
+        seq=0,
+        time=1,
+        data={"nested": [{"whatever": digest}]},
+        ignorable=True,
+    )
+    session = Session("s", seed=[future], header=SessionHeader(id="s", created_at=1))
 
     assert referenced_digests(session.events) == {digest}
 

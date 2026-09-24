@@ -43,7 +43,7 @@ from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
 from ..json import as_str
 from ..keys import USER_QUESTIONS
-from ..session import Session, SessionEvent
+from ..session import Session, SessionEvent, session_written
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -260,29 +260,37 @@ class UserQuestionService:
         )
         if session is not None:
             self._record_asked(session, asked)
+        # On disk before it is delivered (F8), which is the whole reason the ask
+        # is appended ahead of the waterfall: a crash while somebody was deciding
+        # must leave the question in the log for `pending_questions` to fold.
+        # Appended alone it left nothing — the last flush was before the model
+        # request. One that cannot be written is not asked, and closes as failed.
+        if session is not None and not await session_written(self.ctx, session):
+            outcome = AskOutcome("failed")
+        else:
+            outcome = await self._deliver(asked)
+        if session is not None:
+            self._record_answered(session, asked, outcome)
+        return outcome
 
+    async def _deliver(self, asked: UserQuestion) -> AskOutcome:
         async def inner(_question: UserQuestion) -> str | None:
             return None
 
         try:
             raw = await self.ctx.waterfall("user-question/ask", asked, inner=inner)
             answer = settled_or_none("user-question/ask", raw, str)
-            # Delivered and unanswered is a *person* declining; the failure below
-            # is the machinery not reaching one. Both close the log pair, and
-            # they are told apart here because nothing downstream can.
-            outcome = (
-                AskOutcome("answered", answer) if answer is not None else AskOutcome("declined")
-            )
         except Exception:
-            # Inside the `try` on purpose: an answerer that raises and one that
-            # answers the wrong shape are the same failure to this seam, and
-            # either way the ask below has to be closed in the log — the
-            # `asked`/`answered` pair is what `pending_questions` folds.
+            # An answerer that raises and one that answers the wrong shape are the
+            # same failure to this seam, and either way the ask has to be closed
+            # in the log — the `asked`/`answered` pair is what `pending_questions`
+            # folds.
             log.exception("ph.seams.user_questions: an answerer failed")
-            outcome = AskOutcome("failed")
-        if session is not None:
-            self._record_answered(session, asked, outcome)
-        return outcome
+            return AskOutcome("failed")
+        # Delivered and unanswered is a *person* declining; the failure above is
+        # the machinery not reaching one. Both close the log pair, and they are
+        # told apart here because nothing downstream can.
+        return AskOutcome("answered", answer) if answer is not None else AskOutcome("declined")
 
     def _record_asked(self, session: Session, question: UserQuestion) -> None:
         """The ask, as the log keeps it.

@@ -35,7 +35,7 @@ import pytest
 
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ph.persistence.jsonl import JsonlSessionStore, read_session
-from ph.session import SESSION_FORMAT_VERSION, Session, SessionEvent, SurfaceIntent
+from ph.session import SESSION_FORMAT_VERSION, Session, SessionEvent, SessionHeader, SurfaceIntent
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import MountProfile, stored_log, user_payload, write_reference_fork
 from ph.tools import ToolRunContext
@@ -45,6 +45,18 @@ pytestmark = pytest.mark.anyio
 
 def _root(tmp_path: Path) -> dict[str, Any]:
     return {"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}}
+
+
+def _caught_up(ctx: Any, session: Session | None) -> bool:  # noqa: ANN401
+    """Whether the mounted JSONL store holds everything up to the log's end.
+
+    The progress table is that backend's own, not part of the `SessionPersistence`
+    Protocol, so the narrowing says which backend the test mounted.
+    """
+    store = ctx.require(SESSION_PERSISTENCE)
+    assert isinstance(store, JsonlSessionStore)
+    assert session is not None
+    return store._progress[session.id].cursor == session.seq
 
 
 def test_append_is_synchronous_and_io_free() -> None:
@@ -243,14 +255,7 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
     flushed_before_body: list[bool] = []
 
     def body(_args: object, run: ToolRunContext) -> str:
-        # The buffer table is the jsonl store's own, not part of the
-        # `SessionPersistence` Protocol — this test mounts that backend and now
-        # says so instead of reading through an `Any`.
-        store = ctx.require(SESSION_PERSISTENCE)
-        assert isinstance(store, JsonlSessionStore)
-        assert run.session is not None
-        durable = store._buffers[run.session.id].pending
-        flushed_before_body.append(not durable)
+        flushed_before_body.append(_caught_up(ctx, run.session))
         return "ok"
 
     ctx.require(TOOLS).register(simple_tool("touch", body))
@@ -262,8 +267,60 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
     )
     session.append("turn/start", {"turn": 1})
     await ctx.require(TOOLS).dispatch(run)
-    # Nothing pending when the body ran: the barrier drained the buffer first.
+    # Nothing owed when the body ran: the barrier wrote it first.
     assert flushed_before_body == [True]
+
+
+async def test_a_nested_dispatch_that_reaches_past_the_tree_is_preceded_by_a_barrier(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Barrier 2 for a Code Mode dispatch (F4): durable before it can escape.
+
+    One barrier per cell used to cover every dispatch inside it, and under the
+    `rlm` profile every tool the model calls is one. A crash mid-cell left the
+    outer `tool/call` and none of the `tool/code-dispatch-start` records, so
+    `/revert`'s list of what a restore does not undo came back empty — failing
+    in the one direction that list exists to prevent — and the limits folds
+    under-counted the work.
+
+    Asked of the rule `/revert` lists by (`ToolRuntime.restore_covers`): `note`
+    says its effects stay in the workspace and runs unflushed, which keeps a cell
+    of reads and edits at one fsync; `publish` says nothing, so it is not covered.
+
+    Sabotage: restore the `execution.parent is not None` early return and
+    `publish` runs with its record still in memory.
+    """
+    from collections.abc import Callable, Mapping
+
+    from ph.keys import CODE_RUNTIME_STUB
+    from ph.testing import code_mode_stub, run_tool, simple_tool
+    from ph.tools.registry import RUN_CODE
+
+    ctx = await mount(_root(tmp_path), code_mode_stub())
+    durable_at_body: dict[str, bool] = {}
+
+    def body(name: str) -> Callable[[object, ToolRunContext], str]:
+        def run(_args: object, run: ToolRunContext) -> str:
+            durable_at_body[name] = _caught_up(ctx, run.session)
+            return name
+
+        return run
+
+    tools = ctx.require(TOOLS)
+    tools.register(simple_tool("note", body("note"), effects_confined_to_workspace=True))
+    tools.register(simple_tool("publish", body("publish")))
+
+    async def program(ns: Mapping[str, object], _emit: Callable[[str], None]) -> str:
+        await ns["tools"].note()  # type: ignore[attr-defined]
+        await ns["tools"].publish()  # type: ignore[attr-defined]
+        return "done"
+
+    ctx.require(CODE_RUNTIME_STUB).register_program("cell", program)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    result = await run_tool(ctx, RUN_CODE, {"program": "cell"}, agent=agent, session=session)
+    assert result.is_error is False
+    assert durable_at_body == {"note": False, "publish": True}
 
 
 def test_events_survive_a_wire_round_trip() -> None:
@@ -343,3 +400,260 @@ async def test_segments_each_hold_only_their_own_run(mount: MountProfile, tmp_pa
     assert [event.type for event in whole].count("session/segmented") == 0, (
         "a marker belongs to the log that stopped, not to the one that carried on"
     )
+
+
+# ------------------------------------------------------------ unfinished writes --
+#
+# A JSONL log has two ways to be left holding bytes no flush finished: a write
+# that *fails* part-way (a disk that fills mid-payload), and a process that *dies*
+# mid-write. Before these, both ended the same way — the retry, or the next
+# process's first flush, appended whole lines behind a half one, and `read_session`
+# refused the log at that line for good. One crash, or one full disk, and a session
+# could never be opened again.
+
+
+def _tracked(tmp_path: Path, session: Session | None = None) -> tuple[JsonlSessionStore, Session]:
+    """A bare store tracking `session` (a fresh one by default), as `attach` would."""
+    store = JsonlSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    tracked = session if session is not None else Session("s")
+    store.track(tracked)
+    return store, tracked
+
+
+def _half_then_full_disk(fd: int, payload: bytes) -> None:
+    """What a disk that fills mid-payload does: some of the bytes, then the error."""
+    import errno
+    import os
+
+    os.write(fd, payload[: len(payload) // 2])
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+async def test_a_write_that_fails_part_way_takes_its_bytes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3. The failed write leaves the file exactly as long as it was.
+
+    `flush` owes the records again on any failure, so the half it had written
+    would otherwise sit in front of the retry's full copy. Measured before the
+    fix: `read_session` → `…:3: Extra data`, a log no later write could repair.
+
+    Sabotage: drop `_take_back` from `_append_and_sync` and the length assertion
+    fails — the retry still reads back, but only because the re-measure below
+    catches it, which is the second line and not the first.
+    """
+    from ph.persistence import jsonl
+
+    store, session = _tracked(tmp_path)
+    session.append("turn/start", {"turn": 1})
+    await store.flush(session)
+    path = stored_log(tmp_path, "s")
+    before = path.stat().st_size
+
+    session.append("step/start", {"turn": 1, "step": 1})
+    session.append("step/end", {"turn": 1, "step": 1})
+    with monkeypatch.context() as patch:
+        patch.setattr(jsonl, "_write_all", _half_then_full_disk)
+        with pytest.raises(OSError, match="No space left"):
+            await store.flush(session)
+    assert path.stat().st_size == before, "the failed write left its partial bytes behind"
+
+    await store.flush(session)
+    _header, events = read_session(path)
+    assert [event.seq for event in events] == [0, 1, 2]
+
+
+async def test_a_retry_behind_a_write_nobody_took_back_still_appends_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3, the second line: a take-back that itself failed.
+
+    `flush` stops trusting its measurement when a write fails, so the retry
+    settles the fragment (`_settle_tail`) before appending behind it.
+
+    Sabotage: remove `buffer.measured = False` from `flush`'s failure path and the
+    retry glues its first record onto the half line.
+    """
+    from ph.persistence import jsonl
+
+    store, session = _tracked(tmp_path)
+    session.append("turn/start", {"turn": 1})
+    await store.flush(session)
+    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    with monkeypatch.context() as patch:
+        patch.setattr(jsonl, "_write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "_take_back", lambda *_args: None)
+        with pytest.raises(OSError):
+            await store.flush(session)
+
+    await store.flush(session)
+    _header, events = read_session(stored_log(tmp_path, "s"))
+    assert [event.type for event in events] == ["turn/start", "turn/end"]
+
+
+def _torn(tmp_path: Path, tail: str) -> Path:
+    """A two-event log, then `tail` with no newline after it — what a death mid-write leaves.
+
+    Written with the store's own encoders at the store's own path, so only the
+    torn fragment is spelled by hand."""
+    from ph.json import dumps
+    from ph.persistence.jsonl import HEADER_LINE_TYPE
+
+    records = [
+        {"type": HEADER_LINE_TYPE, "header": SessionHeader(id="torn", created_at=1).to_wire()},
+        SessionEvent(type="turn/start", seq=0, time=1, data={"turn": 1}).to_wire(),
+        SessionEvent(type="step/start", seq=1, time=1, data={"turn": 1, "step": 1}).to_wire(),
+    ]
+    path = stored_log(tmp_path, "torn")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{dumps(record)}\n" for record in records) + tail, encoding="utf-8")
+    return path
+
+
+def test_a_torn_final_line_is_read_without_it(tmp_path: Path) -> None:
+    """F6. The fragment a crash mid-write leaves is not a reason to lose the session.
+
+    No flush returned for those bytes, so nothing was told they exist — dropping
+    them reads the log as it was the last time anything was promised about it.
+    Before: `ValueError`, on every open, forever.
+    """
+    path = _torn(tmp_path, '{"type":"step/end","seq":2,"ti')
+    _header, events = read_session(path)
+    assert [event.seq for event in events] == [0, 1]
+
+
+def test_a_record_that_lost_only_its_newline_is_kept(tmp_path: Path) -> None:
+    """An unterminated line that parses is a whole record: an object's encoding
+    ends in its closing brace, so no proper prefix of one parses. Reader and
+    writer (`_settle_tail`) keep it alike, or a resume would declare it durable
+    while the writer cut it from the file."""
+    path = _torn(tmp_path, '{"type":"step/end","seq":2,"time":1,"data":{"turn":1,"step":1}}')
+    _header, events = read_session(path)
+    assert [event.seq for event in events] == [0, 1, 2]
+
+
+def test_a_malformed_line_before_the_last_still_refuses(tmp_path: Path) -> None:
+    """The tolerance is for the one damage an append-only log can suffer. A bad line
+    with a newline after it is some other damage, and skipping it would hand the
+    model a history missing its middle."""
+    path = _torn(tmp_path, "")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines.insert(2, "{not a record\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"torn\.jsonl:3"):
+        read_session(path)
+
+
+@pytest.mark.parametrize(
+    ("tail", "kept"),
+    [
+        ('{"type":"step/end","seq":2,"ti', [0, 1]),
+        ('{"type":"step/end","seq":2,"time":1,"data":{"turn":1,"step":1}}', [0, 1, 2]),
+    ],
+    ids=["fragment", "finished-record"],
+)
+async def test_a_resumed_log_appends_behind_its_torn_tail_cleanly(
+    tmp_path: Path, tail: str, kept: list[int]
+) -> None:
+    """F6, the writer's half: the first flush after a resume settles the tail —
+    finishes a record that lost its newline, removes a fragment — before appending.
+
+    Sabotage: drop `_settle_tail` for the bare `_read_tail` and the resumed log's
+    first appended record lands on the fragment's line, which `read_session` then
+    refuses as mid-file damage.
+    """
+    path = _torn(tmp_path, tail)
+    header, events = read_session(path)
+    assert [event.seq for event in events] == kept
+    store, session = _tracked(
+        tmp_path, Session("torn", seed=events, header=header, durable=len(events))
+    )
+    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await store.flush(session)
+
+    _header, reread = read_session(path)
+    assert [event.seq for event in reread] == list(range(len(session.events)))
+    assert path.read_bytes().endswith(b"\n"), "a record was left without its newline"
+
+
+async def test_a_final_record_longer_than_one_read_is_still_measured(tmp_path: Path) -> None:
+    """B7 over a large last record. The measurement read one fixed 64 KiB window,
+    so a final record longer than that was split, its fragment failed to parse,
+    and the answer was "no records" — and a re-activated store wrote the whole
+    log again behind itself. A large tool result is exactly such a record."""
+    first, session = _tracked(tmp_path)
+    session.append("turn/start", {"turn": 1})
+    session.append("tool/call", {"callId": "c", "name": "read", "arguments": "x" * 200_000})
+    await first.flush(session)
+
+    second, _ = _tracked(tmp_path, session)  # the row re-activates: a store new to it
+    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await second.flush(session)
+
+    _header, events = read_session(stored_log(tmp_path, "s"))
+    assert [event.seq for event in events] == [0, 1, 2], "the log was rewritten behind itself"
+
+
+# ------------------------------------------------------------ the last write --
+
+
+async def test_what_a_teardown_appends_is_written_by_the_mounts_last_act(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """F2. A record appended while the tree unwinds reaches the file.
+
+    Every host flushes *before* it unwinds, and unwinding is exactly when records
+    are appended — the workspace seam's release closure writes
+    `workspace/disposed` as an agent scope lets go. Rows unwind in reverse and the
+    agent scopes hang off the `agent` row, which mounts before persistence, so
+    those appends landed after the persistence row's listeners were gone: in
+    memory, never on disk. A clean stop read as a crash, and `workspace-reconcile`
+    reclaimed trees the clean exit had already released.
+
+    Held by the claim, which is the contract every host already goes through: a
+    store that holds a session writes every live log before letting it go
+    (`write_on_unwind`). Probe: `reviews/probes/probe_teardown_flush.py`.
+
+    Sabotage: drop `write_on_unwind` from `JsonlSessionStore.claim` and the last
+    record is `turn/start`.
+    """
+    from ph.seams.workspace import DISPOSED
+    from ph.testing import workspace_disposed
+
+    ctx = await mount(_root(tmp_path))
+    store = ctx.require(SESSION_PERSISTENCE)
+    assert isinstance(store, JsonlSessionStore)
+    await store.claim("s", scope=ctx)
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    agent.ctx.add_disposer(lambda: session.append(*workspace_disposed(agent.id)), label="release")
+    session.append("turn/start", {"turn": 1})
+    await sessions.flush(session)  # what every host does, and all it did
+    await ctx.dispose()
+
+    _header, events = read_session(stored_log(tmp_path / "sessions", "s"))
+    assert [event.type for event in events][-2:] == ["turn/start", DISPOSED]
+
+
+async def test_disposing_an_agent_writes_what_its_teardown_appended(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The mid-run half of F2: an agent let go while the mount lives on — a
+    settled subagent is the common one — records its workspace's release as the
+    scope unwinds, and `AgentRegistry.dispose` writes that before returning
+    rather than leaving it for whenever the whole mount unwinds.
+
+    Sabotage: drop the `session_written` call from `AgentRegistry.dispose` and
+    the store does not hold the record.
+    """
+    from ph.seams.workspace import DISPOSED
+    from ph.testing import stored_types, workspace_disposed
+
+    ctx = await mount(_root(tmp_path))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    agent.ctx.add_disposer(lambda: session.append(*workspace_disposed(agent.id)), label="release")
+    await ctx.require(AGENTS).dispose(agent.id)
+
+    assert stored_types(ctx, "s")[-1] == DISPOSED

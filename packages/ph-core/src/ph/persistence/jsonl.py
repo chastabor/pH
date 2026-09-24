@@ -1,17 +1,22 @@
 """`session-persistence-jsonl` — the log on disk, one JSON object per line.
 
-The append hot path must never block on I/O (A1), so this provider buffers: it
-subscribes to `session/event`, queues the event, and drains on `session/flush`.
-`session/flush` is a `parallel` event, so a caller awaiting it has awaited every
-backend, not just the first one to answer.
+The append hot path must never block on I/O (A1), so this provider writes only on
+`session/flush`, and what it writes is read off the log itself — everything past
+a cursor of what the file already holds. `session/flush` is a `parallel` event, so
+a caller awaiting it has awaited every backend, not just the first one to answer.
 
 The file format is deliberately dsh's: a header line, then one event per line,
 camelCase throughout (Q2). A pH session is therefore a session dsh tooling
 reads, and `ph session import` in the other direction needs no second parser.
 
-Writes are atomic-ish by construction — appends of whole lines, `flush()` +
-`fsync()` at each barrier — because a torn last line is the one corruption a
-JSONL reader cannot repair without guessing. Encoding happens in the worker
+Writes are whole lines, `fsync`ed at each barrier, and **a write is all or
+nothing**: one that fails part-way takes back the bytes it managed before the
+failure is reported (`_append_and_sync`), so the retry `flush` owes appends to a
+clean end. What that cannot cover is a process that dies mid-write, which leaves
+a torn final line. That is the one damage an append-only log can repair without
+guessing, because nothing ever reported those bytes written: the reader drops
+them and the writer's first flush trims them (`_settle_tail`). A malformed line
+anywhere *before* the last is still refused. Encoding happens in the worker
 thread beside the I/O: the checkpoint policy awaits a flush before every model
 request, so nothing about a flush should hold the event loop.
 
@@ -28,7 +33,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import anyio
 from pydantic import ValidationError
@@ -42,7 +47,7 @@ from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
-from .protocol import SessionPersistence, StoredSession, attach, stored_row
+from .protocol import SessionPersistence, StoredSession, attach, stored_row, write_on_unwind
 
 __all__ = [
     "JsonlSessionStore",
@@ -102,23 +107,52 @@ def locate_session(root: Path, session_id: str) -> Path | None:
 
 
 @dataclass(slots=True)
-class _Buffer:
+class _Progress:
+    """How far this store has written one session's log — not a copy of it."""
+
     path: Path
-    pending: list[SessionEvent] = field(default_factory=list)
+    cursor: int = 0
+    """The first seq this file does not yet hold — **the log is the queue** (F2).
+
+    What is owed is `session.events_from(cursor)`, read at flush time, rather
+    than a second list filled by the `session/event` listener. That list was only
+    as complete as the listener's life: teardown is exactly when events are
+    appended (`workspace/disposed`, tombstones, a canceled turn's closers) and
+    exactly when this row's listeners have already unwound, so every one of them
+    was appended to the session and never reached the file. A cursor over the
+    log cannot miss an event, because it never needed to be told about one."""
     header_written: bool = False
     writing: anyio.Lock = field(default_factory=anyio.Lock)
     """One flush of this log at a time. See `JsonlSessionStore.flush`."""
     measured: bool = False
-    """Whether this buffer has reconciled its queue against the file (B7).
+    """Whether the cursor and `header_written` have been checked against the file (B7).
 
     Resolved on the first flush rather than at `track`, because the answer costs
-    a read of the whole log and `track` is a synchronous `session/created`
-    listener — the thing `TursoSessionStore.track` refuses in its own docstring.
-    A session that is tracked and never flushed never pays it."""
+    reads of the file and `track` is a synchronous `session/created` listener —
+    the thing `TursoSessionStore.track` refuses in its own docstring. A session
+    that is tracked and never flushed never pays it. Cleared after a failed write,
+    which may have left a fragment only a fresh measurement settles."""
 
 
-def _last_seq(path: Path) -> int | None:
-    """The seq of the last complete record in this log, or `None` (B7).
+_TAIL_CHUNK = 64 * 1024
+"""How far one backwards read reaches when looking for a line boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Tail:
+    """How a log ends: where its last finished line stops, and what is after it."""
+
+    complete: int
+    """Bytes through the last newline — every line a write finished."""
+    torn: bytes
+    """What follows that newline. Empty in a log every write finished; otherwise
+    an unterminated final line, which only a write that did not finish leaves."""
+    last_seq: int | None
+    """The seq of the last finished record, or `None` when there is none."""
+
+
+def _read_tail(path: Path) -> _Tail | None:
+    """How this log ends, or `None` when there is no file to ask (B7).
 
     **The record's own seq, not a line count.** Counting lines and adding an
     offset needs to know which index the file *starts* at, and the two numbers
@@ -127,32 +161,111 @@ def _last_seq(path: Path) -> int | None:
     A seq is absolute: `Session.append` assigns `seq == len(log)` (A1) and a
     seed preserves it, so `events[i].seq == i` for every log, forked or not.
 
-    Read from the tail rather than by scanning: only the last line is wanted,
-    so this is a seek and one small read however long the log is. An
-    unterminated final line is ignored, which is what a crash mid-write leaves
-    and exactly what should not count as written.
+    Read from the end rather than by scanning: only the last line is wanted, so
+    this is a few seeks however long the log is. **Backwards in chunks until a
+    boundary is found**, not one fixed window: a single 64 KiB read split a
+    final record longer than the window, parsed the fragment, and answered
+    `None` — so a large tool result at the end of a log made a re-activated
+    store re-queue everything the file already held.
     """
     try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            window = min(size, 64 * 1024)
-            handle.seek(size - window)
-            tail = handle.read(window)
+        handle = path.open("rb")
     except OSError:
         # No file yet — a fresh session, or a fork that has not written — or one
         # this process cannot read. The declared boundary then answers alone.
         return None
-    for line in reversed(tail.split(b"\n")[:-1]):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return None
-        seq = record.get("seq")
-        return seq if isinstance(seq, int) else None
-    return None
+    with handle:
+        size = handle.seek(0, os.SEEK_END)
+        complete = _line_start(handle, size)
+        handle.seek(complete)
+        torn = handle.read(size - complete)
+        end = complete
+        while end > 0:
+            start = _line_start(handle, end - 1)
+            handle.seek(start)
+            line = handle.read(end - start)
+            if line.strip():
+                return _Tail(complete=complete, torn=torn, last_seq=_seq_of(_record(line)))
+            end = start
+    return _Tail(complete=complete, torn=torn, last_seq=None)
+
+
+def _line_start(handle: BinaryIO, end: int) -> int:
+    """The offset just past the last newline before `end`, or 0 if there is none."""
+    position = end
+    while position > 0:
+        start = max(0, position - _TAIL_CHUNK)
+        handle.seek(start)
+        found = handle.read(position - start).rfind(b"\n")
+        if found >= 0:
+            return start + found + 1
+        position = start
+    return 0
+
+
+def _record(line: bytes) -> dict[str, Any] | None:
+    """The JSON object a line holds, or `None` when it holds none.
+
+    Also the test for an unterminated final line: a record is a JSON **object**,
+    and no proper prefix of an object's encoding parses — the closing brace is its
+    last byte — so a fragment that parses as one is the entire record, cut after
+    it and before the `\\n` that follows.
+    """
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _seq_of(record: dict[str, Any] | None) -> int | None:
+    seq = record.get("seq") if record is not None else None
+    return seq if isinstance(seq, int) else None
+
+
+def _settle_tail(path: Path) -> _Tail | None:
+    """Measure how this log ends, and finish or take back an unfinished write (F6).
+
+    Only a process that died mid-write leaves anything after the last newline —
+    a write that *failed* takes its own bytes back (`_append_and_sync`) — and the
+    next append would be glued onto it, turning one lost tail into a line nobody
+    can parse in the middle of the log. So before this store appends anything:
+
+    * a fragment that is a **whole record** gets the newline it lost, and counts
+      as written, which is how `read_session` reads the same bytes;
+    * anything else is **removed**. Nothing reported it written — `flush` had
+      not returned — so no reader was told it exists, and `read_session` drops
+      it for the same reason.
+
+    The two rules are the reader's rules, applied by the one party allowed to
+    change the file: the lease (I-5) makes this store its only writer.
+    """
+    tail = _read_tail(path)
+    if tail is None or not tail.torn:
+        return tail
+    with path.open("r+b") as handle:
+        fragment = _record(tail.torn)
+        if fragment is not None:
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"\n")
+            seq = _seq_of(fragment)
+            settled = _Tail(
+                complete=tail.complete + len(tail.torn) + 1,
+                torn=b"",
+                last_seq=tail.last_seq if seq is None else seq,
+            )
+        else:
+            handle.truncate(tail.complete)
+            settled = _Tail(complete=tail.complete, torn=b"", last_seq=tail.last_seq)
+            log.warning(
+                "ph.persistence.jsonl: %s ended in %d byte(s) of a write that did not "
+                "finish; removed them before appending",
+                path,
+                len(tail.torn),
+            )
+        handle.flush()
+        os.fsync(handle.fileno())
+    return settled
 
 
 @dataclass(slots=True)
@@ -161,12 +274,12 @@ class JsonlSessionStore:
 
     ctx: Context
     root: Path
-    _buffers: dict[str, _Buffer] = field(default_factory=dict)
+    _progress: dict[str, _Progress] = field(default_factory=dict)
 
     def track(self, session: Session) -> None:
-        """Start buffering a session; whatever it holds that we do not is owed.
+        """Start persisting a session; whatever it holds that we do not is owed.
 
-        **The queue is `events[durable_length:]`, not "everything if the file is
+        **What is owed starts at `durable_length`, not "everything if the file is
         new".** This backend appends, so it must write each event exactly once —
         and the question is not whether the *file* exists but how much of *this
         log* is in it. `Session.durable_length` is that number, stated by
@@ -195,71 +308,52 @@ class JsonlSessionStore:
         the boundary that was true when the session was built. See `flush`.
 
                 `TursoSessionStore` needs none of this — its `_write` is
-        `INSERT OR REPLACE` keyed by seq, so re-queueing is idempotent there.
+        `INSERT OR REPLACE` keyed by seq, so writing a row twice is harmless there.
         """
-        if session.id in self._buffers:
+        if session.id in self._progress:
             return
         path = session_path(self.root, session.id, session.header.family)
         # The **family directory**, not just the root: a log now lives one level
         # down, and creating only the root left every flush raising into
         # `session/flush`'s listener set.
         path.parent.mkdir(parents=True, exist_ok=True)
-        buffer = _Buffer(path=path, header_written=path.exists())
-        buffer.pending.extend(session.events[session.durable_length :])
-        self._buffers[session.id] = buffer
-
-    def record(self, session: Session, event: SessionEvent) -> None:
-        buffer = self._buffers.get(session.id)
-        if buffer is None:
-            # Every live session is tracked at creation or at activation, so an
-            # untracked one is a lifecycle gap worth hearing about. `track`
-            # captures the whole log, this event included.
-            log.warning("ph.persistence.jsonl: session %s was untracked; tracking now", session.id)
-            self.track(session)
-            return
-        buffer.pending.append(event)
+        # No `header_written=path.exists()`: the first flush measures the file
+        # anyway, and a second statement of "is this log new" is one that can
+        # disagree with the first — see `_append_and_sync`.
+        self._progress[session.id] = _Progress(path=path, cursor=session.durable_length)
 
     async def flush(self, session: Session) -> None:
-        """Write what this log has and the file does not, or still owe it.
+        """Write what this log has and the file does not.
 
-        **The queue is emptied before the write and restored if the write does
-        not happen**, and both halves are load-bearing for different reasons.
-
-        *Before*, because two flushes can overlap — `checkpoint_policy` flushes
-        on an event while the supervisor flushes on passivation or shutdown —
-        and a second one that found the same events still queued would append
-        them twice. Clearing first makes the concurrent flush a no-op.
-
-        **Serialized per log, because take-then-restore is only safe alone.**
-        Overlapping flushes were the case the clearing was *for*, and the restore
-        is what it could not survive: the earlier flush, canceled at the thread
-        hop, put its events back at the front of a queue the later one had
-        already taken from and written. The file then held higher seqs before
-        lower ones, and `header_written` was restored by whichever failed last —
-        so a log could end up with no header line at all, which `read_session`
-        refuses outright. A waiter canceled here has taken nothing, so the lock
-        costs a concurrent flush exactly what the clearing already cost it: it
-        finds the queue empty and does nothing.
-
-        *Restored*, because clearing first is otherwise a way to lose them.
+        **What is owed is read off the log**, from the cursor, rather than
+        drained from a queue — so a flush that does not happen owes exactly what
+        it owed before, with nothing to restore. That is the case the old
+        take-then-restore existed for, and it is the ordinary case:
         `anyio.to_thread.run_sync` begins with a checkpoint, so a cancellation
         delivered as this flush enters the thread pool raises **before** the
         work is queued — and passivation and teardown are exactly when
         cancellation arrives. An `OSError` (a full disk, a read-only mount) has
-        the same shape. Either way the events were dropped from `pending` and
-        never written, so the file gains a hole in its seq space and the next
-        resume dies in `_readmit`: *"seed must be contiguous from 0"*. That is
-        not a lost flush, it is a session that can never be opened again —
-        which is the failure `track`'s docstring above describes a previous
-        incarnation of, from a different cause.
+        the same shape. A queue emptied before a write that never happened left
+        a hole in the seq space, and the next resume died in `_readmit`: *"seed
+        must be contiguous from 0"* — a session that could never be opened again.
 
-        Prepended rather than appended on the way back, because `pending` is
-        ordered by seq and anything recorded while the write was in flight
-        belongs after what this flush was carrying.
+        **Serialized per log**, so two flushes that overlap — `checkpoint_policy`
+        flushing on an event while the supervisor flushes on passivation or
+        shutdown — write in turn, and the second finds the cursor already past
+        what the first wrote and appends only what arrived since. A waiter
+        canceled here has written nothing and owes nothing new.
+
+        The cursor advances only once the write has returned, which is the one
+        ordering the rest depends on.
         """
-        buffer = self._buffers.get(session.id)
+        buffer = self._progress.get(session.id)
         if buffer is None:
-            return
+            # Every live session is tracked at creation or at activation, so an
+            # untracked one is a lifecycle gap worth hearing about — and still
+            # written, since what it owes is on the log.
+            log.warning("ph.persistence.jsonl: session %s was untracked; tracking now", session.id)
+            self.track(session)
+            buffer = self._progress[session.id]
         async with buffer.writing:
             if not buffer.measured:
                 # **What this file already holds, asked once** (B7).
@@ -267,8 +361,8 @@ class JsonlSessionStore:
                 # advances, so a store built later in a session's life — which
                 # is every store after the persistence row re-activates — is
                 # told a boundary that was true before anything was flushed and
-                # re-queues the difference. This backend appends, so that is
-                # duplicate events in the file.
+                # would write the difference again. This backend appends, so that
+                # is duplicate events in the file.
                 #
                 # Asked of the last record's seq, which is absolute
                 # (`events[i].seq == i`), so nothing has to be mutated and no
@@ -279,29 +373,38 @@ class JsonlSessionStore:
                 # Here rather than in `track` because `track` is a synchronous
                 # listener, and because a session that never flushes never needs
                 # the answer.
+                #
+                # And settled, not only measured (F6): a torn tail left by a
+                # process that died mid-write is finished or removed before this
+                # store appends behind it — see `_settle_tail`.
+                tail = await anyio.to_thread.run_sync(_settle_tail, buffer.path)
                 buffer.measured = True
-                last = await anyio.to_thread.run_sync(_last_seq, buffer.path)
-                if last is not None:
-                    already = max(0, last + 1 - session.durable_length)
-                    del buffer.pending[:already]
-            records: list[dict[str, Any]] = []
+                # No file, or one whose only line was torn: the header is owed.
+                buffer.header_written = tail is not None and tail.complete > 0
+                if tail is not None and tail.last_seq is not None:
+                    buffer.cursor = max(buffer.cursor, tail.last_seq + 1)
+            owed = session.events_from(buffer.cursor)
             header_owed = not buffer.header_written
+            records: list[dict[str, Any]] = []
             if header_owed:
                 records.append({"type": HEADER_LINE_TYPE, "header": session.header.to_wire()})
-            owed = list(buffer.pending)
             records.extend(event.to_wire(thaw=False) for event in owed)
             if not records:
                 return
-            buffer.pending.clear()
-            buffer.header_written = True
             try:
                 await anyio.to_thread.run_sync(
                     partial(_append_and_sync, buffer.path, records, fresh=header_owed)
                 )
             except BaseException:
-                buffer.pending[:0] = owed
-                buffer.header_written = not header_owed
+                # Asked again next time rather than assumed: a write that failed
+                # part-way normally takes its bytes back, but if that took-back
+                # failed too the file now ends in a fragment, and only a fresh
+                # measurement settles it before the retry appends behind it.
+                buffer.measured = False
                 raise
+            buffer.header_written = True
+            if owed:
+                buffer.cursor = owed[-1].seq + 1
 
     # ------------------------------------------------------------- reading --
     #
@@ -356,7 +459,7 @@ class JsonlSessionStore:
         only for `locate`, whose caller is asking where a log is rather than
         holding one against another process.
         """
-        buffer = self._buffers.get(session_id)
+        buffer = self._progress.get(session_id)
         if buffer is not None:
             return buffer.path
         return locate_session(self.root, session_id) or session_path(
@@ -364,8 +467,10 @@ class JsonlSessionStore:
         )
 
     async def claim(self, session_id: str, *, scope: Context) -> None:
-        """Hold this log against every other writer for `scope`'s life (I-5)."""
+        """Hold this log against every other writer for `scope`'s life (I-5), and
+        write every live log before letting go — see `write_on_unwind`."""
         await claim_session(scope, self.root, session_id)
+        write_on_unwind(scope, self)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
@@ -383,7 +488,7 @@ class JsonlSessionStore:
         ]
 
     def forget(self, session_id: str) -> None:
-        self._buffers.pop(session_id, None)
+        self._progress.pop(session_id, None)
 
 
 def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) -> None:
@@ -400,21 +505,64 @@ def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) 
     here would pay a stat on every flush of every session forever to answer "yes"
     once, while making a second statement of "is this log new" that can disagree
     with `header_written`.
+
+    **All or nothing** (F3). A write that fails part-way — a disk that fills
+    mid-payload, an `EIO` — has already put some of these bytes in the file, and
+    `flush` answers the failure by owing the same records again. Left there, the
+    retry appends a full copy behind a half line, and `read_session` refuses the
+    log at that line for good. So the file is cut back to the length it had
+    before this write, and only then is the failure reported. Through the raw
+    descriptor with `O_APPEND` rather than a text handle, because the length has
+    to be known exactly and a buffered writer may hold bytes of its own.
     """
-    payload = "".join(f"{dumps(record)}\n" for record in records)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
+    payload = "".join(f"{dumps(record)}\n" for record in records).encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+    try:
+        start = os.fstat(fd).st_size
+        try:
+            _write_all(fd, payload)
+            os.fsync(fd)
+        except BaseException:
+            _take_back(fd, start, path)
+            raise
+    finally:
+        os.close(fd)
     if fresh:
         # Best effort: a filesystem that refuses a directory handle (some
         # networked ones do) has already given us the file's own durability.
         with suppress(OSError):
-            fd = os.open(path.parent, os.O_RDONLY)
+            directory = os.open(path.parent, os.O_RDONLY)
             try:
-                os.fsync(fd)
+                os.fsync(directory)
             finally:
-                os.close(fd)
+                os.close(directory)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write every byte, however many calls that takes. A short write is not an error."""
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
+def _take_back(fd: int, length: int, path: Path) -> None:
+    """Cut the file back to `length` after a failed write, or say it could not be.
+
+    Never raises: it runs while another exception is on its way out, and that one
+    is the account of what happened. A take-back that fails leaves a fragment the
+    next flush's measurement settles (`_settle_tail`), because `flush` stops
+    trusting its measurement the moment a write fails.
+    """
+    try:
+        os.ftruncate(fd, length)
+        os.fsync(fd)
+    except OSError:
+        log.warning(
+            "ph.persistence.jsonl: could not take back a partial write to %s; "
+            "the next flush trims it",
+            path,
+            exc_info=True,
+        )
 
 
 def read_records(path: Path) -> Iterator[dict[str, Any]]:
@@ -429,10 +577,11 @@ def read_records(path: Path) -> Iterator[dict[str, Any]]:
     global log are both this shape, and both said so in their own comments
     before they said it here.
 
-    Contrast `read_session`, which is deliberately **strict**: a session is a
-    conversation, and silently truncating one at the first unreadable line would
-    hand the model a history that is missing its middle. Nothing about JSONL
-    decides which rule applies — the *log's* contract does.
+    Contrast `read_session`, which is deliberately **strict** about every line
+    but the last: a session is a conversation, and silently skipping an
+    unreadable line in it would hand the model a history that is missing its
+    middle. Nothing about JSONL decides which rule applies — the *log's*
+    contract does.
 
     Streamed, and a missing file is an empty log: both callers grow without
     bound, and both had already reached for `read_text()`.
@@ -485,6 +634,16 @@ def read_session(
     `upto` stops at the first event whose seq reaches it. The log is append-only
     and `seq` is its index, so everything after the first such line is at or
     above it too — there is nothing below the boundary further down to miss.
+
+    **Strict about every line but an unterminated last one** (F6). A process
+    that dies mid-write leaves a fragment after the final newline, and a reader
+    that refused it made one crash cost the whole session — permanently, since
+    no later write could get past it. Dropping it is not a guess: no flush
+    returned for those bytes, so nothing was ever told they were written, and
+    the writer's first flush removes them the same way (`_settle_tail`). An
+    unterminated line that *parses* is a whole record that lost only its
+    newline, and is kept by both. A malformed line with a newline after it is
+    damage of some other kind, and still refuses the log.
     """
     header: SessionHeader | None = None
     events: list[SessionEvent] = []
@@ -496,6 +655,15 @@ def read_session(
             try:
                 record = json.loads(text)
             except json.JSONDecodeError as error:
+                if not line.endswith("\n"):
+                    # Only the last line can lack its newline.
+                    log.warning(
+                        "ph.persistence.jsonl: %s:%d is a write that did not finish; "
+                        "reading the log without it",
+                        path,
+                        number,
+                    )
+                    break
                 raise ValueError(f"{path}:{number}: {error}") from error
             if record.get("type") == HEADER_LINE_TYPE:
                 header = SessionHeader.model_validate(record["header"])

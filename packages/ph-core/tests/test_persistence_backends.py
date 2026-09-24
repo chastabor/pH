@@ -150,14 +150,9 @@ def _append(
     data: Any,  # noqa: ANN401
     intent: SurfaceIntent | None = None,
 ) -> None:
-    """Append and record, which is the pair the row wires to the firehose.
-
-    `record` is not something `Session.append` calls — the plugin subscribes it
-    to `session/event` — so a test driving a store directly has to do both, and
-    doing only the first is how these tests first read back an empty log from
-    *both* backends and looked like two bugs instead of one mistake.
-    """
-    store.record(session, session.append(kind, data, intent))
+    """Append, which is all a store needs: it writes what the log holds past its
+    cursor, so there is nothing to hand it beside the event."""
+    session.append(kind, data, intent)
 
 
 async def test_a_tracked_session_round_trips_through_the_backend(
@@ -285,7 +280,7 @@ async def test_a_resume_writes_what_it_synthesized_on_top_of_what_it_read(
         revived = Session("s1", seed=list(events), header=header)
         revived.durable_length = len(events)
         store.track(revived)
-        store.record(revived, revived.append("session/resumed", {"events": len(events)}))
+        revived.append("session/resumed", {"events": len(events)})
         await store.flush(revived)
 
     _, events = store.read("s1")
@@ -482,14 +477,33 @@ def _reference_fork(
     shape a fork taken *at* an end-seed has: `Session.__init__` suppresses the
     marker when the seed already ends in one, so such a child stores nothing at
     all and the file has no first seq to read a boundary off.
+
+    **Built the way `SessionStore.create` builds one**: a session holding its
+    inherited prefix, told that `boundary` events of it are durable elsewhere.
+    A store writes what the log holds past that line and nothing else — the log
+    is the queue — so a helper that recorded events the session did not contain
+    would be exercising a write path no backend has.
     """
     header, events = reference_fork(child, parent, boundary=boundary, family=family)
-    session = Session(child, header=header)
+    session = _inheriting(child, header, boundary)
     store.track(session)
     if own:
         for event in events:
-            store.record(session, event)
+            session.admit(event)
     return session
+
+
+def _inheriting(session_id: str, header: SessionHeader, boundary: int) -> Session:
+    """A session whose first `boundary` events are someone else's to store.
+
+    Their content is not read by anything here — the store writes from the
+    boundary up — so they are markers, and ending on one keeps the constructor
+    from appending another.
+    """
+    prefix = [
+        SessionEvent(type="session/end-seed", seq=seq, time=1, data={}) for seq in range(boundary)
+    ]
+    return Session(session_id, seed=prefix or None, header=header, durable=boundary)
 
 
 async def test_a_log_that_starts_at_zero_is_read_unchanged(store: SessionPersistence) -> None:
@@ -561,7 +575,9 @@ async def test_a_fork_at_an_end_seed_still_reads_its_history(
     await store.flush(parent)
 
     childless = _reference_fork(store, "c", "p", boundary=4, own=False)
-    assert childless.events == (), "a fork at an end-seed owns nothing of its own"
+    assert childless.events_from(childless.durable_length) == (), (
+        "a fork at an end-seed owns nothing of its own"
+    )
     await store.flush(childless)
 
     header, events = store.read("c")
@@ -616,8 +632,8 @@ async def test_a_child_that_claims_completeness_but_is_short_is_refused(
     header = SessionHeader(id="short", created_at=1, parent_session="p", seed_length=4)
     session = Session("short", header=header)
     store.track(session)
-    for seq in (0, 1):
-        store.record(session, SessionEvent(type="turn/start", seq=seq, time=1, data={"turn": seq}))
+    for turn in (0, 1):
+        session.append("turn/start", {"turn": turn})
     await store.flush(session)
 
     with pytest.raises(LineageError, match="claims to hold its own history") as caught:
@@ -654,9 +670,9 @@ async def test_a_log_above_zero_that_names_no_parent_is_refused(
     from, and only the second is unrecoverable.
     """
     header = SessionHeader(id="rootless", created_at=1)
-    session = Session("rootless", header=header)
+    session = _inheriting("rootless", header, 4)
     store.track(session)
-    store.record(session, SessionEvent(type="turn/start", seq=4, time=1, data={"turn": 4}))
+    session.append("turn/start", {"turn": 4})
     await store.flush(session)
 
     with pytest.raises(LineageError, match="names no parent") as caught:

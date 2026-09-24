@@ -35,7 +35,7 @@ from ..wire import WireModel
 from .derive import derive_event_message, derive_transcript
 from .events import SESSION_FORMAT_VERSION, SessionEvent, SurfaceIntent, now_ms
 from .json import InvalidJsonValueError, freeze_json_value
-from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
+from .known_event_types import UnknownEventTypeError, is_ignorable, is_known
 from .request_header import (
     EpochHeader,
     RequestContext,
@@ -423,19 +423,31 @@ class Session:
         at runtime. The runtime gate stays — a type is not a proof about a value
         that arrived as `Any` — but a producer that can be checked is.
 
-        The hot path never blocks on I/O — persistence buffers asynchronously
-        and drains on `session/flush`.
+        The hot path never blocks on I/O — persistence reads what it owes off
+        this log on `session/flush`.
 
         Whether the event is `ignorable` — skippable by a *different* build that
-        does not know its type — is a property of the type, read from
-        `IGNORABLE_SESSION_EVENT_TYPES` rather than passed here, so no two call
-        sites can disagree about one type.
+        does not know its type — is a property of the type, read from the
+        vocabulary rather than passed here, so no two call sites can disagree
+        about one type.
 
+        **The type must be one this build reads** (F11): ph-core's own, or one a
+        package declared with `declare_log_type`. The read door refuses an
+        unknown required type on every seed, so a write door that accepted one
+        wrote a log that resumed nowhere — the same asymmetry the `Mapping` check
+        below closes for payloads, one field over.
+
+        :raises UnknownEventTypeError: when `event_type` is in no vocabulary.
         :raises InvalidJsonValueError: when `data` is not losslessly JSON, or
             is not a JSON **object**.
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
         """
+        if not is_known(event_type):
+            raise UnknownEventTypeError(
+                f'"{event_type}" is not a session event type this build can read back; '
+                "declare it with ph.session.declare_log_type"
+            )
         if not isinstance(data, Mapping):
             # `_EventWire` refuses a non-object payload on the way *in* from
             # disk, and `SessionEvent.data` is declared a `JsonObject`. Without
@@ -455,7 +467,7 @@ class Session:
             data=freeze_json_value(data),
             source_event_seqs=None if surface is None else surface.source_event_seqs,
             surface_op=None if surface is None else surface.surface_op,
-            ignorable=event_type in IGNORABLE_SESSION_EVENT_TYPES,
+            ignorable=is_ignorable(event_type),
         )
         return self._commit(event)
 
@@ -710,7 +722,7 @@ def _readmit(source: SessionEvent, index: int) -> SessionEvent:
             f"seed event at index {index} has seq {source.seq} (expected {index}); "
             "seed must be contiguous from 0"
         )
-    if source.type not in KNOWN_SESSION_EVENT_TYPES and not source.ignorable:
+    if not is_known(source.type) and not source.ignorable:
         raise ValueError(
             f'seed event at index {index} has unrecognized required type "{source.type}"; '
             "this log was written by a newer harness and reading it here would "

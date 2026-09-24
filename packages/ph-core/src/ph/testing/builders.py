@@ -44,6 +44,7 @@ __all__ = [
     "FAKE_OPTIONS",
     "StubAgent",
     "assistant_payload",
+    "code_mode_stub",
     "parked_gate",
     "plugin_payload",
     "raising",
@@ -51,6 +52,7 @@ __all__ = [
     "run_tool",
     "simple_tool",
     "stored_log",
+    "stored_types",
     "tool_result_payload",
     "tool_runtime",
     "user_payload",
@@ -597,6 +599,29 @@ def noting[I, T](bucket: list[I], item: I, answer: Callable[[], T]) -> T:
     """
     bucket.append(item)
     return answer()
+
+
+def stored_types(ctx: Context, session_id: str) -> list[str]:
+    """The event types a session's store holds right now, read through the Protocol.
+
+    What a durability test asks — not what is in memory, but what a resume would
+    be handed. Seven tests spelled the read and the comprehension out before this.
+    """
+    _header, events = ctx.require(SESSION_PERSISTENCE).read(session_id)
+    return [event.type for event in events]
+
+
+def code_mode_stub() -> dict[str, Any]:
+    """The patch that mounts Code Mode over the stub runtime, for a test to pass to `mount`.
+
+    A fresh document per call, since a mount may keep what it is handed.
+    """
+    return {
+        "insert": [
+            {"id": "code-runtime-stub", "name": "code-runtime-stub"},
+            {"id": "tools-code-mode", "name": "tools-code-mode"},
+        ]
+    }
 
 
 def store_root(ctx: Context) -> Path:

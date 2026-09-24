@@ -60,7 +60,7 @@ from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import latest_checkpoint, workspace_of
-from ph.session import Session, SessionEvent, now_ms
+from ph.session import Session, SessionEvent, now_ms, session_written
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
@@ -1558,12 +1558,10 @@ class Supervisor:
         into a task that dies with no account of why. `aclose` wants the same
         thing for the same reason — and had its own copy, which additionally
         skipped `exits.aclose()` when the flush raised, so one root's unwritable
-        log left its context undisposed.
+        log left its context undisposed. `session_written` is that rule for
+        every caller that must carry on, so this is one line of it.
         """
-        try:
-            await root.ctx.require(SESSIONS).flush(root.session)
-        except Exception:
-            log.warning("ph_app.daemon: root %s could not flush its retry", root.id, exc_info=True)
+        await session_written(root.ctx, root.session)
 
     async def _restore(self, root: Root) -> bool:
         """Put the root's tree back to its last restore point, if it has one.
@@ -1798,8 +1796,10 @@ class Supervisor:
         Channels first, so each task leaves its own loop rather than being
         canceled mid-turn. Then per root, because one root's teardown failing
         must not strand the others (I2) — and each is flushed *before* it
-        unwinds, since disposal appends events of its own and a session lost on
-        exit is the worst way to learn that.
+        unwinds. That flush cannot cover what the unwind itself appends
+        (`workspace/disposed`, a child's tombstone): those are written by the
+        mount's last act, which the store's `claim` registered beside the lease
+        (`write_on_unwind`, F2).
 
         **`deadline` is one budget for the whole shutdown**, seeded onto each
         root before it is released. Every root is its own `Context` with its own

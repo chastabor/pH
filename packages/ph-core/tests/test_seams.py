@@ -61,7 +61,7 @@ from ph.seams.subprocess import (
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session
-from ph.testing import StubAgent, noted, settled
+from ph.testing import MountProfile, StubAgent, noted, raising, settled, stored_types
 
 pytestmark = pytest.mark.anyio
 
@@ -125,6 +125,88 @@ async def test_a_cancel_while_a_person_is_being_asked_still_closes_the_pair() ->
     assert [event.type for event in session.events] == ["approval/asked", "approval/decided"]
     assert as_str(session.events[-1].data["outcome"]) == "canceled"
     assert pending_approvals(session.events) == [], "repair would stamp this interrupted"
+
+
+async def test_an_ask_is_on_disk_before_anybody_is_asked(mount: MountProfile) -> None:
+    """F8. The ask is durable before the wait, which may be hours.
+
+    The last flush was before the model request, so for the whole wait the
+    `approval/asked` — and the `assistant/message` whose call it gates — were
+    in memory only: a crash lost both, and the `INTERRUPTED` settlement repair
+    owes a parked ask (P5-13) only ever ran after a clean stop.
+
+    Asked of the store, through the Protocol, from inside the answerer.
+
+    Sabotage: drop the `_written` check from `request` and the answerer finds
+    nothing on disk.
+    """
+    from ph.keys import APPROVAL, SESSIONS
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    held: list[list[str]] = []
+
+    async def answerer(request: ApprovalRequest, next_: object) -> str:
+        held.append(stored_types(ctx, "s"))
+        return "allowed-once"
+
+    ctx.require(APPROVAL).register_answerer(answerer)
+    outcome = await ctx.require(APPROVAL).request(
+        agent=_agent(session), tool_name="edit", call_id="c1"
+    )
+    assert outcome == "allowed-once"
+    assert held == [["approval/asked"]]
+
+
+async def test_an_ask_that_cannot_be_written_is_not_put_to_anybody(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absence is not consent, and neither is a question nobody could see was
+    asked: a log that refuses the write answers `unavailable`, and the pair still
+    closes."""
+    from ph.keys import APPROVAL, SESSIONS
+    from ph.session import SessionStore
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    reached: list[str] = []
+
+    async def answerer(request: ApprovalRequest, next_: object) -> str:
+        reached.append(request.tool_name)
+        return "allowed-once"
+
+    monkeypatch.setattr(SessionStore, "flush", raising(OSError("read-only file system")))
+    ctx.require(APPROVAL).register_answerer(answerer)
+    outcome = await ctx.require(APPROVAL).request(
+        agent=_agent(session), tool_name="edit", call_id="c1"
+    )
+    assert outcome == "unavailable"
+    assert reached == [], "a person was asked a question the log could not hold"
+    assert [event.type for event in session.events] == ["approval/asked", "approval/decided"]
+
+
+async def test_a_question_is_on_disk_before_it_is_delivered(mount: MountProfile) -> None:
+    """F8 for the other seam that interrupts a person. The vocabulary's own claim
+    — "a crash while somebody was deciding leaves the question in the log" — is
+    the whole reason the ask is appended before the waterfall, and it held only
+    once something happened to flush."""
+    from ph.keys import SESSIONS, USER_QUESTIONS
+    from ph.seams.user_questions import UserQuestion
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    held: list[list[str]] = []
+
+    async def answerer(question: UserQuestion, next_: object) -> str:
+        held.append(stored_types(ctx, "s"))
+        return "blue"
+
+    ctx.require(USER_QUESTIONS).register_answerer(answerer)
+    outcome = await ctx.require(USER_QUESTIONS).ask(
+        UserQuestion(question="Which color?"), session=session
+    )
+    assert outcome.answer == "blue"
+    assert held == [["question/asked"]]
 
 
 async def test_register_answerer_is_the_waterfall_by_another_name() -> None:

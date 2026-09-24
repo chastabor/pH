@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any
 
-from ..cordis import Boundary, Context, plugin
+from ..cordis import Context, plugin
 from ..json import JsonValue, as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
 from ..seams.commands import CommandContext, CommandDefinition
@@ -145,7 +145,7 @@ def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) ->
         for event in session.events
         if event.type == "tool/code-dispatch-start"
         and as_str(event.data.get("parentCallId")) == call_id
-        and not _covered(ctx, as_str(event.data.get("name"), "?"), scope)
+        and not ctx.require(TOOLS).restore_covers(as_str(event.data.get("name"), "?"), scope=scope)
     ]
     if not outside:
         return []
@@ -155,19 +155,6 @@ def _not_undone(ctx: Context, scope: Context, session: Session, call_id: str) ->
         "and restoring the workspace did NOT undo it:",
         *(f"  - {name}({_brief(arguments)})" for name, arguments in outside),
     ]
-
-
-def _covered(ctx: Context, name: str, scope: Boundary) -> bool:
-    """Scope-aware, because a shadowed registration is a different tool.
-
-    `offload`'s reader of `self_limits` makes the same point: an agent-scoped or
-    MCP-registered tool is invisible at root scope. Here the unscoped lookup ran
-    in the *unsafe* direction — a row shadowing `write` would have resolved to
-    the global builtin's `True` and a dispatch that reached past the tree would
-    never have been listed.
-    """
-    definition = ctx.require(TOOLS).get(name, scope=scope)
-    return bool(definition is not None and definition.effects_confined_to_workspace)
 
 
 def _brief(arguments: JsonValue) -> str:

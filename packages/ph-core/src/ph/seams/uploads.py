@@ -73,7 +73,7 @@ from ..cordis import Context, Disposer, Running, plugin, running
 from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
 from ..paths import resolve_roots, write_atomic
-from ..session import Session, now_ms
+from ..session import Session, now_ms, session_written
 from ..wire import WireModel
 from ._registry import claim_key
 
@@ -264,10 +264,19 @@ class UploadRegistry:
         content = await store.load_bytes(ref)
         with running(entry.by):
             handle = await entry.uploader.upload(ref, content)
-        await self._store(handle)
         session = self._session(session_id)
         if session is not None:
             record_uploaded(session, handle, ref)
+            # **The record is durable before the cache is** (F10). The cache is
+            # what makes every later request skip this branch, so caching first
+            # meant a crash before the next barrier kept the handle and lost the
+            # fact — for good, since nothing ever uploads, or records, that file
+            # for that provider again. Not cached when the record cannot be
+            # written: the next request uploads again and records again, which is
+            # the direction a person auditing their data needs this to fail in.
+            if not await session_written(self.ctx, session):
+                return handle
+        await self._store(handle)
         return handle
 
     def _session(self, session_id: str | None) -> Session | None:

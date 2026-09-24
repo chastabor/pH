@@ -15,7 +15,14 @@ from .events import (
 )
 from .folds import SessionFoldCache, SessionLog
 from .json import InvalidJsonValueError, freeze_json_value
-from .known_event_types import IGNORABLE_SESSION_EVENT_TYPES, KNOWN_SESSION_EVENT_TYPES
+from .known_event_types import (
+    IGNORABLE_SESSION_EVENT_TYPES,
+    KNOWN_SESSION_EVENT_TYPES,
+    LogTypeDeclaration,
+    LogTypeError,
+    UnknownEventTypeError,
+    declare_log_type,
+)
 from .request_header import (
     EpochHeader,
     RequestContext,
@@ -40,6 +47,7 @@ from .store import (
     is_fork_boundary,
     new_session_id,
     open_turn_at,
+    session_written,
     valid_session_id,
 )
 from .surface import (
@@ -61,6 +69,8 @@ __all__ = [
     "SURFACE_EVENT_TYPES",
     "EpochHeader",
     "InvalidJsonValueError",
+    "LogTypeDeclaration",
+    "LogTypeError",
     "RequestContext",
     "Session",
     "SessionEvent",
@@ -78,8 +88,10 @@ __all__ = [
     "SurfaceManager",
     "SurfaceOp",
     "SurfaceReplace",
+    "UnknownEventTypeError",
     "canonical_header",
     "cwd_tag",
+    "declare_log_type",
     "derive_event_message",
     "derive_transcript",
     "family_for",
@@ -99,5 +111,6 @@ __all__ = [
     "new_session_id",
     "now_ms",
     "open_turn_at",
+    "session_written",
     "valid_session_id",
 ]

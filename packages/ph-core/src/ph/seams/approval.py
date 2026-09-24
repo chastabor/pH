@@ -32,7 +32,7 @@ from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import Session, SessionEvent
+from ..session import Session, SessionEvent, session_written
 from ..wire import WireModel, literal_lookup
 
 __all__ = [
@@ -388,6 +388,17 @@ class ApprovalService:
         # synchronous so it completes inside a cancelled scope.
         outcome: ApprovalAnswer = "canceled"
         try:
+            # **On disk before anybody is asked** (F8). The wait may be hours, and
+            # the last flush was before the model request — so the ask, and the
+            # `assistant/message` whose call it gates, were memory-only for all of
+            # it: a crash lost both, and the `INTERRUPTED` settlement repair owes a
+            # parked ask only ever ran after a clean stop. Inside the `try`, so a
+            # cancellation arriving during the write still closes the pair. A log
+            # that cannot be written is not a question worth putting to a person:
+            # nobody would be able to see it was asked.
+            if session is not None and not await session_written(self.ctx, session):
+                outcome = "unavailable"
+                return outcome
             outcome = await self._route(request, cancel if cancel is not None else agent.signal)
             return outcome
         finally:

@@ -38,7 +38,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS, UPLOADS
 from ph.llm.types import FILE_EXPIRED, MediaBlock, Message, create_user_message
-from ph.testing import MountProfile, anthropic_reply
+from ph.testing import MountProfile, anthropic_reply, stored_types
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.anthropic import _is_missing_file, _is_overflow
 
@@ -168,6 +168,37 @@ async def test_a_file_is_uploaded_once_and_then_referenced(
     (record,) = [one for one in session.events if one.type == "attachment/uploaded"]
     assert record.data["provider"] == "anthropic" and record.data["name"] == "paper.pdf"
     assert "file_001" not in str(record.data)
+
+
+async def test_the_upload_is_on_disk_before_its_handle_is_cached(
+    mount: MountProfile, wire: _FileApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10. The audit record is durable before the cache that skips it forever.
+
+    The handle was cached first — durably, `write_atomic` — and the record
+    appended after, inside a request whose barrier had already run. A crash
+    between the two kept the handle and lost the fact, and every later request
+    hit the cache, so nothing ever recorded that this file went to this provider.
+
+    Sabotage: move `self._store(handle)` back above `record_uploaded` and the
+    record is not on disk when the handle is.
+    """
+    ctx: Context = await mount(ROUTE, profile=PROFILE)
+    session = ctx.require(SESSIONS).create("audited")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+    registry = type(ctx.require(UPLOADS))
+    cache = registry._store
+    at_cache: list[bool] = []
+
+    async def watched(self: Any, handle: Any) -> None:  # noqa: ANN401
+        at_cache.append("attachment/uploaded" in stored_types(ctx, session.id))
+        await cache(self, handle)
+
+    monkeypatch.setattr(registry, "_store", watched)
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    assert at_cache == [True]
 
 
 async def test_the_second_turn_reuses_the_handle(mount: MountProfile, wire: _FileApi) -> None:

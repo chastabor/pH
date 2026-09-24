@@ -707,6 +707,21 @@ class ToolRuntime:
     def get(self, name: str, *, scope: Boundary) -> ToolDefinition | None:
         return self.view(scope).visible.get(name)
 
+    def restore_covers(self, name: str, *, scope: Boundary) -> bool:
+        """Whether restoring the workspace takes back everything a call to `name` does.
+
+        The tool's own `effects_confined_to_workspace`, read through this scope's
+        view: a shadowed registration is a different tool, and an unscoped lookup
+        ran in the *unsafe* direction — a row shadowing `write` resolved to the
+        global builtin's `True`. An unknown tool is not covered.
+
+        One rule for its two readers, which must not drift apart: `/revert`, listing
+        what a restore did not undo, and the checkpoint policy's barrier before a
+        nested Code Mode dispatch, which exists so a crash cannot empty that list.
+        """
+        definition = self.get(name, scope=scope)
+        return definition is not None and definition.effects_confined_to_workspace
+
     def names(self, *, scope: Boundary) -> list[str]:
         return sorted(self.view(scope).visible)
 

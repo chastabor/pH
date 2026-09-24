@@ -60,7 +60,14 @@ from ph.seams.subagents import (
 )
 from ph.seams.workspace import workspace_survivors
 from ph.session import Session, derive_event_message
-from ph.testing import FAKE_OPTIONS, MountProfile, StubWorkspaceProvider, not_none, skill
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    StubWorkspaceProvider,
+    not_none,
+    skill,
+    stored_types,
+)
 from ph.testing.git import WORKTREE_ROWS, git_repo
 from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
@@ -391,6 +398,45 @@ async def test_the_child_status_reaches_the_parents_log(delegating: MountedRunti
     statuses = _statuses(session, run.id)
     assert statuses[0] == "running"
     assert statuses[-1] in {"done", "error"}
+
+
+async def test_a_childs_outcome_is_on_disk_before_its_parent_says_done(
+    delegating: MountedRuntime,
+) -> None:
+    """F1. The parent's `subagent/status{done}` is only written once the child's own
+    log holds what it is reporting.
+
+    Nothing used to flush a child after its last model request — its last barrier
+    comes *before* that request, and a parent's flush walks ancestors, never
+    children — so every child log on disk ended before its answer while the
+    parent's said "done" with a preview of it. Repair then closed the child's
+    turn as interrupted on the next open.
+
+    Asked of the store at the moment the parent's record lands, through the
+    Protocol: what it would hand a resume, not what is in memory.
+
+    Sabotage: drop the `_write_log` ahead of `_status(child, "done", ...)` and the
+    child's stored log is missing its answer when the parent reports it.
+    """
+    ctx, session, parent = await delegating()
+    children: list[str] = []
+    seen: list[tuple[int, int, str]] = []
+
+    def watch(_session: Session, event: Any) -> None:  # noqa: ANN401
+        if event.type == "subagent/status" and event.data.get("status") == "done":
+            child = not_none(ctx.require(SESSIONS).get(children[0]))
+            stored = stored_types(ctx, child.id)
+            seen.append((len(stored), child.seq, stored[-1]))
+
+    session.observe(watch)
+    run = await _spawn(ctx, parent)
+    children.append(run.session_id)
+    await ctx.drain()
+
+    assert len(seen) == 1, "the child never reported done"
+    stored, held, last = seen[0]
+    assert stored == held, f"the store held {stored} of the child's {held} events"
+    assert last == "turn/end"
 
 
 async def test_a_waiter_can_still_block_on_completion(delegating: MountedRuntime) -> None:

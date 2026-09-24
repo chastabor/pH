@@ -4,9 +4,9 @@
 bytes" and "what can you tell me". A store that keeps sessions in a database has
 no per-session path and no directory to list, but it can still answer *does this
 exist*, *read it back*, *what is stored*, and *where would a person look* — the
-last one honestly returning `None`. So the write side stays as it was (buffered
-appends, drained by `session/flush`) and the read side is stated here rather than
-inferred from a filename.
+last one honestly returning `None`. So the write side stays as it was (the log
+itself is the queue, written on `session/flush`) and the read side is stated here
+rather than inferred from a filename.
 
 **`locate` is allowed to say no**, and a caller must handle that rather than
 assume a path. Both shipped backends keep one file per session and answer with it
@@ -20,6 +20,7 @@ loudly instead of inventing a path that protects nothing.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -33,6 +34,8 @@ from .lineage import lineage_faults
 if TYPE_CHECKING:
     from ..cordis import Context
 
+log = logging.getLogger("ph.persistence")
+
 SURVEY_LIMIT = 500
 """How many stored sessions the lineage check surveys.
 
@@ -43,7 +46,14 @@ since the point of answering from the listing is not to walk a store
 without limit.
 """
 
-__all__ = ["ClaimingStore", "SessionArchive", "SessionPersistence", "StoredSession", "attach"]
+__all__ = [
+    "ClaimingStore",
+    "SessionArchive",
+    "SessionPersistence",
+    "StoredSession",
+    "attach",
+    "write_on_unwind",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +183,7 @@ class SessionPersistence(SessionArchive, Protocol):
     """
 
     def track(self, session: Session) -> None:
-        """Start persisting this session. **Queue what you do not already hold.**
+        """Start persisting this session. **Owe what you do not already hold.**
 
         `session.durable_length` is a *floor* the caller declares at
         construction — a resume's stored length, a fork's inherited prefix — and
@@ -194,12 +204,19 @@ class SessionPersistence(SessionArchive, Protocol):
         """
         ...
 
-    def record(self, session: Session, event: SessionEvent) -> None:
-        """Buffer one event. Never blocks — A1 keeps `append` I/O-free."""
-        ...
-
     async def flush(self, session: Session) -> None:
-        """Drain whatever is buffered for this session."""
+        """Write whatever this log holds that the backend does not.
+
+        **Read off the log, never drained from a queue** — which is why there is
+        no per-event hook here. A backend that buffered from the `session/event`
+        firehose would miss whatever is appended after its listener unwinds, and
+        teardown is when that happens (F2). A session it was never told about is
+        tracked here and written.
+
+        Callable after the row that mounted the backend has unwound, which is
+        how a mount's last write reaches the events its own teardown appended —
+        see `write_on_unwind`.
+        """
         ...
 
     def forget(self, session_id: str) -> None:
@@ -247,7 +264,8 @@ class ClaimingStore(Protocol):
     """
 
     async def claim(self, session_id: str, *, scope: Context) -> None:
-        """Hold this session for `scope`'s life, or raise `SessionBusy`."""
+        """Hold this session for `scope`'s life, or raise `SessionBusy` — and
+        write every live log before letting go (`write_on_unwind`)."""
         ...
 
 
@@ -282,8 +300,8 @@ def attach(ctx: Context, store: SessionPersistence) -> None:
     gives as the reason for typing the Protocol.
     """
     ctx.provide(SESSION_PERSISTENCE, store)
-    # Catch-up: a row (re)activated after sessions already exist owes them the
-    # same buffering a freshly created one gets.
+    # Catch-up: a row (re)activated after sessions already exist owes them what
+    # a freshly created one is owed.
     #
     # A store built here is told a construction-time `durable_length` (B7);
     # asking the medium what it holds is each backend's job. See
@@ -291,7 +309,6 @@ def attach(ctx: Context, store: SessionPersistence) -> None:
     for session in ctx.require(SESSIONS).list():
         store.track(session)
     ctx.on("session/created", store.track)
-    ctx.on("session/event", store.record)
     ctx.on("session/flush", store.flush)
     ctx.on("session/disposed", lambda session: store.forget(session.id))
 
@@ -309,3 +326,55 @@ def attach(ctx: Context, store: SessionPersistence) -> None:
             order=20,
         ),
     )
+
+
+def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
+    """Make writing every live session the last thing `scope` does before it lets go (F2).
+
+    **Teardown appends.** An agent's workspace is released with `workspace/disposed`,
+    a child's parent-scope effect writes its tombstone, a canceled turn closes
+    itself. All of it happens while `scope` unwinds its children — every row, and
+    beneath the `agent` row every agent scope — which is after each host's own
+    flush, and for the agent scopes after the persistence row itself has gone:
+    rows unwind in reverse, and persistence mounts after `agent`. So a clean stop
+    wrote a log that read as a crash, and `workspace-reconcile` reclaimed trees a
+    clean exit had already released.
+
+    An effect of the **mount's own scope** is the one thing that runs after all of
+    that: a scope unwinds its children first, then its own effects, LIFO. Each
+    backend's `claim` registers this right after the lease (I-5) is taken on the
+    same scope, so it runs before the lease is given back — the log is written
+    while it is still this process's to write, and no host has to remember it.
+
+    Straight to the backend rather than through `SessionStore.flush`, which
+    dispatches `session/flush` to listeners that have unwound by now. Parents
+    before children, through the store's own `lineage` and for its reason: a
+    reference-forked child is unreadable without its parent's prefix, so a write
+    cut short must leave the parent's done.
+
+    A scope with no session store has nothing to write. One registration per
+    claim: a host that claims two sessions registers two, and the second of them
+    to run finds nothing owed.
+    """
+    sessions = scope.get(SESSIONS)
+    if sessions is None:
+        return
+
+    async def last_write() -> None:
+        written: set[str] = set()
+        for live in sessions.list():
+            for session in sessions.lineage(live):
+                if session.id in written:
+                    continue
+                written.add(session.id)
+                try:
+                    await store.flush(session)
+                except Exception:
+                    # One unwritable log must not keep the next from being written.
+                    log.warning(
+                        "ph.persistence: session %s could not be written on unwind",
+                        session.id,
+                        exc_info=True,
+                    )
+
+    scope.add_disposer(last_write, label="session-last-write")
