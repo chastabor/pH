@@ -787,8 +787,16 @@ Three inbox targets, differing in *when* and *whether they wake*
 | `inject` | next **step** | **no** |
 
 Durability is not the loop's job: `session-checkpoint-policy` flushes before
-every model request, before every top-level tool body, and after a rejected
-`agent/pre-step` (`persistence/checkpoint_policy.py`).
+every model request, before every top-level tool body — and before a nested
+Code Mode dispatch whose tool can reach past the workspace — and after a
+rejected `agent/pre-step` (`persistence/checkpoint_policy.py`). A record that
+must precede an effect outside those barriers flushes itself: a daemon verb
+before it replies, a `!!` command before it runs, an approval or a question
+before it is put to a person, an upload before its handle is cached, a
+subagent's outcome before its parent reports it. A backend writes what the log
+holds past its own cursor rather than draining a queue, so what a teardown
+appends is still owed — and `write_on_unwind`, which each backend's `claim`
+registers beside the lease, is the mount's last act (`persistence/protocol.py`).
 
 ### 5.3 Rehydrate
 
@@ -822,7 +830,12 @@ resume without a resume-only hook (`seams/workspace.py`).
 
 **Seed acceptance is one gate for every path** (fork, resume, replay, import):
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown
-non-ignorable types (`session/session.py`).
+non-ignorable types (`session/session.py`). **`Session.append` refuses the same
+types on the way in**, so no build writes a log it cannot read back; a package
+outside ph-core adds its own with `declare_log_type`, naming an owner and whether
+another build may skip it (`session/known_event_types.py`). And the JSONL reader
+drops an unterminated final line — the one damage a death mid-write leaves,
+which no flush ever reported written — where it used to refuse the whole log.
 
 **Subagent rehydration** is separate and narrower. `RehydratableProvider.rehydrate`
 re-attaches a runtime to a *settled* child so it can be addressed again. The one
@@ -870,7 +883,7 @@ the tombstone is the record.
 
 | Reason | Trigger | Event appended | What survives |
 |---|---|---|---|
-| **Clean dispose** | mode completion, or wire `shutdown` | **none** — there is no `supervisor/shutdown` type | whatever the caller flushed |
+| **Clean dispose** | mode completion, or wire `shutdown` | **none** — there is no `supervisor/shutdown` type | the whole log, including what the unwind itself appended (`workspace/disposed`, tombstones): `write_on_unwind` runs after every scope below the mount has unwound |
 | **Passivation** | idle ≥ `PASSIVATE_AFTER` (90 min) on a 60 s sweep | `supervisor/passivated {idleMs}`, **write-ahead** | the JSONL: journal, schedules, ladder state, all re-folded on next start |
 | **Retry ladder** | any `Exception` from a root's task | `supervisor/retry` before each attempt; `supervisor/failed` on give-up; `supervisor/recovered` on success | the root stays **mounted** and still accepts wakes |
 | **Daemon unreachable** | socket `(st_dev, st_ino)` changed | `supervisor/unreachable`, to **every** root, each flushed | everything — **roots keep working** |
