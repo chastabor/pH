@@ -96,6 +96,7 @@ from ..payloads import (
     AskSettledNotice,
     CommandShown,
     DaemonLifetime,
+    MutationRepeated,
     QuestionAsk,
     QuestionAskReply,
     SessionCommandsNotice,
@@ -116,7 +117,13 @@ from .screens import AppSurface, open_screen_action
 from .state import CatalogEntry, Surface, TuiState
 from .trajectory_screen import CLIENT_SIDE as TRAJECTORY
 
-__all__ = ["LOCAL_SCREENS", "DaemonSession", "attach_session"]
+__all__ = ["LOCAL_SCREENS", "UNKNOWN_REPEAT", "DaemonSession", "attach_session"]
+
+UNKNOWN_REPEAT = (
+    "This command was sent before and the daemon cannot say whether it finished — "
+    "it may have stopped partway. Check its effect before running it again."
+)
+"""What a re-sent slash command says when its first attempt's outcome is unknown."""
 
 log = logging.getLogger("ph_app.tui.remote")
 
@@ -780,7 +787,10 @@ def _remote_command(
         # A repeat answers with a description and no `shown`, which is the one
         # thing this caller wanted — so the union is narrowed rather than
         # ignored, and a re-sent command says nothing instead of saying the
-        # wrong thing.
+        # wrong thing. Unless the first attempt's outcome is unknown: then the
+        # person is the one to decide, and is told so (P10-10).
+        if isinstance(reply, MutationRepeated) and reply.outcome == "unknown":
+            return UNKNOWN_REPEAT
         return reply.shown if isinstance(reply, CommandShown) else None
 
     return CommandDefinition(

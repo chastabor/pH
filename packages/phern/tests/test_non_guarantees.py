@@ -64,6 +64,8 @@ CLAIMED = {
     "how long `!!` may run": "without limit",
     "who may run `!!`": "anyone holding the web token",
     "a question a person walked away from": "re-posed only while this daemon runs",
+    "an outside effect after a crash": "unknown unless the tool can say",
+    "facts across two logs": "eventual, not atomic",
     "per user": "one daemon per $PH_RUNTIME",
 }
 """Every N5 row, and the phrase that carries it.

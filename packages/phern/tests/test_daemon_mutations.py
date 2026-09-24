@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from daemon_helpers import running, until
 
-from ph.keys import COMMANDS
+from ph.keys import COMMANDS, CREDENTIALS, SESSIONS
 from ph.llm.types import AttachmentRef
 from ph.seams.commands import CommandDefinition
 from ph.session import now_ms
@@ -113,7 +113,7 @@ def test_every_mutation_has_a_case_here_and_no_projection_is_one() -> None:
 async def test_the_same_key_twice_acts_once_and_says_so(method: str, tmp_path: Path) -> None:
     """One key, one effect, one reply shape — for every row, not two of them.
 
-    Sabotage: drop `once` from the wrapper, and the second call acts again; give
+    Sabotage: drop the journal's dedupe, and the second call acts again; give
     one handler its own `repeated` reply, and the shape assertion fails for it.
     """
     build, effects = CASES[method]
@@ -130,6 +130,7 @@ async def test_the_same_key_twice_acts_once_and_says_so(method: str, tmp_path: P
         assert again["repeated"] is True and again["sessionId"] == root.id, (
             "one repeat shape for every verb, so a client branches on one field"
         )
+        assert again["outcome"] == "settled", "the first attempt finished, and says so"
         if effects is not None:
             await until(lambda: effects(root) >= 1, what=f"{method} to take effect")
             assert effects(root) == 1
@@ -214,3 +215,85 @@ async def test_a_verb_is_on_disk_before_it_is_answered(tmp_path: Path) -> None:
         types = stored_types(root.ctx, root.id)
         assert "client/command" in types, "the idempotence key was only in memory"
         assert "permission/preset" in types, "the act was only in memory"
+
+
+async def test_a_retry_after_a_crash_mid_act_is_told_the_outcome_is_unknown(
+    tmp_path: Path,
+) -> None:
+    """P10-10, decision 4. The key reached disk and its settle never did — the
+    daemon died mid-act — so the next daemon's repair settles it `unknown`, and
+    the retry is told exactly that rather than a bare `repeated` that reads as
+    "it finished".
+
+    The crash is the log it leaves: an opened `client/command` with nothing
+    after it, written by the first daemon and resumed by the second over the
+    same `$PH_HOME`.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("crashed")
+        root.session.append("client/command", {"command": "c:1"})
+        await root.ctx.require(SESSIONS).flush(root.session)
+
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        again = await client.call(
+            "session/preset",
+            sessionId="crashed",
+            clientId="c",
+            commandId="1",
+            preset="workspace-write",
+        )
+        root = daemon.held("crashed")
+
+        assert again["repeated"] is True and again["outcome"] == "unknown"
+        assert root.session.latest("permission/preset") is None, "a repeat never acts"
+        settled = root.session.latest("client/command-settled")
+        assert settled is not None and settled.data["outcome"] == "unknown"
+
+
+async def test_an_act_that_raises_leaves_its_key_unknown(tmp_path: Path) -> None:
+    """`claim`'s half of the same rule, inside one process: an act that raised
+    has claimed its key and may have begun, so the retry is refused as
+    repeated — and told the outcome is unknown, not settled."""
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("raised")
+        client = await daemon.client()
+
+        def fails(argument: str, ctx: object) -> str:
+            raise RuntimeError("the act failed partway")
+
+        root.ctx.require(COMMANDS).register(
+            CommandDefinition(name="fails", summary="fails", run=fails)
+        )
+        keyed = {"sessionId": root.id, "clientId": "c", "commandId": "1", "line": "/fails"}
+        with pytest.raises(DaemonError):
+            await client.call("session/command", **keyed)
+        again = await client.call("session/command", **keyed)
+
+        assert again["repeated"] is True and again["outcome"] == "unknown"
+
+
+async def test_a_credential_re_sent_after_a_restart_is_stored_again(tmp_path: Path) -> None:
+    """L1. A credential lives in the daemon's memory, and its key on the log. A
+    restart keeps the key and loses the value, so the re-send a client makes
+    after reconnecting must store it again rather than be refused as a repeat —
+    which only a key scoped to the process that stored it allows.
+
+    Sabotage: drop `key_scope="process"` from the `credentials/store` row and the
+    second daemon answers `repeated`, holding no value.
+    """
+    keyed = {"clientId": "c", "commandId": "1", "name": "PROBE_KEY", "value": "shh"}
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("keyed")
+        client = await daemon.client()
+        await client.call("credentials/store", sessionId=root.id, **keyed)
+        again = await client.call("credentials/store", sessionId=root.id, **keyed)
+        assert again["repeated"] is True, "within the process that stored it, the key dedupes"
+
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        reply = await client.call("credentials/store", sessionId="keyed", **keyed)
+        root = daemon.held("keyed")
+
+        assert reply.get("repeated") is not True, "a restart lost the value, not the key"
+        assert "PROBE_KEY" in root.ctx.require(CREDENTIALS).provided()

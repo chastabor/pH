@@ -1449,6 +1449,9 @@ BOUND: dict[str, str] = {
     "ToolOutput.presentation_meta": "ToolRuntime.dispatch",
     "ToolOutput.render": "ToolRuntime.dispatch",
     "ToolDefinition.is_concurrency_safe": "ToolRuntime.execution_mode",
+    # Asked for a repeat of an unknown effect and, through `reconciled`, by
+    # `resume_session` — one invoker for both, bound as the registering row.
+    "ToolDefinition.reconcile": "ToolRuntime._answer",
     # The five registries P6-29 reached, once the binding could hold a pair.
     "CommandDefinition.run": "CommandRegistry.dispatch",
     "CompactionNote.text": "CompactionSeam.notes",
@@ -1539,6 +1542,13 @@ UNBOUND: dict[str, str] = {
     # answers yes or no. Nothing to register — and it is consulted *before* the
     # ask is committed, so there is no execution for it to belong to yet.
     "UserQuestionService._reachable": "a policy answer read before the ask; nothing to register",
+    # An intent kind's functions read a record and return a key or a payload. The
+    # folds call them over a stored log with nothing mounted, and repair calls
+    # them while a log is being rebuilt, so there is no running row to bind — and
+    # nothing a pure read of a record should register.
+    "IntentKind.closer": "a pure payload from a record; repair calls it with nothing mounted",
+    "IntentKind.opened_key": "a pure read of a record; folds call it with nothing mounted",
+    "IntentKind.settled_key": "a pure read of a record; folds call it with nothing mounted",
     # The egress proxy asks the seam per connection and reports a refusal back to
     # the row that mounted it. Both run on the proxy's own task, outside every
     # pipeline; the answer registers nothing and the report appends a record.
@@ -1556,6 +1566,9 @@ UNBOUND: dict[str, str] = {
     # Unlike its sibling `is_concurrency_safe`, which the scheduler binds because it
     # holds the `Running` pair from the same view; `hitl` holds only a definition.
     "ToolDefinition.is_irreversible": "a policy answer over arguments; nothing to register",
+    # A pure read of the arguments, asked before the body runs so the pipeline can
+    # decide whether to run it at all; nothing it could register would belong to a run.
+    "ToolDefinition.idempotency_key": "a pure key over arguments, read before the body",
     "_Screen.decide": "a policy answer; its own owner is what fs filters on",
     # --- factories and transports --------------------------------------------
     "_Layer.code_namespaces": "a factory, invoked to build bindings for a run",

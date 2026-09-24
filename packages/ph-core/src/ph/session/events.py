@@ -29,6 +29,7 @@ from .json import freeze_json_value
 __all__ = [
     "SESSION_FORMAT_VERSION",
     "SURFACE_EVENT_TYPES",
+    "BatchRef",
     "SessionEvent",
     "SurfaceIntent",
     "SurfaceOp",
@@ -37,7 +38,7 @@ __all__ = [
     "now_ms",
 ]
 
-SESSION_FORMAT_VERSION = 1
+SESSION_FORMAT_VERSION = 2
 """The on-disk format version, stamped into every header and checked on load.
 
 A single monotonic integer with no major/minor split. Bump exactly when an older
@@ -54,6 +55,13 @@ sessions without opening one of them (`SessionHeader.family`). Nothing about the
 envelope or the event semantics changed; the bump is here because the *layout*
 did, and a 0.1.x log sitting in an undecorated directory would simply stop being
 found by a filtered listing. Refusing it says so.
+
+**2 (0.4.0): the envelope carries batch membership** (P10-15). Events appended
+together by `Session.batch()` each say which batch they belong to — `batch: {first,
+count}` — so a reader can tell a batch a torn write cut short (and drop it whole) from
+one that is complete, anywhere in a log and not only at its tail. A format-1 reader
+would refuse the field as unknown, which is exactly why this is a bump; a format-1
+log is refused by this header check, not migrated.
 """
 
 SURFACE_EVENT_TYPES: frozenset[str] = frozenset(
@@ -124,6 +132,24 @@ class SurfaceReplace(WireModel):
 SurfaceOp: TypeAlias = 'Literal["append"] | SurfaceReplace'
 
 
+class BatchRef(WireModel):
+    """Which batch an event was appended in: its first member's seq, and how many.
+
+    **On every member**, so the question "is this batch whole?" has an exact answer
+    at any point of a log — the members from `first` to `first + count - 1`, each
+    carrying the same ref, with nothing else between them. A batch of one is never
+    stamped: there is nothing to keep together.
+    """
+
+    first: Seq
+    count: Annotated[StrictInt, Field(ge=2)]
+
+    @property
+    def last(self) -> int:
+        """The seq of the batch's last member."""
+        return self.first + self.count - 1
+
+
 @dataclass(frozen=True, slots=True)
 class SurfaceIntent:
     """Surface placement supplied at `Session.append`.
@@ -156,6 +182,7 @@ class _EventWire(WireModel):
     the field rather than one being thorough — and is refused."""
     source_event_seqs: list[Seq] | None = None
     surface_op: Literal["append"] | SurfaceReplace | None = None
+    batch: BatchRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +216,9 @@ class SessionEvent(WireDataclass):
     or the surface nodes a replacement shadows."""
     surface_op: SurfaceOp | None = None
     """How this event entered the surface; `None` for a non-surface event."""
+    batch: BatchRef | None = None
+    """The batch this event was appended in (P10-15); `None` for an event appended
+    alone. Stamped by `Session.batch()`, checked on every seed and admit."""
 
     def to_wire(self, *, thaw: bool = True) -> dict[str, JsonValue]:
         """The camelCase JSON object, with absent optional fields omitted.
@@ -220,6 +250,7 @@ class SessionEvent(WireDataclass):
                 None if parsed.source_event_seqs is None else tuple(parsed.source_event_seqs)
             ),
             surface_op=parsed.surface_op,
+            batch=parsed.batch,
         )
 
     def readmitted(self) -> SessionEvent:

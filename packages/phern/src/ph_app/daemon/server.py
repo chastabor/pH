@@ -46,7 +46,7 @@ from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
 from ph.seams.schedule import Schedule
 from ph.seams.shell import ShellService
-from ph.session import now_ms, session_written
+from ph.session import IntentScope, Prior, intents_of, now_ms, session_written
 from ph.text import duration
 from ph.wire import WireModel
 
@@ -83,6 +83,7 @@ from ..payloads import (
     Hold,
     MutationRepeated,
     PresetApplied,
+    RepeatOutcome,
     RootDescription,
     RootListing,
     RootStatusReply,
@@ -130,7 +131,7 @@ from .projections import (
     tools_of,
 )
 from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
-from .supervisor import NON_GUARANTEES, Root, Supervisor
+from .supervisor import CLIENT_COMMAND, NON_GUARANTEES, Root, Supervisor
 
 if TYPE_CHECKING:
     from ph.seams.attachments import AttachmentStore
@@ -226,6 +227,10 @@ class Mutation[P: MutationParams, R: WireModel]:
     `act`. Each pair agrees on it by being written together, and no third party
     ever sees it."""
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]]
+    key_scope: IntentScope = "log"
+    """How long the key names the act (`IntentScope`). `process` for a verb whose
+    effect lives in this process's memory — `credentials/store` — so a re-send
+    after a restart stores the value again rather than being refused (L1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +278,15 @@ and `.handle` off either, which structural attribute access on a union gives
 for free — where a shared base would have to declare a `handle` returning
 `Awaitable[Any]`, putting back the `Any` the row types exist to remove.
 """
+
+
+def _repeat_outcome(prior: Prior) -> RepeatOutcome:
+    """`settled` only for a settle that says so: an open key is one still acting in
+    this process, and repair's settle says `unknown` in so many words."""
+    settled = prior.settled
+    return (
+        "settled" if settled is not None and settled.data.get("outcome") == "settled" else "unknown"
+    )
 
 
 def _command_key(params: MutationParams) -> str:
@@ -495,20 +509,39 @@ class _Connection:
         parsed = mutation.verb.parse(params)
         root = await self.server.supervisor.start(parsed.session_id)
         plan = await mutation.prepare(self, root, parsed)
-        if not root.once(_command_key(parsed)):
-            return MutationRepeated(**root.describe().model_dump())
-        reply = await mutation.act(self, root, parsed, plan)
+        key = _command_key(parsed)
+        if not key:
+            # No identity offered, so no deduplication wanted: it always acts.
+            reply = await mutation.act(self, root, parsed, plan)
+        else:
+            journal = intents_of(root.ctx)
+            # The key is claimed between the halves (`Mutation` says why), and an
+            # act that raises is settled `unknown` by `claim` rather than leaving
+            # a key that refuses the retry with no word that nothing finished.
+            async with journal.claim(
+                root.session, CLIENT_COMMAND, {"command": key}, key_scope=mutation.key_scope
+            ) as held:
+                if isinstance(held, Prior):
+                    # The retry a reconnecting client cannot avoid sending: it
+                    # does not know whether the first one landed. Answering "yes,
+                    # that one — and here is whether it finished" is what makes
+                    # asking twice safe.
+                    return MutationRepeated(
+                        **root.describe().model_dump(), outcome=_repeat_outcome(held)
+                    )
+                reply = await mutation.act(self, root, parsed, plan)
+                journal.settle(root.session, held, {"command": key, "outcome": "settled"})
         # **Durable before the client is told** (F7). A client that has its reply
         # never re-sends, so a reply sent while the key and the act's own record
         # were still in memory made a crash lose the act outright — and
         # `session/prompt`'s "the message is logged" meant logged in a buffer.
-        # After the act rather than between `once` and it: a key made durable
-        # first would turn a crash before the act into a refused retry for work
-        # that never began, which is the loss `Root.once` is written to avoid.
-        # An act that records its own start before an effect it cannot take back
-        # (`!!`, `run_shell`) carries the key to disk with that record, and then a
-        # retry is refused because the log already says the command began.
-        # One flush of the root, which carries both.
+        # After the act, which is why `CLIENT_COMMAND` is `buffered`: a key made
+        # durable first would turn a crash before the act into a refused retry
+        # for work that never began. An act that records its own start before an
+        # effect it cannot take back (`!!`, `run_shell`) carries the key to disk
+        # with that record, and a crash then leaves an open key repair settles
+        # `unknown` — which the retry is told. One flush of the root, which
+        # carries the key, the act and its settle.
         #
         # `written`, not `flush`: the act has happened by now, so a write that
         # fails does not make it not have happened, and answering the verb with
@@ -1037,6 +1070,8 @@ def _mutating[P: MutationParams, R: WireModel](
     verb: Verb[P, R],
     prepare: Callable[[_Connection, Root, P], Awaitable[Any]],
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]],
+    *,
+    key_scope: IntentScope = "log",
 ) -> tuple[str, Mutation[Any, Any]]:
     """One `MUTATIONS` row, keyed by its verb's name and **checked against it**.
 
@@ -1049,7 +1084,7 @@ def _mutating[P: MutationParams, R: WireModel](
     names no type variable, so `P` and `R` can only come from the verb, and the
     two halves are checked against it.
     """
-    return verb.name, Mutation(verb, prepare, act)
+    return verb.name, Mutation(verb, prepare, act, key_scope)
 
 
 def _unkeyed[P: WireModel, R: WireModel](
@@ -1083,6 +1118,8 @@ MUTATIONS: dict[str, Mutation[Any, Any]] = dict(
             verbs.CREDENTIALS_STORE,
             _Connection._prepare_credential,
             _Connection._act_credential,
+            # The value lives in this process's memory; its key must not outlive it.
+            key_scope="process",
         ),
     )
 )
@@ -1096,7 +1133,9 @@ a method in this table gets the write-ahead guard whether its author thought of
 it or not, and one that is not in it cannot claim to be idempotent by key.
 
 The repeat reply has one shape — `MutationRepeated`, a description carrying
-`repeated: true` — so a client branches on one field for every verb.
+`repeated: true` and whether the first attempt finished (`outcome`) — so a client
+branches on one field for every verb. The keys and their outcomes are the
+journal's (`CLIENT_COMMAND`, P10-10).
 Deliberately absent: `attachment/put`
 (content-addressed, so a retry is a no-op already, and its reply *is* the
 reference a repeat must still return) and `session/new` (`start` is idempotent

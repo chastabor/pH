@@ -79,6 +79,7 @@ __all__ = [
     "PresetApplied",
     "QuestionAsk",
     "QuestionAskReply",
+    "RepeatOutcome",
     "RootDescription",
     "RootDetail",
     "RootListing",
@@ -221,6 +222,10 @@ class RootDescription(SessionScoped):
         )
 
 
+RepeatOutcome: TypeAlias = Literal["settled", "unknown"]
+"""What became of the first attempt a repeat names (P10-10, decision 4)."""
+
+
 class MutationRepeated(RootDescription):
     """A mutation whose idempotence key had already been claimed.
 
@@ -230,6 +235,15 @@ class MutationRepeated(RootDescription):
     """
 
     repeated: bool = True
+    outcome: RepeatOutcome
+    """Whether the first attempt finished. **Required**, not defaulted: daemon and
+    front ends ship together (`PROTOCOL_VERSION` 4), and a default would be the
+    one field that silently claims `settled` for a verb nobody saw finish.
+
+    `settled` — it ran and answered; this is the same request again. `unknown` —
+    the key was claimed and no settle followed: the daemon died mid-act and repair
+    closed it, the act raised, or it is still running in this process. A client
+    told `unknown` should ask the person rather than assume either way."""
 
 
 class RootDetail(RootDescription):

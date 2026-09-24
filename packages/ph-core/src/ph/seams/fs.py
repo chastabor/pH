@@ -440,7 +440,9 @@ class FsService:
             return self.root
         return resolved or self.root
 
-    def named(self, path: str | Path, *, agent: AgentHandle | None = None) -> str:
+    def named(
+        self, path: str | Path, *, agent: AgentHandle | None = None, root: Path | None = None
+    ) -> str:
         """How a path should be *written down* — relative to this agent's root.
 
         `resolve`'s inverse, and the form every path that reaches the model or
@@ -463,13 +465,15 @@ class FsService:
         prefix off; this is the same answer for the paths that arrive one at a
         time.
         """
-        resolved = self.resolve(path, agent=agent)
+        resolved = self.resolve(path, agent=agent, root=root)
         try:
-            return resolved.relative_to(self.root_for(agent)).as_posix()
+            return resolved.relative_to(root or self.root_for(agent)).as_posix()
         except ValueError:
             return str(resolved)
 
-    def resolve(self, path: str | Path, *, agent: AgentHandle | None = None) -> Path:
+    def resolve(
+        self, path: str | Path, *, agent: AgentHandle | None = None, root: Path | None = None
+    ) -> Path:
         """Resolve against the agent's workspace root, **with `..` collapsed** (J1).
 
         A relative path is the agent's business; an absolute one is passed
@@ -491,9 +495,14 @@ class FsService:
         with the caller that needs symlink-safety — rather than being half
         answered here by a syscall that would also make a relative path's
         meaning depend on what is on disk.
+
+        `root` resolves against a root the caller already knows instead of asking
+        for the agent's — for a caller with no agent to ask, such as a tool
+        reconciling a call on resume from the root its log recorded.
         """
         candidate = Path(path).expanduser()
-        joined = candidate if candidate.is_absolute() else (self.root_for(agent) / candidate)
+        base = root if root is not None else self.root_for(agent)
+        joined = candidate if candidate.is_absolute() else (base / candidate)
         return Path(os.path.normpath(joined))
 
     # ------------------------------------------------------------------ read --

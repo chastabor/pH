@@ -29,6 +29,7 @@ def test_every_envelope_field_maps_to_to_camel_of_its_name() -> None:
         "ignorable": "ignorable",
         "source_event_seqs": "sourceEventSeqs",
         "surface_op": "surfaceOp",
+        "batch": "batch",
     }
     names = {field.name for field in dataclasses.fields(SessionEvent)}
     assert names == set(mapping)

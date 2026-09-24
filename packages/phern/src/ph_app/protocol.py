@@ -79,7 +79,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -107,6 +107,14 @@ the archive and the workspace scratch root. A 0.2.x client that minted any other
 id is refused where it used to be served. Released beside the kernel's fd-3
 protocol moving from 1 to 4 (`ph_runtime.protocol.PROTOCOL_VERSION`, its own
 number), which is why every package moved to 0.3.0 together.
+
+**4 (0.4.0): a repeated mutation says whether the first attempt finished**
+(P10-10). `MutationRepeated` carries a required `outcome` — `settled`, or `unknown`
+when the key was claimed and no settle followed (a crash mid-act, an act that
+raised) — so a client told `unknown` can ask the person rather than assume. A 0.3.x
+client reading a 0.4.x repeat ignores the field; a 0.4.x client reading a 0.3.x
+repeat refuses it, since the field is required, and restarting the daemon fixes
+that. Released with the session log's format 2 (P10-15), so each number moves once.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

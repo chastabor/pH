@@ -21,7 +21,9 @@ Ported from dsh `packages/core/session/src/index.ts`.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import PurePath
 from typing import Literal, TypeAlias, cast
@@ -33,7 +35,7 @@ from ..llm.types import Message
 from ..selectors import matches_any, parse_all
 from ..wire import WireModel
 from .derive import derive_event_message, derive_transcript
-from .events import SESSION_FORMAT_VERSION, SessionEvent, SurfaceIntent, now_ms
+from .events import SESSION_FORMAT_VERSION, BatchRef, SessionEvent, SurfaceIntent, now_ms
 from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import UnknownEventTypeError, is_ignorable, is_known
 from .request_header import (
@@ -45,7 +47,7 @@ from .request_header import (
 )
 from .surface import SurfaceManager, fold_surface
 
-__all__ = ["Session", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
+__all__ = ["Session", "SessionBatch", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
 
 CWD_TAG_LENGTH = 6
 """Hex characters of the cwd digest that tag a lineage directory.
@@ -235,6 +237,8 @@ class Session:
     """An event-sourced session: an append-only log of `SessionEvent`s."""
 
     __slots__ = (
+        "_batch",
+        "_batch_open",
         "_derived",
         "_derived_generation",
         "_derived_nodes",
@@ -262,6 +266,10 @@ class Session:
         self._events_snapshot: tuple[SessionEvent, ...] | None = None
         self._observers: tuple[SessionObserver, ...] = ()
         self._publishing = False
+        self._batch: SessionBatch | None = None
+        """The batch whose block is open, if any — one at a time, and the only one
+        whose `append` still stamps."""
+        self._batch_open: BatchRef | None = None
         self._derived: tuple[Message, ...] = ()
         self._derived_nodes = 0
         self._derived_generation = 0
@@ -290,6 +298,18 @@ class Session:
                     raise ValueError(
                         f"invalid seed event at index {len(self._log)}: {error}"
                     ) from error
+            if self._batch_open is not None:
+                # **A seed may not end inside a batch** (P10-15). A reader drops a
+                # batch a torn write cut short before it gets here, so an
+                # unfinished one reaching a seed is damage, and seeding it would
+                # hand every reader half of something that only means anything
+                # whole. The check is the seed path's alone: a replica admitting
+                # a batch member by member is mid-batch between frames, legitimately.
+                opened = self._batch_open
+                raise ValueError(
+                    f"the seed ends inside the batch at seq {opened.first} "
+                    f"({len(self._log) - opened.first} of {opened.count} events)"
+                )
 
         self.durable_length = durable
         """How many leading events a **store already holds**; 0 unless declared.
@@ -443,6 +463,62 @@ class Session:
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
         """
+        return self._commit(self._event(event_type, data, surface, len(self._log)))
+
+    @contextmanager
+    def batch(self) -> Iterator[SessionBatch]:
+        """Append several events as one: all of them land, or none of them do (P10-14).
+
+        ```python
+        with session.batch() as batch:
+            batch.append("compaction/summarized", accounting)
+            batch.append("user/message", summary, SurfaceIntent(...))
+        ```
+
+        For records that only mean something together — an accounting record and
+        the replacement it describes. Appended one at a time, a later member the
+        surface refuses leaves the earlier ones in the log, describing a
+        replacement that never landed.
+
+        **Nothing is committed until the block exits.** Each member is stamped
+        when `batch.append` is called — its seq is its place in the batch, so a
+        later member may cite an earlier one — and on exit every member is planned
+        against the surface together (`SurfaceManager.validate_batch`); only if
+        all of them pass are they pushed and published, in order, under one
+        reentrancy guard, so no observer can append between two members. An
+        exception inside the block, a refused type or payload, or a refused plan
+        pushes nothing. That is the whole of in-process failure: there is nothing
+        to roll back, because nothing was committed.
+
+        **Synchronous by contract.** An `await` inside the block lets another
+        task append, and the members were stamped against a log that has since
+        moved; the batch is then refused whole rather than landed at seqs that
+        belong to someone else. Not enforced: that the block awaits nothing —
+        only its consequence is caught.
+
+        Not nested: one batch at a time per session.
+
+        :raises RuntimeError: when a batch is already open, when the log moved
+            while this one was, or when re-entered during publication.
+        :raises SurfaceError: when any member's surface transition is refused.
+        """
+        if self._batch is not None:
+            raise RuntimeError("a session batch cannot be opened inside another")
+        batch = self._batch = SessionBatch(self, len(self._log))
+        try:
+            yield batch
+        finally:
+            self._batch = None
+        self._commit_batch(batch)
+
+    def _event(
+        self,
+        event_type: str,
+        data: Mapping[str, JsonValue],
+        surface: SurfaceIntent | None,
+        seq: int,
+    ) -> SessionEvent:
+        """Build the event `append` would commit at `seq`, refusing what it refuses."""
         if not is_known(event_type):
             raise UnknownEventTypeError(
                 f'"{event_type}" is not a session event type this build can read back; '
@@ -460,16 +536,15 @@ class Session:
             raise InvalidJsonValueError(
                 "", f"an event payload must be a JSON object, not {type(data).__name__}"
             )
-        event = SessionEvent(
+        return SessionEvent(
             type=event_type,
-            seq=len(self._log),
+            seq=seq,
             time=now_ms(),
             data=freeze_json_value(data),
             source_event_seqs=None if surface is None else surface.source_event_seqs,
             surface_op=None if surface is None else surface.surface_op,
             ignorable=is_ignorable(event_type),
         )
-        return self._commit(event)
 
     def admit(self, event: SessionEvent) -> SessionEvent:
         """Append an event that already carries its `seq` and `time` — a replica's path.
@@ -496,7 +571,11 @@ class Session:
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
         """
-        return self._commit(_readmit(event, len(self._log)))
+        admitted = _readmit(event, len(self._log))
+        batch_open = _within_batch(self._batch_open, admitted)
+        committed = self._commit(admitted)
+        self._batch_open = batch_open
+        return committed
 
     def _commit(self, event: SessionEvent) -> SessionEvent:
         """Validate against the surface, push, and publish — `append` and `admit`'s
@@ -512,23 +591,52 @@ class Session:
         it — and so the two doors cannot disagree about the sentence, which they
         briefly did.
         """
+        self._refuse_reentry()
+        self._surface.validate_next(event)
+        self._push((event,))
+        return event
+
+    def _commit_batch(self, batch: SessionBatch) -> None:
+        """`_commit` for several events planned together; see `batch`."""
+        self._refuse_reentry()
+        if len(self._log) != batch.base:
+            raise RuntimeError(
+                f"session {self.id} moved from seq {batch.base} to {len(self._log)} while a "
+                "batch was open; its members were stamped against a log that no longer "
+                "exists, so none of them is appended"
+            )
+        events = batch.events
+        if not events:
+            return
+        if len(events) > 1:
+            # Every member says which batch it is in (P10-15), so a reader can tell
+            # one a torn write cut short from one that is whole. One event is not
+            # stamped: there is nothing to keep together.
+            ref = BatchRef(first=batch.base, count=len(events))
+            events = tuple(replace(event, batch=ref) for event in events)
+        self._surface.validate_batch(events)
+        self._push(events)
+
+    def _refuse_reentry(self) -> None:
         if self._publishing:
             raise RuntimeError(
                 "session append cannot reenter while another append is being published"
             )
-        self._surface.validate_next(event)
+
+    def _push(self, events: Sequence[SessionEvent]) -> None:
+        """Push and publish validated events, each seen with the log ending at it."""
         self._publishing = True
         try:
-            self._log.append(event)
-            self._events_snapshot = None
-            for observer in self._observers:
-                try:
-                    observer(self, event)
-                except Exception:
-                    log.exception(
-                        "ph.session: observer failed for %s at seq %s", event.type, event.seq
-                    )
-            return event
+            for event in events:
+                self._log.append(event)
+                self._events_snapshot = None
+                for observer in self._observers:
+                    try:
+                        observer(self, event)
+                    except Exception:
+                        log.exception(
+                            "ph.session: observer failed for %s at seq %s", event.type, event.seq
+                        )
         finally:
             self._publishing = False
 
@@ -707,6 +815,72 @@ class Session:
             if event.type in types:
                 return event
         return None
+
+
+class SessionBatch:
+    """The events one `Session.batch()` block will append; see there.
+
+    Holds stamped events and nothing else — it never touches the log, so dropping
+    one (an exception out of the block) needs no cleanup.
+    """
+
+    __slots__ = ("_events", "_session", "base")
+
+    def __init__(self, session: Session, base: int) -> None:
+        self._session = session
+        self._events: list[SessionEvent] = []
+        self.base = base
+        """The seq the first member takes: the log's length when the batch opened."""
+
+    @property
+    def events(self) -> tuple[SessionEvent, ...]:
+        """The members as stamped. The log holds them as committed, with the batch's
+        membership on each."""
+        return tuple(self._events)
+
+    def append(
+        self,
+        event_type: str,
+        data: Mapping[str, JsonValue],
+        surface: SurfaceIntent | None = None,
+    ) -> SessionEvent:
+        """Stamp an event for this batch, refused as `Session.append` would refuse it.
+
+        Returned so a later member can cite its seq; **not yet in the log**, and
+        not in it at all if the batch is refused.
+        """
+        if self._session._batch is not self:
+            # The block has exited, landed or not: a member stamped now would belong
+            # to no commit, so it is refused rather than dropped.
+            raise RuntimeError("this session batch has closed; open another to append")
+        event = self._session._event(event_type, data, surface, self.base + len(self._events))
+        self._events.append(event)
+        return event
+
+
+def _within_batch(open_batch: BatchRef | None, event: SessionEvent) -> BatchRef | None:
+    """Hold `event` to the batch the log is inside, and say which it is inside after.
+
+    A batch's members are contiguous and each carries the same ref: the first is at
+    `first`, and nothing unstamped, and no other batch, falls before its last. Asked
+    of every event that arrives already stamped — seed, fork, resume, a replica —
+    since an owner's own `batch()` stamps its members correctly by construction.
+
+    :raises ValueError: when the event breaks a batch or starts one out of place.
+    """
+    ref = event.batch
+    if open_batch is not None and ref != open_batch:
+        raise ValueError(
+            f"seq {event.seq} interrupts the batch at seq {open_batch.first} "
+            f"({event.seq - open_batch.first} of {open_batch.count} events)"
+        )
+    if ref is None:
+        return None
+    if open_batch is None and ref.first != event.seq:
+        raise ValueError(
+            f"seq {event.seq} claims the batch at seq {ref.first}, which it does not continue"
+        )
+    return None if event.seq == ref.last else ref
 
 
 def _readmit(source: SessionEvent, index: int) -> SessionEvent:

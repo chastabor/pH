@@ -42,12 +42,23 @@ from ..cordis import (
     running,
     settled,
 )
-from ..json import JsonValue, thaw_json
+from ..json import JsonObject, JsonValue, as_bool, as_str, thaw_json
 from ..keys import APPROVAL, TOOLS
-from ..llm.types import ContentBlock, ToolSchema, text_of
+from ..llm.types import ContentBlock, TextBlock, ToolSchema, content_from_wire, text_of
 from ..seams._restriction import NameFilter
 from ..seams.approval import Edited, Responded, denial_reason
 from ..seams.code_runtime import CodeBindingNamespace, validate_binding_name
+from ..session import (
+    Claim,
+    IntentJournal,
+    IntentKind,
+    Prior,
+    Session,
+    SessionEvent,
+    Unsettled,
+    declare_intent,
+    intents_of,
+)
 from ..session.json import freeze_json_value
 from ..wire import WireModel
 from .definition import (
@@ -56,8 +67,10 @@ from .definition import (
     Ask,
     Block,
     Deny,
+    Done,
     ExecutionMode,
     FailureKind,
+    NotDone,
     PostToolDecision,
     PreToolDecision,
     Respond,
@@ -69,6 +82,7 @@ from .definition import (
     ToolOutput,
     ToolRunContext,
     TransportPresentation,
+    Unknown,
     aborted_result,
     budget_result,
     denied_result,
@@ -79,6 +93,7 @@ from .errors import HarnessError, ToolNotFoundError, error_info, error_message
 
 __all__ = [
     "RUN_CODE",
+    "TOOL_EFFECT",
     "CodeNamespaceFactory",
     "PreparedCall",
     "ToolGuard",
@@ -89,6 +104,41 @@ __all__ = [
 ]
 
 log = logging.getLogger("ph.tools")
+
+
+def _effect_key(event: SessionEvent) -> str:
+    return as_str(event.data.get("key"))
+
+
+def _effect_unknown(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """A keyed call nobody saw finish: its effect may have happened."""
+    return {"key": _effect_key(opened), "callId": opened.data.get("callId"), "outcome": "unknown"}
+
+
+TOOL_EFFECT = declare_intent(
+    IntentKind(
+        opened="tool/effect",
+        settled="tool/effect-settled",
+        opened_key=_effect_key,
+        settled_key=_effect_key,
+        orphan="outcome-unknown",
+        # Opened ahead of the `tools/execute` waterfall, so the checkpoint
+        # policy's barrier — after every pre-execute gate — carries it to disk
+        # before the body runs.
+        barrier="tools-execute",
+        closer=_effect_unknown,
+        owner="ph.tools.registry",
+    )
+)
+"""A call whose tool names its effect (`ToolDefinition.idempotency_key`, P10-12).
+Keyed by tool name and effect key, for the life of the session's log."""
+
+EFFECT_MAY_HAVE_HAPPENED = (
+    "Note: an earlier call with this same effect (call {call_id}) was not seen to "
+    "finish, so it may already have happened. Check before relying on this having "
+    "been the first time."
+)
+"""What a keyed call's result says when it ran after an unknown outcome."""
 
 RUN_CODE = "run_code"
 """The reserved Code Mode transport name.
@@ -228,6 +278,40 @@ class _View:
     """The contributed binding namespaces this scope's programs may reach,
     shadowed by name like tools. Resolved with the view so the run and the SDK
     block read one answer."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Effect:
+    """A keyed call's open intent, from before its wrappers to after its body."""
+
+    journal: IntentJournal
+    session: Session
+    claim: Claim
+    unsure_of: str | None = None
+    """The call id of the earlier attempt nobody saw finish, when this retries one."""
+
+
+def _effect_settle(
+    key: str, call_id: str, *, outcome: str, is_error: bool, content: Sequence[ContentBlock]
+) -> JsonObject:
+    """A `tool/effect-settled` payload: the outcome, and the result a repeat is handed."""
+    return {
+        "key": key,
+        "callId": call_id,
+        "outcome": outcome,
+        "isError": is_error,
+        "content": [block.to_wire() for block in content],
+    }
+
+
+def _repeated(prior: Prior, settled: SessionEvent) -> ToolExecutionResult:
+    """The result the first call with this effect returned, handed back instead."""
+    meta: JsonObject = {"repeated": True, "repeatOf": as_str(prior.opened.data.get("callId"))}
+    return ToolExecutionResult(
+        is_error=as_bool(settled.data.get("isError")),
+        content=tuple(content_from_wire(settled.data.get("content"))),
+        meta=meta,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1049,7 +1133,161 @@ class ToolRuntime:
         return Deny(reason=denial_reason(outcome, f'tool "{name}"'))
 
     async def dispatch(self, run: ToolRunContext) -> PreparedCall:
-        """The around-dispatch stage: `tools/execute` wrappers, then the body."""
+        """The around-dispatch stage: the effect's record, `tools/execute` wrappers,
+        then the body.
+
+        **A call that names its effect is answered from the log when it can be**
+        (P10-12). The record opens here, before the wrappers, so the checkpoint
+        policy's barrier carries it to disk before the body runs; the settle holds
+        what the call returned, so the same effect asked for again — under the new
+        call id a re-issued call always has — gets that result back, marked
+        `repeated`, rather than a second effect.
+        """
+        effect = await self._open_effect(run)
+        if isinstance(effect, ToolExecutionResult):
+            return PreparedCall(run=run, result=effect)
+        prepared = await self._dispatch(run)
+        if effect is not None:
+            prepared = self._settle_effect(run, effect, prepared)
+        return prepared
+
+    async def _open_effect(self, run: ToolRunContext) -> _Effect | ToolExecutionResult | None:
+        """The effect's intent, or the recorded result of a repeat, or `None`."""
+        session = run.execution.session
+        key = self._key_of(run)
+        if session is None or key is None:
+            return None
+        journal = intents_of(self.ctx)
+        data = {"key": f"{run.name}:{key}", "tool": run.name, "callId": run.call_id}
+        opened = await journal.open(session, TOOL_EFFECT, data)
+        if isinstance(opened, Claim):
+            return _Effect(journal=journal, session=session, claim=opened)
+        settled = opened.settled
+        outcome = None if settled is None else settled.data.get("outcome")
+        if settled is not None and outcome == "settled":
+            return _repeated(opened, settled)
+        # Failed, or never seen to finish: this is a new attempt at the effect,
+        # under the same key — which the fold reads as replacing the first.
+        again = journal.record(session, TOOL_EFFECT, data)
+        if outcome == "failed":
+            return _Effect(journal=journal, session=session, claim=again)
+        # Nobody saw the first attempt finish, so the tool is asked whether it
+        # happened (P10-13) before anything is decided for it.
+        earlier = as_str(opened.opened.data.get("callId"))
+        said = await self._answer(
+            run.definition,
+            run.by,
+            run.execution.scope,
+            thaw_json(run.execution.arguments),
+            opened.opened,
+            session,
+        )
+        if isinstance(said, tuple):
+            journal.settle(
+                session,
+                again,
+                _effect_settle(
+                    again.key, run.call_id, outcome="settled", is_error=False, content=said
+                ),
+            )
+            meta: JsonObject = {"reconciled": True, "repeatOf": earlier}
+            return ToolExecutionResult(is_error=False, content=said, meta=meta)
+        return _Effect(
+            journal=journal,
+            session=session,
+            claim=again,
+            unsure_of=None if isinstance(said, NotDone) else earlier,
+        )
+
+    async def reconciled(
+        self,
+        name: str,
+        arguments: JsonValue,
+        record: SessionEvent,
+        session: Session,
+        *,
+        scope: Boundary,
+    ) -> tuple[ContentBlock, ...] | NotDone | Unknown:
+        """Ask the tool `name` names at `scope` whether the call `record` holds happened.
+
+        For `resume_session` (P10-13), which has no run: the same answer the pipeline
+        gets for a repeat of an unknown effect, looked up in this scope's view and
+        bound as the row that registered the tool.
+        """
+        view = self.view(scope)
+        definition = view.visible.get(name)
+        if definition is None:
+            return Unknown()
+        bound = boundary_of(scope, self.ctx)
+        by = view.by.get(name) or Running(bound, bound)
+        return await self._answer(definition, by, bound, arguments, record, session)
+
+    async def _answer(
+        self,
+        definition: ToolDefinition,
+        by: Running,
+        scope: Context,
+        arguments: JsonValue,
+        record: SessionEvent,
+        session: Session,
+    ) -> tuple[ContentBlock, ...] | NotDone | Unknown:
+        """What the tool says about a call: `Done` rendered as the call's result,
+        `NotDone`, or `Unknown` — which a tool with no `reconcile`, and one that
+        raises, answers too. Bound as the registering row (P6-26), render included."""
+        check = definition.reconcile
+        if check is None:
+            return Unknown()
+        try:
+            with running(by, scope):
+                said = await check(arguments, record, session)
+                if isinstance(said, Done):
+                    return tuple(definition.render(arguments, said.value))
+                return said
+        except Exception:
+            log.warning(
+                "ph.tools: %s could not reconcile; treating as unknown",
+                definition.name,
+                exc_info=True,
+            )
+            return Unknown()
+
+    def _key_of(self, run: ToolRunContext) -> str | None:
+        read = run.definition.idempotency_key
+        if read is None:
+            return None
+        try:
+            key = read(thaw_json(run.execution.arguments))
+        except Exception:
+            log.warning(
+                "ph.tools: %s's idempotency_key raised; running unkeyed", run.name, exc_info=True
+            )
+            return None
+        return key if isinstance(key, str) and key else None
+
+    def _settle_effect(
+        self, run: ToolRunContext, effect: _Effect, prepared: PreparedCall
+    ) -> PreparedCall:
+        result = prepared.result
+        assert result is not None
+        effect.journal.settle(
+            effect.session,
+            effect.claim,
+            _effect_settle(
+                effect.claim.key,
+                run.call_id,
+                outcome="failed" if result.is_error else "settled",
+                is_error=result.is_error,
+                content=result.content,
+            ),
+        )
+        if effect.unsure_of is None:
+            return prepared
+        note = EFFECT_MAY_HAVE_HAPPENED.format(call_id=effect.unsure_of or "?")
+        return replace(
+            prepared, result=replace(result, content=(*result.content, TextBlock(text=note)))
+        )
+
+    async def _dispatch(self, run: ToolRunContext) -> PreparedCall:
         execution = run.execution
         definition = run.definition
         try:

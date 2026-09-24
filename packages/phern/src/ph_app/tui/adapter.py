@@ -1210,9 +1210,15 @@ RECORDLESS: frozenset[str] = frozenset(
         "workspace/provisioned",
         "workspace/checkpoint",
         "session/end-seed",
-        # Protocol bookkeeping: which client asked for which turn. The turn
-        # itself renders; who deduplicated it is not conversation.
+        # Protocol bookkeeping: which client asked for which turn, and that it
+        # finished. The turn itself renders; who deduplicated it is not
+        # conversation.
         "client/command",
+        "client/command-settled",
+        # A keyed call's effect record (P10-12). The call and its result render as
+        # the tool card; that it was deduplicated rides on the result's meta.
+        "tool/effect",
+        "tool/effect-settled",
         "kernel/snapshot",
         "compaction/summarized",
         # A skill's nudge budget (D16). The nudges it bounds each render as

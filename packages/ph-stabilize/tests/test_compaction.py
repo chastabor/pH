@@ -48,6 +48,7 @@ from ph.llm.types import (
 from ph.seams.compaction import CompactionError, CompactionNote
 from ph.session import Session, SurfaceIntent, derive_event_message
 from ph.session.events import SurfaceReplace
+from ph.session.json import InvalidJsonValueError
 from ph.session.known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
@@ -62,6 +63,7 @@ from ph.testing import (
     tool_result_payload,
     user_payload,
 )
+from ph_stabilize import compaction
 from ph_stabilize.compaction import (
     KEEP_FRACTION,
     MAX_ARG_LENGTH,
@@ -664,6 +666,57 @@ async def test_truncating_twice_changes_nothing_the_second_time(mount: MountProf
     length = len(session.events)
     assert _truncate(ctx, session) == ()
     assert len(session.events) == length
+
+
+async def test_a_truncation_pass_lands_whole_or_not_at_all(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P10-14. The rewrites and `compaction/args-truncated` are one batch.
+
+    Appended one at a time, a rewrite refused partway left the ones before it in
+    the log — elided from what the model sees — with no record saying so or why.
+    Here the second rewrite's payload is one the write door refuses, after the
+    first has been stamped: nothing of the pass lands, and the refusal reaches the
+    caller rather than a half-applied pass.
+    """
+    ctx = await mount(profile=PROFILE)
+    body = "x" * (MAX_ARG_LENGTH + 1)
+    session = _windowed("whole")
+    for turn in (1, 2):
+        session.append("user/message", user_payload("save it", f"u{turn}"), SurfaceIntent())
+        session.append(
+            "assistant/message",
+            assistant_payload("", f"a{turn}", content=[_write_call(f"c{turn}", body)]),
+            SurfaceIntent(),
+        )
+        session.append(
+            "tool/result", tool_result_payload("written", f"r{turn}", f"c{turn}"), SurfaceIntent()
+        )
+    _pressured(session)
+    before = (session.seq, session.surface.nodes)
+
+    real = compaction.truncated_assistant_payload
+    calls: list[int] = []
+
+    def refused_second(event: Any, **options: Any) -> Any:  # noqa: ANN401
+        calls.append(event.seq)
+        found = real(event, **options)
+        if len(calls) == 2 and found is not None:
+            return {**found[0], "unwritable": {1, 2}}, found[1]
+        return found
+
+    monkeypatch.setattr(compaction, "truncated_assistant_payload", refused_second)
+    with pytest.raises(InvalidJsonValueError):
+        _truncate(ctx, session)
+
+    assert len(calls) == 2, "the pass never reached a second rewrite"
+    assert (session.seq, session.surface.nodes) == before
+    assert session.latest("compaction/args-truncated") is None
+
+    monkeypatch.setattr(compaction, "truncated_assistant_payload", real)
+    assert len(_truncate(ctx, session)) == 2
+    record = not_none(session.latest("compaction/args-truncated"))
+    assert record.seq == session.seq - 1
 
 
 async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: MountProfile) -> None:

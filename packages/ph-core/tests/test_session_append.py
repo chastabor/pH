@@ -12,25 +12,25 @@ listener for exactly this reason, and persistence depends on it.
 from __future__ import annotations
 
 import math
-import re
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from ph.json import JsonValue, as_obj, as_seq
+from ph.json import JsonValue, as_obj, as_seq, thaw_json
 from ph.session import (
-    KNOWN_SESSION_EVENT_TYPES,
+    BatchRef,
     LogTypeError,
     Session,
     SessionEvent,
     SessionFoldCache,
+    SurfaceError,
     SurfaceIntent,
+    SurfaceReplace,
     UnknownEventTypeError,
     declare_log_type,
 )
 from ph.session.json import InvalidJsonValueError
-from ph.testing import prefix_of, user_payload
+from ph.testing import check_fold_laws, prefix_of, user_payload
 
 
 def test_seq_always_equals_log_length() -> None:
@@ -173,26 +173,6 @@ def test_events_snapshot_does_not_grow_under_a_holder() -> None:
     session.append("step/start", {"turn": 1, "step": 1})
     assert len(held) == 1
     assert len(session.events) == 2
-
-
-def test_every_appended_type_is_a_known_event_type() -> None:
-    """A type this build can write but would refuse to read back is a trap.
-
-    `KNOWN_SESSION_EVENT_TYPES` gates the seed path, so every literal `append(`
-    call site in `ph-core` must be in the set. `Session.append` refuses the rest
-    at runtime now (F11); this is the same rule caught before anything runs, for
-    the types ph-core itself writes.
-    """
-    import ph
-
-    pattern = re.compile(r'\.append\(\s*"([a-z][a-z0-9-]*/[a-z0-9/-]+)"')
-    appended = {
-        match
-        for path in Path(ph.__path__[0]).rglob("*.py")
-        for match in pattern.findall(path.read_text(encoding="utf-8"))
-    }
-    assert appended, "the scan found no append call sites — the regex is stale"
-    assert appended <= KNOWN_SESSION_EVENT_TYPES, appended - KNOWN_SESSION_EVENT_TYPES
 
 
 # ---------------------------------------------------------- the vocabulary --
@@ -443,3 +423,148 @@ def test_a_stable_parser_reuses_its_fold_rather_than_rebuilding_one() -> None:
         assert session.latest("turn/start") is not None
         assert session.projection("turn/start", _turn_number) == 3
     assert len(session._latest) == 2, "a fold was rebuilt instead of reused"
+
+
+# ------------------------------------------------------------------ batches --
+
+
+def _conversation() -> Session:
+    session = Session("s")
+    session.append("user/message", user_payload("one", "m1"), SurfaceIntent())
+    session.append("user/message", user_payload("two", "m2"), SurfaceIntent())
+    return session
+
+
+def _summary(replaces: tuple[int, ...]) -> SurfaceIntent:
+    return SurfaceIntent(SurfaceReplace(replaces=replaces), replaces)
+
+
+def test_a_refused_event_leaves_none_of_its_batch() -> None:
+    """P10-14. The accounting record and the replacement it describes land together.
+
+    Appended one at a time, a replacement the surface refuses left the record
+    before it in the log, describing a rewrite that never happened. In a batch
+    the refusal is found on exit, before anything is pushed — a refused plan,
+    an unknown type, and an exception out of the block all leave the log, the
+    surface and every observer exactly as they were.
+    """
+    session = _conversation()
+    seen: list[int] = []
+    session.observe(lambda _session, event: seen.append(event.seq))
+    before = (session.seq, session.surface.nodes)
+
+    refused = pytest.raises(SurfaceError, match="seq 7 is not a current surface node")
+    with refused, session.batch() as batch:
+        batch.append("compaction/summarized", {"shadowedSeqs": [7]})
+        batch.append("user/message", user_payload("summary", "m3"), _summary((7,)))
+    with pytest.raises(UnknownEventTypeError), session.batch() as batch:
+        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
+        batch.append("quantum/entangle", {})
+    with pytest.raises(LookupError), session.batch() as batch:
+        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
+        raise LookupError("the block failed before it finished")
+
+    assert (session.seq, session.surface.nodes) == before
+    assert seen == []
+    assert session.stale() == []
+
+
+def test_observers_see_a_batch_in_order_after_it_validates() -> None:
+    """Nothing is published while the block runs; then every member, in order,
+    each seen with the log ending at it — the view a single append gives. An
+    observer cannot append between two members: the one reentrancy guard spans
+    the whole publication."""
+    session = _conversation()
+    seen: list[tuple[int, int]] = []
+    refused: list[str] = []
+
+    def watch(watched: Session, event: SessionEvent) -> None:
+        seen.append((event.seq, len(watched.events)))
+        try:
+            watched.append("turn/start", {"turn": 9})
+        except RuntimeError as error:
+            refused.append(str(error))
+
+    session.observe(watch)
+    with session.batch() as batch:
+        accounting = batch.append("compaction/summarized", {"shadowedSeqs": [0, 1]})
+        batch.append("user/message", user_payload("summary", "m3"), _summary((0, 1)))
+        assert seen == [], "published before the block exited"
+        assert session.seq == 2, "pushed before the block exited"
+
+    assert accounting.seq == 2
+    assert seen == [(2, 3), (3, 4)]
+    assert len(refused) == 2 and "cannot reenter" in refused[0]
+    assert session.surface.nodes == (3,)
+
+
+def test_a_batch_obeys_the_fold_laws() -> None:
+    """A batch is a way to append, not a second kind of log: its events fold
+    exactly as the same events appended one at a time, including a member that
+    replaces a node an earlier member added — which only a plan against the
+    state the earlier members leave can accept."""
+    batched = _conversation()
+    with batched.batch() as batch:
+        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
+        batch.append("user/message", user_payload("summary", "m3"), _summary((0,)))
+        batch.append("user/message", user_payload("three", "m4"), SurfaceIntent())
+        batch.append("user/message", user_payload("three, shorter", "m5"), _summary((4,)))
+
+    single = _conversation()
+    for event in batched.events[2:]:
+        surface = (
+            None
+            if event.surface_op is None
+            else SurfaceIntent(event.surface_op, event.source_event_seqs)
+        )
+        single.append(event.type, thaw_json(event.data), surface)
+
+    assert batched.surface.nodes == single.surface.nodes == (3, 1, 5)
+    assert batched.derive_messages() == single.derive_messages()
+    assert batched.stale() == []
+    assert check_fold_laws(batched, lambda log: log.surface.nodes) == []
+
+
+def test_a_batch_whose_log_moved_is_refused_whole() -> None:
+    """The members were stamped against the log as the block found it. An
+    `await` inside the block lets another task append; landing the batch then
+    would put its members at seqs somebody else already holds."""
+    session = _conversation()
+    moved = pytest.raises(RuntimeError, match="moved from seq 2 to 3 while a batch was open")
+    with moved, session.batch() as batch:
+        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
+        session.append("turn/start", {"turn": 1})
+    assert [event.type for event in session.events][2:] == ["turn/start"]
+
+
+def test_a_batch_is_one_at_a_time_and_closes_behind_itself() -> None:
+    session = _conversation()
+    with session.batch() as outer:
+        with pytest.raises(RuntimeError, match="inside another"), session.batch():
+            pass
+        outer.append("turn/start", {"turn": 1})
+    with pytest.raises(RuntimeError, match="has closed"):
+        outer.append("turn/start", {"turn": 2})
+    with session.batch():
+        pass
+    assert [event.type for event in session.events][2:] == ["turn/start"]
+
+
+def test_every_member_of_a_batch_says_which_batch_and_one_alone_is_not_stamped() -> None:
+    """P10-15. The committed members carry the batch's membership — which is what
+    lets a reader drop a torn batch whole — and a batch of one carries none, having
+    nothing to keep together. The wire form round-trips it."""
+    session = _conversation()
+    with session.batch() as batch:
+        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
+        batch.append("user/message", user_payload("summary", "m3"), _summary((0,)))
+    with session.batch() as alone:
+        alone.append("compaction/args-truncated", {"seqs": []})
+
+    pair, single = session.events[2:4], session.events[4]
+    assert {event.batch for event in pair} == {BatchRef(first=2, count=2)}
+    assert single.batch is None
+    wire = pair[0].to_wire()
+    assert wire["batch"] == {"first": 2, "count": 2}
+    assert SessionEvent.from_wire(wire) == pair[0]
+    assert "batch" not in single.to_wire()

@@ -1379,7 +1379,8 @@ def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
     from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 
     written = {
-        supervisor_module.COMMAND_ACCEPTED,
+        supervisor_module.CLIENT_COMMAND.opened,
+        supervisor_module.CLIENT_COMMAND.settled,
         recovery.RETRY,
         recovery.FAILED,
         recovery.RECOVERED,

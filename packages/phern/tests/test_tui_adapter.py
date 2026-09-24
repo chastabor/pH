@@ -37,9 +37,12 @@ from ph.llm.types import (
     UsageChunk,
     create_user_message,
 )
+from ph.persistence import interrupted_turn_closers
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import MountProfile, assistant_payload, plugin_payload, simple_tool, user_payload
+from ph.tools.code_mode import DISPATCH_INTERRUPTED
+from ph_app.shell import INTERRUPTED
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, RULES, TuiEventAdapter
 from ph_app.tui.state import Surface, TuiState
 
@@ -429,6 +432,60 @@ async def test_a_surfaced_shell_command_is_marked_apart_from_a_quiet_one(
 
     titles = [item.tool.title for item in _replay(session).visible_items() if item.tool]
     assert titles == ["Shell → agent", "Shell"], "the loud one is named and the quiet one is not"
+
+
+async def test_an_interrupted_command_is_drawn_as_interrupted(mount: MountProfile) -> None:
+    """P10-08. A command the daemon died during is settled on resume by repair,
+    and the card says what that settle means.
+
+    Without the line a settled card with no output and no exit code reads as a
+    command that printed nothing and succeeded — the opposite of what is known.
+    Fed the closer repair actually writes, so the card and repair cannot drift.
+    """
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-shell-interrupted")
+    session.append("shell/command", {"command": "make", "surface": False})
+    (closer,) = interrupted_turn_closers(session.events)
+    session.admit(closer)
+
+    (card,) = [item.tool for item in _replay(session).visible_items() if item.tool]
+    assert card.settled and card.is_error
+    assert INTERRUPTED["outcome-unknown"] in card.body
+
+
+async def test_an_orphaned_dispatch_is_drawn_settled(mount: MountProfile) -> None:
+    """P10-11. A Code Mode cell the daemon died inside left a dispatch card that
+    ran forever: nothing settled `tool/code-dispatch-start`. Repair now does, by
+    the kind's closer, and the card draws that settle as an error saying why —
+    fed the closer repair actually writes, so the two cannot drift."""
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-dispatch-orphaned")
+    session.append("turn/start", {"turn": 1})
+    session.append("step/start", {"turn": 1, "step": 1})
+    run_code = {"type": "tool-call", "id": "c1", "name": "run_code", "arguments": "{}"}
+    session.append(
+        "assistant/message",
+        assistant_payload("", "m1", content=[run_code]),
+        SurfaceIntent("append", ()),
+    )
+    session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "run_code"})
+    session.append(
+        "tool/code-dispatch-start",
+        {
+            "rootCallId": "c1",
+            "parentCallId": "c1",
+            "subCallId": "c1:code:0",
+            "name": "bash",
+            "arguments": {"command": "make"},
+        },
+    )
+    for closer in interrupted_turn_closers(session.events):
+        session.admit(closer)
+
+    (parent,) = [item.tool for item in _replay(session).visible_items() if item.tool]
+    (dispatch,) = parent.dispatches
+    assert dispatch.settled and dispatch.is_error
+    assert DISPATCH_INTERRUPTED in dispatch.body
 
 
 async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(

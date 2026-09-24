@@ -40,7 +40,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
-from ph.json import as_obj, as_seq, as_str
+from ph.json import JsonObject, as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     INVARIANTS,
@@ -60,7 +60,15 @@ from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import latest_checkpoint, workspace_of
-from ph.session import Session, SessionEvent, now_ms, session_written
+from ph.session import (
+    IntentKind,
+    Session,
+    SessionEvent,
+    Unsettled,
+    declare_intent,
+    now_ms,
+    session_written,
+)
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
@@ -241,6 +249,22 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "and the transcript says it was interrupted rather than declined",
     ),
     (
+        "an outside effect after a crash",
+        "unknown unless the tool can say. A call the daemon died during reads as outcome "
+        "unknown after a resume, and the model is told to check before retrying — unless "
+        "its tool names its effect (`idempotency_key`, so a repeat is answered from the "
+        "log) or can check it (`reconcile`, which `write` does). A tool with neither — "
+        "every MCP tool today — keeps the unknown (P10-12, P10-13)",
+    ),
+    (
+        "facts across two logs",
+        "eventual, not atomic. A child's log and its parent's roster, a message sent and "
+        "its receipt, are separate writes: a crash between them leaves one said and the "
+        "other not, until the next open reconciles what it can. Within one log a "
+        "`Session.batch()` lands whole or not at all (P10-14, P10-15); across two logs "
+        "there is no batch",
+    ),
+    (
         "per user",
         "one daemon per $PH_RUNTIME — a second on the same socket is refused rather "
         "than merged (P5-01), and a second writer on one session log is refused by its "
@@ -260,8 +284,43 @@ true are the same strings. A paragraph in a docstring cannot be printed, and a
 sentence nobody can print is one nobody checks.
 """
 
-COMMAND_ACCEPTED = "client/command"
-"""The record that makes a mutating command idempotent (P5-02)."""
+
+def _command(event: SessionEvent) -> str:
+    return as_str(event.data.get("command"))
+
+
+def _unknown(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """A verb whose settle nobody wrote: a crash, or an `act` that raised.
+
+    `unknown` either way, and that is the point (P10-10): the key was claimed,
+    so the act may have begun, and a retry told `repeated` with no more than
+    that would assume it finished. `not-started` cannot reach here — the kind
+    is `buffered` — and would say the same to a client: ask.
+    """
+    return {"command": _command(opened), "outcome": "unknown"}
+
+
+CLIENT_COMMAND = declare_intent(
+    IntentKind(
+        opened="client/command",
+        settled="client/command-settled",
+        opened_key=_command,
+        settled_key=_command,
+        orphan="outcome-unknown",
+        # **Buffered, not durable**, and that is P5-02's rule kept: the key goes
+        # to disk with the act's own records — the flush `_mutate` makes before
+        # it replies (F7), or an act's own barrier (`!!`) — never alone before
+        # the act. A key made durable first would turn a crash *before* the act
+        # into a refused retry for work that never began; a crash before any
+        # flush re-runs the verb, which a transcript shows, where a dropped one
+        # is invisible.
+        barrier="buffered",
+        closer=_unknown,
+        owner="ph_app.daemon.supervisor",
+    )
+)
+"""The record that makes a mutating command idempotent (P5-02), and its outcome
+(P10-10). Keyed by `clientId:commandId`."""
 
 WAKE_SLOTS = 8
 """How many un-acted-on doorbell rings to hold.
@@ -301,15 +360,10 @@ class Root:
     """The retry ladder's state (P5-04), folded from the log when this root
     starts and maintained by `retry`/`give_up`/`recovered` from there.
 
-    Held rather than re-folded, for the reason `accepted` gives below: `status` is
-    read for every root on every `sessions/list`, and a whole-log scan per read puts
-    that on the daemon's event loop."""
-    commands: set[str] = field(default_factory=set)
-    """Commands already run, folded from this session's own log.
-
-    A set rather than a scan, and derived rather than remembered: it is rebuilt
-    from `client/command` events when a root starts, so a resumed root knows
-    what it already did."""
+    Held rather than re-folded: `status` is read for every root on every
+    `sessions/list`, and a whole-log scan per read puts that on the daemon's event
+    loop. The commands a root already ran are the journal's index now
+    (`CLIENT_COMMAND`), which is cached and extended rather than scanned."""
     subscribers: set[Subscriber] = field(default_factory=set)
     """Attached connections. A set of bound methods, which compare by
     `(__self__, __func__)`, so attaching and detaching are symmetric without a
@@ -446,52 +500,13 @@ class Root:
         """
         return str(self.session.header.created_at)
 
-    def accepted(self, command: str) -> bool:
-        """Whether this exact command already ran for this client.
-
-        **Folded once, then kept.** Built from the log when the root starts, so it
-        survives a restart — the one moment a client is most likely to retry, because it
-        reconnects, cannot know whether its last `session/prompt` landed, and sends it
-        again. Re-scanning per command would put that read on the daemon's event loop,
-        stalling every other connection.
-        """
-        return command in self.commands
-
-    def remember(self, command: str) -> None:
-        """Record a command in the log and in the fold that reads it back."""
-        self.session.append(COMMAND_ACCEPTED, {"command": command})
-        self.commands.add(command)
-
-    def once(self, command: str) -> bool:
-        """Claim this command, or say it was already claimed. `True` means act.
-
-        The write-ahead ordering, next to the two halves it orders. Called from
-        one place — the daemon's `MUTATIONS` wrapper — for every mutating method,
-        so no handler spells it and none can forget it. The record is written
-        **before** the act, so a crash between them re-runs the command rather
-        than losing it: the same reasoning A10 applies to blobs, and a duplicated
-        turn is visible in the transcript where a dropped one is not.
-
-        An empty key means the caller offered no identity and wants no
-        deduplication; it always acts.
-        """
-        if not command:
-            return True
-        if self.accepted(command):
-            # The retry a reconnecting client cannot avoid sending: it does not
-            # know whether the first one landed. Answering "yes, that one" is
-            # what makes asking twice safe.
-            return False
-        self.remember(command)
-        return True
-
     def retry(self, *, reason: str, restored: bool) -> None:
         """Record that a failed turn is being run again (P5-04).
 
         Written *before* the attempt, not after it: a daemon that died during
         the retry must come back knowing the attempt was made, or it resumes
         with a shorter ladder than it had actually spent. The same write-ahead
-        ordering A10 applies to blobs and `remember` applies to commands.
+        ordering A10 applies to blobs and `CLIENT_COMMAND` applies to commands.
         """
         self.session.append(
             RETRY,
@@ -868,16 +883,11 @@ class Supervisor:
             root.desk = AskDesk(root=root)
             for dispose in root.desk.attach():
                 exits.callback(dispose)
-            # Both folds are read back from this session's own log, once, here:
-            # what it already did (so a retry after a restart is not a second
-            # turn) and how far up the retry ladder it got (so a root resumed
-            # mid-ladder does not start the count over and retry forever).
+            # Read back from this session's own log, once, here: how far up the
+            # retry ladder it got, so a root resumed mid-ladder does not start
+            # the count over and retry forever. What it already did is the
+            # journal's `CLIENT_COMMAND` index, folded from the same log.
             root.recovery = recovery_of(session)
-            root.commands.update(
-                as_str(event.data.get("command"))
-                for event in session.events_from(0)
-                if event.type == COMMAND_ACCEPTED
-            )
 
             # On the stack rather than on a later line, because the entry has to
             # go in *before* the awaits below: a readmitted child starts a drive

@@ -209,6 +209,39 @@ async def test_a_question_is_on_disk_before_it_is_delivered(mount: MountProfile)
     assert held == [["question/asked"]]
 
 
+async def test_an_ask_under_a_key_asked_before_is_put_again() -> None:
+    """P10-09. An ask is keyed by call id, or by tool name when there is none,
+    so one key is asked many times in a session — and a question re-posed after
+    a resume keeps its id. Neither kind dedupes: each ask reaches a person.
+
+    Sabotage: declare either kind with `dedupe=True` and the second ask is
+    answered from the log, never shown to anybody.
+    """
+    from ph.seams.user_questions import UserQuestion, UserQuestionService
+
+    root = Context()
+    session = Session("s")
+    reached: list[str] = []
+
+    async def approve(request: ApprovalRequest, next_: object) -> str:
+        reached.append(request.tool_name)
+        return "allowed-once"
+
+    async def answer(question: UserQuestion, next_: object) -> str:
+        reached.append(question.question)
+        return "blue"
+
+    approvals, questions = ApprovalService(ctx=root), UserQuestionService(ctx=root)
+    approvals.register_answerer(approve)
+    questions.register_answerer(answer)
+    for _ in range(2):
+        await approvals.request(agent=_agent(session), tool_name="edit")
+        await questions.ask(UserQuestion(question="Which?", ask_id="q1"), session=session)
+
+    assert reached == ["edit", "Which?", "edit", "Which?"]
+    assert [event.type for event in session.events].count("approval/decided") == 2
+
+
 async def test_register_answerer_is_the_waterfall_by_another_name() -> None:
     root = Context()
     service = ApprovalService(ctx=root)

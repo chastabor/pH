@@ -162,22 +162,22 @@ so, and none of them is started until the decision is recorded here.
 
 | Row | What it lands | Depends on | Part |
 |---|---|---|---|
-| P10-01 | Writers of record for ph-core's vocabulary, and one AST gate across every package | — | 1 |
-| P10-02 | *Spike:* posture types refuse a writer that is not their owner | P10-01, decision 6 | 1 |
-| P10-03 | *Conditional:* a `ph.log_types` entry-point group, so a reader knows a package's types unmounted | the first type declared outside ph-core | 1 |
-| P10-04 | A lineage writes a parent only when the child inherits its prefix | — | 2 |
-| P10-05 | `ph.session.intents`: kinds declared once, the pure fold, the fold laws | P10-01 | 3 |
-| P10-06 | `ctx.intents`: record, open, settle, claim; the barrier; the dedupe index; the invariant row | P10-05, decisions 1–3 | 3 |
-| P10-07 | Repair settles every declared kind, in a turn or out of one | P10-05 | 3 |
-| P10-08 | `shell/command` → `shell/result`: the first kind, end to end | P10-06, P10-07 | 3 |
-| P10-09 | Approvals and questions become kinds; `_settled_asks` goes | P10-07 | 3 |
-| P10-10 | Daemon verbs: `client/command` settles; a key lives as long as its effect (L1) | P10-06, decision 4 | 3 |
-| P10-11 | Code Mode dispatches and workspace trees as kinds | P10-06, P10-07 | 3 |
-| P10-12 | Tools name their own effect: `idempotency_key`, and a key for a far side | P10-06 | 4 |
-| P10-13 | Tools answer "did I happen?": `reconcile`, asked on resume | P10-07, P10-12 | 4 |
-| P10-14 | `Session.batch()`: planned as a unit, published as a unit, adopted by compaction | — | 5 |
-| P10-15 | Batch membership on the envelope; a batch reads back whole or not at all (format 2) | P10-14, decision 5 | 5 |
-| P10-16 | Docs, non-guarantees, `Implementation_Plan.md` §4 and §6, `reviews/` status | all | — |
+| P10-01 | **Landed.** Writers of record for ph-core's vocabulary, and one AST gate across every package | — | 1 |
+| P10-02 | **Spiked, not shipped.** *Spike:* posture types refuse a writer that is not their owner | P10-01, decision 6 | 1 |
+| P10-03 | **Not started — its condition is unmet.** *Conditional:* a `ph.log_types` entry-point group, so a reader knows a package's types unmounted | the first type declared outside ph-core | 1 |
+| P10-04 | **Landed.** A lineage writes a parent only when the child inherits its prefix | — | 2 |
+| P10-05 | **Landed.** `ph.session.intents`: kinds declared once, the pure fold, the fold laws | P10-01 | 3 |
+| P10-06 | **Landed.** `ctx.intents`: record, open, settle, claim; the barrier; the dedupe index; the invariant row | P10-05, decisions 1–3 | 3 |
+| P10-07 | **Landed.** Repair settles every declared kind, in a turn or out of one | P10-05 | 3 |
+| P10-08 | **Landed.** `shell/command` → `shell/result`: the first kind, end to end | P10-06, P10-07 | 3 |
+| P10-09 | **Landed.** Approvals and questions become kinds; `_settled_asks` goes | P10-07 | 3 |
+| P10-10 | **Landed.** Daemon verbs: `client/command` settles; a key lives as long as its effect (L1) | P10-06, decision 4 | 3 |
+| P10-11 | **Landed** (dispatch; workspace kept on its own fold, see row). Code Mode dispatches and workspace trees as kinds | P10-06, P10-07 | 3 |
+| P10-12 | **Landed.** Tools name their own effect: `idempotency_key`, and a key for a far side | P10-06 | 4 |
+| P10-13 | **Landed.** Tools answer "did I happen?": `reconcile`, asked on resume | P10-07, P10-12 | 4 |
+| P10-14 | **Landed.** `Session.batch()`: planned as a unit, published as a unit, adopted by compaction | — | 5 |
+| P10-15 | **Landed.** Batch membership on the envelope; a batch reads back whole or not at all (format 2) | P10-14, decision 5 | 5 |
+| P10-16 | **Landed.** Docs, non-guarantees, `Implementation_Plan.md` §4 and §6, `reviews/` status | all | — |
 
 **Order.** P10-01, P10-04 and P10-14 are independent and small; any can go first. Then
 P10-05 → P10-06 → P10-07 → **P10-08**, which is the row that proves the API on the
@@ -189,6 +189,18 @@ order. Part 4 needs the journal; Part 5 does not. P10-16 is last.
 ## Part 1 — the vocabulary names its writers
 
 ## P10-01 — writers of record for ph-core's vocabulary, and one gate across every package
+
+*(Landed. 74 types, each with at least one writer; the gate is its own module,
+`packages/ph-core/tests/test_log_writers.py`, not `test_session_append.py`, since the walk
+and its variable-site list are more than a vocabulary test. The table is keyed by the
+module whose code calls `append` — lexical, not the running row — and is built from a
+module → types map so each writer's list reads in one place. Three variable sites exist,
+not the two guessed below: `ph.agent_loop.driver`'s `Inbox.append(target, …)` (not a log
+append; listed as writing nothing), `ph.llm.media`'s `event_type`, and
+`ph.testing.builders`' `workspace_log` scaffolding. The Continual Harness's records are
+imported constants, which the walk resolves. Sabotaged four ways — a stray `sandbox/mode`,
+an unknown type, a new variable site, and a writer that stopped writing — each failed the
+gate that names it.)*
 
 **Why.** `test_every_appended_type_is_a_known_event_type`
 (`packages/ph-core/tests/test_session_append.py:178`) is a regex over *literal*
@@ -231,6 +243,17 @@ Continual Harness's outcome records passed by name.
 
 ## P10-02 — *spike:* posture types refuse a writer that is not their owner
 
+*(Spiked; **not shipped**, per decision 6. The running row is not known at every
+legitimate append: the daemon's preset verb (`_act_preset`,
+`packages/phern/src/ph_app/daemon/server.py`) calls `apply_preset` on the connection's task
+with no activation bound, so `Context.current_owner()` is `None` there and a check would
+have to answer "allowed" when it cannot tell. And where a row *is* running, it is the wrong
+one for the table: `sandbox/mode` from a preset is appended while `permission-presets` is
+the caller, but the code that appends it is `ph.seams.sandbox`'s — P10-01's table is
+lexical, and a runtime check would need a second, dynamic table held in step with it. The
+static gate is the whole answer; it is written beside `SandboxSeam.logged_mode` and
+`approval_policy`.)*
+
 **Why.** F12. `sandbox/mode`, `approval/policy`, `approval/mode` and `permission/preset`
 are read as the posture in force (`logged_mode`, `approval_policy`, `hitl`,
 `PermissionPresetService`). A static gate (P10-01) catches a shipped writer; it does not
@@ -269,6 +292,12 @@ mechanism with no user is the shape rule 6 exists to forbid.
 
 ## P10-04 — a lineage writes a parent only when the child inherits its prefix
 
+*(Landed. The test is `seed_length` truthy rather than `is not None`: a seed of zero
+references nothing, so it needs no ancestor either. The fork ordering test is unchanged
+and still holds; `test_a_segment_still_writes_its_parent_first` adds `roll`, the other
+child that references a prefix. Sabotaged both ways — the old walk fails the subagent
+test, a walk that never follows a parent fails both prefix tests.)*
+
 **Why.** `SessionStore.lineage` (`ph/session/store.py:287`) follows `parent_session` for
 every child, so every flush of a subagent child also flushes its parent. A subagent
 child is created fresh — `durable_length == 0`, no `seed_length` — and does not need its
@@ -293,6 +322,23 @@ re-asserted).
 ## Part 3 — the intent journal
 
 ## P10-05 — `ph.session.intents`: kinds declared once, the pure fold, the fold laws
+
+*(Landed. **One fold, `fold_intents`** — per key, the latest intent opened under it and
+its settle (`IntentRecord`), with `since=` as the `extend` — and `open_intents` and
+`settled_record` are both read off it, from a log or from the journal's cached index, so
+"open" and "settled" cannot drift apart. The index keeps settled keys too, which is what
+P10-06's dedupe needs, and hands back the prefix's value unchanged when a slice holds
+nothing of the kind, so a cache read per model step costs the slice. `closer` takes the
+reason, `closer(opened, why)` with `why: Unsettled` (`"outcome-unknown" | "not-started"`),
+because the journal writes settles too: `not-started` on a failed barrier,
+`outcome-unknown` when a claimed body raises. `declared_intents()` is what repair will
+walk; `is_declared(kind)` is the journal's check. `declare_intent` refuses one thing more
+than listed — a type that both opens and settles. The rule is `pending_approvals'`
+exactly, and `test_the_fold_agrees_with_the_folds_it_replaces` holds it to both the
+approval and question folds over the same logs, which is P10-09's licence. The fold-law
+gate lives in `test_intents.py` beside the fold rather than in `test_fold_laws.py`.
+Sabotaged three ways — first-open-wins, `since` ignored, and a settle blind to a re-open
+— each failed its gate.)*
 
 **Why.** Seven pairs, seven folds, three settlers. Each existing fold is correct; what
 is missing is one statement of "an intent this log opened and never settled" that repair,
@@ -342,6 +388,23 @@ kind's own producer wrote — the list grows with P10-08 to P10-11).
 
 ## P10-06 — `ctx.intents`: record, open, settle, claim, and the barrier
 
+*(Landed, in `ph/session/journal.py` (new) rather than `intents.py`, which stays pure.
+`IntentJournal` holds the store it is provided beside and uses `SessionStore.written` as
+the barrier: `session_written` lives in `store.py`, which imports the journal to provide
+it, so importing it back would be a cycle. Beyond the sketch: the journal **refuses an
+undeclared kind** (repair settles only declared ones, so its orphans would never close)
+and **an empty key** (it would pair every keyless record); `record` returns a `Claim`
+rather than the event, so a `tools-execute` producer settles through the same method;
+`settle` refuses a key that is not the claim's and an intent no longer open; `is_open`
+and `forget` (on `session/disposed`) are public; `claim` settles
+`{**closer(opened, "outcome-unknown"), "failed": true}` on any `BaseException`,
+cancellation included, and a body that returns without settling leaves the intent open
+for its owner. One `SessionFoldCache` per kind over `fold_intents`, reported as
+`intent-fold-cache` with the kind named in each finding; the base-profile roster test
+lists the row. Two extra gates: `test_a_settle_closes_only_its_own_intent_once`,
+`test_what_the_journal_refuses_to_open`. Sabotaged four ways — no flush, no dedupe, a
+claim that does not settle, a silent `stale` — each failed its gate.)*
+
 **Why.** The seven sites each spell their own append, flush and failure. The journal is
 where that spelling lives once, so a new component that must record before an effect gets
 it right by calling one method.
@@ -387,6 +450,21 @@ nothing.
 
 ## P10-07 — repair settles every declared kind, in a turn or out of one
 
+*(Landed. `_settled_intents` walks `declared_intents()` and writes each open intent's
+settle with the kind's own `closer(opened, orphan)`. Skipped: `owner-settles`. A kind whose settle is **surface-eligible** is refused by
+`declare_intent` itself (it was first skipped here; the refusal is the deeper place), since
+a model-visible closer needs the surface metadata and provider rules only the turn repair
+has. Each closer is probed against the kind's `settled_key` and a mismatch raises
+`IntentError`: a closer that does not settle its own key would reopen on every resume and
+grow the log each time. The asks stay inside the turn check until P10-09 moves them onto
+kinds. Not enforced, and said in the module: a kind is settled only if its declaring
+module is imported in the resuming process. Three extra gates: the unit form of the
+out-of-turn test, `test_a_kind_settled_on_the_surface_is_refused` (now in `test_intents.py`),
+`test_a_closer_that_does_not_settle_its_own_key_is_refused`. Sabotaged four ways — early
+return for a balanced turn, no surface skip, no owner skip, no key probe — each failed
+its gate; the owner-settles test first passed its sabotage, because its kind had no
+closer, and now carries one.)*
+
 **Why.** F13. `interrupted_turn_closers` returns `[]` when no turn is open, so an
 orphaned `shell/command` — which is always outside a turn — is never settled, and every
 future reader is told a command is running. The module argues that "a registry for two is
@@ -409,6 +487,28 @@ asks and intents first, then tool results, then `step/end`, then `turn/end`.
 
 ## P10-08 — `shell/command` → `shell/result`: the first kind, end to end
 
+*(Landed. `SHELL_COMMAND` in `ph.seams.shell` is keyed by the command's **own seq** —
+nothing else about a command is unique — and settled by `commandSeq`, which the result
+already carried, so no payload changed shape. The closer writes `{commandSeq, ok: false,
+interrupted: why}` with `interrupted` the **reason** (`outcome-unknown` | `not-started`)
+rather than a bare `true`, so a card can say which half is known. `run_shell` is a
+`ctx.intents.claim`, its flush deleted; a barrier that fails now raises
+`IntentNotDurable` rather than the backend's exception, and the command still does not
+run. The rendering is in `shell_body` (`INTERRUPTED`), which both TUI front ends already
+draw a card from; `trajectory.py` needed no change, since its generic line already prints
+`interrupted=…`. Two things the plan did not foresee: **repair imports `ph.seams.shell`**,
+so ph-core's kinds are declared wherever repair runs, and the module says the rest is not
+enforced; and **P10-01's gate learned the journal** — its two `kind.opened` /
+`kind.settled` sites are listed as writing nothing of their own, and the walk reads each
+`IntentKind(opened=…, settled=…)` as a write by the declaring module, so
+`WRITERS["shell/*"]` is `ph.seams.shell` now, not `ph_app.shell`. The test fixtures that
+swap the kind table go through `ph.testing.isolated_intent_kinds`, which declares ph-core's
+kinds into the real table first, so a first import under a swapped table cannot lose one. The resume gate is in `packages/ph-core/tests/test_repair.py`
+(it needs no daemon), the drawing gate in `packages/phern/tests/test_tui_adapter.py`, fed
+the closer repair actually writes; `test_the_shell_kind_obeys_the_fold_laws` joins the
+fold-law list. Sabotaged three ways — a `buffered` barrier, a closer without
+`commandSeq`, a renderer without the line — each failed its gate.)*
+
 **Why.** The simplest real pair and the one with no settler today: no wire contract,
 one writer (`run_shell`), one reader shape, and a claim in the vocabulary — "one that takes
 the daemon down with it still shows in the log what was started" — that is only half true
@@ -430,6 +530,43 @@ kind) · `test_a_command_the_daemon_died_during_is_settled_on_resume` ·
 
 ## P10-09 — approvals and questions become kinds; `_settled_asks` goes
 
+*(Landed. `APPROVAL_ASK` and `QUESTION_ASK` — `APPROVAL` is already the service key — both
+`orphan="outcome-unknown"` as planned: the person may have answered on a screen whose
+answer never reached the log. Each closer maps the reason to today's words, so no payload
+changed: `not-started` (the barrier failed, nobody was asked) writes `unavailable` /
+`resolution: failed`, and repair's `outcome-unknown` writes `INTERRUPTED, automatic` /
+`interrupted: true`. `pending_approvals` and `pending_questions` are one comprehension
+each over `open_intents`; `_settled_asks` is gone, and repair orders kinds **by type**, so
+closers do not depend on import order. What the migration found, each now a gate:
+
+- **Asks reuse keys.** An approval is keyed by tool name when it has no call id, and a
+  question re-posed after a resume keeps its id, so `IntentKind` gained `dedupe` (default
+  true; false for both asks) — `test_an_ask_under_a_key_asked_before_is_put_again`. And
+  concurrent asks of one tool share a key, so the second open replaces the first in the
+  fold, as it always did; the journal therefore holds a non-deduping kind's settle to its
+  key alone rather than raising from the K7 `finally` (the ph-rlm concurrent-writes test
+  found it).
+- **A cancellation during the barrier write** closes the pair `not-started` and still
+  propagates — `test_a_barrier_canceled_mid_write_still_closes_the_pair`.
+- **A question canceled mid-answer stays pending**, so a passivated root re-poses it: the
+  question seam uses `open` and an explicit settle, not `claim` (`test_ask_user` pins it).
+  Approvals keep the K7 `finally`, settling through the journal.
+- **Seams on a bare `Context`** get `intents_of(ctx)`: `ctx.intents`, or a store-less
+  journal with no barrier — `session_written`'s reading of the same case.
+  `IntentJournal.sessions` is optional for it.
+- **Repair imports the declaring seams inside `_kinds()`, not at module top**:
+  `ph.seams.shell` reaches `ph.orphans`, which imports `ph.persistence`, so the top-level
+  import was a cycle for any process importing `ph.orphans` first (the ph-rlm lifecycle
+  host). `test_importing_repair_declares_every_core_kind` probes a fresh interpreter that
+  imports `ph.orphans` first; `test_repair_no_longer_knows_the_ask_shapes` holds that
+  repair reads nothing of those seams.
+- `IntentKind`'s three callables are classified `UNBOUND` in the registration-ownership
+  gate: pure reads of a record, called with nothing mounted.
+
+The six P5-13 settlement tests pass unchanged. Sabotaged four ways — an approval closer
+that always writes `unavailable`, `dedupe=True` on each ask, an unhandled cancellation in
+the barrier, a module-level declaring import — each failed its gate.)*
+
 **Why.** The two asks already work like kinds. Making them kinds deletes the special
 case in repair and moves the barrier added in `39c9426` into the declaration.
 
@@ -447,6 +584,38 @@ same shape.
 `test_repair_no_longer_knows_the_ask_shapes` (repair imports no seam).
 
 ## P10-10 — daemon verbs: `client/command` settles, and a key lives as long as its effect
+
+*(Landed. `CLIENT_COMMAND` is declared in `ph_app.daemon.supervisor`; `Root.once`,
+`remember`, `accepted` and `commands` are gone, and `_mutate` is a `ctx.intents.claim`
+settled with `{command, outcome: "settled"}` after `act`. `client/command-settled` is in
+the vocabulary, ignorable, and rendered by the auditor and not the transcript.
+`MutationRepeated.outcome: RepeatOutcome` is required and `PROTOCOL_VERSION` is 4, with its
+docstring entry. Three corrections to the sketch:
+
+- **The kind is `buffered`, and the post-act flush in `_mutate` stays.** A `durable`
+  barrier would flush the key *before* the act — the ordering P5-02 refused, since a
+  crash before the act would then refuse a retry for work that never began — and the
+  flush the plan said would go is F7's, *after* the act and before the reply, which no
+  pre-act barrier replaces. So a key still reaches disk with its act's own records, and
+  one that did so with no settle after it is the open intent repair settles `unknown`.
+- **`claim` gives the act that raises a word too**: its key is settled `unknown`
+  (`failed`), so the retry is told the outcome is unknown rather than a bare repeat —
+  `test_an_act_that_raises_leaves_its_key_unknown`.
+- **The keyword is `key_scope`, not `scope`**, which in this codebase means a `Context`
+  lifetime — the registration-ownership gate refused `scope=` on the journal. `IntentScope`
+  is `Literal["log", "process"]`; a `process` key carries `"scope": "process"` on its
+  record and is no prior before `session.first_live_seq`. The `credentials/store` row
+  passes it (`Mutation.key_scope`).
+
+The TUI's remote slash command says so when a re-send's outcome is unknown
+(`UNKNOWN_REPEAT`), and `test_daemon`'s vocabulary check reads the kind's types. Gates:
+the existing same-key test now asserts `outcome == "settled"` for every row;
+`test_a_retry_after_a_crash_mid_act_is_told_the_outcome_is_unknown` resumes a crashed log
+in a second daemon over the same home; `test_a_credential_re_sent_after_a_restart_is_stored_again`;
+`test_a_process_scoped_key_is_no_prior_to_the_next_process` (ph-core);
+`test_a_re_sent_command_whose_outcome_is_unknown_says_so`; the payload test refuses a
+repeat with no outcome. Sabotaged four ways — no process scope, an outcome that always
+says `settled`, no dedupe, a `process` key that lives forever — each failed its gates.)*
 
 **Why.** `Root.once` dedupes on the *intent*. A retry after a crash mid-act is refused as
 repeated with no word that the act may not have happened. And L1: `credentials/store`'s
@@ -481,6 +650,35 @@ a re-send is refused and the value never comes back.
 
 ## P10-11 — Code Mode dispatches and workspace trees as kinds
 
+*(Landed for the dispatch; **the workspace pair is deliberately not migrated**.
+`TOOL_DISPATCH` in `ph.tools.code_mode` — keyed by `subCallId`, `tools-execute`,
+`outcome-unknown` — and `_log_start` is `ctx.intents.record`, its `Claim` held on the
+bridge by sub-call id until `_log_settle` settles it through the journal. A dispatch
+refused before it started (a denial, an approval that said no) has no intent, and its
+settle record is appended alone as before. The closer copies the start's
+`CodeDispatchRef` identity and writes `isError`, `interrupted` and a text body
+(`DISPATCH_INTERRUPTED`), so the TUI's existing handler draws it with no adapter change.
+Repair's `_kinds()` imports `code_mode` beside the three seams. The checkpoint policy's
+nested branch is unchanged in code — "reading the kind's barrier" there would compare a
+constant with itself — and its docstring names `TOOL_DISPATCH` as the kind whose barrier it
+places.
+
+**Why the workspace pair stays `workspace_survivors`'**: its openness is folded **from
+`seed_length`** (a fork's inherited acquires are the parent's, not the child's) and only
+over tiers with a fresh root; a key-pair fold from seq 0 would report a fork's parent's
+live trees as the child's leaks, and `reclaim` deletes what that fold says. The docstring
+of `workspace_leaks` already forbids a second implementation for that reason (A11), and
+repair leaves an undeclared pair alone exactly as it leaves an `owner-settles` one — so
+declaring it would add a second, wrong statement of openness and change nothing repair
+does. `WorkspaceSeam.reconcile` stays the settler.
+
+Gates: `test_an_orphaned_dispatch_is_settled_by_repair` (the crash-point log is the one
+the dispatched tool's body sees, taken there), `test_an_orphaned_dispatch_is_drawn_settled`
+(phern, fed repair's closer), `test_revert_still_lists_an_orphaned_dispatch_as_not_undone`;
+the existing reconcile tests stand as they are. Sabotaged three ways — a closer that is
+not an error, repair forgetting `code_mode`, a `durable` dispatch kind — each failed its
+gates.)*
+
 **Why.** An orphaned `tool/code-dispatch-start` is never settled, so after a crash the TUI
 draws a dispatch card that is running forever, and each of its three readers keys the pair
 its own way (`CodeDispatchRef` exists so they cannot drift; nothing folds them). The
@@ -510,6 +708,30 @@ workspace pair is already reconciled on open, by its owner, through `workspace_l
 ## Part 4 — tools vouch for their own effects
 
 ## P10-12 — tools name their own effect: `idempotency_key`, and a key for a far side
+
+*(Landed. `ToolDefinition.idempotency_key` (through `define_tool`) is called with the
+arguments that will run, as plain JSON; `None` or a raise means unkeyed, the raise logged.
+`TOOL_EFFECT` — declared in `ph.tools.registry` over two new **required** types,
+`tool/effect` and `tool/effect-settled` — is opened in `ToolRuntime.dispatch`, **before**
+the `tools/execute` waterfall, so the checkpoint policy's barrier carries it to disk before
+the body; `batch.py` and `execute` both reach it through `dispatch`, so no batch change was
+needed. The settle holds the result's content, `isError`, and an `outcome`:
+
+- a prior settled `settled` is answered from the log — its content, `meta: {repeated,
+  repeatOf}` — and the tool does not run;
+- a prior that **failed** runs again with no note: the tool reported on its own far side;
+- a prior open or repaired to `unknown` runs again under a new intent with
+  `EFFECT_MAY_HAVE_HAPPENED` appended — the branch P10-13's `reconcile` will take first.
+
+`ToolRunContext.idempotency_key` is `{session}/{call_id}` (a Code Mode dispatch's call id
+already carries `:code:{n}`). `ph.testing.external_tool` returns a keyed tool and its
+`FarSide` counter. No shipped tool declares a key, said on the field. Three repo gates
+found three things beside the row: the auditor's type set, `as_bool` over `bool(...)` on a
+JSON field, and `idempotency_key`'s classification as `UNBOUND` (a pure read of the
+arguments). Gates in `test_tools_idempotency.py` — the four planned plus
+`test_a_repeat_of_a_failed_effect_runs_again` and
+`test_a_different_effect_is_a_different_key`. Sabotaged three ways — no answer from the
+log, no note, a failure read as unknown — each failed its gate.)*
 
 **Why.** DESIGN I2: "Outside state needs to be idempotent… the session may repeat those
 actions." After `TOOL_OUTCOME_UNKNOWN` the model re-issues the call with a **new** call id,
@@ -546,6 +768,30 @@ so nothing keyed on the call can recognize the repeat. Only the effect can.
 `test_a_tool_that_declares_no_key_runs_every_time`.
 
 ## P10-13 — tools answer "did I happen?": `reconcile`, asked on resume
+
+*(Landed. `Done(value) | NotDone() | Unknown()` in `ph.tools.definition` (exported from
+`ph.tools`); `ToolDefinition.reconcile` takes the call's arguments, its record **and the
+session** — a third argument the sketch lacked, because `write` cannot find the file
+without the agent's root, and at resume no agent exists to ask: the tool reads it from the
+session's own open fresh-root workspace record (else the deployment root), the way
+`root_for` would have resolved it. Repair gained `unresolved_calls(events)` (the started,
+unresolved `tool/call` records of the open turn) and `CallOutcome`, handed in by call id:
+`resume_session`'s `_reconciled` pass asks each tool at `DEPLOYMENT` scope, over a
+read-only copy of the stored log built only when some tool can answer, and a raise or
+`Unknown` is no answer. `Done` becomes a non-error `tool/result` of the tool's own
+rendering with `meta: {reconciled: true}`; `NotDone` becomes a `TOOL_NOT_STARTED` result
+whose text says the tool checked, rather than the "never recorded" text, which would be
+false. `write` is exact or `Unknown`: done on identical bytes, not done on a missing or
+different file. **And the pipeline asks too**, as P10-12 planned: a repeat of an effect
+whose prior is unknown asks `reconcile` (bound as the registering row) before running —
+`Done` answers the call from the tool's rendering (`meta: {reconciled, repeatOf}`) without
+running, `NotDone` runs without the note. `ToolDefinition.reconcile` is classified `BOUND`
+to `ToolRuntime._reconcile`, with the resume path's lack of a binding said there and on the
+field. Gates: the four planned, plus `test_a_tool_that_can_tell_is_asked_before_the_retry_runs`
+and `test_a_tool_that_says_it_did_not_happen_runs_without_the_note` in
+`test_tools_idempotency.py` (`external_tool(reconciles=True)` asks its `FarSide`).
+Sabotaged four ways — resume never asking, `write` unable to tell, a done result drawn as
+an error, the pipeline never asking — each failed its gates.)*
 
 **Why.** Repair's `_OUTCOME_UNKNOWN_TEXT` asks the *model* to "decide whether to retry
 from the tool semantics", because the harness never asks the tool, which knows. A `write`
@@ -585,6 +831,22 @@ reconciled. Said on `reconcile`.
 
 ## P10-14 — `Session.batch()`: planned as a unit, published as a unit
 
+*(Landed. `Session.batch()` yields a `SessionBatch` (exported from `ph.session`) whose
+`append` stamps each member with its batch seq and the write door's refusals, so a later
+member can cite an earlier one; `SurfaceManager.validate_batch` plans them on a scratch
+`_FoldState`; `_commit` and the batch share one `_push`, which publishes each member with
+the log ending at it. Two refusals the plan did not name: a log that **moved** while the
+block was open (an `await` inside it let another task append) refuses the batch whole,
+since its seqs now belong to someone else — "no `await`" is not enforced, only its
+consequence is caught; and a batch appended to after its block closed raises rather than
+stamping an event no commit will take. Not nested. Two extra gates for those:
+`test_a_batch_whose_log_moved_is_refused_whole`,
+`test_a_batch_is_one_at_a_time_and_closes_behind_itself`. The truncation gate's refusal
+is the write door's (an unwritable payload on the second rewrite), since a truncation pass
+cannot make the surface refuse its own rewrites. Sabotaged five ways — no validation,
+planning against the live state, push-all-then-publish, no moved check, and truncation
+back to one append at a time — each failed its gate.)*
+
 **Why.** Compaction appends `compaction/summarized` and then the summary's `user/message`
 replace, adjacent by construction (`ph_stabilize/compaction.py:1267`, "no `await` between
 here and the replacement"). Argument truncation appends N `assistant/message` replaces and
@@ -618,6 +880,26 @@ roll back, because nothing was committed. A batch holds only synchronous appends
 `test_a_truncation_pass_lands_whole_or_not_at_all`.
 
 ## P10-15 — batch membership on the envelope; a batch reads back whole or not at all (format 2)
+
+*(Landed. `BatchRef(first, count)` is a `WireModel` (`count ≥ 2`, a `last` property),
+exported from `ph.session`; `SessionEvent.batch` and `_EventWire.batch`, omitted when
+absent. `Session.batch()` stamps members only when there are two or more and hands back
+the committed events through `batch.events`. Membership is checked by `_within_batch` on
+**every** `admit` — seed and replica alike, since members are contiguous whichever door
+they come through — and only the seed refuses to **end** inside one, as planned. Two
+additions: `read_session` drops an unfinished trailing batch only on an **unbounded** read
+— a bounded one is a reference fork reading a prefix it cites, where dropping would
+silently shorten what a child depends on — and `_fork_seed` refuses a boundary inside a
+batch with a new `ForkRejection`, `OPEN_BATCH`, rather than letting the seed refuse it
+less legibly. `_settle_batch` runs after the torn-line rule in `_settle_tail`, walking
+back to the member whose seq is `first`; when that member is in a parent's file instead,
+it leaves the tail for the seed to refuse. `SESSION_FORMAT_VERSION` is 2 with its
+docstring entry; the format-version gate is parametrized over format 1 by name.
+`tests/test_wire.py` gained a `BatchRef` sample. Gates: the planned set, with the replica
+test in `test_session_admit.py` beside `test_an_event_that_breaks_a_batch_is_refused_by_admit`,
+and the stamping/round-trip test in `test_session_append.py`. Sabotaged four ways — the
+reader keeping half a batch, the writer keeping half, members never stamped, membership
+unchecked — each failed its gates.)*
 
 **Why.** A batch is appended synchronously, so one flush carries all of it, and Turso
 commits a flush as one transaction. JSONL writes a flush with one `write`, and a process
@@ -667,6 +949,17 @@ row, but that is a presentation change with its own gate.
 ---
 
 ## P10-16 — docs, non-guarantees, bookkeeping
+
+*(Landed. `plans/Implementation_Plan.md` §4 gained Phase 10 and §6 its row; `DESIGN.md`
+§5.2's durability paragraph now says kinds declare their barrier, §7 I2's "where it is
+imperfect" says what is offered and what is not, and §8 gained three rows — P10-02's
+outcome, the workspace pair kept on its own fold, and P10-03's unmet condition — and
+lost one that had gone false (`Session.first_live_seq` is read now, by the journal's
+process-scoped keys). `reviews/09` and `reviews/10` carry status lines;
+`docs/dev-notes/phase-10.md` records what was traded. Two `NON_GUARANTEES` rows, claimed
+in `test_non_guarantees`: "an outside effect after a crash" and "facts across two logs".
+The version constants moved with their docstring entries; **the package versions are not
+bumped here** — that is the release's, with its note.)*
 
 - **`plans/Implementation_Plan.md`:** §4 gains **Phase 10 — actions the log can vouch
   for**, with these rows as they land, and §6 gains its line (below).

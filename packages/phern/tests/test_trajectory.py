@@ -133,7 +133,13 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "workspace/checkpoint",
         # Who asked for a turn, and whether they had asked before: bookkeeping
         # to a reader, provenance to an auditor of a daemon-driven run (P5-02).
+        # And how it ended, `unknown` after a crash (P10-10).
         "client/command",
+        "client/command-settled",
+        # P10-12: which calls named their effect, and which were answered from
+        # the log instead of run — the question an auditor of a retry asks.
+        "tool/effect",
+        "tool/effect-settled",
         # D16: the nudges render; the budget that stopped them is the auditor's.
         "skill-steps/budget",
         # P1: a retried call is accounting to a reader, evidence to an auditor.

@@ -21,7 +21,7 @@ here finishes after this front end is gone.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -29,21 +29,24 @@ from daemon_helpers import Daemon, running, until
 from tui_helpers import StubApp, StubClient, StubHost, WorkingApp
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
+from ph.cordis import DEPLOYMENT, Profile, load_profile_documents, maybe_await
 from ph.json import as_int
 from ph.keys import APPROVAL, SKILLS, TOOLS, USER_QUESTIONS
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
+from ph.seams.commands import CommandContext, CommandSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.testing import StubAgent
 from ph_app import verbs
+from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.follow import Followed
 from ph_app.params import CancelScheduleParams, CreateScheduleParams
-from ph_app.payloads import DaemonLifetime, StatusFacts
+from ph_app.payloads import DaemonLifetime, MutationRepeated, RepeatOutcome, StatusFacts
+from ph_app.protocol import Cursor
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.commands import TUI_VERBS
-from ph_app.tui.remote import DaemonSession, attach_session
+from ph_app.tui.remote import UNKNOWN_REPEAT, DaemonSession, _remote_command, attach_session
 from ph_app.tui.state import TuiState
 from ph_app.tui.widgets.status import daemon_line
 
@@ -914,3 +917,28 @@ async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
             CancelScheduleParams(session_id="planner", schedule_id="nightly"),
         )
         await until(lambda: "schedule" not in held(), what="the withdrawal to reach the line")
+
+
+@pytest.mark.parametrize(("outcome", "said"), [("unknown", True), ("settled", False)])
+async def test_a_re_sent_command_whose_outcome_is_unknown_says_so(
+    outcome: RepeatOutcome, said: bool
+) -> None:
+    """P10-10. A repeat of a command that finished says nothing — the person
+    already saw it run. One whose first attempt the daemon cannot vouch for says
+    so, because the person is the one who can check whether it happened."""
+
+    class Repeating:
+        async def mutate(self, verb: object, params: object) -> MutationRepeated:
+            return MutationRepeated(
+                session_id="s",
+                status="idle",
+                watchers=0,
+                cursor=Cursor(generation="1", sequence=0),
+                outcome=outcome,
+            )
+
+    command = _remote_command(
+        cast(DaemonClient, Repeating()), "s", CommandSchema(name="probe", summary="a probe")
+    )
+    shown = await maybe_await(command.run("", cast(CommandContext, None)))
+    assert shown == (UNKNOWN_REPEAT if said else None)

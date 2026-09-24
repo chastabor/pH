@@ -12,7 +12,9 @@ Two barriers, and a third that turns out to be one of the first two:
 2. **before a tool body** (`tools/execute`) — the `tool/call` is durable before
    the side effect happens, which is what makes a crashed call recoverable as
    `TOOL_OUTCOME_UNKNOWN` rather than invisible. For a nested Code Mode
-   dispatch the record is `tool/code-dispatch-start`, and it is flushed **unless
+   dispatch the record is `tool/code-dispatch-start` — `TOOL_DISPATCH`, whose
+   declared `tools-execute` barrier is this one, placed here because it must run
+   after every pre-execute gate — and it is flushed **unless
    a workspace restore covers the dispatched tool** (F4) —
    `ToolRuntime.restore_covers`, the rule `/revert` lists by, and so an unknown
    tool is flushed. One barrier per cell used to cover every dispatch

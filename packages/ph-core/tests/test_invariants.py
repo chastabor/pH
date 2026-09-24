@@ -495,6 +495,7 @@ async def test_the_rows_reach_the_report_through_the_real_mount(mount: MountProf
         "schedule-fold-cache",
         "subagent-fold-cache",
         "sandbox-fold-cache",
+        "intent-fold-cache",
     )
     assert set(rows) == {"model-visible-logged", *pollable}
     assert rows["model-visible-logged"].startswith("enforced inline ·")

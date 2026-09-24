@@ -11,7 +11,10 @@ draft had one, and it had already diverged inside a single increment.
 **Two events, log first** (§5 rule 2). `shell/command` is appended *before* the
 child starts, so a command that hangs — or that takes the daemon down with it —
 still says in the log what was started, which is exactly the command worth
-knowing about. One event on completion would lose it.
+knowing about. One event on completion would lose it. The pair is an intent
+(`ph.seams.shell.SHELL_COMMAND`, P10-08): `ctx.intents` puts the command on disk
+before the child starts, and repair settles one the daemon died during, so no
+reader is told forever that a command is still running.
 
 **Both forms log in full; only `!` is spoken.** Neither event type is
 surface-eligible — see `SURFACE_EVENT_TYPES` in `ph.session.events` — so no
@@ -36,16 +39,24 @@ from __future__ import annotations
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import JsonObject, as_int, as_str
-from ph.keys import SESSIONS, SHELL
+from ph.keys import INTENTS, SHELL
 from ph.llm.types import PluginSource, TextBlock, create_user_message
-from ph.seams.shell import ShellResult, ShellService
-from ph.session import Session
+from ph.seams.shell import SHELL_COMMAND, ShellResult, ShellService
+from ph.session import Prior, Session
 from ph.text import NO_OUTPUT, truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 
 from .protocol import SeamAbsent
 
-__all__ = ["SHELL_OUTPUT", "SURFACE_OUTPUT", "run_shell", "shell_body", "shell_message", "shell_of"]
+__all__ = [
+    "INTERRUPTED",
+    "SHELL_OUTPUT",
+    "SURFACE_OUTPUT",
+    "run_shell",
+    "shell_body",
+    "shell_message",
+    "shell_of",
+]
 
 SHELL_OUTPUT = 64 * 1024
 """How much of one stream the log keeps.
@@ -76,6 +87,18 @@ reads, never what is kept, and a person who wants the rest can scroll.
 """
 
 
+INTERRUPTED: dict[str, str] = {
+    "outcome-unknown": (
+        "[ph: the harness stopped before this command's result was recorded; "
+        "what it did is unknown]"
+    ),
+    "not-started": "[ph: not run — the log could not record the command first]",
+}
+"""What a card says for a result nobody saw the command write, by
+`SHELL_COMMAND`'s `interrupted` reason. Said, because a card that settled with no
+output and no exit code reads as a command that printed nothing and succeeded."""
+
+
 def shell_body(data: JsonObject) -> str:
     """A `shell/result`'s streams as one column, the way a terminal shows them.
 
@@ -103,6 +126,9 @@ def shell_body(data: JsonObject) -> str:
     code = data.get("exitCode")
     if code:
         parts.append(f"[exit {code}]")
+    interrupted = as_str(data.get("interrupted"))
+    if interrupted:
+        parts.append(INTERRUPTED.get(interrupted, INTERRUPTED["outcome-unknown"]))
     return "\n".join(parts)
 
 
@@ -178,41 +204,48 @@ async def run_shell(
     # about not changing the shape of logs already written, and it does not reach
     # here: one shape for every `shell/command` means no reader has to know that
     # an absent key encodes the quiet half.
-    started = session.append("shell/command", {"command": command, "surface": surface})
-    # **On disk before the child starts** (F9) — the whole reason this is two
-    # events: a command that hangs, or takes the daemon down with it, still shows
-    # in the log what was started. Appended alone it showed nothing of the kind,
-    # because nothing flushed until the next model request. Fail-closed like the
-    # checkpoint policy's barriers: a command whose record could not be written
-    # does not run.
-    await agent.ctx.require(SESSIONS).flush(session)
-    result = await shell.run(command, agent=agent)
-    settled = session.append(
-        "shell/result",
-        {
-            # The command this settles, so a fold can pair them and a front end
-            # need not assume only one is ever in flight — two attached UIs can
-            # each be running one, and the log is what tells them apart.
-            "commandSeq": started.seq,
-            "exitCode": result.exit_code,
-            "ok": result.exit_code == 0,
-            "cwd": result.cwd,
-            "confinedBy": result.confined_by,
-            "stdout": result.stdout[:SHELL_OUTPUT],
-            "stderr": result.stderr[:SHELL_OUTPUT],
-            # **Two bounds, two keys.** A fold that wants to know why a person is
-            # looking at a prefix wants to tell "the seam threw 37 MB away" from
-            # "we kept 64 KiB of what survived" — one `truncated` bool lost that.
-            # Compared on the originals, which is O(1) and *before* anything is
-            # concatenated: the first draft joined both streams in full to keep
-            # 64 KiB, which on a 50 MB output was three full-size copies and
-            # ~100 ms of memcpy inside the daemon's event loop.
-            "dropped": result.dropped,
-            "cap": result.cap,
-            "timedOut": result.timed_out,
-            "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
-        },
-    )
+    intents = agent.ctx.require(INTENTS)
+    # **On disk before the child starts** (F9) — the kind's `durable` barrier: a
+    # command that hangs, or takes the daemon down with it, still shows in the
+    # log what was started, and a command whose record could not be written
+    # does not run (`IntentNotDurable`). A `shell.run` that raises is settled
+    # `outcome-unknown` by `claim` rather than left open.
+    async with intents.claim(
+        session, SHELL_COMMAND, {"command": command, "surface": surface}
+    ) as held:
+        if isinstance(held, Prior):
+            # A command is keyed by its own seq, which no earlier record can hold.
+            raise RuntimeError(f"shell command at seq {held.opened.seq} was opened twice")
+        result = await shell.run(command, agent=agent)
+        settled = intents.settle(
+            session,
+            held,
+            {
+                # The command this settles, so a fold can pair them and a front
+                # end need not assume only one is ever in flight — two attached
+                # UIs can each be running one, and the log is what tells them
+                # apart.
+                "commandSeq": held.opened.seq,
+                "exitCode": result.exit_code,
+                "ok": result.exit_code == 0,
+                "cwd": result.cwd,
+                "confinedBy": result.confined_by,
+                "stdout": result.stdout[:SHELL_OUTPUT],
+                "stderr": result.stderr[:SHELL_OUTPUT],
+                # **Two bounds, two keys.** A fold that wants to know why a person
+                # is looking at a prefix wants to tell "the seam threw 37 MB away"
+                # from "we kept 64 KiB of what survived" — one `truncated` bool
+                # lost that. Compared on the originals, which is O(1) and *before*
+                # anything is concatenated: the first draft joined both streams in
+                # full to keep 64 KiB, which on a 50 MB output was three
+                # full-size copies and ~100 ms of memcpy inside the daemon's
+                # event loop.
+                "dropped": result.dropped,
+                "cap": result.cap,
+                "timedOut": result.timed_out,
+                "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
+            },
+        )
     if surface:
         agent.inject(
             create_user_message(

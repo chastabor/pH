@@ -15,9 +15,11 @@ admitted event by event *is* the log — the same surface, `stale()` clean.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from ph.session import Session, SessionEvent, SurfaceError, SurfaceIntent
+from ph.session import BatchRef, Session, SessionEvent, SurfaceError, SurfaceIntent
 from ph.session.session import SessionHeader
 from ph.testing import assistant_payload, user_payload
 
@@ -124,3 +126,39 @@ def test_admit_holds_the_surface_to_the_same_rules_as_append() -> None:
     assert mirror.seq == 1
     assert mirror.surface.nodes == (0,)
     assert mirror.stale() == []
+
+
+def test_a_replica_admits_a_batch_one_member_at_a_time() -> None:
+    """P10-15. A daemon publishes a batch's members one frame each, so a mirror is
+    mid-batch between them — legitimately. Only a *seed* must not end inside one."""
+    owner = Session("s")
+    with owner.batch() as batch:
+        batch.append("compaction/args-truncated", {"n": 1})
+        batch.append("compaction/args-truncated", {"n": 2})
+    replica = Session("s")
+
+    replica.admit(owner.events[0])
+    assert len(replica.events) == 1, "half a batch, between frames"
+    replica.admit(owner.events[1])
+
+    assert replica.events == owner.events
+    with pytest.raises(ValueError, match="ends inside the batch at seq 0"):
+        Session("s", seed=owner.events[:1])
+
+
+def test_an_event_that_breaks_a_batch_is_refused_by_admit() -> None:
+    """Members are contiguous, whichever door they arrive by: an unstamped event
+    inside an open batch, and a member claiming a batch it does not start, are
+    both refused."""
+    owner = Session("s")
+    with owner.batch() as batch:
+        batch.append("compaction/args-truncated", {"n": 1})
+        batch.append("compaction/args-truncated", {"n": 2})
+    first, second = owner.events
+
+    interrupted = Session("s")
+    interrupted.admit(first)
+    with pytest.raises(ValueError, match="seq 1 interrupts the batch at seq 0"):
+        interrupted.admit(replace(second, batch=None))
+    with pytest.raises(ValueError, match="claims the batch at seq 1, which it does not continue"):
+        Session("s").admit(replace(first, batch=BatchRef(first=1, count=2)))

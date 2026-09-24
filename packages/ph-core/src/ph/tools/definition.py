@@ -32,7 +32,7 @@ from ..cancel import CancelToken
 from ..cordis import Boundary, Context, Running, maybe_await
 from ..json import JsonObject, JsonValue, as_obj
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
-from ..session import Session
+from ..session import Session, SessionEvent
 
 if TYPE_CHECKING:
     from ..seams.approval import ApprovalDecisionName
@@ -54,10 +54,13 @@ __all__ = [
     "Ask",
     "Block",
     "Deny",
+    "Done",
     "ExecutionMode",
     "FailureKind",
+    "NotDone",
     "PostToolDecision",
     "PreToolDecision",
+    "Reconciled",
     "Respond",
     "ToolDefinition",
     "ToolExecution",
@@ -69,6 +72,7 @@ __all__ = [
     "ToolResult",
     "ToolRunContext",
     "TransportPresentation",
+    "Unknown",
     "aborted_result",
     "budget_result",
     "concluded_result",
@@ -295,6 +299,27 @@ class ToolExecutionInput:
     cancel: CancelToken | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class Done:
+    """The call happened, and this is the value it produced (P10-13)."""
+
+    value: Any
+
+
+@dataclass(frozen=True, slots=True)
+class NotDone:
+    """The call did not happen — its effect is not there — so running it again is safe."""
+
+
+@dataclass(frozen=True, slots=True)
+class Unknown:
+    """The tool cannot tell. The honest answer whenever the check would be a guess."""
+
+
+Reconciled: TypeAlias = Done | NotDone | Unknown
+"""What a tool says about a call a crash left unresolved (`ToolDefinition.reconcile`)."""
+
+
 @dataclass(slots=True)
 class ToolExecution:
     """One accepted call inside the pipeline.
@@ -377,6 +402,19 @@ class ToolRunContext:
     @property
     def signal(self) -> CancelToken | None:
         return self.execution.signal
+
+    @property
+    def idempotency_key(self) -> str:
+        """A key for **this tool's own retries** against a far side that takes one.
+
+        An HTTP `Idempotency-Key`, an SMTP `Message-ID`: stable for this call and
+        unique to it — `{session}/{call_id}`, and for a Code Mode dispatch
+        `{session}/{call_id}:code:{n}`, already deterministic. That is all it is
+        for. It does **not** survive the model re-issuing a call, which mints a new
+        call id; recognizing that repeat is `ToolDefinition.idempotency_key`'s job.
+        """
+        session = self.execution.session
+        return self.call_id if session is None else f"{session.id}/{self.call_id}"
 
     def defer_context(self, context: Message) -> None:
         """Attach a context message to this call's own result.
@@ -642,6 +680,46 @@ class ToolDefinition:
     to take back — a URL read, a query — and over-asking is how a gate teaches its
     user to stop reading it. Whether a person is actually asked is `hitl`'s call.
     """
+    idempotency_key: Callable[[Any], str | None] | None = None
+    """What this call's **effect** is, as a key: the same key, the same effect (P10-12).
+
+    DESIGN I2: outside state has to be idempotent, because a session may repeat an
+    action. After `TOOL_OUTCOME_UNKNOWN` the model re-issues the call under a **new**
+    call id, so nothing keyed on the call can recognize the repeat — only the effect
+    can, and only the producer knows what its effect is: a message id, an order
+    number, a path and a digest. Called with the arguments that will run — plain
+    JSON, after any approval substitution. `None` from the function means this call
+    has no key; a function that raises is treated the same, and logged.
+
+    A keyed call is recorded as a `TOOL_EFFECT` intent. The same key settled before
+    is answered from the log, marked `repeated`, instead of running; one whose first
+    attempt failed runs again; one whose outcome is unknown runs again with a note
+    that the earlier call may have happened (or is asked of `reconcile`, P10-13).
+
+    **No shipped tool declares one**, and that is deliberate: none has an external
+    effect whose repeat is worth suppressing — `bash` is a different command every
+    time — and suppressing a legitimate repeat is the failure this could cause.
+    """
+    reconcile: Callable[[Any, SessionEvent, Session], Awaitable[Reconciled]] | None = None
+    """Did this call happen? Asked on resume, of a call a crash left unresolved (P10-13).
+
+    Repair's `TOOL_OUTCOME_UNKNOWN` text asks the *model* to decide from the tool's
+    semantics whether to retry, because nothing asked the tool — which knows. Given the
+    call's arguments (plain JSON, as recorded), its `tool/call` record, and the session
+    being resumed, answer `Done(value)` when the effect is there — the value is
+    rendered as the call's result — `NotDone()` when it is not and running again is
+    safe, and `Unknown()` whenever the check would be a guess. A raise is `Unknown`.
+
+    Asked in two places: on resume, of a `tool/call` a crash left unresolved, and in
+    the pipeline, of a repeat of an effect whose first attempt nobody saw finish
+    (`idempotency_key`) — there it is handed the `tool/effect` record instead.
+
+    Both are asked through `ToolRuntime`, bound as the row that registered the tool.
+
+    **Not enforced: an agent-scoped tool is never asked on resume.** Resume looks
+    tools up at `DEPLOYMENT` scope, before any agent exists, so a tool registered on
+    an agent's own scope is invisible there and keeps today's text.
+    """
     present_call: Callable[[JsonObject], ToolCallView | None] | None = None
     present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None
 
@@ -741,6 +819,8 @@ def define_tool[A: BaseModel](
     effects_confined_to_workspace: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
     is_irreversible: Callable[[Any], bool] | bool | None = None,
+    idempotency_key: Callable[[Any], str | None] | None = None,
+    reconcile: Callable[[Any, SessionEvent, Session], Awaitable[Reconciled]] | None = None,
     present_call: Callable[[JsonObject], ToolCallView | None] | None = None,
     present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None,
 ) -> ToolDefinition:
@@ -797,6 +877,8 @@ def define_tool[A: BaseModel](
         effects_confined_to_workspace=effects_confined_to_workspace,
         is_concurrency_safe=_classifier(is_concurrency_safe),
         is_irreversible=_classifier(is_irreversible),
+        idempotency_key=idempotency_key,
+        reconcile=reconcile,
         present_call=present_call,
         present_result=present_result,
     )

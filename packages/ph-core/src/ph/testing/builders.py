@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -21,7 +22,7 @@ import anyio
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
-from ..json import dumps
+from ..json import as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
 from ..locks import file_lock
@@ -37,14 +38,25 @@ from ..seams.workspace import (
 )
 from ..session import Session, SessionEvent, SessionHeader, SessionKind
 from ..tools import PreToolDecision, ToolExecution, ToolExecutionResult
-from ..tools.definition import ToolDefinition, ToolOutput, define_tool, text_content
+from ..tools.definition import (
+    Done,
+    NotDone,
+    Reconciled,
+    ToolDefinition,
+    ToolOutput,
+    define_tool,
+    text_content,
+)
 from ..tools.registry import ToolRuntime
 
 __all__ = [
     "FAKE_OPTIONS",
+    "FarSide",
     "StubAgent",
     "assistant_payload",
     "code_mode_stub",
+    "external_tool",
+    "isolated_intent_kinds",
     "parked_gate",
     "plugin_payload",
     "raising",
@@ -117,6 +129,73 @@ def simple_tool(
         is_concurrency_safe=safe,
         **kwargs,
     )
+
+
+@dataclass(slots=True)
+class FarSide:
+    """What an external tool's effect reached, in order — the counter a test reads."""
+
+    deliveries: list[str] = field(default_factory=list)
+    ids: set[str] = field(default_factory=set)
+    """The ids it has seen — what a tool that can ask its far side would ask."""
+
+
+def external_tool(
+    name: str = "send", *, keyed: bool = True, fails: bool = False, reconciles: bool = False
+) -> tuple[ToolDefinition, FarSide]:
+    """A tool whose effect is outside the harness — a message delivered — and its far side.
+
+    Called with `{"id": ..., "message": ...}`; `keyed` declares `id` as the call's
+    effect key (`ToolDefinition.idempotency_key`), `fails` makes the delivery land
+    and the call report an error — the ambiguous case a retry has to handle — and
+    `reconciles` lets the tool answer `reconcile` by asking the far side about the id.
+    """
+    far = FarSide()
+
+    def deliver(args: Any, _run: Any) -> str:  # noqa: ANN401
+        far.deliveries.append(as_str(args.get("message")))
+        far.ids.add(as_str(args.get("id")))
+        if fails:
+            raise RuntimeError("the far side accepted it and then the connection dropped")
+        return f"delivered {as_str(args.get('id'))}"
+
+    def effect(args: Any) -> str | None:  # noqa: ANN401
+        return as_str(args.get("id")) or None
+
+    async def asked(args: Any, _opened: SessionEvent, _session: Session) -> Reconciled:  # noqa: ANN401
+        sent = as_str(args.get("id"))
+        return Done(f"delivered {sent}") if sent in far.ids else NotDone()
+
+    tool = simple_tool(
+        name,
+        deliver,
+        idempotency_key=effect if keyed else None,
+        reconcile=asked if reconciles else None,
+    )
+    return tool, far
+
+
+@contextmanager
+def isolated_intent_kinds(*, core: bool) -> Iterator[None]:
+    """Declare intent kinds into a table of this block's own, so a test's do not leak.
+
+    `core` keeps ph-core's own kinds — the asks, the shell, the dispatches — in it,
+    for a test of repair that must still see them settled; without it the table
+    starts empty, for a test of `declare_intent` itself. ph-core's kinds are
+    declared into the real table *first* either way, so a declaring module first
+    imported inside the block cannot put its kind into the throwaway table and lose
+    it for every test after.
+    """
+    from ..persistence.repair import _kinds
+    from ..session import intents
+
+    _kinds()
+    real = intents._KINDS
+    intents._KINDS = dict(real) if core else {}
+    try:
+        yield
+    finally:
+        intents._KINDS = real
 
 
 def boundary_for(scope: Boundary | None, agent: AgentHandle | None) -> Boundary:

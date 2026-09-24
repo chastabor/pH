@@ -637,6 +637,13 @@ class SandboxSeam:
         actually chose may overrule it. Collapsed into the default, "nobody said"
         and "the deployment says workspace-write" are the same answer, and
         `effective` would overwrite every caller's mode with the default.
+
+        **Not enforced: who wrote it** (F12, P10-02). This trusts the last
+        `sandbox/mode` whoever appended it. Shipped writers are held to
+        `known_event_types.WRITERS` by `test_log_writers.py`; a third-party row that
+        appends one at runtime is not refused, because the append cannot tell who is
+        asking — the daemon's preset verb reaches `set_mode` with no row running, so a
+        runtime check would have to answer "allowed" when it cannot tell.
         """
         if session is None:
             return None

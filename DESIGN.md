@@ -786,13 +786,19 @@ Three inbox targets, differing in *when* and *whether they wake*
 | `steer` | next **step** | yes |
 | `inject` | next **step** | **no** |
 
-Durability is not the loop's job: `session-checkpoint-policy` flushes before
-every model request, before every top-level tool body — and before a nested
-Code Mode dispatch whose tool can reach past the workspace — and after a
-rejected `agent/pre-step` (`persistence/checkpoint_policy.py`). A record that
-must precede an effect outside those barriers flushes itself: a daemon verb
-before it replies, a `!!` command before it runs, an approval or a question
-before it is put to a person, an upload before its handle is cached, a
+Durability is not the loop's job, and since Phase 10 most of it is not a call
+site's either: **a record that must precede an effect is an intent kind, and
+kinds declare their barrier** (`session/intents.py`). `ctx.intents` opens a
+`durable` kind's record and flushes it before handing out the claim — a `!!`
+command, an approval, a question — or leaves a `buffered` one for the next
+flush, which is how a daemon verb's key travels with its act; repair settles
+every declared kind a crash left open. The barriers that must run after every
+pre-execute gate stay `session-checkpoint-policy`'s — before every model
+request, before a top-level tool body and a nested dispatch that can reach past
+the workspace, after a rejected `agent/pre-step`
+(`persistence/checkpoint_policy.py`) — and a kind that needs one declares
+`tools-execute` rather than placing a second. What still flushes by hand: a
+daemon verb before it replies (F7), an upload before its handle is cached, a
 subagent's outcome before its parent reports it. A backend writes what the log
 holds past its own cursor rather than draining a queue, so what a teardown
 appends is still owed — and `write_on_unwind`, which each backend's `claim`
@@ -1257,10 +1263,27 @@ and asserts **the seam's own context did not grow an effect**. A lint additional
 refuses `subprocess.Popen` and `tempfile.mkdtemp` outside the seams, "because the
 fiftieth plugin author will not have read §4.9" (`resources.py`).
 
-**Where it is imperfect.** Outside state needs to be idempotent. Should a change
-take place in an external database, or an email get sent out, those cannot be
-undone as the session may repeat those actions after the harness has unwound.
-The invariant is about the *harness*, not the external state.
+**Where it is imperfect, and what is offered for it.** Outside state needs to be
+idempotent. Should a change take place in an external database, or an email get
+sent out, those cannot be undone, and the session may repeat those actions after
+the harness has unwound. The invariant is about the *harness*, not the external
+state. What the harness offers a tool since Phase 10:
+
+- **name its effect** (`ToolDefinition.idempotency_key`) — the same effect asked
+  for again, under the new call id a re-issued call always has, is answered from
+  the log (`TOOL_EFFECT`) instead of repeated; one whose first attempt nobody saw
+  finish runs with a note that it may already have happened;
+- **say whether it happened** (`ToolDefinition.reconcile`) — asked on resume of a
+  call a crash left unresolved, and in the pipeline of such a repeat, so the model
+  reads done or not done instead of "outcome unknown". `write` answers exactly;
+- **key its own retries** against a far side that accepts a key
+  (`ToolRunContext.idempotency_key`, stable for one call).
+
+What it does not offer: a tool with neither a key nor a `reconcile` — every MCP
+tool today — still leaves the model an unknown after a crash; and a fact that
+spans two logs (a child's and its parent's roster, a send and its receipt) is
+eventual, not atomic. Within one log, `Session.batch()` lands records whole or not
+at all, including across a torn write (format 2). Both are `NON_GUARANTEES` rows.
 
 ### I3 — Model-visible means logged
 
@@ -1530,7 +1553,9 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
-| `Session.first_live_seq` is written and read only by a test | unused |
+| **Posture types are not refused at runtime from a writer that is not their owner.** `WRITERS` holds every shipped `sandbox/mode`, `approval/policy`, `approval/mode` and `permission/preset` writer to the code that may write it (`test_log_writers.py`); a third-party row appending one at runtime is not refused, because the append cannot tell who is asking — the daemon's preset verb reaches `set_mode` with no row running. Said beside `SandboxSeam.logged_mode` and `approval_policy` | P10-02 spiked; not shipped, by decision 6 |
+| **A workspace tree is not an intent kind.** Its openness is folded from `seed_length` and only over tiers with a fresh root (`workspace_survivors`), which a key-pair fold from seq 0 cannot express; `WorkspaceSeam.reconcile` stays its settler, and repair leaves it as it leaves an `owner-settles` kind | P10-11, by decision |
+| **A package's log type is known to a reader only once the package is imported.** `declare_log_type` has no entry-point group, so a stored log carrying a *required* plugin type is refused by a reader that never mounted the plugin; none ships today | P10-03, conditional on the first such type |
 | `phern attachments gc` is cited as precedent in two docstrings but **does not exist** | doc drift |
 | `DowngradeReason` has one member and one producer; tier-driven narrowing records none (§6.6) | incomplete |
 | `_enforce`'s containment refusal (a scope outside the parent's) has **no test**; the no-scope branch does | untested |

@@ -35,7 +35,14 @@ import pytest
 
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ph.persistence.jsonl import JsonlSessionStore, read_session
-from ph.session import SESSION_FORMAT_VERSION, Session, SessionEvent, SessionHeader, SurfaceIntent
+from ph.session import (
+    SESSION_FORMAT_VERSION,
+    BatchRef,
+    Session,
+    SessionEvent,
+    SessionHeader,
+    SurfaceIntent,
+)
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import MountProfile, stored_log, user_payload, write_reference_fork
 from ph.tools import ToolRunContext
@@ -179,6 +186,49 @@ async def test_a_child_is_never_durable_before_the_prefix_it_references(
     assert [event.seq for event in whole] == [0, 1, 2]
 
 
+async def test_flushing_a_subagent_child_does_not_write_its_parent(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """P10-04. The ordering rule above is for a child that *references* a prefix.
+
+    A subagent child names its parent and inherits nothing, so its file reads back
+    on its own — and writing the parent first on every child flush was one parent
+    fsync per child tool call that reaches past the tree. The parent is still
+    written: by its own flushes, and by the mount's last write.
+    """
+    ctx = await mount(_root(tmp_path))
+    sessions = ctx.require(SESSIONS)
+    parent = sessions.create("parent")
+    parent.append("turn/start", {"turn": 1})
+    child = sessions.create("child", meta={"parentSession": "parent", "origin": "subagent"})
+    child.append("turn/start", {"turn": 1})
+
+    assert sessions.lineage(child) == (child,)
+    await sessions.flush(child)
+
+    assert not stored_log(tmp_path / "sessions", "parent").exists()
+    header, whole = ctx.require(SESSION_PERSISTENCE).read("child")
+    assert header is not None and header.parent_session == "parent"
+    assert [event.type for event in whole] == ["turn/start"]
+
+
+async def test_a_segment_still_writes_its_parent_first(mount: MountProfile, tmp_path: Path) -> None:
+    """The other child that references a prefix: `roll` is a fork at the tip."""
+    ctx = await mount(_root(tmp_path))
+    sessions = ctx.require(SESSIONS)
+    parent = sessions.create("parent")
+    parent.append("turn/start", {"turn": 1})
+    parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+
+    child = sessions.roll(parent, "child")
+    assert sessions.lineage(child) == (parent, child)
+    await sessions.flush(child)
+
+    assert stored_log(tmp_path / "sessions", "parent").exists(), "the ancestor went first"
+    _, whole = ctx.require(SESSION_PERSISTENCE).read("child")
+    assert [event.type for event in whole][:2] == ["turn/start", "turn/end"]
+
+
 def test_read_session_hands_acceptance_to_the_session(tmp_path: Path) -> None:
     path = tmp_path / "future.jsonl"
     path.write_text(
@@ -202,9 +252,14 @@ def test_a_log_with_no_header_is_refused(tmp_path: Path) -> None:
         read_session(path)
 
 
-def test_a_wrong_format_version_is_refused(tmp_path: Path) -> None:
-    path = tmp_path / "v9.jsonl"
-    path.write_text('{"type":"session/header","header":{"version":9,"id":"f","createdAt":1}}\n')
+@pytest.mark.parametrize("version", [1, 9], ids=["format-1", "a-later-one"])
+def test_a_wrong_format_version_is_refused(tmp_path: Path, version: int) -> None:
+    """Format 1 by name (P10-15): its envelope has no batch membership, and a log
+    of it is refused rather than half-understood."""
+    path = tmp_path / f"v{version}.jsonl"
+    path.write_text(
+        f'{{"type":"session/header","header":{{"version":{version},"id":"f","createdAt":1}}}}\n'
+    )
     with pytest.raises(ValueError, match=f"version must be {SESSION_FORMAT_VERSION}"):
         read_session(path)
 
@@ -491,23 +546,27 @@ async def test_a_retry_behind_a_write_nobody_took_back_still_appends_cleanly(
     assert [event.type for event in events] == ["turn/start", "turn/end"]
 
 
-def _torn(tmp_path: Path, tail: str) -> Path:
-    """A two-event log, then `tail` with no newline after it — what a death mid-write leaves.
+def _raw_log(tmp_path: Path, session_id: str, events: list[SessionEvent], tail: str) -> Path:
+    """A stored log as a death mid-write leaves it: whole lines, then `tail` as given.
 
-    Written with the store's own encoders at the store's own path, so only the
-    torn fragment is spelled by hand."""
+    Written with the store's own encoders at the store's own path, so only `tail`
+    — a torn fragment, a half-written batch — is spelled by hand."""
     from ph.json import dumps
     from ph.persistence.jsonl import HEADER_LINE_TYPE
 
-    records = [
-        {"type": HEADER_LINE_TYPE, "header": SessionHeader(id="torn", created_at=1).to_wire()},
-        SessionEvent(type="turn/start", seq=0, time=1, data={"turn": 1}).to_wire(),
-        SessionEvent(type="step/start", seq=1, time=1, data={"turn": 1, "step": 1}).to_wire(),
-    ]
-    path = stored_log(tmp_path, "torn")
+    header = SessionHeader(id=session_id, created_at=1).to_wire()
+    records = [{"type": HEADER_LINE_TYPE, "header": header}, *(e.to_wire() for e in events)]
+    path = stored_log(tmp_path, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(f"{dumps(record)}\n" for record in records) + tail, encoding="utf-8")
     return path
+
+
+def _torn(tmp_path: Path, tail: str) -> Path:
+    """A two-event log, then `tail` with no newline after it."""
+    turn = SessionEvent(type="turn/start", seq=0, time=1, data={"turn": 1})
+    step = SessionEvent(type="step/start", seq=1, time=1, data={"turn": 1, "step": 1})
+    return _raw_log(tmp_path, "torn", [turn, step], tail)
 
 
 def test_a_torn_final_line_is_read_without_it(tmp_path: Path) -> None:
@@ -574,6 +633,82 @@ async def test_a_resumed_log_appends_behind_its_torn_tail_cleanly(
     _header, reread = read_session(path)
     assert [event.seq for event in reread] == list(range(len(session.events)))
     assert path.read_bytes().endswith(b"\n"), "a record was left without its newline"
+
+
+def _batched(tmp_path: Path, members: list[str], after: str = "") -> Path:
+    """A turn, then a two-member batch written line by line — `members` are the
+    lines as a torn write may leave them — then `after`."""
+    turn = SessionEvent(type="turn/start", seq=0, time=1, data={"turn": 1})
+    return _raw_log(tmp_path, "batched", [turn], "".join(members) + after)
+
+
+def _member(seq: int, *, newline: bool = True) -> str:
+    from ph.json import dumps
+
+    ref = BatchRef(first=1, count=2)
+    line = dumps(
+        SessionEvent(
+            type="compaction/args-truncated", seq=seq, time=1, data={"n": seq}, batch=ref
+        ).to_wire()
+    )
+    return line + ("\n" if newline else "")
+
+
+@pytest.mark.parametrize(
+    "members",
+    [[_member(1)], [_member(1), _member(2, newline=False)[:20]]],
+    ids=["second-never-written", "second-torn"],
+)
+def test_a_batch_cut_by_a_torn_write_is_dropped_whole(tmp_path: Path, members: list[str]) -> None:
+    """P10-15. One flush wrote the whole batch; a death mid-write cut it; nothing
+    was told those bytes were written — so the reader keeps none of the batch,
+    rather than an accounting record whose replacement never landed.
+
+    Sabotage: drop `_unfinished_batch` from `read_session` and the first member
+    is kept alone, which the seed then refuses.
+    """
+    _header, events = read_session(_batched(tmp_path, members))
+    assert [event.seq for event in events] == [0]
+
+
+def test_a_complete_batch_reads_back_intact(tmp_path: Path) -> None:
+    header, events = read_session(_batched(tmp_path, [_member(1), _member(2)]))
+    assert [event.seq for event in events] == [0, 1, 2]
+    assert {event.batch for event in events[1:]} == {BatchRef(first=1, count=2)}
+    Session("batched", seed=events, header=header)
+
+
+async def test_a_resumed_log_appends_behind_a_dropped_batch_cleanly(tmp_path: Path) -> None:
+    """The writer's half, as for a torn line: the first flush cuts the file back
+    to the batch's first member before appending, so the log it leaves reads
+    back contiguous — and not with a new event behind half a batch.
+
+    Sabotage: drop `_settle_batch` from `_settle_tail` and the new event lands
+    after the dangling member, which the reread refuses.
+    """
+    path = _batched(tmp_path, [_member(1)])
+    header, events = read_session(path)
+    store, session = _tracked(
+        tmp_path, Session("batched", seed=events, header=header, durable=len(events))
+    )
+    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await store.flush(session)
+
+    _header, reread = read_session(path)
+    assert [event.type for event in reread] == ["turn/start", "session/end-seed", "turn/end"]
+    assert [event.seq for event in reread] == list(range(len(session.events)))
+
+
+def test_an_unfinished_batch_before_the_end_refuses_the_log(tmp_path: Path) -> None:
+    """Only a *trailing* batch can be a torn write. One cut short with more after
+    it is damage of another kind, and seeding it would hand every reader half of
+    something that only means anything whole."""
+    after = SessionEvent(type="turn/end", seq=2, time=1, data={"turn": 1}).to_wire()
+    from ph.json import dumps
+
+    header, events = read_session(_batched(tmp_path, [_member(1)], after=dumps(after) + "\n"))
+    with pytest.raises(ValueError, match="seq 2 interrupts the batch at seq 1"):
+        Session("batched", seed=events, header=header)
 
 
 async def test_a_final_record_longer_than_one_read_is_still_measured(tmp_path: Path) -> None:

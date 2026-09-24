@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from .seams.uploads import UploadRegistry
     from .seams.user_questions import UserQuestionService
     from .seams.workspace import WorkspaceSeam
+    from .session.journal import IntentJournal
     from .session.store import SessionStore
     from .system_prompt.assembly import SystemPromptService
     from .tools.registry import ToolRuntime
@@ -92,6 +93,7 @@ __all__ = [
     "DIAGNOSTICS",
     "FS",
     "GOALS",
+    "INTENTS",
     "INVARIANTS",
     "JOBS",
     "LLM",
@@ -135,6 +137,7 @@ CREDENTIALS: ServiceKey[CredentialService] = ServiceKey("credentials")
 DIAGNOSTICS: ServiceKey[DiagnosticsRegistry] = ServiceKey("diagnostics")
 FS: ServiceKey[FsService] = ServiceKey("fs")
 GOALS: ServiceKey[GoalService] = ServiceKey("goals")
+INTENTS: ServiceKey[IntentJournal] = ServiceKey("intents")
 INVARIANTS: ServiceKey[InvariantRegistry] = ServiceKey("invariants")
 JOBS: ServiceKey[JobService] = ServiceKey("jobs")
 LLM: ServiceKey[LlmRuntime] = ServiceKey("llm")

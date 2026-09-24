@@ -449,6 +449,11 @@ HANDLERS: Mapping[str, Handler] = {
     # A record: "who asked for this, and had they asked before" is exactly the
     # provenance an auditor reading a daemon-driven run needs.
     "client/command": _on_harness_event,
+    # And how it ended — `unknown` is the row an auditor looks for after a crash.
+    "client/command-settled": _on_harness_event,
+    # Which calls named their effect, and which were answered from the log.
+    "tool/effect": _on_harness_event,
+    "tool/effect-settled": _on_harness_event,
     "kernel/restored": _on_harness_event,
     "subagent/admitted": _on_harness_event,
     "subagent/deleted": _on_harness_event,

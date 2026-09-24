@@ -940,31 +940,39 @@ class SummarizeEngine:
         elides = self._elides_arguments(agent)
         rewritten: list[int] = []
         saved = 0
-        for at in nodes[:cutoff]:
-            event = events[at]
-            if event.type != "assistant/message":
-                continue
-            replacement = truncated_assistant_payload(
-                event, elides=elides, max_length=settings.max_length
-            )
-            if replacement is None:
-                continue
-            payload, savings = replacement
-            session.append(
-                "assistant/message",
-                payload,
-                SurfaceIntent(surface_op=SurfaceReplace(replaces=(at,)), source_event_seqs=(at,)),
-            )
-            rewritten.append(at)
-            saved += savings
-        if not rewritten:
-            return ()
-        # The harness's own statement of what it elided. Without it the only
-        # record is a diff between two events, and no record at all of *why*.
-        session.append(
-            "compaction/args-truncated",
-            {"trigger": trigger, "seqs": rewritten, "savedChars": saved},
-        )
+        # One batch: the rewrites and the record of them land together or not at
+        # all (P10-14). One at a time, a rewrite the surface refused partway left
+        # the ones before it in the log with no `compaction/args-truncated` saying
+        # why — and the record, had it been written, describing rewrites that
+        # never landed.
+        with session.batch() as batch:
+            for at in nodes[:cutoff]:
+                event = events[at]
+                if event.type != "assistant/message":
+                    continue
+                replacement = truncated_assistant_payload(
+                    event, elides=elides, max_length=settings.max_length
+                )
+                if replacement is None:
+                    continue
+                payload, savings = replacement
+                batch.append(
+                    "assistant/message",
+                    payload,
+                    SurfaceIntent(
+                        surface_op=SurfaceReplace(replaces=(at,)), source_event_seqs=(at,)
+                    ),
+                )
+                rewritten.append(at)
+                saved += savings
+            if rewritten:
+                # The harness's own statement of what it elided. Without it the
+                # only record is a diff between two events, and no record at all
+                # of *why*.
+                batch.append(
+                    "compaction/args-truncated",
+                    {"trigger": trigger, "seqs": rewritten, "savedChars": saved},
+                )
         return tuple(rewritten)
 
     def _should_truncate(self, baseline: TokenBaseline, nodes: tuple[int, ...]) -> bool:
@@ -1264,60 +1272,62 @@ class SummarizeEngine:
             content=history,
         )
         options = agent.options
-        # No `await` between here and the replacement: the two events are
-        # adjacent by construction, which is what lets a consumer price a
-        # shadowed range from the record immediately before it.
-        session.append(
-            "compaction/summarized",
-            {
-                "trigger": trigger,
-                "shadowedSeqs": list(plan.shadowed_seqs),
-                "shadowedTokens": plan.shadowed_tokens,
-                "kept": plan.kept,
-                "provider": str(options.provider or ""),
-                "model": str(options.model or ""),
-                "maxTokens": self.config.max_tokens,
-                "locator": None if ref is None else ref.locator,
-                "usage": None if usage is None else usage.to_wire(),
-                "instructions": instructions or None,
-                # Which request shape paid for this summary. The cache is the
-                # whole reason `replay` exists, and `usage.cacheReadTokens`
-                # beside it is what makes "did we actually get the hit" a
-                # question the log can answer rather than an assumption.
-                "shape": shape,
-            },
-        )
-        text = (
-            REPLACEMENT_WITHOUT_PATH.format(summary=summary)
-            if ref is None
-            else REPLACEMENT_WITH_PATH.format(file_path=ref.locator, summary=summary)
-        )
-        replacement = session.append(
-            "user/message",
-            create_user_message(
-                content=[{"type": "text", "text": text}],
-                # The harness speaking, and saying which kind of speech it is.
-                # `form="compaction"` is the discriminator a reader needs: an
-                # offloaded paste is also a plugin-authored replacement, and
-                # calling either one by the other's name tells the person
-                # something false about their own conversation.
-                source=PluginSource(
-                    plugin="compaction-summarize",
-                    form="compaction",
-                    summary=(
-                        f"{count_of(len(plan.shadowed_seqs), 'message')} summarized"
-                        f" (~{plan.shadowed_tokens} tokens)"
+        # One batch (P10-14). The two events are adjacent, which is what lets a
+        # consumer price a shadowed range from the record immediately before it;
+        # and they land together, so a replacement the surface refuses no longer
+        # leaves an accounting record for a summary that replaced nothing.
+        with session.batch() as batch:
+            batch.append(
+                "compaction/summarized",
+                {
+                    "trigger": trigger,
+                    "shadowedSeqs": list(plan.shadowed_seqs),
+                    "shadowedTokens": plan.shadowed_tokens,
+                    "kept": plan.kept,
+                    "provider": str(options.provider or ""),
+                    "model": str(options.model or ""),
+                    "maxTokens": self.config.max_tokens,
+                    "locator": None if ref is None else ref.locator,
+                    "usage": None if usage is None else usage.to_wire(),
+                    "instructions": instructions or None,
+                    # Which request shape paid for this summary. The cache is the
+                    # whole reason `replay` exists, and `usage.cacheReadTokens`
+                    # beside it is what makes "did we actually get the hit" a
+                    # question the log can answer rather than an assumption.
+                    "shape": shape,
+                },
+            )
+            text = (
+                REPLACEMENT_WITHOUT_PATH.format(summary=summary)
+                if ref is None
+                else REPLACEMENT_WITH_PATH.format(file_path=ref.locator, summary=summary)
+            )
+            replacement = batch.append(
+                "user/message",
+                create_user_message(
+                    content=[{"type": "text", "text": text}],
+                    # The harness speaking, and saying which kind of speech it is.
+                    # `form="compaction"` is the discriminator a reader needs: an
+                    # offloaded paste is also a plugin-authored replacement, and
+                    # calling either one by the other's name tells the person
+                    # something false about their own conversation.
+                    source=PluginSource(
+                        plugin="compaction-summarize",
+                        form="compaction",
+                        summary=(
+                            f"{count_of(len(plan.shadowed_seqs), 'message')} summarized"
+                            f" (~{plan.shadowed_tokens} tokens)"
+                        ),
                     ),
+                ).to_wire(),
+                SurfaceIntent(
+                    # The set it already has, passed through — where the range
+                    # forced it to collapse the list to its two ends and let the fold
+                    # re-derive what sat between them.
+                    surface_op=SurfaceReplace(replaces=plan.shadowed_seqs),
+                    source_event_seqs=plan.shadowed_seqs,
                 ),
-            ).to_wire(),
-            SurfaceIntent(
-                # The set it already has, passed through — where the range
-                # forced it to collapse the list to its two ends and let the fold
-                # re-derive what sat between them.
-                surface_op=SurfaceReplace(replaces=plan.shadowed_seqs),
-                source_event_seqs=plan.shadowed_seqs,
-            ),
-        )
+            )
         # After both appends, and outside the adjacency they require: the blob
         # appears at a locator the log already names, which is what keeps the
         # open-time sweep from reading this row's own history file as garbage

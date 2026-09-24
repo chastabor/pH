@@ -24,6 +24,7 @@ from ph.cordis import DEPLOYMENT, Context
 from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, CODE_RUNTIME_STUB, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolSchema
+from ph.persistence import interrupted_turn_closers
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
@@ -38,9 +39,14 @@ from ph.testing import (
     simple_tool,
 )
 from ph.tools import Deny, ToolExecutionInput, ToolExecutionResult, text_content
-from ph.tools.code_mode import CodeDispatchRef, ToolCallError, governed_binding
+from ph.tools.code_mode import (
+    DISPATCH_INTERRUPTED,
+    CodeDispatchRef,
+    ToolCallError,
+    governed_binding,
+)
 from ph.tools.definition import ToolOutput, TransportPresentation
-from ph.tools.registry import RUN_CODE
+from ph.tools.registry import RUN_CODE, ToolRuntime
 
 pytestmark = pytest.mark.anyio
 
@@ -761,3 +767,61 @@ async def test_a_dispatch_parked_on_its_gate_has_no_start_record(mount: MountPro
     kinds = [e.type for e in session.events]
     assert kinds.index("tool/code-dispatch-start") < kinds.index("tool/code-dispatch")
     assert calls == ["touch:1"]
+
+
+async def test_an_orphaned_dispatch_is_settled_by_repair(mount: MountProfile) -> None:
+    """P10-11. The log a crash mid-dispatch leaves — the start record written, the
+    binding running, no settle — is the log the tool body sees, so it is taken
+    there. Repair settles the dispatch by its own kind's closer: the start's
+    identity, an error, and a body a card can draw, so no dispatch card runs
+    forever after a crash."""
+    ctx = await _code_ctx(mount)
+    crashed: list[Any] = []
+
+    def body(args: Any, run: Any) -> Any:  # noqa: ANN401
+        crashed.extend(run.session.events)
+        return "ok"
+
+    ctx.require(TOOLS).register(simple_tool("touch", body, safe=True))
+
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
+        await ns["tools"].touch(n=1)
+        return "done"
+
+    await _run(ctx, "orphaned", program)
+    (start,) = [event for event in crashed if event.type == "tool/code-dispatch-start"]
+    assert not [event for event in crashed if event.type == "tool/code-dispatch"]
+
+    (settle,) = interrupted_turn_closers(crashed)
+    assert settle.type == "tool/code-dispatch"
+    identity = ("rootCallId", "parentCallId", "subCallId", "name")
+    assert [settle.data[key] for key in identity] == [start.data[key] for key in identity]
+    assert settle.data["isError"] is True and settle.data["interrupted"] == "outcome-unknown"
+    assert as_obj(as_seq(settle.data["content"])[0])["text"] == DISPATCH_INTERRUPTED
+
+
+async def test_revert_still_lists_an_orphaned_dispatch_as_not_undone() -> None:
+    """`/revert` reads the start records, so a dispatch repair settled is still one
+    the run did — and one a tree restore does not take back."""
+    from ph.commands.revert import _not_undone
+
+    root = Context()
+    tools = ToolRuntime(ctx=root)
+    root.provide(TOOLS, tools)
+    session = Session("s")
+    session.append(
+        "tool/code-dispatch-start",
+        {
+            "rootCallId": "c1",
+            "parentCallId": "c1",
+            "subCallId": "c1:code:0",
+            "name": "publish",
+            "arguments": {"to": "prod"},
+        },
+    )
+    for closer in interrupted_turn_closers(session.events):
+        session.admit(closer)
+
+    assert session.latest("tool/code-dispatch") is not None, "repair settled it"
+    listed = "\n".join(_not_undone(root, root, session, "c1"))
+    assert "publish(" in listed

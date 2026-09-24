@@ -25,11 +25,14 @@ event is declared with `EventRegistry.declare`.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 __all__ = [
     "IGNORABLE_SESSION_EVENT_TYPES",
     "KNOWN_SESSION_EVENT_TYPES",
+    "WRITERS",
     "LogTypeDeclaration",
     "LogTypeError",
     "UnknownEventTypeError",
@@ -61,8 +64,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # are a fork, and only this says which one a person is looking at.
         "session/segmented",
         # A mutating command a protocol client asked for, recorded so asking
-        # twice is safe across a restart (P5-02). Not a slash `command/*`.
+        # twice is safe across a restart (P5-02). Not a slash `command/*`. Its
+        # settle says the verb finished, or — written by repair — that a crash
+        # left its outcome unknown (P10-10), which is what a retry is told.
         "client/command",
+        "client/command-settled",
         # The supervisor's retry ladder (P5-04): a crashed root task being run
         # again, the ladder giving up, and a retry that worked. In the log
         # rather than in supervisor memory, because "this root tried three times
@@ -198,6 +204,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
         "tool/code-dispatch",
         "tool/code-dispatch-start",
+        # A call whose tool names its effect (P10-12): opened before the body,
+        # settled with what it returned, so the same effect asked for again
+        # under a new call id is answered from the log. **Not** ignorable: a
+        # reader that skipped them would run an effect the log says happened.
+        "tool/effect",
+        "tool/effect-settled",
         # Persistent-kernel state (D17; emitted by ph-rlm's snapshot policy).
         # These are what make `persistence: "namespace"` admissible at all: the
         # seam takes the provider's promise at registration, and these events are
@@ -339,6 +351,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # Protocol bookkeeping a reader can skip without misreading anything
         # else: the turn it deduplicated is in the log either way.
         "client/command",
+        "client/command-settled",
         # Supervisor bookkeeping (P5-04), ignorable on the same terms as
         # `limits/*`: a reader skipping these loses the *account* of why a root
         # paused, gave up or came back — which is accounting, not the
@@ -400,6 +413,132 @@ refuse the seed, because skipping one can change how everything after it reads.
 Only purely informational records — kernel state, subagent status, usage
 attribution — belong here.
 """
+
+
+# ---------------------------------------------------------- writers of record --
+
+_WRITTEN_BY: Mapping[str, frozenset[str]] = {
+    "ph.agent.inbox": frozenset({"agent/inbox/spliced"}),
+    "ph.agent_loop.driver": frozenset(
+        {
+            "assistant/chunk",
+            "assistant/message",
+            "request/context",
+            "request/header",
+            "step/end",
+            "step/retry",
+            "step/start",
+            "turn/end",
+            "turn/start",
+            "user/message",
+        }
+    ),
+    "ph.llm.media": frozenset({"attachment/degraded", "attachment/oversized"}),
+    "ph.llm.retry": frozenset({"llm/retry"}),
+    "ph.persistence.jsonl": frozenset({"session/resumed"}),
+    "ph.seams.approval": frozenset({"approval/asked", "approval/decided", "approval/policy"}),
+    "ph.seams.commands": frozenset({"command/done", "command/run"}),
+    "ph.seams.fs": frozenset({"fs/observed"}),
+    "ph.seams.goals": frozenset({"goal/continued", "goal/gate", "goal/set", "goal/settled"}),
+    "ph.seams.permission_presets": frozenset({"permission/preset"}),
+    "ph.seams.sandbox": frozenset({"sandbox/denied", "sandbox/mode"}),
+    "ph.seams.schedule": frozenset(
+        {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
+    ),
+    # Through `ctx.intents`: the declaring module is the writer of record (P10-08).
+    "ph.seams.shell": frozenset({"shell/command", "shell/result"}),
+    # The seam writes the terminal status for a child it gave up on — one the
+    # provider admitted and can no longer end — so the roster row closes.
+    "ph.seams.subagents": frozenset({"subagent/status"}),
+    "ph.seams.uploads": frozenset({"attachment/uploaded"}),
+    "ph.seams.user_questions": frozenset({"question/answered", "question/asked"}),
+    "ph.seams.workspace": frozenset(
+        {
+            "workspace/acquired",
+            "workspace/checkpoint",
+            "workspace/disposed",
+            "workspace/provisioned",
+            "workspace/retained",
+        }
+    ),
+    "ph.session.session": frozenset({"session/end-seed"}),
+    "ph.session.store": frozenset({"session/segmented"}),
+    "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
+    "ph.tools.code_mode": frozenset({"tool/code-dispatch", "tool/code-dispatch-start"}),
+    "ph.tools.registry": frozenset({"tool/effect", "tool/effect-settled"}),
+    "ph_app.daemon.supervisor": frozenset(
+        {
+            "client/command",
+            "client/command-settled",
+            "supervisor/failed",
+            "supervisor/passivated",
+            "supervisor/recovered",
+            "supervisor/retry",
+            "supervisor/unreachable",
+            "supervisor/violated",
+        }
+    ),
+    "ph_rlm.context_loader": frozenset({"context/loaded"}),
+    "ph_rlm.harness": frozenset({"harness/refine-considered"}),
+    "ph_rlm.harness.service": frozenset({"harness/refined"}),
+    "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
+    "ph_rlm.subagents": frozenset(
+        {"subagent/admitted", "subagent/deleted", "subagent/status", "subagent/usage-attributed"}
+    ),
+    # Compaction rewrites the model's history through surface `replace` — a
+    # summary as a `user/message`, an elided call as an `assistant/message`, a
+    # clipped result as a `tool/result` — which is why the three surface types
+    # have a second writer, and the one reason they may.
+    "ph_stabilize.compaction": frozenset(
+        {
+            "assistant/message",
+            "compaction/args-truncated",
+            "compaction/declined",
+            "compaction/summarized",
+            "tool/result",
+            "user/message",
+        }
+    ),
+    "ph_stabilize.hitl": frozenset({"approval/mode"}),
+    # An offloaded paste is a `user/message` replace for the same reason.
+    "ph_stabilize.input_offload": frozenset({"offload/input-spilled", "user/message"}),
+    "ph_stabilize.limits": frozenset({"limits/breaker-tripped", "limits/exceeded"}),
+    "ph_stabilize.offload": frozenset({"offload/spilled"}),
+    # Two writers of one list on purpose: a procedure a skill declares is a todo
+    # list, and both rows mean "the list is now this".
+    "ph_stabilize.skill_steps": frozenset({"skill-steps/budget", "todo/write"}),
+    "ph_stabilize.todo": frozenset({"todo/write"}),
+}
+"""Which shipped module appends which of ph-core's types (P10-01).
+
+**The one thing the runtime refusal cannot say.** Since F11 `Session.append` refuses a
+type this build could not read back; what is left is *who may write each one*, and a
+table that says so is the difference between "deliberately shared" and "nobody
+noticed". Grouped by module so each shared type carries its reason where it is shared.
+
+Held to the code by `test_log_writers.py`, which walks every shipped module in every
+package: an append site whose module is not listed for its type fails, and so does a
+listed pair nothing appends any more. **Lexical, not dynamic** — the module whose code
+calls `append`, not the row that happened to be running: `permission-presets` changes
+the sandbox posture by calling `SandboxSeam.set_mode`, and the append is the seam's.
+
+**A pair written through `ctx.intents` belongs to the module that declares its
+kind** (`IntentKind(opened=…, settled=…)`), not to the journal whose code calls
+`append` on its behalf, nor to the caller holding the kind: the declaration is the
+one place both types are named. Not enforced: which modules may *use* a declared
+kind — the walk sees the declaration, not who passes it to the journal.
+
+Repair is not a writer here: its closers are synthesized onto a seed
+(`interrupted_turn_closers`), never appended.
+"""
+
+WRITERS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        kind: frozenset(module for module, kinds in _WRITTEN_BY.items() if kind in kinds)
+        for kind in sorted(KNOWN_SESSION_EVENT_TYPES)
+    }
+)
+"""`_WRITTEN_BY` inverted: each ph-core type, and the modules that append it."""
 
 
 # ------------------------------------------------------------- declarations --

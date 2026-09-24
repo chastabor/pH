@@ -331,6 +331,25 @@ class SurfaceManager:
         self._process_delta()
         _plan(self._state, event, len(self._log), self._log)
 
+    def validate_batch(self, events: Sequence[SessionEvent]) -> None:
+        """Validate candidates that will enter the log together (P10-14).
+
+        Each is planned against the state the ones before it would leave, on a
+        **scratch copy** of the fold state, so a member may replace a node an
+        earlier member added and a refusal anywhere leaves the live state as it
+        was. `validate_next` needs no copy because it plans one event and applies
+        nothing; a batch has to apply each plan to plan the next.
+
+        O(nodes) for the copy and O(events) for the log a member's rewrite check
+        may index into — per batch, never per append, and batches are rare.
+        """
+        self._process_delta()
+        state = _FoldState(list(self._state.nodes), self._state.replace_generation)
+        base = len(self._log)
+        log = [*self._log, *events]
+        for offset, event in enumerate(events):
+            _apply(state, _plan(state, event, base + offset, log))
+
     @property
     def replace_generation(self) -> int:
         """Monotonic count of committed positional replacements."""

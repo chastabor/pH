@@ -12,13 +12,17 @@ move — which is how one crash becomes two side effects.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ph.json import as_obj, as_seq
-from ph.keys import SESSION_PERSISTENCE, SESSIONS
+from ph.json import JsonObject, as_obj, as_seq, thaw_json
+from ph.keys import FS, INTENTS, SESSION_PERSISTENCE, SESSIONS
+from ph.llm.types import content_from_wire, text_of
 from ph.persistence.repair import (
     TOOL_NOT_STARTED,
     TOOL_OUTCOME_UNKNOWN,
@@ -27,8 +31,24 @@ from ph.persistence.repair import (
 )
 from ph.seams.approval import INTERRUPTED, pending_approvals
 from ph.seams.user_questions import pending_questions
-from ph.session import Session, SurfaceIntent, SurfaceReplace
-from ph.testing import MountProfile, assistant_payload, tool_result_payload, user_payload
+from ph.session import (
+    Claim,
+    IntentError,
+    IntentKind,
+    Session,
+    SessionEvent,
+    SurfaceIntent,
+    SurfaceReplace,
+    Unsettled,
+    declare_intent,
+)
+from ph.testing import (
+    MountProfile,
+    assistant_payload,
+    isolated_intent_kinds,
+    tool_result_payload,
+    user_payload,
+)
 
 
 def _assistant_with_call(call_id: str, *, turn: int = 1, step: int = 1) -> dict[str, Any]:
@@ -527,3 +547,343 @@ async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_
     # reads as crashed — and a later reopen is a clean one.
     _, stored = store.read("reopened")
     assert not interrupted_turn_closers(stored), "the repair never reached the store"
+
+
+# ------------------------------------------------------- declared intents --
+# P10-07. Every declared kind's orphans, settled by the kind's own closer —
+# whether or not a turn is open, since most of them happen between turns.
+
+
+def _command_key(event: SessionEvent) -> str | None:
+    value = event.data.get("id")
+    return value if isinstance(value, str) else None
+
+
+def _unknown(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    return {"id": opened.data["id"], "ok": False, "why": why}
+
+
+COMMAND = IntentKind(
+    # A pair no ph-core kind declares, so the test's closer is the only one.
+    opened="command/run",
+    settled="command/done",
+    opened_key=_command_key,
+    settled_key=_command_key,
+    orphan="outcome-unknown",
+    closer=_unknown,
+    owner="tests",
+)
+
+
+@pytest.fixture
+def kinds() -> Iterator[None]:
+    """The intent registry, isolated so a test's kinds do not outlive it, with
+    ph-core's own — the asks, the shell — still settled beside them."""
+    with isolated_intent_kinds(core=True):
+        yield
+
+
+def _between_turns() -> Session:
+    """A finished turn, then a command run outside any turn and never settled."""
+    session = Session("s")
+    session.append("turn/start", {"turn": 1})
+    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    session.append("command/run", {"id": "x1", "command": "make"})
+    return session
+
+
+@pytest.mark.usefixtures("kinds")
+def test_an_orphan_outside_any_turn_is_settled() -> None:
+    """F13. The turn is balanced, so repair used to return `[]` and leave the
+    command running forever in the eyes of every reader."""
+    declare_intent(COMMAND)
+    closers = interrupted_turn_closers(_between_turns().events)
+
+    assert [(event.type, dict(event.data)) for event in closers] == [
+        ("command/done", {"id": "x1", "ok": False, "why": "outcome-unknown"})
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("kinds")
+async def test_an_orphan_outside_any_turn_is_settled_on_resume(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """End to end, and twice: the second resume finds nothing open and writes
+    nothing, which is what keeps reopening a session from growing it."""
+    from ph.persistence import resume_session
+
+    declare_intent(COMMAND)
+    ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
+    session = ctx.require(SESSIONS).create("between")
+    for event in _between_turns().events:
+        session.append(event.type, thaw_json(event.data))
+    await ctx.require(SESSIONS).flush(session)
+    ctx.require(SESSIONS).dispose("between")
+
+    revived = await resume_session(ctx, "between")
+    assert [event.type for event in revived.events][-3:] == [
+        "command/done",
+        "session/end-seed",
+        "session/resumed",
+    ]
+    assert revived.events[-1].data["closed"] == 1
+    await ctx.require(SESSIONS).flush(revived)
+    ctx.require(SESSIONS).dispose("between")
+
+    again = await resume_session(ctx, "between")
+    assert again.events[-1].data["closed"] == 0
+
+
+@pytest.mark.usefixtures("kinds")
+def test_an_owner_settles_kind_is_left_for_its_owner() -> None:
+    """The owner can look — a tree is on disk or it is not — so a guess from
+    repair would be worse than the owner's reconcile."""
+    # With a closer, so the policy is what leaves it and not the absence of a
+    # way to settle it.
+    declare_intent(replace(COMMAND, orphan="owner-settles"))
+    assert interrupted_turn_closers(_between_turns().events) == []
+
+
+@pytest.mark.usefixtures("kinds")
+def test_a_balanced_log_still_resumes_with_no_closers() -> None:
+    declare_intent(COMMAND)
+    session = _between_turns()
+    session.append("command/done", {"id": "x1", "ok": True})
+    assert interrupted_turn_closers(session.events) == []
+
+
+@pytest.mark.usefixtures("kinds")
+def test_closers_are_deterministic_and_backdated() -> None:
+    """Seqs continue the log, the time is the last real event's, the same log
+    repairs the same way twice — and inside a turn, intents settle after the
+    asks and before the tool results, step and turn."""
+    declare_intent(COMMAND)
+    session = _parked_turn(recorded_call=True)
+    session.append("command/run", {"id": "x1", "command": "make"})
+    last = session.events[-1]
+
+    closers = interrupted_turn_closers(session.events)
+
+    assert closers == interrupted_turn_closers(session.events)
+    assert [event.seq for event in closers] == list(
+        range(last.seq + 1, last.seq + 1 + len(closers))
+    )
+    assert {event.time for event in closers} == {last.time}
+    assert [event.type for event in closers] == [
+        "approval/decided",
+        "command/done",
+        "tool/result",
+        "step/end",
+        "turn/end",
+    ]
+
+
+@pytest.mark.usefixtures("kinds")
+def test_a_closer_that_does_not_settle_its_own_key_is_refused() -> None:
+    """Otherwise the intent stays open and every resume writes another settle."""
+    declare_intent(replace(COMMAND, closer=lambda opened, why: {"id": "someone-else"}))
+    with pytest.raises(IntentError, match="does not settle 'x1'"):
+        interrupted_turn_closers(_between_turns().events)
+
+
+@pytest.mark.anyio
+async def test_a_command_the_daemon_died_during_is_settled_on_resume(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """P10-08, the real kind end to end: the journal puts the command on disk,
+    the daemon dies before the result, and the next resume settles it as
+    `outcome-unknown` — once."""
+    from ph.persistence import resume_session
+    from ph.seams.shell import SHELL_COMMAND
+
+    ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
+    session = ctx.require(SESSIONS).create("died")
+    held = await ctx.require(INTENTS).open(
+        session, SHELL_COMMAND, {"command": "make", "surface": False}
+    )
+    assert isinstance(held, Claim)
+    # The daemon dies here: the command is on disk and its result never is.
+    ctx.require(SESSIONS).dispose("died")
+
+    revived = await resume_session(ctx, "died")
+    result = revived.latest("shell/result")
+    assert result is not None
+    assert dict(result.data) == {
+        "commandSeq": held.opened.seq,
+        "ok": False,
+        "interrupted": "outcome-unknown",
+    }
+    assert ctx.require(INTENTS).pending(revived, SHELL_COMMAND) == ()
+    assert revived.events[-1].data["closed"] == 1
+
+
+def test_repair_no_longer_knows_the_ask_shapes() -> None:
+    """P10-09. The asks are kinds; their keying and their closers' words are the
+    seams' to state, once. Repair imports the declaring seams and reads nothing
+    of them — no type, no fold, no field — so a second spelling cannot return
+    unnoticed."""
+    import ast
+    import inspect
+
+    from ph.persistence import repair
+
+    tree = ast.parse(inspect.getsource(repair))
+    strings = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    shapes = ("approval/", "question/", "shell/", "tool/code-dispatch")
+    code = [s for s in strings if s.startswith(shapes)]
+    assert code == [], code
+    declarers = {"approval", "shell", "user_questions", "code_mode"}
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert not names & declarers, "a declaring module is read"
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module in ("seams", "tools")
+        for alias in node.names
+    }
+    assert imported == declarers, imported
+
+
+def test_importing_repair_declares_every_core_kind() -> None:
+    """The guarantee the declaring imports buy: a process that imported only
+    repair — the trajectory viewer, a bare resume — settles every kind ph-core
+    declares. Asked of a fresh interpreter, since this one has imported
+    everything by now, and one that imports `ph.orphans` first: that order made
+    a module-level declaring import a cycle, which no in-process test sees."""
+    import ast
+    import subprocess
+    import sys
+
+    import ph
+
+    declared = set()
+    for path in Path(ph.__path__[0]).rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "IntentKind":
+                for keyword in node.keywords:
+                    if keyword.arg == "opened" and isinstance(keyword.value, ast.Constant):
+                        declared.add(keyword.value.value)
+    probe = (
+        "import ph.orphans\n"
+        "from ph.persistence.repair import interrupted_turn_closers\n"
+        "from ph.session import Session, declared_intents\n"
+        "log = Session('s')\n"
+        "log.append('turn/start', {'turn': 1})\n"
+        "interrupted_turn_closers(log.events)\n"
+        "print('\\n'.join(sorted(kind.opened for kind in declared_intents())))\n"
+    )
+    found = subprocess.run(
+        [sys.executable, "-c", probe], check=True, capture_output=True, text=True
+    ).stdout.split()
+    assert declared, "the walk found no declaration"
+    assert set(found) == declared
+
+
+# ------------------------------------------------------------- reconcile --
+# P10-13. The tool is asked about its own started, unresolved call — mounted, on
+# resume — and repair is handed the answer, so it stays a pure fold.
+
+
+async def _crashed_write(
+    mount: MountProfile, tmp_path: Path, session_id: str, *, tool: str = "write"
+) -> tuple[Any, Path]:
+    """A turn that recorded a `write` as started and died before its result."""
+    ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
+    session = ctx.require(SESSIONS).create(session_id)
+    session.append("turn/start", {"turn": 1})
+    session.append("step/start", {"turn": 1, "step": 1})
+    arguments = json.dumps({"path": "notes.md", "content": "the plan"})
+    call = {"type": "tool-call", "id": "c1", "name": tool, "arguments": arguments}
+    session.append(
+        "assistant/message",
+        assistant_payload("", "m1", content=[call]),
+        SurfaceIntent("append", ()),
+    )
+    session.append(
+        "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": tool, "arguments": arguments}
+    )
+    await ctx.require(SESSIONS).flush(session)
+    ctx.require(SESSIONS).dispose(session_id)
+    return ctx, ctx.require(FS).root / "notes.md"
+
+
+def _result(session: Session) -> Any:  # noqa: ANN401
+    event = session.latest("tool/result")
+    assert event is not None
+    block = as_obj(as_seq(as_obj(event.data["message"])["content"])[0])
+    return event, block, text_of(content_from_wire(block.get("content")))
+
+
+@pytest.mark.anyio
+async def test_a_write_that_landed_is_reported_done_after_a_crash(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The file holds exactly the call's bytes, so the write happened — and the
+    model reads the result the tool renders, not `TOOL_OUTCOME_UNKNOWN`."""
+    from ph.persistence import resume_session
+
+    ctx, target = await _crashed_write(mount, tmp_path, "landed")
+    target.write_text("the plan", encoding="utf-8")
+
+    revived = await resume_session(ctx, "landed")
+    event, block, text = _result(revived)
+
+    assert block["isError"] is False
+    assert text == "Wrote notes.md (8 bytes)"
+    assert dict(as_obj(event.data["meta"])) == {"reconciled": True}
+    assert "error" not in event.data
+
+
+@pytest.mark.anyio
+async def test_a_write_that_did_not_land_is_reported_not_started(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    from ph.persistence import resume_session
+
+    ctx, target = await _crashed_write(mount, tmp_path, "missed")
+    assert not target.exists()
+
+    revived = await resume_session(ctx, "missed")
+    event, block, text = _result(revived)
+
+    assert block["isError"] is True
+    assert as_obj(event.data["error"])["code"] == TOOL_NOT_STARTED
+    assert "it did not happen" in text
+
+
+@pytest.mark.anyio
+async def test_a_tool_that_cannot_answer_keeps_the_unknown_text(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """`edit` declares no `reconcile`, so its crashed call reads as it always has."""
+    from ph.persistence import resume_session
+
+    ctx, _ = await _crashed_write(mount, tmp_path, "unanswered", tool="edit")
+
+    revived = await resume_session(ctx, "unanswered")
+    event, _block, _text = _result(revived)
+
+    assert as_obj(event.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN
+    assert "meta" not in event.data
+
+
+@pytest.mark.anyio
+async def test_repair_is_still_a_pure_fold_over_a_stored_log(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """With no answers handed in — the trajectory viewer, `repaired()` — the same
+    stored log repairs the same way, whatever is on disk, with nothing asked."""
+    ctx, target = await _crashed_write(mount, tmp_path, "pure")
+    target.write_text("the plan", encoding="utf-8")
+    _, events = ctx.require(SESSION_PERSISTENCE).read("pure")
+
+    closers = interrupted_turn_closers(events)
+
+    assert closers == interrupted_turn_closers(events)
+    (result,) = [one for one in closers if one.type == "tool/result"]
+    assert as_obj(result.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN

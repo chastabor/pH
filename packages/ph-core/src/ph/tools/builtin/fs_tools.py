@@ -19,16 +19,30 @@ whose outcome depends on scheduling — so they serialize (B6).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+import anyio
 from pydantic import Field
 
 from ...cordis import Context, plugin
-from ...json import JsonObject
+from ...json import JsonObject, as_obj
 from ...keys import FS, TOOLS
 from ...llm.types import ContentBlock
+from ...seams.workspace import workspace_leaks
+from ...session import Session, SessionEvent
 from ...text import count_of
-from ..definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
+from ..definition import (
+    Done,
+    NotDone,
+    Reconciled,
+    ToolModel,
+    ToolOutput,
+    ToolRunContext,
+    Unknown,
+    define_tool,
+    text_content,
+)
 from ..presentation import simple_views
 
 __all__ = ["apply"]
@@ -112,6 +126,14 @@ def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
     return text_content(f"{header}\n{value['text']}")
 
 
+def _holds_exactly(target: Path, expected: bytes) -> bool:
+    """Whether `target` is a file holding `expected` — the size first, so a file
+    that differs in length is answered without reading it."""
+    if not target.is_file() or target.stat().st_size != len(expected):
+        return False
+    return target.read_bytes() == expected
+
+
 def _render_write(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     verb = "Created" if value["created"] else "Wrote"
     return text_content(f"{verb} {value['path']} ({value['bytes']} bytes)")
@@ -176,6 +198,37 @@ async def apply(ctx: Context, config: None) -> None:
             "created": written.created,
         }
 
+    async def reconciled_write(args: Any, _call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
+        """Did a write a crash interrupted land? The file says (P10-13).
+
+        **Exact or `Unknown`.** Done when the file holds the call's bytes exactly
+        — the effect is there, whoever finished it — and not done when the file
+        is missing or holds something else: the call never reached it, or
+        somebody changed it since, and either way writing it again is what the
+        call asked for. The path is resolved
+        the way the call resolved it, against the agent's own root as its log
+        records it (a fresh-root workspace still open, else the deployment's), since
+        no agent exists to ask at resume. Anything that cannot be read is
+        `Unknown`, which keeps today's text.
+        """
+        body = as_obj(args)
+        path, content = body.get("path"), body.get("content")
+        if not isinstance(path, str) or not path or not isinstance(content, str):
+            return Unknown()
+        root = next(
+            (one.root for one in workspace_leaks(session) if one.agent_id == session.id),
+            fs.root,
+        )
+        target = fs.resolve(path, root=root)
+        expected = content.encode("utf-8")
+        try:
+            landed = await anyio.to_thread.run_sync(_holds_exactly, target, expected)
+        except OSError:
+            return Unknown()
+        if not landed:
+            return NotDone()
+        return Done({"path": fs.named(target, root=root), "bytes": len(expected), "created": False})
+
     async def edit(args: EditArgs, run: ToolRunContext) -> dict[str, Any]:
         count = await fs.edit(
             args.path,
@@ -237,6 +290,7 @@ async def apply(ctx: Context, config: None) -> None:
             parameters=WriteArgs,
             output=ToolOutput(schema=WriteValue, render=_render_write),
             execute=write,
+            reconcile=reconciled_write,
             effects_confined_to_workspace=True,
             self_limits=True,
             # The file body is a payload this call delivered, not an instruction

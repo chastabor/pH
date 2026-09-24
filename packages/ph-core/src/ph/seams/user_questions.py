@@ -41,13 +41,24 @@ from typing import Any, Literal
 
 from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
-from ..json import as_str
+from ..json import JsonObject, as_str
 from ..keys import USER_QUESTIONS
-from ..session import Session, SessionEvent, session_written
+from ..session import (
+    Claim,
+    IntentKind,
+    IntentNotDurable,
+    Session,
+    SessionEvent,
+    Unsettled,
+    declare_intent,
+    intents_of,
+    open_intents,
+)
 from ..wire import WireModel
 from ._registry import claim_entry
 
 __all__ = [
+    "QUESTION_ASK",
     "AskOutcome",
     "AskResolution",
     "PendingQuestion",
@@ -152,19 +163,54 @@ def pending_questions(events: Sequence[SessionEvent]) -> list[PendingQuestion]:
     is the caller that has no session, and it settles these on resume so the
     fold stops reporting a question nobody can answer.
     """
-    asked: dict[str, PendingQuestion] = {}
-    for event in events:
-        ask_id = as_str(event.data.get("askId"))
-        if event.type == "question/asked":
-            # `model_validate` off the event data, the way `RequestContext` and
-            # `Message` are already rehydrated: `WireModel` owns the camelCase
-            # aliases and the log's frozen mapping, so neither is spelled here.
-            asked[ask_id] = PendingQuestion(
-                seq=event.seq, question=UserQuestion.model_validate(event.data)
-            )
-        elif event.type == "question/answered":
-            asked.pop(ask_id, None)
-    return sorted(asked.values(), key=lambda pending: pending.seq)
+    # `model_validate` off the event data, the way `RequestContext` and `Message`
+    # are already rehydrated: `WireModel` owns the camelCase aliases and the log's
+    # frozen mapping, so neither is spelled here.
+    return [
+        PendingQuestion(
+            seq=intent.opened.seq, question=UserQuestion.model_validate(intent.opened.data)
+        )
+        for intent in open_intents(events, QUESTION_ASK)
+    ]
+
+
+def _ask_id(event: SessionEvent) -> str:
+    return as_str(event.data.get("askId"))
+
+
+def _closed(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """The answer nobody gave, as it has always been written.
+
+    `not-started` is the barrier failing — the question could not be written,
+    so it was not delivered, and closes `failed` as a live ask does when the
+    machinery does not reach a person. `outcome-unknown` is repair's: the
+    process died while somebody may have been answering, which says
+    `interrupted` and pointedly **not** `declined` — declined means "somebody
+    was there and declined", and claiming that of a person who was never
+    reached is the false statement this module opens by refusing to make.
+    """
+    if why == "not-started":
+        asked = UserQuestion.model_validate(opened.data)
+        return UserQuestionService._answered_data(asked, AskOutcome("failed"))
+    return {"askId": _ask_id(opened), "interrupted": True}
+
+
+QUESTION_ASK = declare_intent(
+    IntentKind(
+        opened="question/asked",
+        settled="question/answered",
+        opened_key=_ask_id,
+        settled_key=_ask_id,
+        orphan="outcome-unknown",
+        # On disk before it is delivered (F8).
+        barrier="durable",
+        closer=_closed,
+        owner="ph.seams.user_questions",
+        # A question re-posed after a resume keeps its id; it is asked again.
+        dedupe=False,
+    )
+)
+"""A question put to a person, then answered — or settled by repair (P10-09)."""
 
 
 def _always() -> bool:
@@ -258,19 +304,27 @@ class UserQuestionService:
             if question.ask_id
             else question.model_copy(update={"ask_id": f"q-{secrets.token_hex(4)}"})
         )
-        if session is not None:
-            self._record_asked(session, asked)
+        if session is None:
+            return await self._deliver(asked)
         # On disk before it is delivered (F8), which is the whole reason the ask
         # is appended ahead of the waterfall: a crash while somebody was deciding
-        # must leave the question in the log for `pending_questions` to fold.
-        # Appended alone it left nothing — the last flush was before the model
-        # request. One that cannot be written is not asked, and closes as failed.
-        if session is not None and not await session_written(self.ctx, session):
-            outcome = AskOutcome("failed")
-        else:
-            outcome = await self._deliver(asked)
-        if session is not None:
-            self._record_answered(session, asked, outcome)
+        # must leave the question in the log for `pending_questions` to fold. The
+        # kind's barrier does it; one that cannot be written is not asked, and
+        # the journal closes it `failed`.
+        #
+        # `open` and not `claim`: a question canceled while somebody is looking
+        # at it — a root passivated while parked on a person — **stays pending**,
+        # so the next resume re-poses it. `claim` would settle it on the way out,
+        # and the fold would say a released root had been answered.
+        journal = intents_of(self.ctx)
+        try:
+            held = await journal.open(session, QUESTION_ASK, asked.to_wire())
+        except IntentNotDurable:
+            return AskOutcome("failed")
+        if not isinstance(held, Claim):
+            raise RuntimeError("QUESTION_ASK does not dedupe, so no ask has a prior")
+        outcome = await self._deliver(asked)
+        journal.settle(session, held, self._answered_data(asked, outcome))
         return outcome
 
     async def _deliver(self, asked: UserQuestion) -> AskOutcome:
@@ -292,30 +346,24 @@ class UserQuestionService:
         # told apart here because nothing downstream can.
         return AskOutcome("answered", answer) if answer is not None else AskOutcome("declined")
 
-    def _record_asked(self, session: Session, question: UserQuestion) -> None:
-        """The ask, as the log keeps it.
-
-        Built from `to_wire()` rather than field by field — the opposite of
-        `ApprovalService._record_asked`, and for the opposite reason: an approval
-        request grows fields for the *answerer's* benefit that have no business
-        in the log, while a question is nothing but what was asked. Every field
-        it gains is part of the question and belongs here.
-        """
-        session.append("question/asked", question.to_wire())
-
-    def _record_answered(
-        self, session: Session, question: UserQuestion, outcome: AskOutcome
-    ) -> None:
+    @staticmethod
+    def _answered_data(question: UserQuestion, outcome: AskOutcome) -> dict[str, Any]:
         """Close the pair, and say *how* it closed.
+
+        The ask itself is `question.to_wire()` whole, rather than built field by
+        field — the opposite of `ApprovalService._asked_data`, and for the
+        opposite reason: an approval request grows fields for the *answerer's*
+        benefit that have no business in the log, while a question is nothing but
+        what was asked. Every field it gains is part of the question.
 
         **The resolution reaches the log, not just the model.** `declined` alone
         was the same collapse `AskResolution` exists to undo: a front end that
         fell over mid-ask recorded "asked and not answered", and the transcript
         renders that as *"No answer given."* — a person choosing not to answer a
-        question they were never shown. `ph.persistence.repair` goes out of its
-        way to write `interrupted` rather than `declined` for exactly this
+        question they were never shown. The closer repair writes through
+        (`_closed`) says `interrupted` rather than `declined` for exactly this
         reason, so the log's vocabulary already knows the distinction is
-        load-bearing; this seam had stopped supplying it.
+        load-bearing; a live ask has to supply it too.
 
         `declined` is kept beside it for every non-answer, because logs written
         before `resolution` existed carry only that — so the *reader* still has
@@ -330,7 +378,7 @@ class UserQuestionService:
             # appends nothing at all, and recorded so the fold stops calling it
             # pending.
             data["declined"] = True
-        session.append("question/answered", data)
+        return data
 
 
 @plugin("user-questions")

@@ -18,6 +18,7 @@ compiled would otherwise reach a client as a silently missing field.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from ph.seams.approval import ApprovalRequest
 from ph.seams.tui_status import StatusReading
@@ -114,15 +115,20 @@ def test_a_description_carries_its_cursor_as_a_cursor() -> None:
     # it is what stops `model_dump()` round-tripping the `Cursor` through a dict.
     # `test_protocol` pins the cursor's own spelling; this pins the difference.
     assert isinstance(dict(described)["cursor"], Cursor)
-    assert MutationRepeated(**dict(described)).cursor == CURSOR
+    assert MutationRepeated(**dict(described), outcome="settled").cursor == CURSOR
 
 
 def test_a_repeat_is_a_description_that_says_so() -> None:
-    """One shape for every verb, so a client branches on one field."""
+    """One shape for every verb, so a client branches on one field — and says
+    whether the first attempt finished, required so no repeat claims `settled`
+    by default (P10-10)."""
     described = RootDescription(session_id="s", status="idle", watchers=0, cursor=CURSOR)
-    repeated = MutationRepeated(**described.model_dump())
+    repeated = MutationRepeated(**described.model_dump(), outcome="unknown")
     assert repeated.to_wire()["repeated"] is True
+    assert repeated.to_wire()["outcome"] == "unknown"
     assert repeated.session_id == described.session_id
+    with pytest.raises(ValidationError, match="outcome"):
+        MutationRepeated(**described.model_dump())
 
 
 def test_the_snapshot_page_spells_from_without_being_named_it() -> None:

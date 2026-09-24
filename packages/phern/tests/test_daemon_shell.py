@@ -176,7 +176,8 @@ async def test_the_command_is_on_disk_before_it_runs(tmp_path: Path) -> None:
     all — the case the two events exist for. The child blocks, and the stored
     log is read while it is still running.
 
-    Sabotage: drop the flush from `run_shell` and the stored log has no command.
+    Sabotage: make `SHELL_COMMAND`'s barrier `buffered` and the stored log has no
+    command. The barrier is the kind's now (P10-08), not a flush in `run_shell`.
     """
     async with running(tmp_path) as daemon:
         root = await daemon.root("durable")

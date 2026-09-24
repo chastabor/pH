@@ -259,6 +259,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         },
         "RequestContext": {"provider": "fake", "model": "fake-1", "contextWindow": 8},
         "SurfaceReplace": {"replaces": [1, 2]},
+        "BatchRef": {"first": 4, "count": 2},
         "UserQuestion": {"question": "which?"},
         "CommandSchema": {"name": "compact", "summary": "Fold the transcript."},
         "ScreenSchema": {"id": "trajectory", "label": "Trajectory"},

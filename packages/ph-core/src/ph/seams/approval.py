@@ -30,12 +30,23 @@ from pydantic import Field
 from ..agent.types import AgentHandle
 from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
-from ..json import JsonValue, as_str
+from ..json import JsonObject, JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import Session, SessionEvent, session_written
+from ..session import (
+    Claim,
+    IntentKind,
+    IntentNotDurable,
+    Session,
+    SessionEvent,
+    Unsettled,
+    declare_intent,
+    intents_of,
+    open_intents,
+)
 from ..wire import WireModel, literal_lookup
 
 __all__ = [
+    "APPROVAL_ASK",
     "APPROVAL_OUTCOMES",
     "DENIAL_REASONS",
     "INTERRUPTED",
@@ -287,24 +298,73 @@ def pending_approvals(events: Sequence[SessionEvent]) -> list[PendingApproval]:
     stop being pending, so a second spelling of the key here is a second
     spelling of what repair must settle.
     """
-    asked: dict[str, PendingApproval] = {}
-    for event in events:
-        if event.type == "approval/asked":
-            key = as_str(event.data.get("callId") or event.data.get("toolName"))
-            call_id, reason = event.data.get("callId"), event.data.get("reason")
-            asked[key] = PendingApproval(
-                seq=event.seq,
-                tool_name=as_str(event.data.get("toolName")),
-                call_id=call_id if isinstance(call_id, str) else None,
-                reason=reason if isinstance(reason, str) else None,
-            )
-        elif event.type == "approval/decided":
-            asked.pop(as_str(event.data.get("callId") or event.data.get("toolName")), None)
-    return sorted(asked.values(), key=lambda pending: pending.seq)
+    return [
+        PendingApproval(
+            seq=intent.opened.seq,
+            tool_name=as_str(intent.opened.data.get("toolName")),
+            call_id=_str_or_none(intent.opened.data.get("callId")),
+            reason=_str_or_none(intent.opened.data.get("reason")),
+        )
+        for intent in open_intents(events, APPROVAL_ASK)
+    ]
+
+
+def _str_or_none(value: JsonValue) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _ask_key(event: SessionEvent) -> str:
+    """An ask is keyed by its call id, or by the tool's name when it has none —
+    the rule both halves of the pair have always been read by."""
+    return as_str(event.data.get("callId") or event.data.get("toolName"))
+
+
+def _closed(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """The decision nobody made, as it has always been written.
+
+    `not-started` is the barrier failing: the ask could not be written, so nobody
+    was asked, and the live answer for that is `unavailable` — a denial the turn
+    continues from. `outcome-unknown` is repair's: the process died while a
+    person may have been deciding, which is `INTERRUPTED`, `automatic` because
+    no person made it — the flag a policy of `never` sets for the same reason.
+    """
+    request = ApprovalRequest(
+        tool_name=as_str(opened.data.get("toolName")),
+        call_id=_str_or_none(opened.data.get("callId")),
+    )
+    if why == "not-started":
+        return ApprovalService._decided_data(request, "unavailable", automatic=False)
+    return ApprovalService._decided_data(request, INTERRUPTED, automatic=True)
+
+
+APPROVAL_ASK = declare_intent(
+    IntentKind(
+        opened="approval/asked",
+        settled="approval/decided",
+        opened_key=_ask_key,
+        settled_key=_ask_key,
+        # A person may have decided on a screen whose answer never reached the
+        # log: the question's outcome is what is unknown.
+        orphan="outcome-unknown",
+        # On disk before anybody is asked (F8).
+        barrier="durable",
+        closer=_closed,
+        owner="ph.seams.approval",
+        # Keyed by tool name when there is no call id, so one key is asked many
+        # times in a session; each ask is its own.
+        dedupe=False,
+    )
+)
+"""An approval: asked, then decided — by a person, a policy, or repair (P10-09)."""
 
 
 def approval_policy(session: Session) -> ApprovalPolicy:
-    """The policy in force: the last `approval/policy` event, else `ask`."""
+    """The policy in force: the last `approval/policy` event, else `ask`.
+
+    **Not enforced: who wrote it** — the same statement as `SandboxSeam.logged_mode`,
+    for the same reason. The writers are checked where they are shipped, not at the
+    append.
+    """
     event = session.latest("approval/policy")
     if event is None:
         return "ask"
@@ -369,8 +429,23 @@ class ApprovalService:
             self._record_decided(session, request, "rejected", automatic=True)
             return "rejected"
 
+        journal = intents_of(self.ctx)
+        held: Claim | None = None
         if session is not None:
-            self._record_asked(session, request)
+            # **On disk before anybody is asked** (F8) — the kind's barrier. The
+            # wait may be hours, and the last flush was before the model request,
+            # so an ask held only in memory was lost with the `assistant/message`
+            # whose call it gates. A log that cannot be written is not a question
+            # worth putting to a person: nobody would be able to see it was asked.
+            # The journal closes that pair `unavailable` itself, and does the same
+            # if the write is canceled.
+            try:
+                opened = await journal.open(session, APPROVAL_ASK, self._asked_data(request))
+            except IntentNotDurable:
+                return "unavailable"
+            if not isinstance(opened, Claim):
+                raise RuntimeError("APPROVAL_ASK does not dedupe, so no ask has a prior")
+            held = opened
 
         # **The pair closes even when the wait does not return** (K7).
         # `_route` checks the token on the way *in*, so `"canceled"` was reachable
@@ -388,22 +463,11 @@ class ApprovalService:
         # synchronous so it completes inside a cancelled scope.
         outcome: ApprovalAnswer = "canceled"
         try:
-            # **On disk before anybody is asked** (F8). The wait may be hours, and
-            # the last flush was before the model request — so the ask, and the
-            # `assistant/message` whose call it gates, were memory-only for all of
-            # it: a crash lost both, and the `INTERRUPTED` settlement repair owes a
-            # parked ask only ever ran after a clean stop. Inside the `try`, so a
-            # cancellation arriving during the write still closes the pair. A log
-            # that cannot be written is not a question worth putting to a person:
-            # nobody would be able to see it was asked.
-            if session is not None and not await session_written(self.ctx, session):
-                outcome = "unavailable"
-                return outcome
             outcome = await self._route(request, cancel if cancel is not None else agent.signal)
             return outcome
         finally:
-            if session is not None:
-                self._record_decided(session, request, outcome, automatic=False)
+            if session is not None and held is not None:
+                journal.settle(session, held, self._decided_data(request, outcome, automatic=False))
 
     async def _route(self, request: ApprovalRequest, cancel: Cancellation | None) -> ApprovalAnswer:
         if is_canceled(cancel):
@@ -464,6 +528,10 @@ class ApprovalService:
         the assistant message holds them; two statements of one fact are two that
         can disagree.
         """
+        session.append("approval/asked", self._asked_data(request))
+
+    @staticmethod
+    def _asked_data(request: ApprovalRequest) -> dict[str, Any]:
         data: dict[str, Any] = {"toolName": request.tool_name}
         if request.call_id is not None:
             data["callId"] = request.call_id
@@ -473,7 +541,7 @@ class ApprovalService:
             data["agentId"] = request.agent_id
         if request.allowed_decisions:
             data["allowedDecisions"] = list(request.allowed_decisions)
-        session.append("approval/asked", data)
+        return data
 
     def _record_decided(
         self,
@@ -483,6 +551,14 @@ class ApprovalService:
         *,
         automatic: bool,
     ) -> None:
+        session.append(
+            "approval/decided", self._decided_data(request, outcome, automatic=automatic)
+        )
+
+    @staticmethod
+    def _decided_data(
+        request: ApprovalRequest, outcome: ApprovalAnswer, *, automatic: bool
+    ) -> dict[str, Any]:
         data: dict[str, Any] = {"toolName": request.tool_name, "outcome": answer_kind(outcome)}
         if isinstance(outcome, Edited):
             # The substitution itself: the assistant message holds what the model
@@ -494,7 +570,7 @@ class ApprovalService:
             data["callId"] = request.call_id
         if automatic:
             data["automatic"] = True
-        session.append("approval/decided", data)
+        return data
 
     def set_policy(self, session: Session, policy: ApprovalPolicy) -> None:
         """Record a policy change. The last one recorded is the one in force."""

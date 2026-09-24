@@ -682,6 +682,45 @@ theme, is the only `dark` left. Adding the pair back means adding its reader in 
 row.
 
 
+### Phase 10 — Actions the log can vouch for *(2026-09-24; fourteen rows landed, one spiked and not shipped, one conditional)*
+
+**Why a phase.** `reviews/09` and `reviews/10` found the log honest about what it held and
+silent about what it had *promised*: seven write-ahead pairs, each with its own fold, flush
+and failure, three settlers, and two the crash repair never reached — a `!!` the daemon died
+during read as running forever. Phase 10 makes the pair a thing declared once
+(`ph.session.intents`), gives it one door (`ctx.intents`), and lets a tool vouch for its own
+effect. The recurring correction was the plan's own sketch meeting the code: **a barrier the
+sketch placed before an act was, four times out of five, the one the code had deliberately
+placed after it** — the daemon verb's key (P5-02), the question a passivated root must
+re-pose, the approval's K7 `finally`, F7's flush before a reply — and each row kept the
+code's ordering and said why. The full account, row by row, is
+`plans/Intent_Journal_And_Durable_Actions_Plan.md`; `docs/dev-notes/phase-10.md` records what
+was traded.
+
+| ID | Work item | Delivers | Gate |
+|---|---|---|---|
+| P10-01 | **Landed.** Writers of record for ph-core's vocabulary (`WRITERS`), held by one AST walk of every package — the journal's writes attributed to the module that declares the kind | rule 6 | `test_log_writers` |
+| P10-02 | **Spiked, not shipped.** A runtime writer check for posture types — the running row is not known at every legitimate append; the static gate is the whole answer, said beside the readers | rule 6 | — |
+| P10-03 | **Conditional.** Entry points so a reader knows a package's types unmounted — lands with the first type declared outside ph-core | — | — |
+| P10-04 | **Landed.** A lineage writes a parent only when the child inherits its prefix | A4 | `test_persistence` |
+| P10-05 | **Landed.** `ph.session.intents`: `IntentKind`, `declare_intent`, one fold (`fold_intents`) | I6 | `test_intents` |
+| P10-06 | **Landed.** `ctx.intents`: open (dedupe, barrier), record, settle, claim; `intent-fold-cache` | A4, I6 | `test_intents`, `test_invariants` |
+| P10-07 | **Landed.** Repair settles every declared kind, in a turn or out of one (F13) | A5 | `test_repair` |
+| P10-08 | **Landed.** `!!` as the first kind: on disk before it runs, settled `outcome-unknown` by repair, drawn as interrupted | F9, F13 | `test_repair`, `test_tui_adapter`, `test_daemon_shell` |
+| P10-09 | **Landed.** Approvals and questions as kinds; repair knows no ask's shape | A5 | `test_repair`, `test_seams` |
+| P10-10 | **Landed.** Daemon verbs settle; a repeat says `settled` or `unknown` (`PROTOCOL_VERSION` 4); a credential's key lives as long as the process (L1) | P5-02, F7 | `test_daemon_mutations` |
+| P10-11 | **Landed** for Code Mode dispatches; the workspace pair stays on `workspace_survivors`, by decision | A5 | `test_code_mode`, `test_tui_adapter` |
+| P10-12 | **Landed.** `ToolDefinition.idempotency_key`: a repeated effect is answered from the log | I2 | `test_tools_idempotency` |
+| P10-13 | **Landed.** `ToolDefinition.reconcile`, asked on resume and before a retry; `write` answers exactly | I2, A5 | `test_repair`, `test_tools_idempotency` |
+| P10-14 | **Landed.** `Session.batch()`: planned as a unit, published as a unit; compaction adopts it | I4 | `test_session_append`, `test_compaction` |
+| P10-15 | **Landed.** Batch membership on the envelope; a torn batch reads back as none (`SESSION_FORMAT_VERSION` 2) | A1, F6 | `test_persistence`, `test_session_admit` |
+| P10-16 | **Landed.** Docs, two `NON_GUARANTEES` rows, `DESIGN.md` I2 and §8, this section | rule 6, N5 | `test_non_guarantees` |
+
+**The version bump.** Format 2 and protocol 4 move together, once. A format-1 log is refused
+by the header check rather than migrated, and a daemon started before the upgrade must be
+restarted: a 0.4 client refuses a 0.3 daemon's repeat, whose `outcome` it requires.
+
+
 ---
 
 ## 5. Engineering rules that hold across every phase
@@ -710,4 +749,5 @@ row.
 | 7 | a file attached outside the repo reaches an accepting route, degrades with a pointer on one that cannot take it, and is never silently dropped; media contributes tokens; `ph attachments gc` collects only what no session references; **the terminal and a browser tab are two front ends on one daemon** — a file dropped on the page reaches the model from a prompt typed in the terminal, an ask put to both settles once, and closing every one of them leaves the daemon to exit on its own |
 | 6 | 100 % coverage on `ph-core`; the docs test passes; `sandbox` refuses an absolute-path write; every seam has a page; Windows in the matrix |
 | 8 | `mypy --strict` green with no new `Any` in a position a declared type could fill; every adapter, tool body, agent implementation and plugin config checked against its declaration rather than at first use; every row names the guarantee it bought, and every `Any` that stays has a sentence saying why |
+| 10 | a `!!` the daemon died during reads as interrupted after the next resume, and every declared kind a crash left open is settled by repair in or out of a turn; a retried daemon verb whose first attempt nobody saw finish is told `unknown`; **a tool that names its effect is not run twice for one effect across a crash, and a `write` a crash interrupted is reported done or not done by the file itself**; a batch a torn write cut short reads back as none of it |
 | 9 | a theme a person wrote loads and `/theme` remembers it across a restart; `↑` in a resumed session walks that session's prompts and a chosen one is revealed where it sits in the transcript; opening pH in a directory offers the sessions worked there and nothing else; **closing the last front end ends the daemon it started, at once, unless a turn, a schedule or a keep-alive says otherwise — and whichever one it is, is legible in the side panel and in `phern agents doctor`** |

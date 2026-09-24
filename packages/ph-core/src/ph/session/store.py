@@ -24,8 +24,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from ..cordis import Context, Disposer, events, plugin
-from ..keys import SESSIONS
+from ..keys import INTENTS, SESSIONS
+from ..seams.invariants import contribute_fold_cache
 from .events import SessionEvent, now_ms
+from .journal import IntentJournal
 from .session import Session, SessionHeader, SessionKind
 
 __all__ = [
@@ -65,6 +67,7 @@ ForkRejection = Literal[
     "SESSION_ID_INVALID",
     "INVALID_BOUNDARY",
     "OPEN_TURN",
+    "OPEN_BATCH",
 ]
 """Why a session could not be created, adopted or forked.
 
@@ -285,11 +288,20 @@ class SessionStore:
         return True
 
     def lineage(self, session: Session) -> tuple[Session, ...]:
-        """`session` and every ancestor **live in this process**, oldest first.
+        """`session` and every ancestor **whose prefix it references**, oldest first.
 
         The order every write of a lineage takes — `flush`, and the mount's last
         write (`ph.persistence.write_on_unwind`), which cannot go through `flush`
         because its listeners have unwound by then.
+
+        **A parent only when the child inherits from it** (P10-04). The rule is for
+        a reference fork or a segment, whose file begins at `seed_length` and reads
+        back only once the parent's holds the events it names. A subagent child is
+        created fresh — a `parent_session` and no seed — so its file is readable on
+        its own, and writing its parent first cost one parent fsync per flush of
+        every child: under `rlm`, one per child tool call that can reach past the
+        tree. The parent is still written by its own flushes and by the last write,
+        which walks every live session.
 
         An ancestor this store does not hold is one nothing here is writing, so
         its log is already whatever it is going to be. Keyed by id so the dict
@@ -303,7 +315,7 @@ class SessionStore:
         current: Session | None = session
         while current is not None and current.id not in chain:
             chain[current.id] = current
-            parent = current.header.parent_session
+            parent = current.header.parent_session if current.header.seed_length else None
             current = self.get(parent) if parent is not None else None
         return tuple(reversed(chain.values()))
 
@@ -461,6 +473,15 @@ class SessionStore:
                 f"open turn {open_turn.data.get('turn')}",
                 "OPEN_TURN",
             )
+        batch = log[boundary].batch
+        if batch is not None and boundary != batch.last:
+            # A prefix holding half of records that only mean something together
+            # (P10-15) — and one the seed would refuse, less legibly, anyway.
+            raise SessionForkError(
+                f'fork boundary {boundary} in session "{session.id}" ends inside the '
+                f"batch at seq {batch.first}",
+                "OPEN_BATCH",
+            )
         return tuple(log[: boundary + 1])
 
 
@@ -525,5 +546,15 @@ async def session_written(ctx: Context, session: Session) -> bool:
 
 @plugin("session")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the session store."""
-    ctx.provide(SESSIONS, SessionStore(ctx=ctx))
+    """Mount the session store, and the intent journal over it (decision 1).
+
+    The journal here rather than in a row of its own: every profile with a log has
+    intents in it, and the journal's barrier is this store's flush — a profile
+    that dropped it would leave every producer testing for its absence.
+    """
+    sessions = SessionStore(ctx=ctx)
+    ctx.provide(SESSIONS, sessions)
+    journal = IntentJournal(sessions=sessions)
+    ctx.provide(INTENTS, journal)
+    ctx.on("session/disposed", lambda session: journal.forget(session.id))
+    contribute_fold_cache(ctx, id="intent-fold-cache", subject="intent index", stale=journal.stale)

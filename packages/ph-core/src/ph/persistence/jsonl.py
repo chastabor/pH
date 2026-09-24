@@ -28,26 +28,29 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import anyio
 from pydantic import ValidationError
 
-from ..cordis import Context, plugin
-from ..json import dumps
+from ..cordis import DEPLOYMENT, Context, plugin
+from ..json import as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..paths import resolve_roots
-from ..session import Session, SessionEvent, SessionHeader
+from ..session import BatchRef, Session, SessionEvent, SessionHeader
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
 from .protocol import SessionPersistence, StoredSession, attach, stored_row, write_on_unwind
+
+if TYPE_CHECKING:
+    from .repair import CallOutcome
 
 __all__ = [
     "JsonlSessionStore",
@@ -149,6 +152,22 @@ class _Tail:
     an unterminated final line, which only a write that did not finish leaves."""
     last_seq: int | None
     """The seq of the last finished record, or `None` when there is none."""
+    open_batch: BatchRef | None = None
+    """The batch that last record belongs to, when it is not the batch's last
+    member — what a torn write can leave, and `_settle_batch` takes back."""
+
+
+def _open_batch_of(record: dict[str, Any] | None) -> BatchRef | None:
+    """The batch `record` is a member of and does not finish, if any."""
+    raw = record.get("batch") if record is not None else None
+    seq = _seq_of(record)
+    if raw is None or seq is None:
+        return None
+    try:
+        ref = BatchRef.model_validate(raw)
+    except ValidationError:
+        return None
+    return ref if seq < ref.last else None
 
 
 def _read_tail(path: Path) -> _Tail | None:
@@ -185,7 +204,13 @@ def _read_tail(path: Path) -> _Tail | None:
             handle.seek(start)
             line = handle.read(end - start)
             if line.strip():
-                return _Tail(complete=complete, torn=torn, last_seq=_seq_of(_record(line)))
+                record = _record(line)
+                return _Tail(
+                    complete=complete,
+                    torn=torn,
+                    last_seq=_seq_of(record),
+                    open_batch=_open_batch_of(record),
+                )
             end = start
     return _Tail(complete=complete, torn=torn, last_seq=None)
 
@@ -241,8 +266,10 @@ def _settle_tail(path: Path) -> _Tail | None:
     change the file: the lease (I-5) makes this store its only writer.
     """
     tail = _read_tail(path)
-    if tail is None or not tail.torn:
+    if tail is None:
         return tail
+    if not tail.torn:
+        return _settle_batch(path, tail)
     with path.open("r+b") as handle:
         fragment = _record(tail.torn)
         if fragment is not None:
@@ -253,10 +280,11 @@ def _settle_tail(path: Path) -> _Tail | None:
                 complete=tail.complete + len(tail.torn) + 1,
                 torn=b"",
                 last_seq=tail.last_seq if seq is None else seq,
+                open_batch=tail.open_batch if seq is None else _open_batch_of(fragment),
             )
         else:
             handle.truncate(tail.complete)
-            settled = _Tail(complete=tail.complete, torn=b"", last_seq=tail.last_seq)
+            settled = replace(tail, torn=b"")
             log.warning(
                 "ph.persistence.jsonl: %s ended in %d byte(s) of a write that did not "
                 "finish; removed them before appending",
@@ -265,7 +293,44 @@ def _settle_tail(path: Path) -> _Tail | None:
             )
         handle.flush()
         os.fsync(handle.fileno())
-    return settled
+    return _settle_batch(path, settled)
+
+
+def _settle_batch(path: Path, tail: _Tail) -> _Tail:
+    """Take back a batch a torn write cut short, as `read_session` drops it (P10-15).
+
+    After the torn line is settled, so the last record is a whole one. If it
+    belongs to a batch it does not finish, walk back line by line to the member
+    whose seq is the batch's `first` and cut the file there — the reader keeps
+    none of an unfinished batch, and the writer's first append must not land
+    behind half of one.
+    """
+    batch = tail.open_batch
+    if batch is None:
+        return tail
+    with path.open("r+b") as handle:
+        end = tail.complete
+        while True:
+            if end == 0:
+                # The batch's first member is not in this file — a reference fork's
+                # prefix holds it — so there is nothing here to cut back to, and the
+                # seed will refuse the log instead.
+                return tail
+            start = _line_start(handle, end - 1)
+            handle.seek(start)
+            if _seq_of(_record(handle.read(end - start))) == batch.first:
+                break
+            end = start
+        handle.truncate(start)
+        handle.flush()
+        os.fsync(handle.fileno())
+    log.warning(
+        "ph.persistence.jsonl: %s ended in %d event(s) of a batch a write did not finish; "
+        "removed them before appending",
+        path,
+        (tail.last_seq or batch.first) - batch.first + 1,
+    )
+    return _Tail(complete=start, torn=b"", last_seq=batch.first - 1 if batch.first > 0 else None)
 
 
 @dataclass(slots=True)
@@ -678,7 +743,38 @@ def read_session(
             events.append(SessionEvent.from_wire(record))
     if header is None:
         raise ValueError(f"{path}: no session header line")
+    if upto is None:
+        dropped = _unfinished_batch(events)
+        if dropped:
+            log.warning(
+                "ph.persistence.jsonl: %s ends in %d event(s) of a batch a write did not "
+                "finish; reading the log without them",
+                path,
+                dropped,
+            )
+            del events[len(events) - dropped :]
     return header, events
+
+
+def _unfinished_batch(events: Sequence[SessionEvent]) -> int:
+    """How many trailing events are a batch a torn write cut short (P10-15).
+
+    The batch rule beside the torn-line rule, and for its reason: one flush wrote
+    the whole batch, a process that died mid-write can cut between two of its
+    lines, and nothing was told those bytes were written — so the reader keeps
+    none of them rather than half. Only at the **end**: a batch cut short anywhere
+    else is damage of another kind, and the seed refuses the log for it.
+
+    Not applied to a bounded read (`upto`): that is a reference fork reading a
+    prefix it cites, which never ends inside a batch, and dropping members there
+    would silently shorten what a child depends on — the seed refuses instead.
+    """
+    if not events:
+        return 0
+    ref = events[-1].batch
+    if ref is None or events[-1].seq == ref.last:
+        return 0
+    return events[-1].seq - ref.first + 1
 
 
 async def resume_session(ctx: Context, session_id: str) -> Session:
@@ -700,7 +796,7 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     # keeps sessions in a database has no path to build, and `resume_session` is
     # the one function every host calls to pick work back up.
     header, events = ctx.require(SESSION_PERSISTENCE).read(session_id)
-    closers = interrupted_turn_closers(events)
+    closers = interrupted_turn_closers(events, await _reconciled(ctx, session_id, header, events))
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))
     # `durable=len(events)`: **what the store already holds is `events`, and
     # nothing else.** The closers
@@ -726,6 +822,50 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
         },
     )
     return session
+
+
+async def _reconciled(
+    ctx: Context, session_id: str, header: SessionHeader | None, events: list[SessionEvent]
+) -> dict[str, CallOutcome]:
+    """Ask each tool about its own started, unresolved call (P10-13).
+
+    Here, mounted, and not in repair — which stays a pure fold a stored log can
+    be put through with nothing mounted; only the answers are handed to it. At
+    `DEPLOYMENT` scope, since no agent exists yet: an agent-scoped tool is not
+    seen, and keeps `TOOL_OUTCOME_UNKNOWN`, as `ToolDefinition.reconcile` says.
+    Through `ToolRuntime.reconciled`, the pipeline's own question, so a raise or
+    an `Unknown` is no answer here either and a `Done` is rendered as the row that
+    registered the tool.
+
+    The session the tool is shown is a read-only copy of the stored log, built
+    only when some call has a tool that can answer — the path is a crash with a
+    call in flight, and the copy is the price of letting a tool read its own
+    context (a workspace root, say) the way it would read a live one.
+    """
+    from ..keys import TOOLS
+    from ..tools import NotDone
+    from ..tools.batch import parse_arguments
+    from .repair import CallOutcome, unresolved_calls
+
+    tools = ctx.get(TOOLS)
+    if tools is None:
+        return {}
+    answers: dict[str, CallOutcome] = {}
+    view: Session | None = None
+    for call in unresolved_calls(events):
+        name = as_str(call.data.get("name"))
+        definition = tools.get(name, scope=DEPLOYMENT)
+        if definition is None or definition.reconcile is None:
+            continue
+        view = view or Session(session_id, seed=events, header=header)
+        arguments = parse_arguments(as_str(call.data.get("arguments")))
+        said = await tools.reconciled(name, arguments, call, view, scope=DEPLOYMENT)
+        call_id = as_str(call.data.get("callId"))
+        if isinstance(said, tuple):
+            answers[call_id] = CallOutcome(done=True, content=tuple(b.to_wire() for b in said))
+        elif isinstance(said, NotDone):
+            answers[call_id] = CallOutcome(done=False)
+    return answers
 
 
 class Config(WireModel):
