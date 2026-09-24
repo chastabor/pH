@@ -40,6 +40,7 @@ from ..seams.code_runtime_stub import StubCodeRuntime
 from .anthropic_wire import anthropic_reply
 from .builders import (
     FAKE_OPTIONS,
+    SCAFFOLDING,
     FarSide,
     StubAgent,
     as_kind,
@@ -50,6 +51,7 @@ from .builders import (
     external_tool,
     hold_session,
     isolated_intent_kinds,
+    log_event,
     not_none,
     noted,
     noting,
@@ -112,6 +114,7 @@ removed.
 __all__ = [
     "FAKE_OPTIONS",
     "REPLAY_ROW",
+    "SCAFFOLDING",
     "FakeAdapter",
     "FarSide",
     "MountProfile",
@@ -137,6 +140,7 @@ __all__ = [
     "external_tool",
     "hold_session",
     "isolated_intent_kinds",
+    "log_event",
     "not_none",
     "noted",
     "noting",

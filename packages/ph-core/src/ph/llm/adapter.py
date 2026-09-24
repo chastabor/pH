@@ -113,6 +113,16 @@ class ResolvedModel:
     outcomes differ in kind: over that, nothing is sent; over this, everything
     works and a person is quietly overpaying, which is the failure that lasts for
     a whole session because nothing announces it."""
+    credential: str | None = None
+    """The credential this route resolves at the adapter edge, **by name** (I-3) —
+    the `apiKeyEnv` its row names — or `None` for a route that needs none.
+
+    What lets anything above the edge ask "can this route run here, now?" without
+    holding a value: the resume check (T5) reads it and asks `ctx.credentials.has`,
+    so a session whose key is missing waits for it by name rather than starting and
+    failing at its first request. Checked against the mounted profile's adapters,
+    never a name copied into the log, because a profile that renamed the variable
+    must be asked about the new name."""
 
 
 class MediaRoute(Protocol):
@@ -151,7 +161,9 @@ class MediaRoute(Protocol):
     def usable_image_edge(self) -> int | None: ...
 
 
-def resolved(route: MediaRoute, *, structured_output: bool) -> ResolvedModel:
+def resolved(
+    route: MediaRoute, *, structured_output: bool, credential: str | None
+) -> ResolvedModel:
     """One route's config as the `ResolvedModel` every layer above reads.
 
     **The projection, not the values.** What a route accepts, how large a file it
@@ -168,7 +180,9 @@ def resolved(route: MediaRoute, *, structured_output: bool) -> ResolvedModel:
     `structured_output` is passed rather than read, because it is the one field
     that is not a config value: it is a claim about the *wire*, argued at each
     call site, and a route that declared it in config could promise a guarantee
-    its adapter does not implement.
+    its adapter does not implement. `credential` is passed for the plainer reason
+    that it is not a media fact: it is the name the adapter resolves at its edge,
+    and **required** so an adapter cannot forget to say (T5).
     """
     return ResolvedModel(
         context_window=route.context_window,
@@ -178,6 +192,7 @@ def resolved(route: MediaRoute, *, structured_output: bool) -> ResolvedModel:
         max_image_edge=route.max_image_edge,
         usable_image_edge=route.usable_image_edge,
         structured_output=structured_output,
+        credential=credential,
     )
 
 

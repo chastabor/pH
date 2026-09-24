@@ -39,9 +39,16 @@ from ph.llm.types import (
 )
 from ph.persistence import interrupted_turn_closers
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
+from ph.session.kinds import DISPATCH_INTERRUPTED
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-from ph.testing import MountProfile, assistant_payload, plugin_payload, simple_tool, user_payload
-from ph.tools.code_mode import DISPATCH_INTERRUPTED
+from ph.testing import (
+    MountProfile,
+    assistant_payload,
+    log_event,
+    plugin_payload,
+    simple_tool,
+    user_payload,
+)
 from ph_app.shell import INTERRUPTED
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, RULES, TuiEventAdapter
 from ph_app.tui.state import Surface, TuiState
@@ -152,8 +159,8 @@ async def test_a_malformed_event_costs_one_row_not_the_transcript(mount: MountPr
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-malformed")
     adapter = TuiEventAdapter()
-    session.append("user/message", {"content": "not a block list"}, SurfaceIntent("append"))
-    session.append("tool/result", {"message": None}, SurfaceIntent("append"))
+    log_event(session, "user/message", {"content": "not a block list"}, SurfaceIntent("append"))
+    log_event(session, "tool/result", {"message": None}, SurfaceIntent("append"))
     for event in session.events:
         adapter.apply(event)
     # No exception, and the transcript is still a list of rows.
@@ -171,7 +178,7 @@ async def test_a_chunk_moves_the_transcript_and_nothing_else(mount: MountProfile
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-surfaces")
     adapter = TuiEventAdapter()
-    session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "text-delta"}})
+    log_event(session, "assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "text-delta"}})
     for event in session.events:
         adapter.apply(event)
 
@@ -188,7 +195,7 @@ async def test_a_panel_event_does_not_redraw_the_transcript(mount: MountProfile)
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-panels")
     adapter = TuiEventAdapter()
-    session.append("todo/write", {"todos": []})
+    log_event(session, "todo/write", {"todos": []})
     for event in session.events:
         adapter.apply(event)
 
@@ -206,7 +213,7 @@ async def test_a_rule_written_without_surfaces_redraws_everything(mount: MountPr
     session = ctx.require(SESSIONS).create("tui-default")
     adapter = TuiEventAdapter()
     plain = next(name for name, rule in RULES.items() if rule.surfaces == Surface.ALL)
-    session.append(plain, {})
+    log_event(session, plain, {})
     for event in session.events:
         adapter.apply(event)
 
@@ -273,10 +280,14 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: MountProfil
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-compaction")
-    first = session.append(
-        "user/message", user_payload("the original question", "m1"), SurfaceIntent("append")
+    first = log_event(
+        session,
+        "user/message",
+        user_payload("the original question", "m1"),
+        SurfaceIntent("append"),
     )
-    session.append(
+    log_event(
+        session,
         "user/message",
         # Attributed the way `compaction-summarize` attributes it (P4-03): a
         # plugin's text, declaring `form: compaction`. Built with
@@ -316,7 +327,8 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-truncated")
-    original = session.append(
+    original = log_event(
+        session,
         "assistant/message",
         {
             **assistant_payload("here is the file", "a1"),
@@ -324,7 +336,8 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
         },
         SurfaceIntent("append"),
     )
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("here is the file", "a1"),
         SurfaceIntent(SurfaceReplace(replaces=(original.seq,)), (original.seq,)),
@@ -349,17 +362,20 @@ async def test_a_truncation_replacement_does_not_reset_the_token_footer(
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-truncated-usage")
-    old = session.append(
+    old = log_event(
+        session,
         "assistant/message",
         {**assistant_payload("first", "a1"), "usage": {"inputTokens": 100, "outputTokens": 0}},
         SurfaceIntent("append"),
     )
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         {**assistant_payload("second", "a2"), "usage": {"inputTokens": 900, "outputTokens": 0}},
         SurfaceIntent("append"),
     )
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("first", "a1"),
         SurfaceIntent(SurfaceReplace(replaces=(old.seq,)), (old.seq,)),
@@ -376,7 +392,8 @@ async def test_truncated_arguments_are_announced(mount: MountProfile) -> None:
     the only place the transcript can say the model is no longer shown them."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-truncation-notice")
-    session.append(
+    log_event(
+        session,
         "compaction/args-truncated",
         {"trigger": "pressure", "seqs": [3, 7], "savedChars": 41_000},
     )
@@ -399,7 +416,8 @@ async def test_a_declined_compaction_is_a_notice(mount: MountProfile) -> None:
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-declined")
-    session.append(
+    log_event(
+        session,
         "compaction/declined",
         {"trigger": "overflow", "code": "summary", "reason": "the summarize call failed"},
     )
@@ -427,8 +445,8 @@ async def test_a_surfaced_shell_command_is_marked_apart_from_a_quiet_one(
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-shell-mark")
-    session.append("shell/command", {"command": "make", "surface": True})
-    session.append("shell/command", {"command": "make", "surface": False})
+    log_event(session, "shell/command", {"command": "make", "surface": True})
+    log_event(session, "shell/command", {"command": "make", "surface": False})
 
     titles = [item.tool.title for item in _replay(session).visible_items() if item.tool]
     assert titles == ["Shell → agent", "Shell"], "the loud one is named and the quiet one is not"
@@ -444,7 +462,7 @@ async def test_an_interrupted_command_is_drawn_as_interrupted(mount: MountProfil
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-shell-interrupted")
-    session.append("shell/command", {"command": "make", "surface": False})
+    log_event(session, "shell/command", {"command": "make", "surface": False})
     (closer,) = interrupted_turn_closers(session.events)
     session.admit(closer)
 
@@ -460,16 +478,18 @@ async def test_an_orphaned_dispatch_is_drawn_settled(mount: MountProfile) -> Non
     fed the closer repair actually writes, so the two cannot drift."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-dispatch-orphaned")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
     run_code = {"type": "tool-call", "id": "c1", "name": "run_code", "arguments": "{}"}
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("", "m1", content=[run_code]),
         SurfaceIntent("append", ()),
     )
-    session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "run_code"})
-    session.append(
+    log_event(session, "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "run_code"})
+    log_event(
+        session,
         "tool/code-dispatch-start",
         {
             "rootCallId": "c1",
@@ -559,8 +579,9 @@ async def test_reasoning_then_text_in_one_step_settles_both_rows(
         {"type": "text-delta", "index": 1, "text": "the answer"},
     ]
     for chunk in chunks:
-        session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": chunk})
-    session.append(
+        log_event(session, "assistant/chunk", {"turn": 1, "step": 1, "chunk": chunk})
+    log_event(
+        session,
         "assistant/message",
         assistant_payload(
             "the answer",
@@ -592,11 +613,13 @@ async def test_a_step_that_only_reasoned_still_shows_its_answer(mount: MountProf
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-one-voice")
-    session.append(
+    log_event(
+        session,
         "assistant/chunk",
         {"turn": 1, "step": 1, "chunk": {"type": "text-delta", "index": 0, "text": "the answer"}},
     )
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload(
             "the answer",
@@ -639,7 +662,8 @@ async def test_a_violated_invariant_is_a_notice_in_the_conversation(mount: Mount
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-violated")
-    session.append(
+    log_event(
+        session,
         "supervisor/violated",
         {
             "violations": [
@@ -670,7 +694,7 @@ async def test_a_cleared_invariant_is_good_news_and_reads_like_it(mount: MountPr
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-cleared")
-    session.append("supervisor/violated", {"violations": [], "pid": 123})
+    log_event(session, "supervisor/violated", {"violations": [], "pid": 123})
 
     (row,) = [item for item in _replay(session).visible_items() if item.role == "notice"]
     assert "holds its invariants again" in row.text
@@ -689,10 +713,11 @@ async def test_a_plugins_replacement_is_not_called_a_compaction(mount: MountProf
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-offload")
-    pasted = session.append(
-        "user/message", user_payload("a two megabyte paste", "m1"), SurfaceIntent("append")
+    pasted = log_event(
+        session, "user/message", user_payload("a two megabyte paste", "m1"), SurfaceIntent("append")
     )
-    session.append(
+    log_event(
+        session,
         "user/message",
         plugin_payload(
             "Message content too large…",
@@ -731,7 +756,8 @@ async def test_a_refinement_says_what_changed(mount: MountProfile) -> None:
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-harness")
-    session.append(
+    log_event(
+        session,
         "harness/refined",
         {
             "refineId": "refine-1",
@@ -741,7 +767,8 @@ async def test_a_refinement_says_what_changed(mount: MountProfile) -> None:
             "rejected": ['skill "imaginary" does not resolve'],
         },
     )
-    session.append(
+    log_event(
+        session,
         "harness/refined",
         {
             "refineId": "refine-2",
@@ -762,8 +789,9 @@ async def test_a_corpus_is_a_row_only_when_it_changed(mount: MountProfile) -> No
     is the corpus having changed under a conversation that was told about it."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-context")
-    session.append("context/loaded", {"corpus": "notes", "digest": "a", "note": ""})
-    session.append(
+    log_event(session, "context/loaded", {"corpus": "notes", "digest": "a", "note": ""})
+    log_event(
+        session,
         "context/loaded",
         {"corpus": "notes", "digest": "b", "note": "`notes` was rebuilt from changed sources"},
     )
@@ -812,8 +840,10 @@ def test_a_sandbox_refusal_is_a_notice_with_the_way_out() -> None:
     from ph.seams.sandbox import Denial
 
     session = Session("s")
-    session.append(
-        "sandbox/denied", Denial(kind="network", via="proxy", host="h", port=443).record("a")
+    log_event(
+        session,
+        "sandbox/denied",
+        Denial(kind="network", via="proxy", host="h", port=443).record("a"),
     )
 
     (item,) = _replay(session).items

@@ -11,7 +11,7 @@ the fake-provider options. Each was being re-declared per test module.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +22,7 @@ import anyio
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
-from ..json import as_str, dumps
+from ..json import JsonValue, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
 from ..locks import file_lock
@@ -36,7 +36,17 @@ from ..seams.workspace import (
     SharedWorkspaceProvider,
     WorkspaceSeam,
 )
-from ..session import Session, SessionEvent, SessionHeader, SessionKind
+from ..session import (
+    Session,
+    SessionBatch,
+    SessionEvent,
+    SessionHeader,
+    SessionKind,
+    SurfaceIntent,
+    intents,
+)
+from ..session import kinds as core_kinds
+from ..session.writers import LogWriter, scaffolding_writer
 from ..tools import PreToolDecision, ToolExecution, ToolExecutionResult
 from ..tools.definition import (
     Done,
@@ -175,23 +185,42 @@ def external_tool(
     return tool, far
 
 
+SCAFFOLDING: LogWriter = scaffolding_writer()
+"""The writer tests build logs with: every type this build reads (T6).
+
+A test is no writer of record — it writes a crashed turn, an ask nobody answered, a
+log a newer build left — so it holds the one writer that may write any known type,
+and a test kind carries it (`IntentKind(..., writer=SCAFFOLDING)`). Minted here,
+since `scaffolding_writer` refuses anywhere outside `ph.testing`."""
+
+
+def log_event(
+    log: Session | SessionBatch,
+    event_type: str,
+    data: Mapping[str, JsonValue],
+    surface: SurfaceIntent | None = None,
+) -> SessionEvent:
+    """Write one event into a hand-built log, through `SCAFFOLDING` — what a test
+    calls where it used to call `session.append` (T6)."""
+    return SCAFFOLDING.append(log, event_type, data, surface)
+
+
 @contextmanager
 def isolated_intent_kinds(*, core: bool) -> Iterator[None]:
     """Declare intent kinds into a table of this block's own, so a test's do not leak.
 
-    `core` keeps ph-core's own kinds — the asks, the shell, the dispatches — in it,
-    for a test of repair that must still see them settled; without it the table
-    starts empty, for a test of `declare_intent` itself. ph-core's kinds are
-    declared into the real table *first* either way, so a declaring module first
-    imported inside the block cannot put its kind into the throwaway table and lose
-    it for every test after.
-    """
-    from ..persistence.repair import _kinds
-    from ..session import intents
+    `core` starts the table with ph-core's own kinds — `ph.session.kinds.KINDS`, and
+    only those — for a test of repair that must still see them settled; without it
+    the table starts empty, for a test of `declare_intent` itself. Either way it is
+    what a process that declared nothing else would hold, whatever this interpreter
+    has imported: a package's kinds (`ph_app.kinds`) are left out, so the block
+    sees repair refuse a log that holds them (T4).
 
-    _kinds()
+    Not enforced: a package leaf *first* imported inside the block declares its kind
+    into the throwaway table, and the real one never sees it.
+    """
     real = intents._KINDS
-    intents._KINDS = dict(real) if core else {}
+    intents._KINDS = {kind.opened: kind for kind in core_kinds.KINDS} if core else {}
     try:
         yield
     finally:
@@ -484,7 +513,7 @@ def workspace_log(*events: tuple[str, dict[str, Any]], session_id: str = "s") ->
     """
     session = Session(session_id)
     for kind, data in events:
-        session.append(kind, data)
+        log_event(session, kind, data)
     return session
 
 

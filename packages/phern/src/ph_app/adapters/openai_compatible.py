@@ -441,7 +441,7 @@ class OpenAiCompatibleAdapter:
         # This wire takes `response_format: {"type": "json_schema", …}` with
         # `strict`, so the server builds a grammar and the reply cannot come back
         # another shape (P7-17).
-        return resolved(self.profile, structured_output=True)
+        return resolved(self.profile, structured_output=True, credential=self.profile.api_key_env)
 
 
 @dataclass(slots=True)

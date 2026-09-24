@@ -76,7 +76,7 @@ not describe the frozen form at all, since a `MappingProxyType` is not a `dict`
 and a `tuple` is not a `list`; a reader typed against it was untyped one index
 down. `Sequence`/`Mapping` are true of both shapes — `tuple`/`MappingProxyType`
 in memory, `list`/`dict` on disk and after `thaw_json` — and they are covariant,
-so a producer holding `list[dict[str, Any]]` may hand it to `Session.append`
+so a producer holding `list[dict[str, Any]]` may hand it to `Session._append`
 where `list[JsonValue]`, being invariant, would have refused it.
 
 What the type does *not* say is "frozen". Nothing in the type system
@@ -103,7 +103,7 @@ the retirement is unaffordable. Everywhere the tree is *not* a pydantic field,
 this alias is the answer."""
 
 JsonObject: TypeAlias = "Mapping[str, JsonValue]"
-"""A JSON object — every event payload, and the shape `Session.append` takes."""
+"""A JSON object — every event payload, and the shape `Session._append` takes."""
 
 PlainJsonValue: TypeAlias = (
     "bool | int | float | str | list[PlainJsonValue] | dict[str, PlainJsonValue] | None"
@@ -117,7 +117,7 @@ containers cannot be assigned into. `compaction-summarize` thaws a payload
 precisely in order to rewrite one block of it, and a return typed `Sequence`
 would refuse the assignment the thaw exists to permit. A `PlainJsonValue` is a
 `JsonValue` (list is a Sequence, dict a Mapping), so a thawed tree still flows
-into `Session.append` without a cast; the reverse is not true, which is the
+into `Session._append` without a cast; the reverse is not true, which is the
 point."""
 
 _EMPTY_OBJECT: JsonObject = MappingProxyType({})

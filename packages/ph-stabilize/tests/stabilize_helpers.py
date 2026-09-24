@@ -24,7 +24,7 @@ from ph.keys import AGENTS, APPROVAL, SESSIONS, WORKSPACE
 from ph.llm.types import ToolCallBlock, ToolResultBlock, text_of
 from ph.seams.spill import SpillStore
 from ph.session import Session, derive_event_message
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, log_event
 from ph_stabilize import BUNDLE
 
 __all__ = [
@@ -98,7 +98,8 @@ async def run_tool_calls(ctx: Context, session: Session, *calls: Any, step: int 
     from ph.tools.batch import execute_tool_calls
 
     blocks = [call.model_dump(mode="json", by_alias=True) for call in calls]
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("", f"a{step}", content=blocks),
         SurfaceIntent("append"),

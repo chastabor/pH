@@ -592,7 +592,7 @@ class DaemonSession:
         returns; `False` in process means "nowhere to put it", which over a
         socket `daemon/config` has already answered."""
         self._spawn(
-            self.client.mutate(
+            self.client.call(
                 verbs.CREDENTIALS_STORE,
                 StoreCredentialParams(session_id=self.session_id, name=name, value=value),
             )

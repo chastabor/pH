@@ -46,11 +46,12 @@ from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
 from ph.seams.schedule import Schedule
 from ph.seams.shell import ShellService
-from ph.session import IntentScope, Prior, intents_of, now_ms, session_written
+from ph.session import Prior, intents_of, now_ms, session_written
 from ph.text import duration
 from ph.wire import WireModel
 
 from .. import verbs
+from ..kinds import CLIENT_COMMAND, command_settled
 from ..params import (
     BrowseParams,
     CancelScheduleParams,
@@ -131,12 +132,11 @@ from .projections import (
     tools_of,
 )
 from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
-from .supervisor import CLIENT_COMMAND, NON_GUARANTEES, Root, Supervisor
+from .supervisor import NON_GUARANTEES, Root, Supervisor
 
 if TYPE_CHECKING:
     from ph.seams.attachments import AttachmentStore
     from ph.seams.commands import CommandRegistry
-    from ph.seams.credentials import CredentialService
     from ph.seams.permission_presets import PermissionPresetService
 
 __all__ = ["DaemonServer", "serve"]
@@ -174,7 +174,7 @@ the answer to one question decided how often the other was asked.
 
 Five minutes, and slow on purpose. A check is O(events) in every live root's log
 and will almost always pass — it exists to catch a writer that bypassed
-`Session.append`, which is a bug nobody has on a schedule. Fast enough to name
+`Session._append`, which is a bug nobody has on a schedule. Fast enough to name
 the drift inside a working session, slow enough that the refold is not a tax
 anybody would later be tempted to remove.
 
@@ -227,10 +227,6 @@ class Mutation[P: MutationParams, R: WireModel]:
     `act`. Each pair agrees on it by being written together, and no third party
     ever sees it."""
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]]
-    key_scope: IntentScope = "log"
-    """How long the key names the act (`IntentScope`). `process` for a verb whose
-    effect lives in this process's memory — `credentials/store` — so a re-send
-    after a restart stores the value again rather than being refused (L1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,12 +277,9 @@ for free — where a shared base would have to declare a `handle` returning
 
 
 def _repeat_outcome(prior: Prior) -> RepeatOutcome:
-    """`settled` only for a settle that says so: an open key is one still acting in
-    this process, and repair's settle says `unknown` in so many words."""
-    settled = prior.settled
-    return (
-        "settled" if settled is not None and settled.data.get("outcome") == "settled" else "unknown"
-    )
+    """`settled` only for a verb its act saw finish: one still acting in this process,
+    or one repair or a raising act closed, is `unknown` in so many words."""
+    return "settled" if prior.outcome == "done" else "unknown"
 
 
 def _command_key(params: MutationParams) -> str:
@@ -518,9 +511,7 @@ class _Connection:
             # The key is claimed between the halves (`Mutation` says why), and an
             # act that raises is settled `unknown` by `claim` rather than leaving
             # a key that refuses the retry with no word that nothing finished.
-            async with journal.claim(
-                root.session, CLIENT_COMMAND, {"command": key}, key_scope=mutation.key_scope
-            ) as held:
+            async with journal.claim_once(root.session, CLIENT_COMMAND, {"command": key}) as held:
                 if isinstance(held, Prior):
                     # The retry a reconnecting client cannot avoid sending: it
                     # does not know whether the first one landed. Answering "yes,
@@ -530,7 +521,7 @@ class _Connection:
                         **root.describe().model_dump(), outcome=_repeat_outcome(held)
                     )
                 reply = await mutation.act(self, root, parsed, plan)
-                journal.settle(root.session, held, {"command": key, "outcome": "settled"})
+                journal.settle(root.session, held, command_settled(key))
         # **Durable before the client is told** (F7). A client that has its reply
         # never re-sends, so a reply sent while the key and the act's own record
         # were still in memory made a crash lose the act outright — and
@@ -818,21 +809,25 @@ class _Connection:
         _refresh_readings(root)
         return PresetApplied(session_id=root.id, preset=applied.name)
 
-    async def _prepare_credential(
-        self, root: Root, params: StoreCredentialParams
-    ) -> CredentialService:
+    async def _credentials_store(self, params: StoreCredentialParams) -> CredentialStored:
+        """Hand a root a credential's value, which it uses and does not keep.
+
+        **Unkeyed** (T5). Storing one value twice stores it once, so a retry needs no
+        key; and a key would outlive what it named — the value lives in this
+        process's memory, so after a restart a re-send is the only way it comes back.
+        `start` rather than `_root`: the value belongs to a mounted root's seam.
+        """
+        root = await self.server.supervisor.start(params.session_id)
         service = root.ctx.get(CREDENTIALS)
         if service is None:
             raise SeamAbsent("this deployment stores no credentials")
-        return service
-
-    async def _act_credential(
-        self, root: Root, params: StoreCredentialParams, service: CredentialService
-    ) -> CredentialStored:
         # **The value is used and not kept.** It is never logged, never echoed
         # in the reply, and never reaches `describe()` — the reply is the name
         # and a boolean, which is everything a UI needs to redraw.
         service.provide_value(params.name, params.value)
+        # And whatever was waiting on it goes (T5): the root, if its route named
+        # this, and every child held for it.
+        await self.server.supervisor.credential_supplied(root)
         return CredentialStored(session_id=root.id, name=params.name)
 
     def _attachments(self, root: Root, refs: list[AttachmentRef]) -> list[AttachmentRef]:
@@ -1070,8 +1065,6 @@ def _mutating[P: MutationParams, R: WireModel](
     verb: Verb[P, R],
     prepare: Callable[[_Connection, Root, P], Awaitable[Any]],
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]],
-    *,
-    key_scope: IntentScope = "log",
 ) -> tuple[str, Mutation[Any, Any]]:
     """One `MUTATIONS` row, keyed by its verb's name and **checked against it**.
 
@@ -1084,7 +1077,7 @@ def _mutating[P: MutationParams, R: WireModel](
     names no type variable, so `P` and `R` can only come from the verb, and the
     two halves are checked against it.
     """
-    return verb.name, Mutation(verb, prepare, act, key_scope)
+    return verb.name, Mutation(verb, prepare, act)
 
 
 def _unkeyed[P: WireModel, R: WireModel](
@@ -1114,13 +1107,6 @@ MUTATIONS: dict[str, Mutation[Any, Any]] = dict(
         _mutating(verbs.SESSION_STAGE, _Connection._prepare_stage, _Connection._act_stage),
         _mutating(verbs.SESSION_SHELL, _Connection._prepare_shell, _Connection._act_shell),
         _mutating(verbs.SESSION_PRESET, _Connection._prepare_preset, _Connection._act_preset),
-        _mutating(
-            verbs.CREDENTIALS_STORE,
-            _Connection._prepare_credential,
-            _Connection._act_credential,
-            # The value lives in this process's memory; its key must not outlive it.
-            key_scope="process",
-        ),
     )
 )
 """Every method that changes a root, and the one place their idempotence lives.
@@ -1156,6 +1142,7 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.SESSION_SNAPSHOT, _Connection._snapshot),
         _unkeyed(verbs.ATTACHMENT_PUT, _Connection._put),
         _unkeyed(verbs.CREDENTIALS_HELD, _Connection._credentials_held),
+        _unkeyed(verbs.CREDENTIALS_STORE, _Connection._credentials_store),
         # The read-only projections (P5-14). What a front end used to read straight
         # off `ctx`; each is a fold computed now, so a reconnecting client gets
         # today's answer rather than one cached when somebody last wrote it down.
@@ -1355,6 +1342,9 @@ class DaemonServer:
                 ],
             ),
             ("socket lifetime", self.socket_lifetime().describe()),
+            # What is held for a credential, by name (T5) — the question a person
+            # asks when a child resumed after a restart and is not moving.
+            ("credentials awaited", self.supervisor.awaited() or [("held", "nothing")]),
             # The daemon's own non-guarantees (N5, I-2), printed by the command a
             # person runs to ask what this daemon is. Rule 6 wants them beside
             # where they would be assumed, and this reply *is* that place: it

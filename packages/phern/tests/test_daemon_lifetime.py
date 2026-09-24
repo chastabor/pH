@@ -36,7 +36,7 @@ from ph.keys import APPROVAL
 from ph.paths import resolve_roots
 from ph.seams.schedule_index import ScheduleIndex
 from ph.session import SurfaceIntent, now_ms
-from ph.testing import StubAgent, user_payload
+from ph.testing import StubAgent, log_event, user_payload
 from ph_app.daemon.launch import SPAWN_TIMEOUT
 
 pytestmark = pytest.mark.anyio
@@ -76,7 +76,9 @@ async def test_the_exit_no_longer_waits_on_the_root_quiet_window(tmp_path: Path)
     async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
         daemon.aged()
         root = await daemon.running.supervisor.start("just-finished")
-        root.session.append("user/message", user_payload("the last thing"), SurfaceIntent("append"))
+        log_event(
+            root.session, "user/message", user_payload("the last thing"), SurfaceIntent("append")
+        )
         assert root.idle_for(now_ms()) < 1_000, "the log was written just now"
 
         assert daemon.running.spent(), "idle is idle, however recently"

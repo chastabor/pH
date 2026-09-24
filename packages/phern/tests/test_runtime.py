@@ -20,6 +20,7 @@ import pytest
 
 from ph.cordis import Profile
 from ph.cordis import context as context_module
+from ph.testing import log_event
 from ph_app.runtime import mounted
 
 pytestmark = pytest.mark.anyio
@@ -105,7 +106,7 @@ async def test_opening_a_session_makes_its_teardown_durable() -> None:
         session = await open_session(ctx, "teardown")
         agent = ctx.require(AGENTS).create(session)
         agent.ctx.add_disposer(
-            lambda: session.append(*workspace_disposed(agent.id)), label="release"
+            lambda: log_event(session, *workspace_disposed(agent.id)), label="release"
         )
         await ctx.require(SESSIONS).flush(session)
 

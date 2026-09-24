@@ -30,7 +30,7 @@ from ph.keys import AGENTS, COMMANDS, JOBS, LLM_FAKE, SESSIONS
 from ph.llm.types import GenerateOptions
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SessionEvent, SurfaceReplace
-from ph.testing import FAKE_OPTIONS, MountProfile, block_text, user_payload
+from ph.testing import FAKE_OPTIONS, MountProfile, block_text, log_event, user_payload
 from ph_rlm.harness import (
     CONSIDERED,
     REFINED,
@@ -88,11 +88,13 @@ def script(ctx: Context, *, review: str = NO, planner: str = "{}") -> list[Gener
 
 
 def turn(session: Session, index: int = 1) -> None:
-    session.append("turn/end", {"turn": index, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": index, "reason": {"kind": "completed"}})
 
 
 def say(session: Session, text: str, message_id: str = "m1") -> Any:  # noqa: ANN401
-    return session.append("user/message", user_payload(text, message_id), SurfaceIntent("append"))
+    return log_event(
+        session, "user/message", user_payload(text, message_id), SurfaceIntent("append")
+    )
 
 
 # ------------------------------------------------------------ the JSON --
@@ -195,7 +197,8 @@ async def test_the_conversation_is_what_the_model_saw(refining: Refining) -> Non
     ctx, session, agent = await refining()
     requests = script(ctx, planner=json.dumps(PROPOSAL))
     first = say(session, "the forgotten original", "m1")
-    session.append(
+    log_event(
+        session,
         "user/message",
         user_payload("(summary of earlier conversation)", "m2"),
         SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),

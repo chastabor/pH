@@ -12,40 +12,70 @@ move — which is how one crash becomes two side effects.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
-from ph.json import JsonObject, as_obj, as_seq, thaw_json
+from ph.cordis import Context
+from ph.json import JsonObject, as_int, as_obj, as_seq, thaw_json
 from ph.keys import FS, INTENTS, SESSION_PERSISTENCE, SESSIONS
 from ph.llm.types import content_from_wire, text_of
+from ph.persistence import repair as repair_module
 from ph.persistence.repair import (
     TOOL_NOT_STARTED,
     TOOL_OUTCOME_UNKNOWN,
     interrupted_turn_closers,
     repaired,
 )
-from ph.seams.approval import INTERRUPTED, pending_approvals
-from ph.seams.user_questions import pending_questions
+from ph.seams.approval import INTERRUPTED, ApprovalService, pending_approvals
+from ph.seams.user_questions import (
+    UserQuestion,
+    UserQuestionService,
+    pending_questions,
+)
 from ph.session import (
     Claim,
     IntentError,
     IntentKind,
+    IntentNotDurable,
     Session,
     SessionEvent,
     SurfaceIntent,
     SurfaceReplace,
     Unsettled,
     declare_intent,
+    declared_intents,
+    outcome_of,
+    unsettled_why,
 )
+from ph.session import kinds as core_kinds
+from ph.session.kinds import (
+    APPROVAL_ASK,
+    QUESTION_ASK,
+    SHELL_COMMAND,
+    TOOL_DISPATCH,
+    TOOL_EFFECT,
+    credential_hold,
+)
+from ph.session.store import SessionStore
 from ph.testing import (
+    SCAFFOLDING,
     MountProfile,
+    StubAgent,
     assistant_payload,
     isolated_intent_kinds,
+    log_event,
+    not_none,
     tool_result_payload,
     user_payload,
 )
@@ -61,10 +91,10 @@ def _assistant_with_call(call_id: str, *, turn: int = 1, step: int = 1) -> dict[
 
 def _open_turn_with_unstarted_call() -> Session:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("user/message", user_payload("do it", "m1"), SurfaceIntent("append"))
-    session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "user/message", user_payload("do it", "m1"), SurfaceIntent("append"))
+    log_event(session, "assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
     return session
 
 
@@ -76,15 +106,15 @@ def _parked_turn(*, recorded_call: bool) -> Session:
     """
     session = _open_turn_with_unstarted_call()
     if recorded_call:
-        session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit"})
-    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
+        log_event(session, "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit"})
+    log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
     return session
 
 
 def test_a_balanced_log_needs_no_repair() -> None:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     assert interrupted_turn_closers(session.events) == []
     # Reopening a clean session must not grow its log.
     assert len(repaired(session.events)) == len(session.events)
@@ -111,8 +141,10 @@ def test_a_call_that_never_started_is_closed_as_not_started() -> None:
 
 def test_a_recorded_call_is_closed_as_outcome_unknown() -> None:
     session = _open_turn_with_unstarted_call()
-    call_seq = session.append(
-        "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"}
+    call_seq = log_event(
+        session,
+        "tool/call",
+        {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"},
     ).seq
 
     closers = interrupted_turn_closers(session.events)
@@ -145,17 +177,23 @@ def test_a_replaced_assistant_message_does_not_reopen_answered_calls() -> None:
     """
     session = _open_turn_with_unstarted_call()
     assistant_seq = session.events[-1].seq
-    call_seq = session.append(
-        "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"}
+    call_seq = log_event(
+        session,
+        "tool/call",
+        {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"},
     ).seq
-    session.append(
-        "tool/result", tool_result_payload("done", "r1", "c1"), SurfaceIntent("append", (call_seq,))
+    log_event(
+        session,
+        "tool/result",
+        tool_result_payload("done", "r1", "c1"),
+        SurfaceIntent("append", (call_seq,)),
     )
-    session.append("step/end", {"turn": 1, "step": 1})
-    session.append("step/start", {"turn": 1, "step": 2})
+    log_event(session, "step/end", {"turn": 1, "step": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 2})
     # The elision: the same call, its arguments shortened, standing in place of
     # the message already on the surface.
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         _assistant_with_call("c1", step=1),
         SurfaceIntent(
@@ -173,10 +211,13 @@ def test_a_replaced_assistant_message_does_not_reopen_answered_calls() -> None:
 
 def test_a_completed_call_is_not_re_closed() -> None:
     session = _open_turn_with_unstarted_call()
-    call_seq = session.append(
-        "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"}
+    call_seq = log_event(
+        session,
+        "tool/call",
+        {"turn": 1, "step": 1, "callId": "c1", "name": "edit", "arguments": "{}"},
     ).seq
-    session.append(
+    log_event(
+        session,
         "tool/result",
         {
             "turn": 1,
@@ -298,14 +339,56 @@ def test_repair_settles_every_parked_ask_not_only_the_first() -> None:
     this whole row is about, surviving in the narrower case.
     """
     session = _open_turn_with_unstarted_call()
-    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
-    session.append("approval/asked", {"toolName": "bash", "callId": "c2"})
+    log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
+    log_event(session, "approval/asked", {"toolName": "bash", "callId": "c2"})
 
     settled = [
         one for one in interrupted_turn_closers(session.events) if one.type == "approval/decided"
     ]
 
     assert [one.data["callId"] for one in settled] == ["c1", "c2"], "both, in the order asked"
+
+
+@pytest.mark.anyio
+async def test_asks_parked_under_one_name_are_each_settled_on_resume() -> None:
+    """T3: a crash with two `refine` approvals and a question asked twice under one id
+    all parked settles all four, each by the seq of the ask it closes.
+
+    The log is taken while everything is parked — what a killed process leaves behind.
+    Canceling the asks in-process would run the seams' own closers (K7) instead.
+    """
+    root = Context()
+    approvals, questions = ApprovalService(ctx=root), UserQuestionService(ctx=root)
+
+    async def never(*_args: object) -> str:
+        await anyio.sleep_forever()
+        raise AssertionError  # pragma: no cover
+
+    approvals.register_answerer(never)
+    questions.register_answerer(never)
+    session = _open_turn_with_unstarted_call()
+    agent = StubAgent(session=session)
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            for _ in range(2):
+                tasks.start_soon(partial(approvals.request, agent=agent, tool_name="refine"))
+                tasks.start_soon(
+                    partial(
+                        questions.ask, UserQuestion(question="Which?", ask_id="q1"), session=session
+                    )
+                )
+                await anyio.wait_all_tasks_blocked()
+            parked = tuple(session.events)
+            tasks.cancel_scope.cancel()
+
+    closers = interrupted_turn_closers(parked)
+
+    asks = [e.seq for e in parked if e.type in {"approval/asked", "question/asked"}]
+    answers = {"approval/decided", "question/answered"}
+    settled = [as_int(e.data["askSeq"]) for e in closers if e.type in answers]
+    assert len(asks) == 4 and sorted(settled) == asks, "every ask, once, by its own seq"
+    revived = Session("s2", seed=repaired(parked))
+    assert pending_approvals(revived.events) == [] and pending_questions(revived.events) == []
 
 
 def test_a_parked_user_question_is_settled_too() -> None:
@@ -317,13 +400,13 @@ def test_a_parked_user_question_is_settled_too() -> None:
     that remained while the one that closed went unmentioned, and a resumed log
     keeping a ghost question that "what needs your attention" lists forever.
 
-    **`interrupted`, pointedly not `declined`.** `user_questions` opens by
+    **Interrupted — the `unsettled` marker — pointedly not `declined`.** `user_questions` opens by
     refusing to write `declined` for an exchange that never happened — "the log
     would then say a person was asked and declined, which is a different and
     false claim" — and a person the process never reached is exactly that case.
     """
     session = _open_turn_with_unstarted_call()
-    session.append("question/asked", {"askId": "q1", "question": "which one?"})
+    log_event(session, "question/asked", {"askId": "q1", "question": "which one?"})
 
     settled = [
         one for one in interrupted_turn_closers(session.events) if one.type == "question/answered"
@@ -331,7 +414,7 @@ def test_a_parked_user_question_is_settled_too() -> None:
 
     (answered,) = settled
     assert answered.data["askId"] == "q1"
-    assert answered.data["interrupted"] is True
+    assert unsettled_why(answered.data) == "outcome-unknown"
     assert "declined" not in answered.data, "nobody was there to decline"
     assert "answer" not in answered.data, "and nobody answered"
 
@@ -342,8 +425,10 @@ def test_a_parked_user_question_is_settled_too() -> None:
 def test_an_answered_question_is_not_settled_twice() -> None:
     """`pending_questions`' own pop rule, relied on rather than re-derived."""
     session = _open_turn_with_unstarted_call()
-    session.append("question/asked", {"askId": "q1", "question": "which one?"})
-    session.append("question/answered", {"askId": "q1", "answer": "this one"})
+    asked = log_event(session, "question/asked", {"askId": "q1", "question": "which one?"})
+    log_event(
+        session, "question/answered", {"askId": "q1", "askSeq": asked.seq, "answer": "this one"}
+    )
 
     closers = interrupted_turn_closers(session.events)
 
@@ -359,8 +444,12 @@ def test_an_answered_ask_is_not_settled_twice() -> None:
     would believe.
     """
     session = _open_turn_with_unstarted_call()
-    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
-    session.append("approval/decided", {"toolName": "edit", "callId": "c1", "outcome": "rejected"})
+    asked = log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
+    log_event(
+        session,
+        "approval/decided",
+        {"toolName": "edit", "callId": "c1", "askSeq": asked.seq, "outcome": "rejected"},
+    )
 
     closers = interrupted_turn_closers(session.events)
 
@@ -368,15 +457,12 @@ def test_an_answered_ask_is_not_settled_twice() -> None:
     assert [one.type for one in closers] == ["tool/result", "step/end", "turn/end"]
 
 
-def test_an_ask_with_no_call_id_settles_by_tool_name() -> None:
-    """`pending_approvals` keys on `callId or toolName`, so repair must too.
-
-    An approval can be asked without a call id — a row gating something that is
-    not a tool call. Keying the closer differently from the fold would settle a
-    question the fold was not reporting and leave the one it was.
-    """
+def test_an_ask_with_no_call_id_is_settled_too() -> None:
+    """An approval can be asked without a call id — a row gating something that is
+    not a tool call. Keyed by its own seq since T3, like every ask, it is settled
+    like any other, and the decision invents no call id it was not asked with."""
     session = _open_turn_with_unstarted_call()
-    session.append("approval/asked", {"toolName": "deploy"})
+    log_event(session, "approval/asked", {"toolName": "deploy"})
 
     (settled,) = [
         one for one in interrupted_turn_closers(session.events) if one.type == "approval/decided"
@@ -417,10 +503,10 @@ def test_a_repaired_log_seeds_a_resumable_session() -> None:
 
 def test_an_earlier_completed_turn_is_untouched() -> None:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    session.append("turn/start", {"turn": 2})
-    session.append("step/start", {"turn": 2, "step": 1})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/start", {"turn": 2})
+    log_event(session, "step/start", {"turn": 2, "step": 1})
     closers = interrupted_turn_closers(session.events)
     assert [event.type for event in closers] == ["step/end", "turn/end"]
     assert closers[-1].data["turn"] == 2
@@ -428,7 +514,7 @@ def test_an_earlier_completed_turn_is_untouched() -> None:
 
 def test_a_turn_with_no_open_step_closes_only_the_turn() -> None:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     closers = interrupted_turn_closers(session.events)
     assert [event.type for event in closers] == ["turn/end"]
 
@@ -440,9 +526,9 @@ async def test_resume_repairs_a_crashed_log_on_load(mount: MountProfile, tmp_pat
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("crashed")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("crashed")
 
@@ -481,10 +567,10 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("parked")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
-    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
+    log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
     assert pending_approvals(session.events), "parked before the crash"
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("parked")
@@ -526,9 +612,9 @@ async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("reopened")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("reopened")
 
@@ -571,7 +657,7 @@ COMMAND = IntentKind(
     settled_key=_command_key,
     orphan="outcome-unknown",
     closer=_unknown,
-    owner="tests",
+    writer=SCAFFOLDING,
 )
 
 
@@ -586,9 +672,9 @@ def kinds() -> Iterator[None]:
 def _between_turns() -> Session:
     """A finished turn, then a command run outside any turn and never settled."""
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    session.append("command/run", {"id": "x1", "command": "make"})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "command/run", {"id": "x1", "command": "make"})
     return session
 
 
@@ -600,7 +686,15 @@ def test_an_orphan_outside_any_turn_is_settled() -> None:
     closers = interrupted_turn_closers(_between_turns().events)
 
     assert [(event.type, dict(event.data)) for event in closers] == [
-        ("command/done", {"id": "x1", "ok": False, "why": "outcome-unknown"})
+        (
+            "command/done",
+            {
+                "id": "x1",
+                "ok": False,
+                "why": "outcome-unknown",
+                "unsettled": {"why": "outcome-unknown", "by": "repair"},
+            },
+        )
     ]
 
 
@@ -617,7 +711,7 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("between")
     for event in _between_turns().events:
-        session.append(event.type, thaw_json(event.data))
+        log_event(session, event.type, thaw_json(event.data))
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("between")
 
@@ -649,7 +743,7 @@ def test_an_owner_settles_kind_is_left_for_its_owner() -> None:
 def test_a_balanced_log_still_resumes_with_no_closers() -> None:
     declare_intent(COMMAND)
     session = _between_turns()
-    session.append("command/done", {"id": "x1", "ok": True})
+    log_event(session, "command/done", {"id": "x1", "ok": True})
     assert interrupted_turn_closers(session.events) == []
 
 
@@ -660,7 +754,7 @@ def test_closers_are_deterministic_and_backdated() -> None:
     asks and before the tool results, step and turn."""
     declare_intent(COMMAND)
     session = _parked_turn(recorded_call=True)
-    session.append("command/run", {"id": "x1", "command": "make"})
+    log_event(session, "command/run", {"id": "x1", "command": "make"})
     last = session.events[-1]
 
     closers = interrupted_turn_closers(session.events)
@@ -695,7 +789,6 @@ async def test_a_command_the_daemon_died_during_is_settled_on_resume(
     the daemon dies before the result, and the next resume settles it as
     `outcome-unknown` — once."""
     from ph.persistence import resume_session
-    from ph.seams.shell import SHELL_COMMAND
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("died")
@@ -709,79 +802,67 @@ async def test_a_command_the_daemon_died_during_is_settled_on_resume(
     revived = await resume_session(ctx, "died")
     result = revived.latest("shell/result")
     assert result is not None
-    assert dict(result.data) == {
+    assert thaw_json(result.data) == {
         "commandSeq": held.opened.seq,
         "ok": False,
-        "interrupted": "outcome-unknown",
+        "unsettled": {"why": "outcome-unknown", "by": "repair"},
     }
     assert ctx.require(INTENTS).pending(revived, SHELL_COMMAND) == ()
     assert revived.events[-1].data["closed"] == 1
 
 
 def test_repair_no_longer_knows_the_ask_shapes() -> None:
-    """P10-09. The asks are kinds; their keying and their closers' words are the
-    seams' to state, once. Repair imports the declaring seams and reads nothing
-    of them — no type, no fold, no field — so a second spelling cannot return
-    unnoticed."""
-    import ast
-    import inspect
-
-    from ph.persistence import repair
-
-    tree = ast.parse(inspect.getsource(repair))
+    """P10-09, T4. The asks are kinds; their keying and their closers' words are
+    `ph.session.kinds`' to state, once. Repair imports no seam, no tool module and
+    not the leaf itself — `ph.session` declares ph-core's kinds — and names no pair's
+    type, so a second spelling cannot return unnoticed."""
+    tree = ast.parse(inspect.getsource(repair_module))
     strings = {
         node.value
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    shapes = ("approval/", "question/", "shell/", "tool/code-dispatch")
+    shapes = ("approval/", "question/", "shell/", "tool/code-dispatch", "tool/effect")
     code = [s for s in strings if s.startswith(shapes)]
     assert code == [], code
-    declarers = {"approval", "shell", "user_questions", "code_mode"}
-    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-    assert not names & declarers, "a declaring module is read"
-    imported = {
-        alias.name
+    imported = sorted(
+        node.module or ""
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module in ("seams", "tools")
-        for alias in node.names
-    }
-    assert imported == declarers, imported
+        if isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith(("seams", "tools", "session.kinds"))
+    )
+    assert imported == [], imported
 
 
-def test_importing_repair_declares_every_core_kind() -> None:
-    """The guarantee the declaring imports buy: a process that imported only
-    repair — the trajectory viewer, a bare resume — settles every kind ph-core
-    declares. Asked of a fresh interpreter, since this one has imported
-    everything by now, and one that imports `ph.orphans` first: that order made
-    a module-level declaring import a cycle, which no in-process test sees."""
-    import ast
-    import subprocess
-    import sys
+def test_a_fresh_process_declares_ph_cores_kinds_and_refuses_the_rest() -> None:
+    """A process that imported only repair — and `ph.orphans` first, the order that
+    once made a module-level declaring import a cycle — has every kind ph-core's leaf
+    declares, and none of the app's. So a log holding an open `client/command` is
+    refused, naming the leaf that declares it, where it used to be left open (T4).
 
-    import ph
-
-    declared = set()
-    for path in Path(ph.__path__[0]).rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "IntentKind":
-                for keyword in node.keywords:
-                    if keyword.arg == "opened" and isinstance(keyword.value, ast.Constant):
-                        declared.add(keyword.value.value)
+    A fresh interpreter, since this one has imported the app by now."""
     probe = (
+        "import sys\n"
         "import ph.orphans\n"
-        "from ph.persistence.repair import interrupted_turn_closers\n"
+        "from ph.persistence.repair import UndeclaredIntentError, interrupted_turn_closers\n"
         "from ph.session import Session, declared_intents\n"
+        "print(' '.join(sorted(kind.opened for kind in declared_intents())))\n"
+        "print('ph_app' in sys.modules)\n"
+        "from ph.testing import log_event\n"
         "log = Session('s')\n"
-        "log.append('turn/start', {'turn': 1})\n"
-        "interrupted_turn_closers(log.events)\n"
-        "print('\\n'.join(sorted(kind.opened for kind in declared_intents())))\n"
+        "log_event(log, 'client/command', {'command': 'c1:k1'})\n"
+        "try:\n"
+        "    interrupted_turn_closers(log.events)\n"
+        "except UndeclaredIntentError as refused:\n"
+        "    print(refused)\n"
     )
     found = subprocess.run(
         [sys.executable, "-c", probe], check=True, capture_output=True, text=True
-    ).stdout.split()
-    assert declared, "the walk found no declaration"
-    assert set(found) == declared
+    ).stdout.splitlines()
+
+    assert found[0].split() == sorted(kind.opened for kind in core_kinds.KINDS)
+    assert found[1] == "False", "the probe was meant to run without the app"
+    assert '"client/command"' in found[2] and "ph_app.kinds" in found[2], found
 
 
 # ------------------------------------------------------------- reconcile --
@@ -795,17 +876,20 @@ async def _crashed_write(
     """A turn that recorded a `write` as started and died before its result."""
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create(session_id)
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
     arguments = json.dumps({"path": "notes.md", "content": "the plan"})
     call = {"type": "tool-call", "id": "c1", "name": tool, "arguments": arguments}
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("", "m1", content=[call]),
         SurfaceIntent("append", ()),
     )
-    session.append(
-        "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": tool, "arguments": arguments}
+    log_event(
+        session,
+        "tool/call",
+        {"turn": 1, "step": 1, "callId": "c1", "name": tool, "arguments": arguments},
     )
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose(session_id)
@@ -887,3 +971,104 @@ async def test_repair_is_still_a_pure_fold_over_a_stored_log(
     assert closers == interrupted_turn_closers(events)
     (result,) = [one for one in closers if one.type == "tool/result"]
     assert as_obj(result.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN
+
+
+# ------------------------------------------------ one outcome vocabulary --
+# T2. Every settle the act did not write carries one marker, and `outcome_of` is
+# the one reader of it — so a daemon repeat, the tool pipeline and the TUI all read
+# a restart's aftermath the same way.
+
+
+def _core_samples() -> dict[IntentKind, JsonObject]:
+    """An opening payload per ph-core kind. Completeness is asserted below, so a
+    kind added without a sample fails here rather than escaping the gate."""
+    return {
+        SHELL_COMMAND: {"command": "make", "surface": False},
+        APPROVAL_ASK: {"toolName": "edit", "callId": "c1"},
+        QUESTION_ASK: {"askId": "q1", "question": "which?"},
+        TOOL_DISPATCH: {
+            "rootCallId": "r1",
+            "parentCallId": "r1",
+            "subCallId": "r1:code:0",
+            "name": "bash",
+            "arguments": {},
+        },
+        TOOL_EFFECT: {"key": "send:m1", "tool": "send", "callId": "c1"},
+    }
+
+
+def test_every_core_kind_has_a_sample() -> None:
+    """Every ph-core kind repair settles. An `owner-settles` kind is its owner's to
+    settle, so repair writes nothing for it — held by the test below."""
+    samples = _core_samples()
+    core = {
+        kind
+        for kind in declared_intents()
+        if kind.owner.startswith("ph.") and kind.orphan != "owner-settles"
+    }
+    assert set(samples) == core
+
+
+def test_repair_leaves_a_credential_hold_to_its_owner() -> None:
+    """T5. Repair cannot know whether a credential has arrived; the resume check
+    can, so an open hold survives repair untouched and is asked about on open."""
+    session = Session("s")
+    log_event(session, "credential/needed", credential_hold("run-1", "KEY"))
+
+    assert interrupted_turn_closers(session.events) == []
+
+
+def test_what_repair_writes_reads_back_as_outcome_unknown_for_every_kind() -> None:
+    """A dead process's orphan, of every ph-core kind, settled by repair."""
+    session = Session("s")
+    for kind, data in _core_samples().items():
+        log_event(session, kind.opened, data)
+    closers = interrupted_turn_closers(session.events)
+
+    by_type = {kind.settled: kind for kind in _core_samples()}
+    assert {closer.type for closer in closers} == set(by_type)
+    for closer in closers:
+        assert outcome_of(by_type[closer.type], closer) == "outcome-unknown", closer.type
+        assert closer.data["unsettled"] == {"why": "outcome-unknown", "by": "repair"}
+
+
+@pytest.mark.anyio
+async def test_what_the_journal_writes_reads_back_through_the_same_function(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live process's settles on an act's behalf — a barrier that failed, a body
+    that raised — and the act's own, read by the one function."""
+    ctx = await mount()
+    journal = ctx.require(INTENTS)
+    session = ctx.require(SESSIONS).create("vocabulary")
+
+    with pytest.raises(LookupError):
+        async with journal.claim(session, SHELL_COMMAND, {"command": "a"}) as held:
+            raise LookupError("the act raised")
+    raised = not_none(session.latest("shell/result"))
+    assert outcome_of(SHELL_COMMAND, raised) == "outcome-unknown"
+    assert raised.data["unsettled"] == {"why": "outcome-unknown", "by": "process"}
+
+    held = await journal.open(session, SHELL_COMMAND, {"command": "b"})
+    assert isinstance(held, Claim)
+    done = journal.settle(session, held, {"commandSeq": held.opened.seq, "ok": True})
+    assert outcome_of(SHELL_COMMAND, done) == "done"
+
+    async def never(_store: SessionStore, _session: Session) -> bool:
+        return False
+
+    monkeypatch.setattr(SessionStore, "written", never)
+    with pytest.raises(IntentNotDurable):
+        await journal.open(session, SHELL_COMMAND, {"command": "c"})
+    assert outcome_of(SHELL_COMMAND, not_none(session.latest("shell/result"))) == "not-started"
+
+
+def test_an_effect_that_reported_failure_reads_back_as_failed() -> None:
+    session = Session("s")
+    log_event(session, "tool/effect", {"key": "send:m1", "tool": "send", "callId": "c1"})
+    failed = log_event(
+        session,
+        "tool/effect-settled",
+        {"key": "send:m1", "callId": "c1", "isError": True, "content": []},
+    )
+    assert outcome_of(TOOL_EFFECT, failed) == "failed"

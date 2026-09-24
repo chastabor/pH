@@ -64,6 +64,7 @@ from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
     StubWorkspaceProvider,
+    log_event,
     not_none,
     skill,
     stored_types,
@@ -1104,7 +1105,7 @@ def _resumed(session: Session, run_id: str, times: int) -> None:
     asserting against a field production no longer has.
     """
     for _ in range(times):
-        session.append(STATUS, {"runId": run_id, "status": "running", "cause": "resumed"})
+        log_event(session, STATUS, {"runId": run_id, "status": "running", "cause": "resumed"})
 
 
 async def _stalled(
@@ -1157,7 +1158,9 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
-    session.append(USAGE, {"runId": moved.id, "targetSeq": 0, "childUsage": {}, "origin": "probe"})
+    log_event(
+        session, USAGE, {"runId": moved.id, "targetSeq": 0, "childUsage": {}, "origin": "probe"}
+    )
     row = subagent_roster(session)[moved.id]
     assert restarts_since_progress(row) == 0, "progress forgives the restarts before it"
     assert row["resumes"] == RETRIES, "and the roster still says how many there were"

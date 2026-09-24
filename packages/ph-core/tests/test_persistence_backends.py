@@ -107,7 +107,7 @@ from ph.persistence import (
 from ph.persistence.jsonl import JsonlSessionStore
 from ph.persistence.protocol import SessionPersistence, StoredSession
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, family_for
-from ph.testing import MountProfile, reference_fork, user_payload
+from ph.testing import MountProfile, log_event, reference_fork, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -152,7 +152,7 @@ def _append(
 ) -> None:
     """Append, which is all a store needs: it writes what the log holds past its
     cursor, so there is nothing to hand it beside the event."""
-    session.append(kind, data, intent)
+    log_event(session, kind, data, intent)
 
 
 async def test_a_tracked_session_round_trips_through_the_backend(
@@ -280,7 +280,7 @@ async def test_a_resume_writes_what_it_synthesized_on_top_of_what_it_read(
         revived = Session("s1", seed=list(events), header=header)
         revived.durable_length = len(events)
         store.track(revived)
-        revived.append("session/resumed", {"events": len(events)})
+        log_event(revived, "session/resumed", {"events": len(events)})
         await store.flush(revived)
 
     _, events = store.read("s1")
@@ -445,7 +445,7 @@ async def test_a_profile_resumes_through_whichever_backend_it_mounted(
 
     ctx = await mount(*overlays)
     session = ctx.require(SESSIONS).create("carried")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     await ctx.require(SESSIONS).flush(session)
 
     store = ctx.require(SESSION_PERSISTENCE)
@@ -633,7 +633,7 @@ async def test_a_child_that_claims_completeness_but_is_short_is_refused(
     session = Session("short", header=header)
     store.track(session)
     for turn in (0, 1):
-        session.append("turn/start", {"turn": turn})
+        log_event(session, "turn/start", {"turn": turn})
     await store.flush(session)
 
     with pytest.raises(LineageError, match="claims to hold its own history") as caught:
@@ -672,7 +672,7 @@ async def test_a_log_above_zero_that_names_no_parent_is_refused(
     header = SessionHeader(id="rootless", created_at=1)
     session = _inheriting("rootless", header, 4)
     store.track(session)
-    session.append("turn/start", {"turn": 4})
+    log_event(session, "turn/start", {"turn": 4})
     await store.flush(session)
 
     with pytest.raises(LineageError, match="names no parent") as caught:

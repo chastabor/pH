@@ -58,6 +58,7 @@ from ph.testing import (
     MountProfile,
     StubAgent,
     assistant_payload,
+    log_event,
     not_none,
     plugin_payload,
     tool_result_payload,
@@ -203,11 +204,13 @@ def test_the_fraction_trigger_fires_at_0_85_of_a_known_window() -> None:
     def engine_for(total: int) -> tuple[SummarizeEngine, Session]:
         ctx = _bare_context()
         session = Session(f"pressure-{total}")
-        session.append(
+        log_event(
+            session,
             "request/context",
             {"provider": "fake", "model": "f", "contextWindow": window},
         )
-        session.append(
+        log_event(
+            session,
             "assistant/message",
             {**assistant_payload("hi", "m1"), "usage": {"inputTokens": total, "outputTokens": 0}},
             SurfaceIntent("append"),
@@ -231,7 +234,8 @@ def test_without_a_window_the_trigger_is_the_fixed_token_count() -> None:
 
     def engine_for(total: int) -> tuple[SummarizeEngine, Session]:
         session = Session(f"unwindowed-{total}")
-        session.append(
+        log_event(
+            session,
             "assistant/message",
             {**assistant_payload("hi", "m1"), "usage": {"inputTokens": total, "outputTokens": 0}},
             SurfaceIntent("append"),
@@ -264,8 +268,9 @@ def _bare_context() -> Context:
 def _paired_session() -> Session:
     """user · assistant(tool-call) · tool/result · user · assistant."""
     session = Session("paired")
-    session.append("user/message", user_payload("do it", "m1"), SurfaceIntent("append"))
-    session.append(
+    log_event(session, "user/message", user_payload("do it", "m1"), SurfaceIntent("append"))
+    log_event(
+        session,
         "assistant/message",
         assistant_payload(
             "",
@@ -274,11 +279,13 @@ def _paired_session() -> Session:
         ),
         SurfaceIntent("append"),
     )
-    session.append(
-        "tool/result", tool_result_payload("the file", "m3", "c1"), SurfaceIntent("append")
+    log_event(
+        session, "tool/result", tool_result_payload("the file", "m3", "c1"), SurfaceIntent("append")
     )
-    session.append("user/message", user_payload("thanks", "m4"), SurfaceIntent("append"))
-    session.append("assistant/message", assistant_payload("done", "m5"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("thanks", "m4"), SurfaceIntent("append"))
+    log_event(
+        session, "assistant/message", assistant_payload("done", "m5"), SurfaceIntent("append")
+    )
     return session
 
 
@@ -308,7 +315,8 @@ def test_a_conversation_with_no_balanced_cut_is_not_compacted() -> None:
     a single oversized retained unit cannot be repaired by replacing a surface.
     """
     session = Session("unbalanced")
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload(
             "",
@@ -317,7 +325,7 @@ def test_a_conversation_with_no_balanced_cut_is_not_compacted() -> None:
         ),
         SurfaceIntent("append"),
     )
-    session.append("user/message", user_payload("hello", "m2"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hello", "m2"), SurfaceIntent("append"))
     assert safe_cutoff(_projected(session), 2) == 0
 
 
@@ -436,7 +444,9 @@ history — which a scripted conversation reaches only by accident.
 def _windowed(session_id: str) -> Session:
     """A session whose baseline is already over 0.85 of a known window."""
     session = Session(session_id)
-    session.append("request/context", {"provider": "fake", "model": "f", "contextWindow": WINDOW})
+    log_event(
+        session, "request/context", {"provider": "fake", "model": "f", "contextWindow": WINDOW}
+    )
     return session
 
 
@@ -451,7 +461,8 @@ def _write_call(call_id: str, content: str) -> dict[str, Any]:
 
 def _pressured(session: Session, used: int = 900) -> None:
     """Append the assistant message whose reported usage trips the trigger."""
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         {
             **assistant_payload("done", f"u{session.seq}"),
@@ -464,14 +475,15 @@ def _pressured(session: Session, used: int = 900) -> None:
 def _long_write_session(session_id: str, body: str) -> Session:
     """user · assistant(write with `body`) · tool/result · assistant(usage)."""
     session = _windowed(session_id)
-    session.append("user/message", user_payload("save it", "m1"), SurfaceIntent("append"))
-    session.append(
+    log_event(session, "user/message", user_payload("save it", "m1"), SurfaceIntent("append"))
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("", "m2", content=[_write_call("c1", body)]),
         SurfaceIntent("append"),
     )
-    session.append(
-        "tool/result", tool_result_payload("written", "m3", "c1"), SurfaceIntent("append")
+    log_event(
+        session, "tool/result", tool_result_payload("written", "m3", "c1"), SurfaceIntent("append")
     )
     _pressured(session)
     return session
@@ -646,7 +658,8 @@ async def test_a_recent_message_is_not_truncated(mount: MountProfile) -> None:
     ctx = await mount(profile=PROFILE)
     session = _windowed("recent")
     _pressured(session)
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         assistant_payload("", "m2", content=[_write_call("c1", "x" * (MAX_ARG_LENGTH + 1))]),
         SurfaceIntent("append"),
@@ -683,14 +696,18 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
     body = "x" * (MAX_ARG_LENGTH + 1)
     session = _windowed("whole")
     for turn in (1, 2):
-        session.append("user/message", user_payload("save it", f"u{turn}"), SurfaceIntent())
-        session.append(
+        log_event(session, "user/message", user_payload("save it", f"u{turn}"), SurfaceIntent())
+        log_event(
+            session,
             "assistant/message",
             assistant_payload("", f"a{turn}", content=[_write_call(f"c{turn}", body)]),
             SurfaceIntent(),
         )
-        session.append(
-            "tool/result", tool_result_payload("written", f"r{turn}", f"c{turn}"), SurfaceIntent()
+        log_event(
+            session,
+            "tool/result",
+            tool_result_payload("written", f"r{turn}", f"c{turn}"),
+            SurfaceIntent(),
         )
     _pressured(session)
     before = (session.seq, session.surface.nodes)
@@ -729,17 +746,22 @@ async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: MountP
     """
     ctx = await mount(profile=PROFILE)
     session = _windowed("other-tool")
-    session.append("user/message", user_payload("run it", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("run it", "m1"), SurfaceIntent("append"))
     cell = {
         "type": "tool-call",
         "id": "c1",
         "name": "run_code",
         "arguments": json.dumps({"program": "x" * (MAX_ARG_LENGTH + 1)}),
     }
-    session.append(
-        "assistant/message", assistant_payload("", "m2", content=[cell]), SurfaceIntent("append")
+    log_event(
+        session,
+        "assistant/message",
+        assistant_payload("", "m2", content=[cell]),
+        SurfaceIntent("append"),
     )
-    session.append("tool/result", tool_result_payload("ok", "m3", "c1"), SurfaceIntent("append"))
+    log_event(
+        session, "tool/result", tool_result_payload("ok", "m3", "c1"), SurfaceIntent("append")
+    )
     _pressured(session)
 
     assert _truncate(ctx, session) == ()
@@ -785,16 +807,20 @@ def _tool_batch_session(session_id: str, *sizes: int, opening: bool = True) -> S
     """
     session = _windowed(session_id)
     if opening:
-        session.append("user/message", user_payload("read them", "m1"), SurfaceIntent("append"))
+        log_event(session, "user/message", user_payload("read them", "m1"), SurfaceIntent("append"))
     calls = [
         {"type": "tool-call", "id": f"c{index}", "name": "read", "arguments": "{}"}
         for index, _ in enumerate(sizes)
     ]
-    session.append(
-        "assistant/message", assistant_payload("", "m2", content=calls), SurfaceIntent("append")
+    log_event(
+        session,
+        "assistant/message",
+        assistant_payload("", "m2", content=calls),
+        SurfaceIntent("append"),
     )
     for index, size in enumerate(sizes):
-        session.append(
+        log_event(
+            session,
             "tool/result",
             tool_result_payload(f"{index}" * size, f"r{index}", f"c{index}"),
             SurfaceIntent("append"),
@@ -1468,15 +1494,16 @@ def _summarized(session_id: str, tail: str, *, compacted: bool = True) -> Sessio
     test keys on.
     """
     session = _windowed(session_id)
-    first = session.append(
-        "user/message", user_payload("the question", "m1"), SurfaceIntent("append")
+    first = log_event(
+        session, "user/message", user_payload("the question", "m1"), SurfaceIntent("append")
     )
-    second = session.append(
-        "assistant/message", assistant_payload("the answer", "m2"), SurfaceIntent("append")
+    second = log_event(
+        session, "assistant/message", assistant_payload("the answer", "m2"), SurfaceIntent("append")
     )
     if compacted:
         shadowed = (first.seq, second.seq)
-        session.append(
+        log_event(
+            session,
             "user/message",
             plugin_payload(
                 "Earlier conversation, summarized.",
@@ -1487,7 +1514,7 @@ def _summarized(session_id: str, tail: str, *, compacted: bool = True) -> Sessio
             ),
             SurfaceIntent(surface_op=SurfaceReplace(replaces=shadowed), source_event_seqs=shadowed),
         )
-    session.append("user/message", user_payload(tail, "m3"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload(tail, "m3"), SurfaceIntent("append"))
     return session
 
 

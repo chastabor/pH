@@ -29,6 +29,9 @@ from ..seams.invariants import contribute_fold_cache
 from .events import SessionEvent, now_ms
 from .journal import IntentJournal
 from .session import Session, SessionHeader, SessionKind
+from .writers import log_writer
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "SessionForkError",
@@ -422,7 +425,7 @@ class SessionStore:
         """
         live = self._resolve_source(source)
         child = self._branch(live, None, child_session_id, kind="segment")
-        live.append("session/segmented", {"continues": child.id})
+        _LOG.append(live, "session/segmented", {"continues": child.id})
         return child
 
     def _resolve_source(self, source: Session | str) -> Session:

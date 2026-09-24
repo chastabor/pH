@@ -36,6 +36,7 @@ from ph.testing import (
     MountProfile,
     ReplayAdapter,
     as_kind,
+    log_event,
     recorded_steps,
     shared_prefix,
     simple_tool,
@@ -218,7 +219,8 @@ def test_recorded_steps_group_by_turn_and_step() -> None:
     session = Session("s")
     for turn, step in ((1, 1), (1, 2), (2, 1)):
         for text in ("a", "b"):
-            session.append(
+            log_event(
+                session,
                 "assistant/chunk",
                 {
                     "turn": turn,
@@ -250,7 +252,7 @@ def test_a_retried_step_replays_as_two_calls() -> None:
         {"type": "finish", "reason": {"kind": "stop"}},
     ]
     for chunk in attempts:
-        session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": chunk})
+        log_event(session, "assistant/chunk", {"turn": 1, "step": 1, "chunk": chunk})
 
     steps = recorded_steps(session.events)
 

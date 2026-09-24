@@ -65,6 +65,7 @@ CLAIMED = {
     "who may run `!!`": "anyone holding the web token",
     "a question a person walked away from": "re-posed only while this daemon runs",
     "an outside effect after a crash": "unknown unless the tool can say",
+    "credentials across a restart": "waits for it by name",
     "facts across two logs": "eventual, not atomic",
     "per user": "one daemon per $PH_RUNTIME",
 }

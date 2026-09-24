@@ -58,9 +58,12 @@ from ..cordis import (
 )
 from ..keys import FS, PROJECT_ROOT
 from ..session import Session
+from ..session.writers import log_writer
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
 from ._registry import claim_entry, claim_slot
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "EditIntent",
@@ -730,7 +733,7 @@ class FsService:
         except OSError:  # pragma: no cover - raced deletion
             return
         if session is not None:
-            session.append("fs/observed", {"path": self.named(target, agent=agent)})
+            _LOG.append(session, "fs/observed", {"path": self.named(target, agent=agent)})
 
     def observed_mtime(self, path: str | Path) -> float | None:
         return self._observed.get(self.resolve(path))

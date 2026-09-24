@@ -23,13 +23,17 @@ import pytest
 from daemon_helpers import running, until
 
 from ph.keys import COMMANDS, CREDENTIALS, SESSIONS
+from ph.llm.adapter import ResolvedModel
+from ph.llm.fake import FakeAdapter
 from ph.llm.types import AttachmentRef
+from ph.persistence import interrupted_turn_closers
 from ph.seams.commands import CommandDefinition
-from ph.session import now_ms
-from ph.testing import stored_types
+from ph.session import Session, now_ms, outcome_of, unsettled_why
+from ph.testing import log_event, stored_types
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.server import METHODS, MUTATIONS
 from ph_app.daemon.supervisor import Root
+from ph_app.kinds import CLIENT_COMMAND
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio
@@ -76,10 +80,6 @@ async def _preset(client: DaemonClient, root: Root) -> dict[str, Any]:
     return {"preset": "workspace-write"}
 
 
-async def _credential(client: DaemonClient, root: Root) -> dict[str, Any]:
-    return {"name": "PROBE_KEY", "value": "shh"}
-
-
 def _events(kind: str) -> Callable[[Any], int]:
     return lambda root: sum(1 for one in root.session.events if one.type == kind)
 
@@ -90,7 +90,6 @@ CASES: dict[str, Case] = {
     "session/stage": (_stage, lambda root: len(root.staged)),
     "session/shell": (_shell, _events("shell/command")),
     "session/preset": (_preset, _events("permission/preset")),
-    "credentials/store": (_credential, None),
 }
 
 
@@ -231,7 +230,7 @@ async def test_a_retry_after_a_crash_mid_act_is_told_the_outcome_is_unknown(
     """
     async with running(tmp_path) as daemon:
         root = await daemon.root("crashed")
-        root.session.append("client/command", {"command": "c:1"})
+        log_event(root.session, "client/command", {"command": "c:1"})
         await root.ctx.require(SESSIONS).flush(root.session)
 
     async with running(tmp_path) as daemon:
@@ -248,7 +247,7 @@ async def test_a_retry_after_a_crash_mid_act_is_told_the_outcome_is_unknown(
         assert again["repeated"] is True and again["outcome"] == "unknown"
         assert root.session.latest("permission/preset") is None, "a repeat never acts"
         settled = root.session.latest("client/command-settled")
-        assert settled is not None and settled.data["outcome"] == "unknown"
+        assert settled is not None and unsettled_why(settled.data) == "outcome-unknown"
 
 
 async def test_an_act_that_raises_leaves_its_key_unknown(tmp_path: Path) -> None:
@@ -274,26 +273,99 @@ async def test_an_act_that_raises_leaves_its_key_unknown(tmp_path: Path) -> None
 
 
 async def test_a_credential_re_sent_after_a_restart_is_stored_again(tmp_path: Path) -> None:
-    """L1. A credential lives in the daemon's memory, and its key on the log. A
-    restart keeps the key and loses the value, so the re-send a client makes
-    after reconnecting must store it again rather than be refused as a repeat —
-    which only a key scoped to the process that stored it allows.
+    """L1, and T5. A credential lives in the daemon's memory, so a restart loses it,
+    and the re-send a client makes after reconnecting must store it again.
 
-    Sabotage: drop `key_scope="process"` from the `credentials/store` row and the
-    second daemon answers `repeated`, holding no value.
+    **Unkeyed since T5**: storing one value twice stores it once, and a key on the
+    log would outlive the value it named. So nothing about the store reaches the
+    log at all — no `client/command` for a verb whose effect a restart undoes — and
+    a call that stamps a key anyway is refused at the params (`PROTOCOL_VERSION` 4).
+
+    Sabotage: make `StoreCredentialParams` a `MutationParams` and put the verb back
+    in `MUTATIONS`, and the stamped call is served, writing a key.
     """
-    keyed = {"clientId": "c", "commandId": "1", "name": "PROBE_KEY", "value": "shh"}
+    stored = {"name": "PROBE_KEY", "value": "shh"}
     async with running(tmp_path) as daemon:
         root = await daemon.root("keyed")
         client = await daemon.client()
-        await client.call("credentials/store", sessionId=root.id, **keyed)
-        again = await client.call("credentials/store", sessionId=root.id, **keyed)
-        assert again["repeated"] is True, "within the process that stored it, the key dedupes"
+        await client.call("credentials/store", sessionId=root.id, **stored)
+        again = await client.call("credentials/store", sessionId=root.id, **stored)
+        assert again.get("repeated") is not True, "no key, so nothing to repeat"
+        with pytest.raises(DaemonError) as refused:
+            await client.call(
+                "credentials/store", sessionId=root.id, clientId="c", commandId="1", **stored
+            )
+        assert refused.value.reason == "invalid_params"
+        assert not [one for one in root.session.events if one.type == "client/command"]
 
     async with running(tmp_path) as daemon:
         client = await daemon.client()
-        reply = await client.call("credentials/store", sessionId="keyed", **keyed)
+        await client.call("credentials/store", sessionId="keyed", **stored)
         root = daemon.held("keyed")
 
-        assert reply.get("repeated") is not True, "a restart lost the value, not the key"
         assert "PROBE_KEY" in root.ctx.require(CREDENTIALS).provided()
+
+
+def test_a_verb_repair_closed_reads_back_as_unknown() -> None:
+    """T2, for the daemon's own kind: what repair writes for a verb a crash left
+    open reads back through the one function every other kind uses."""
+    session = Session("s")
+    log_event(session, "client/command", {"command": "c:1"})
+    (closer,) = interrupted_turn_closers(session.events)
+    assert outcome_of(CLIENT_COMMAND, closer) == "outcome-unknown"
+
+
+# ------------------------------------------------ nothing starts without its key (T5)
+
+ROOT_KEY = "PH_T5_ROOT_KEY"
+
+
+@pytest.fixture
+def keyed_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The daemon's own route names `ROOT_KEY`, which nothing here supplies."""
+    monkeypatch.delenv(ROOT_KEY, raising=False)
+    monkeypatch.setattr(
+        FakeAdapter,
+        "resolve_model",
+        lambda self, provider, model: ResolvedModel(context_window=8192, credential=ROOT_KEY),
+    )
+
+
+def _awaited(daemon: Any) -> dict[str, str]:  # noqa: ANN401
+    section = next(
+        one for one in daemon.running.status().sections if one.title == "credentials awaited"
+    )
+    return {row.label: row.value for row in section.rows}
+
+
+@pytest.mark.usefixtures("keyed_route")
+async def test_a_root_whose_key_is_missing_is_held_and_the_key_releases_it(
+    tmp_path: Path,
+) -> None:
+    """Held, not failed: a prompt waits in the inbox rather than meeting the missing
+    key at the adapter edge, `sessions/list` says `needs-credential`, the doctor names
+    the key, and storing it lets the waiting prompt run.
+
+    Sabotage: drop the hold from `Supervisor._run`'s wake loop, and the prompt runs
+    and fails at its first request.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("held")
+        client = await daemon.client()
+        assert root.status == "needs-credential"
+        assert _awaited(daemon) == {ROOT_KEY: "held"}
+        (listed,) = (await client.call("sessions/list"))["sessions"]
+        assert listed["status"] == "needs-credential"
+
+        await client.call(
+            "session/prompt", sessionId=root.id, clientId="c", commandId="1", prompt="hello"
+        )
+        assert root.agent.inbox.has_pending and not _events("turn/start")(root)
+
+        await client.call("credentials/store", sessionId=root.id, name=ROOT_KEY, value="shh")
+        await until(lambda: bool(_events("turn/end")(root)), what="the turn")
+
+        assert root.status == "idle"
+        assert _awaited(daemon) == {"held": "nothing"}
+        types = [one.type for one in root.session.events if one.type.startswith("credential/")]
+        assert types == ["credential/needed", "credential/supplied"]

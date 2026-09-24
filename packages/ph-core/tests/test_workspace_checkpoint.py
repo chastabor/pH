@@ -56,7 +56,7 @@ from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams.workspace import CHECKPOINT, checkpoints, latest_checkpoint
 from ph.seams.workspace_git import pre_run_ref
 from ph.session import Session
-from ph.testing import MountProfile, code_mode_stub, not_none, run_tool, stored_types
+from ph.testing import MountProfile, code_mode_stub, log_event, not_none, run_tool, stored_types
 from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
 
@@ -345,7 +345,8 @@ async def test_revert_lists_what_restoring_the_tree_did_not_undo(
         ("bash", {"command": "npm publish"}),
         ("read", {"path": "tracked.txt"}),
     ):
-        session.append(
+        log_event(
+            session,
             "tool/code-dispatch-start",
             {
                 "parentCallId": "c1",
@@ -376,7 +377,8 @@ async def test_an_unknown_tool_is_reported_as_not_undone(
     """
     ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
     seq = await _checkpointed(ctx, session, agent)
-    session.append(
+    log_event(
+        session,
         "tool/code-dispatch-start",
         {
             "parentCallId": "c1",

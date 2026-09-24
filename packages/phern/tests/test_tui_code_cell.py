@@ -26,6 +26,7 @@ import pytest
 
 from ph.seams.subagents import ADMITTED, DELETED, STATUS, USAGE, subagent_roster
 from ph.session import Session
+from ph.testing import log_event
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.state import ChatItem, SubagentRow, ToolCard, TuiState
 from ph_app.tui.widgets.status import (
@@ -149,12 +150,12 @@ def test_the_panel_is_the_seams_fold_field_for_field() -> None:
     way, and a status-only comparison passed straight over it.
     """
     session = Session("panel")
-    session.append(ADMITTED, _admitted("r1", "scout"))
-    session.append(ADMITTED, _admitted("r2", "recon"))
-    session.append(STATUS, {"runId": "r1", "status": "running", "cause": "rehydrated"})
-    session.append(STATUS, {"runId": "r1", "status": "done"})
-    session.append(STATUS, {"runId": "r2", "status": "done"})
-    session.append(DELETED, {"runId": "r2", "reason": "user"})
+    log_event(session, ADMITTED, _admitted("r1", "scout"))
+    log_event(session, ADMITTED, _admitted("r2", "recon"))
+    log_event(session, STATUS, {"runId": "r1", "status": "running", "cause": "rehydrated"})
+    log_event(session, STATUS, {"runId": "r1", "status": "done"})
+    log_event(session, STATUS, {"runId": "r2", "status": "done"})
+    log_event(session, DELETED, {"runId": "r2", "reason": "user"})
 
     state = TuiEventAdapter().replay(session)
     roster = subagent_roster(session)
@@ -174,7 +175,7 @@ def test_a_child_admitted_but_not_yet_started_reads_as_queued() -> None:
     """The first `subagent/status` comes from a detached job, so a reader between
     admission and that event must not see a child with no status at all."""
     session = Session("queued")
-    session.append(ADMITTED, _admitted("r1", "scout"))
+    log_event(session, ADMITTED, _admitted("r1", "scout"))
 
     (row,) = TuiEventAdapter().replay(session).subagents.values()
     assert (row.status, row.glyph) == ("queued", "○")
@@ -184,9 +185,9 @@ def test_a_woken_child_still_reads_as_running() -> None:
     """P3-13's `cause`: rehydration is why it is running, not a status of its
     own — a consumer branching on `running` must still see it."""
     session = Session("woken")
-    session.append(ADMITTED, _admitted("r1", "scout"))
-    session.append(STATUS, {"runId": "r1", "status": "done"})
-    session.append(STATUS, {"runId": "r1", "status": "running", "cause": "rehydrated"})
+    log_event(session, ADMITTED, _admitted("r1", "scout"))
+    log_event(session, STATUS, {"runId": "r1", "status": "done"})
+    log_event(session, STATUS, {"runId": "r1", "status": "running", "cause": "rehydrated"})
 
     state = TuiEventAdapter().replay(session)
     (row,) = state.subagents.values()
@@ -202,9 +203,10 @@ def test_attributed_usage_is_summed_per_child() -> None:
     Sabotage: sum `inputTokens + outputTokens` again and this reads 1 800.
     """
     session = Session("usage")
-    session.append(ADMITTED, _admitted("r1", "scout"))
+    log_event(session, ADMITTED, _admitted("r1", "scout"))
     for _ in range(3):
-        session.append(
+        log_event(
+            session,
             USAGE,
             {
                 "runId": "r1",
@@ -225,9 +227,9 @@ def test_delegation_records_produce_no_transcript_rows() -> None:
     """Status and usage are the panel's, not the conversation's: eight children
     ticking through `queued → running → done` would push it off screen."""
     session = Session("quiet")
-    session.append(ADMITTED, _admitted("r1", "scout"))
-    session.append(STATUS, {"runId": "r1", "status": "running"})
-    session.append(USAGE, {"runId": "r1", "childUsage": {"inputTokens": 1}})
+    log_event(session, ADMITTED, _admitted("r1", "scout"))
+    log_event(session, STATUS, {"runId": "r1", "status": "running"})
+    log_event(session, USAGE, {"runId": "r1", "childUsage": {"inputTokens": 1}})
 
     state = TuiEventAdapter().replay(session)
     # One row for the admission — a spawn is a decision — and nothing for the
@@ -252,10 +254,10 @@ def test_the_panel_heading_counts_the_fan_out() -> None:
     """
     session = Session("fanout")
     for index in range(5):
-        session.append(ADMITTED, _admitted(f"r{index}", f"scout-{index}"))
+        log_event(session, ADMITTED, _admitted(f"r{index}", f"scout-{index}"))
     for index in range(2):
-        session.append(STATUS, {"runId": f"r{index}", "status": "running"})
-    session.append(STATUS, {"runId": "r4", "status": "done"})
+        log_event(session, STATUS, {"runId": f"r{index}", "status": "running"})
+    log_event(session, STATUS, {"runId": "r4", "status": "done"})
 
     state = TuiEventAdapter().replay(session)
 
@@ -267,10 +269,10 @@ def test_the_heading_counts_only_what_is_still_going() -> None:
     """A settled or revoked child stays *listed* — a parent asking what happened
     to it deserves an answer — but "how busy is this fan-out" is about the rest."""
     session = Session("settled")
-    session.append(ADMITTED, _admitted("r1", "scout"))
-    session.append(STATUS, {"runId": "r1", "status": "done"})
-    session.append(ADMITTED, _admitted("r2", "revoked"))
-    session.append(DELETED, {"runId": "r2", "reason": "user"})
+    log_event(session, ADMITTED, _admitted("r1", "scout"))
+    log_event(session, STATUS, {"runId": "r1", "status": "done"})
+    log_event(session, ADMITTED, _admitted("r2", "revoked"))
+    log_event(session, DELETED, {"runId": "r2", "reason": "user"})
 
     state = TuiEventAdapter().replay(session)
 

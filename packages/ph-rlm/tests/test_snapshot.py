@@ -49,7 +49,7 @@ from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.llm.types import text_of
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
 from ph.session.events import SurfaceReplace
-from ph.testing import FAKE_OPTIONS, plugin_payload, prefix_of, user_payload
+from ph.testing import FAKE_OPTIONS, log_event, plugin_payload, prefix_of, user_payload
 from ph_rlm.kernel.manager import Kernel
 from ph_rlm.keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
 from ph_rlm.snapshot import (
@@ -297,7 +297,8 @@ async def test_the_fold_reconstructs_the_namespace_as_of_a_boundary(
 
 async def test_a_foreign_record_does_not_break_the_fold(mounted_runtime: MountedRuntime) -> None:
     _ctx, session, agent = await mounted_runtime(session_id="kernel-state")
-    session.append(
+    log_event(
+        session,
         "kernel/snapshot",
         {"namespace": agent.id, "run": 1, "record": {"kind": "invented", "var": 7}},
     )
@@ -384,10 +385,11 @@ async def test_the_namespace_outlives_a_compaction_of_the_conversation(
     events and never speaks to the runtime.
     """
     ctx, session, agent = await mounted_runtime(session_id="survives")
-    session.append("user/message", user_payload("build the frame"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("build the frame"), SurfaceIntent("append"))
     await run_cell(ctx, "frame = list(range(8))", agent=agent, session=session)
     nodes = session.surface.nodes
-    session.append(
+    log_event(
+        session,
         "user/message",
         plugin_payload(
             "(the conversation, summarized)",

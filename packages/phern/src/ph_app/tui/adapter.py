@@ -62,6 +62,7 @@ from ph.session import (
     is_in_place_rewrite,
     is_replacement_surface_event,
 )
+from ph.session.kinds import SESSION_HOLDER, hold_of
 from ph.session.request_header import parse_request_context
 from ph.text import count_of
 from ph.tools import ToolCallView, ToolResult, ToolResultView
@@ -603,6 +604,32 @@ class TuiEventAdapter:
             text = f"Resumed an existing session — {events} earlier events."
         self._row("resumed", "notice", text, event)
 
+    def _on_credential_needed(self, event: SessionEvent, frame: Frame) -> None:
+        """Say what is waiting, and for which name (T5).
+
+        After a restart a held child looks, from here, exactly like one that is
+        slow, and a held session like one nobody has prompted; the name is what a
+        person needs to act. Never a value: the record carries none (I-3).
+        """
+        holder, name = hold_of(event)
+        who = _holder_label(holder)
+        self._row(
+            "credential",
+            "notice",
+            f"{who[:1].upper()}{who[1:]} is waiting for {name}, which is not set here — "
+            "supply it to continue.",
+            event,
+        )
+
+    def _on_credential_supplied(self, event: SessionEvent, frame: Frame) -> None:
+        holder, name = hold_of(event)
+        self._row(
+            "credential",
+            "notice",
+            f"{name} is here now; {_holder_label(holder)} carries on.",
+            event,
+        )
+
     def _on_session_segmented(self, event: SessionEvent, frame: Frame) -> None:
         """Say that this log stops here, and where the work carries on.
 
@@ -1108,6 +1135,11 @@ class EventRule:
     surfaces: Surface = Surface.ALL
 
 
+def _holder_label(holder: str) -> str:
+    """Who a credential hold holds, as a sentence names it."""
+    return "this session" if holder == SESSION_HOLDER else f"sub-agent {holder}"
+
+
 RULES: Mapping[str, EventRule] = {
     "user/message": EventRule(TuiEventAdapter._on_user_message, Surface.TRANSCRIPT),
     "assistant/chunk": EventRule(TuiEventAdapter._on_assistant_chunk, Surface.TRANSCRIPT),
@@ -1133,6 +1165,8 @@ RULES: Mapping[str, EventRule] = {
     "llm/retry": EventRule(TuiEventAdapter._on_llm_retry),
     "session/resumed": EventRule(TuiEventAdapter._on_session_resumed),
     "session/segmented": EventRule(TuiEventAdapter._on_session_segmented),
+    "credential/needed": EventRule(TuiEventAdapter._on_credential_needed),
+    "credential/supplied": EventRule(TuiEventAdapter._on_credential_supplied),
     "supervisor/retry": EventRule(TuiEventAdapter._on_supervisor_retry),
     "supervisor/failed": EventRule(TuiEventAdapter._on_supervisor_failed),
     "supervisor/recovered": EventRule(TuiEventAdapter._on_supervisor_recovered),

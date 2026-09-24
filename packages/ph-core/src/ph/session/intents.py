@@ -14,10 +14,14 @@ flushing and deduping live. Pure for `folds.py`'s reason: repair folds a log whi
 it is being rebuilt, and the trajectory view folds a stored one with nothing
 mounted, so a fold attached to a live `Session` could answer neither.
 
-**Keys stay in the payloads.** A kind reads its key off its records the way each
-fold did before it: `callId or toolName`, `askId`, the command id. Those fields are
-data their readers already use, and a second copy on the envelope would be a
-second carrier of one fact.
+**Keys stay in the payloads.** A kind reads its key off its records: the opening
+record's own seq for the asks and the shell (whose settles carry it back as
+`askSeq` and `commandSeq`, T3), a dispatch's `subCallId`, an effect's key, a
+daemon verb's command id. Those fields are data their readers already use, and a
+second copy on the envelope would be a second carrier of one fact.
+
+**Kinds are declared in leaves** (T4): ph-core's in `ph.session.kinds`, which this
+package imports, and a package's in its own `kinds`, which that package imports.
 
 **One fold, `fold_intents`**: per key, the latest intent opened under it and the
 settle that closed it. `open_intents` and `settled_record` are both read off it, so
@@ -34,21 +38,27 @@ they were opened.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from typing import Literal, TypeAlias
 
-from ..json import JsonObject
+from ..json import JsonObject, as_obj, as_str
+from ..wire import literal_lookup
 from .events import SessionEvent, is_surface_eligible_type
 from .known_event_types import is_known
+from .writers import LogWriter
 
 __all__ = [
+    "UNSETTLED",
     "Barrier",
     "IntentError",
     "IntentKind",
     "IntentOrphan",
     "IntentRecord",
     "OpenIntent",
+    "Outcome",
+    "SettledBy",
     "Unsettled",
+    "abandoned",
     "declare_intent",
     "declared_intents",
     "extend_index",
@@ -56,7 +66,10 @@ __all__ = [
     "is_declared",
     "key_of",
     "open_intents",
+    "outcome_of",
     "settled_record",
+    "unsettled",
+    "unsettled_why",
 ]
 
 Unsettled: TypeAlias = Literal["outcome-unknown", "not-started"]
@@ -91,6 +104,44 @@ Barrier: TypeAlias = Literal["durable", "buffered", "tools-execute"]
 """
 
 
+Outcome: TypeAlias = Literal["done", "failed", "outcome-unknown", "not-started"]
+"""What became of an intent, read the same way by every consumer (T2).
+
+`done` — the act settled it. `failed` — the act settled it and said it failed, so a
+retry is its own decision (`IntentKind.failed`). `outcome-unknown` and `not-started`
+— somebody other than the act settled it, and these say which half is known
+(`Unsettled`)."""
+
+SettledBy: TypeAlias = Literal["repair", "process"]
+"""Who wrote a settle the act did not: `repair`, on resume, for an intent a dead
+process left open; or the live `process` on the act's behalf — a barrier that
+failed, a body that raised or was canceled."""
+
+UNSETTLED = "unsettled"
+"""The payload field every settle **not written by the act** carries, and nothing
+else does: `{"unsettled": {"why": <Unsettled>, "by": <SettledBy>}}`.
+
+One field for every kind, written by the journal and repair rather than by each
+closer, so "did this finish?" has one reader (`outcome_of`) instead of the four
+spellings Phase 10 grew — `interrupted: why`, `interrupted: true`,
+`outcome: "unknown"`, `failed: true`. A closer still writes its kind's own payload
+(an approval's `outcome`, a question's `resolution`), which readers of that kind
+use; this is the part every reader of every kind shares."""
+
+
+_UNSETTLED_WHY: Mapping[str, Unsettled] = literal_lookup(Unsettled)
+
+
+def unsettled(why: Unsettled, by: SettledBy) -> JsonObject:
+    """The marker, ready to merge into a closer's payload."""
+    return {UNSETTLED: {"why": why, "by": by}}
+
+
+def unsettled_why(data: JsonObject) -> Unsettled | None:
+    """The marker's reason, or `None` for a settle the act wrote itself."""
+    return _UNSETTLED_WHY.get(as_str(as_obj(data.get(UNSETTLED)).get("why")))
+
+
 class IntentError(ValueError):
     """A kind that cannot be declared as stated."""
 
@@ -105,8 +156,12 @@ class IntentKind:
     (`"not-started"`) or whose body raised (`"outcome-unknown"`). It must carry
     the key where `settled_key` reads it. Required unless the kind is
     `owner-settles`, since repair must be able to write *something* for every
-    orphan it is told to settle. `owner` is the module that declares and writes
-    the pair, for the same reason `declare_log_type` asks for one.
+    orphan it is told to settle.
+
+    `writer` is the declaring leaf's own (`log_writer(__name__)`), and the journal
+    writes the pair through it (T6): so a kind is declared only by a module that is
+    the writer of record for both of its types, and the journal writes nothing a
+    kind's declarer could not.
     """
 
     opened: str
@@ -116,15 +171,44 @@ class IntentKind:
     orphan: IntentOrphan
     barrier: Barrier = "durable"
     closer: Callable[[SessionEvent, Unsettled], JsonObject] | None = None
-    owner: str = ""
-    dedupe: bool = True
-    """Whether a key names one act for the life of the log, so opening it again
-    is answered with the `Prior` rather than done again. False for a kind whose
-    key is reused on purpose — an approval keyed by call id *or tool name*, a
-    question re-posed under its own id after a resume — where a second open is a
-    new intent that replaces the first, as the fold already reads it. Such a kind
-    also cannot tell two concurrent intents under one key apart, so the journal
-    holds its settles to the key alone (`IntentJournal.settle`)."""
+    failed: Callable[[SessionEvent], bool] | None = None
+    """Whether the act's own settle says the act failed — read by `outcome_of`. `None`
+    for a kind whose act, once it settles, has done what it does: a shell command
+    that exits non-zero still ran."""
+    reopen: frozenset[Outcome] = frozenset()
+    """What a prior may be, for `open` to open the key again rather than answer
+    with the prior (T2). A tool effect that failed, or never started, is worth
+    another attempt; one that was done is answered from the log; one whose outcome
+    is unknown is its caller's to decide (`reconcile` first). Empty — the default —
+    answers every prior."""
+    _: KW_ONLY
+    writer: LogWriter
+
+    @property
+    def owner(self) -> str:
+        """The module that declares the pair — its writer's owner."""
+        return self.writer.owner
+
+
+def outcome_of(kind: IntentKind, settled: SessionEvent) -> Outcome:
+    """What a settle says became of its intent — the one reader of it (T2)."""
+    why = unsettled_why(settled.data)
+    if why is not None:
+        return why
+    return "failed" if kind.failed is not None and kind.failed(settled) else "done"
+
+
+def abandoned(kind: IntentKind, opened: SessionEvent, why: Unsettled, by: SettledBy) -> JsonObject:
+    """The settle of an intent its act did not settle: the kind's closer, marked.
+
+    The one spelling of it, for repair (`by="repair"`) and for the journal's own
+    settles on an act's behalf (`by="process"`).
+
+    :raises IntentError: when the kind has no closer to write it with.
+    """
+    if kind.closer is None:
+        raise IntentError(f'"{kind.opened}" has no closer, so nothing can settle it but its owner')
+    return {**kind.closer(opened, why), **unsettled(why, by)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +238,7 @@ _KINDS: dict[str, IntentKind] = {}
 
 
 def declare_intent(kind: IntentKind) -> IntentKind:
-    """Declare a pair. Call at import, beside the code that writes it.
+    """Declare a pair. Call at import, in a package's `kinds` leaf (T4).
 
     Refused:
 
@@ -165,7 +249,9 @@ def declare_intent(kind: IntentKind) -> IntentKind:
     * the same type opening and settling — no record can be both;
     * a settle the model sees (`SURFACE_EVENT_TYPES`) — it needs a surface placement
       the journal does not write and provider rules repair keeps for the turn it
-      closes, so such a pair belongs to the turn repair, not to a kind.
+      closes, so such a pair belongs to the turn repair, not to a kind;
+    * a writer that may not write both types (T6) — the journal writes the pair
+      through it, so a kind cannot carry writes its declarer could not make.
 
     Declaring the same kind twice returns the first, so a module imported twice
     does not refuse itself.
@@ -175,6 +261,12 @@ def declare_intent(kind: IntentKind) -> IntentKind:
             raise IntentError(f'"{name}" is not a session event type this build can read back')
     if kind.opened == kind.settled:
         raise IntentError(f'"{kind.opened}" cannot both open and settle an intent')
+    for name in (kind.opened, kind.settled):
+        if not kind.writer.owns(name):
+            raise IntentError(
+                f'{kind.owner} is not a writer of record for "{name}", so it cannot '
+                "declare a kind that writes it"
+            )
     if is_surface_eligible_type(kind.settled):
         raise IntentError(
             f'"{kind.settled}" is model-visible; a pair it settles is the turn repair\'s, '

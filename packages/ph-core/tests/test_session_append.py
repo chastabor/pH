@@ -30,13 +30,13 @@ from ph.session import (
     declare_log_type,
 )
 from ph.session.json import InvalidJsonValueError
-from ph.testing import check_fold_laws, prefix_of, user_payload
+from ph.testing import check_fold_laws, log_event, prefix_of, user_payload
 
 
 def test_seq_always_equals_log_length() -> None:
     session = Session("s")
     for index in range(25):
-        event = session.append("turn/start", {"turn": index})
+        event = log_event(session, "turn/start", {"turn": index})
         assert event.seq == index
         assert session.seq == index + 1
         assert len(session.events) == index + 1
@@ -53,7 +53,7 @@ def test_appended_data_is_detached_from_the_caller() -> None:
     # test is doing: mutate the caller's own buffer, after the append.
     inner: list[JsonValue] = [1, 2]
     payload: dict[str, JsonValue] = {"turn": 1, "nested": {"list": inner}}
-    event = session.append("turn/start", payload)
+    event = log_event(session, "turn/start", payload)
     payload["turn"] = 99
     inner.append(3)
     # The log holds the value at append time, not a live view of the caller's
@@ -64,7 +64,7 @@ def test_appended_data_is_detached_from_the_caller() -> None:
 
 def test_logged_data_is_not_writable() -> None:
     session = Session("s")
-    event = session.append("turn/start", {"turn": 1})
+    event = log_event(session, "turn/start", {"turn": 1})
     with pytest.raises(TypeError):
         event.data["turn"] = 2  # type: ignore[index]
 
@@ -88,7 +88,7 @@ def test_non_lossless_payloads_are_refused(payload: dict[str, Any]) -> None:
     # **refuse**, so annotating it as what `append` accepts would be a
     # claim the test exists to disprove.
     with pytest.raises(InvalidJsonValueError):
-        session.append("turn/start", payload)
+        log_event(session, "turn/start", payload)
     assert session.seq == 0
 
 
@@ -103,7 +103,7 @@ def test_a_non_object_payload_is_refused_at_the_write_door() -> None:
     session = Session("s")
     for payload in ([1, 2], "text", 7, None):
         with pytest.raises(InvalidJsonValueError, match="must be a JSON object"):
-            session.append("turn/start", cast(Any, payload))
+            log_event(session, "turn/start", cast(Any, payload))
     assert session.events == ()
 
 
@@ -114,12 +114,12 @@ def test_cyclic_payloads_are_refused() -> None:
     cycle: dict[str, Any] = {}
     cycle["self"] = cycle
     with pytest.raises(InvalidJsonValueError, match="circular"):
-        session.append("turn/start", cycle)
+        log_event(session, "turn/start", cycle)
 
 
 def test_rejections_name_the_offending_path() -> None:
     with pytest.raises(InvalidJsonValueError, match=r"^a\.b\[1\]\.c: "):
-        Session("s").append("turn/start", {"a": {"b": [0, {"c": math.nan}]}})
+        log_event(Session("s"), "turn/start", {"a": {"b": [0, {"c": math.nan}]}})
 
 
 def test_a_raising_observer_cannot_un_append() -> None:
@@ -131,7 +131,7 @@ def test_a_raising_observer_cannot_un_append() -> None:
 
     session.observe(bad_observer)
     session.observe(lambda _s, event: seen.append(event.type))
-    event = session.append("turn/start", {"turn": 1})
+    event = log_event(session, "turn/start", {"turn": 1})
     assert event.seq == 0
     assert len(session.events) == 1
     # The failing observer neither removed the event nor stopped the next one
@@ -145,12 +145,12 @@ def test_reentrant_append_is_refused() -> None:
 
     def reenter(source: Session, _event: object) -> None:
         try:
-            source.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+            log_event(source, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
         except RuntimeError as error:
             caught.append(error)
 
     session.observe(reenter)
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     # A reentrant append would assign a seq inside another event's publication,
     # so observers would watch the log grow underneath them.
     assert len(caught) == 1
@@ -161,16 +161,16 @@ def test_reentrant_append_is_refused() -> None:
 def test_surface_metadata_is_required_and_forbidden_by_type() -> None:
     session = Session("s")
     with pytest.raises(ValueError, match="requires a surfaceOp"):
-        session.append("user/message", user_payload("hi"))
+        log_event(session, "user/message", user_payload("hi"))
     with pytest.raises(ValueError, match="not surface-eligible"):
-        session.append("turn/start", {"turn": 1}, SurfaceIntent("append"))
+        log_event(session, "turn/start", {"turn": 1}, SurfaceIntent("append"))
 
 
 def test_events_snapshot_does_not_grow_under_a_holder() -> None:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     held = session.events
-    session.append("step/start", {"turn": 1, "step": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
     assert len(held) == 1
     assert len(session.events) == 2
 
@@ -203,7 +203,7 @@ def test_the_write_door_refuses_a_type_the_read_door_would() -> None:
     """
     session = Session("s")
     with pytest.raises(UnknownEventTypeError, match="declare_log_type"):
-        session.append("sample/thing", {"n": 1})
+        log_event(session, "sample/thing", {"n": 1})
     assert session.events == (), "a refused append must leave the log as it was"
 
 
@@ -218,8 +218,8 @@ def test_a_declared_type_is_written_stamped_and_read_back(vocabulary: None) -> N
     declare_log_type("sample/state", owner="sample.plugin", ignorable=False)
 
     session = Session("s")
-    note = session.append("sample/note", {"n": 1})
-    state = session.append("sample/state", {"n": 2})
+    note = log_event(session, "sample/note", {"n": 1})
+    state = log_event(session, "sample/state", {"n": 2})
     assert (note.ignorable, state.ignorable) == (True, False)
 
     reopened = Session("s", seed=list(session.events))
@@ -234,7 +234,7 @@ def test_a_required_declared_type_opens_only_where_it_is_declared(vocabulary: No
 
     declare_log_type("sample/state", owner="sample.plugin", ignorable=False)
     session = Session("s")
-    session.append("sample/state", {"n": 1})
+    log_event(session, "sample/state", {"n": 1})
 
     del known_event_types._DECLARED["sample/state"]  # a build without the package
     with pytest.raises(ValueError, match="unrecognized required type"):
@@ -274,13 +274,13 @@ def test_a_fold_cache_recomputes_only_when_the_log_grew() -> None:
         return sum(1 for event in log.events if event.type == "turn/start")
 
     cache: SessionFoldCache[int] = SessionFoldCache(count_turns)
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
 
     assert cache.read(session) == 1
     assert cache.read(session) == 1
     assert calls == [1], "the fold ran twice for one log"
 
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     assert cache.read(session) == 1
     assert calls == [1, 2], "an appended event did not invalidate the fold"
 
@@ -290,7 +290,7 @@ def test_a_fold_cache_holds_one_value_per_session() -> None:
     cache: SessionFoldCache[int] = SessionFoldCache(lambda log: log.seq)
     first, second = Session("a"), Session("b")
     for index in range(50):
-        first.append("turn/start", {"turn": index})
+        log_event(first, "turn/start", {"turn": index})
         assert cache.read(first) == index + 1
     assert cache.read(second) == 0
     assert len(cache._entries) == 2
@@ -308,9 +308,9 @@ def test_a_fold_cache_leaves_the_fold_callable_on_a_slice() -> None:
     the fold itself stays a pure function.
     """
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     boundary = session.seq
-    session.append("turn/start", {"turn": 2})
+    log_event(session, "turn/start", {"turn": 2})
 
     def count_turns(log: Session) -> int:
         return sum(1 for event in log.events if event.type == "turn/start")
@@ -342,12 +342,12 @@ def test_a_projection_answers_with_the_newest_event_it_can_parse() -> None:
     a frame that carries nothing of the question cannot erase the answer.
     """
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("turn/start", {"turn": 2})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 2})
 
     assert session.projection("turn/start", _turn_number) == 2
 
-    session.append("turn/start", {"turn": "not a number"})
+    log_event(session, "turn/start", {"turn": "not a number"})
     assert session.projection("turn/start", _turn_number) == 2
 
 
@@ -366,15 +366,15 @@ def test_a_projection_parses_only_what_arrived_since_it_last_answered() -> None:
         return _turn_number(event)
 
     for turn in range(1, 4):
-        session.append("turn/start", {"turn": turn})
+        log_event(session, "turn/start", {"turn": turn})
     assert session.projection("turn/start", counted) == 3
     assert seen == [2], "the first read walked past the event that answered"
 
-    session.append("assistant/chunk", {"text": "hi"})
+    log_event(session, "assistant/chunk", {"text": "hi"})
     assert session.projection("turn/start", counted) == 3
     assert seen == [2], "an event of another type was handed to the parser"
 
-    session.append("turn/start", {"turn": 4})
+    log_event(session, "turn/start", {"turn": 4})
     assert session.projection("turn/start", counted) == 4
     assert seen == [2, 4], "the second read re-parsed events it had already seen"
 
@@ -387,7 +387,7 @@ def test_two_parsers_of_one_event_type_do_not_share_a_fold() -> None:
     annotated, with no error until something used it.
     """
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
 
     assert session.projection("turn/start", _turn_number) == 1
     assert session.projection("turn/start", _turn_label) == "turn 1"
@@ -398,8 +398,8 @@ def test_one_parser_over_two_event_types_does_not_share_a_fold() -> None:
     """The other half. `assistant/chunk` carries no turn, so a shared fold would
     answer this with the `turn/start` one."""
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("assistant/chunk", {"text": "hi"})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "assistant/chunk", {"text": "hi"})
 
     assert session.projection("turn/start", _turn_number) == 1
     assert session.projection("assistant/chunk", _turn_number) is None
@@ -417,7 +417,7 @@ def test_a_stable_parser_reuses_its_fold_rather_than_rebuilding_one() -> None:
     """
     session = Session("s")
     for turn in range(1, 4):
-        session.append("turn/start", {"turn": turn})
+        log_event(session, "turn/start", {"turn": turn})
 
     for _ in range(5):
         assert session.latest("turn/start") is not None
@@ -430,8 +430,8 @@ def test_a_stable_parser_reuses_its_fold_rather_than_rebuilding_one() -> None:
 
 def _conversation() -> Session:
     session = Session("s")
-    session.append("user/message", user_payload("one", "m1"), SurfaceIntent())
-    session.append("user/message", user_payload("two", "m2"), SurfaceIntent())
+    log_event(session, "user/message", user_payload("one", "m1"), SurfaceIntent())
+    log_event(session, "user/message", user_payload("two", "m2"), SurfaceIntent())
     return session
 
 
@@ -455,13 +455,13 @@ def test_a_refused_event_leaves_none_of_its_batch() -> None:
 
     refused = pytest.raises(SurfaceError, match="seq 7 is not a current surface node")
     with refused, session.batch() as batch:
-        batch.append("compaction/summarized", {"shadowedSeqs": [7]})
-        batch.append("user/message", user_payload("summary", "m3"), _summary((7,)))
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [7]})
+        log_event(batch, "user/message", user_payload("summary", "m3"), _summary((7,)))
     with pytest.raises(UnknownEventTypeError), session.batch() as batch:
-        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
-        batch.append("quantum/entangle", {})
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [0]})
+        log_event(batch, "quantum/entangle", {})
     with pytest.raises(LookupError), session.batch() as batch:
-        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [0]})
         raise LookupError("the block failed before it finished")
 
     assert (session.seq, session.surface.nodes) == before
@@ -481,14 +481,14 @@ def test_observers_see_a_batch_in_order_after_it_validates() -> None:
     def watch(watched: Session, event: SessionEvent) -> None:
         seen.append((event.seq, len(watched.events)))
         try:
-            watched.append("turn/start", {"turn": 9})
+            log_event(watched, "turn/start", {"turn": 9})
         except RuntimeError as error:
             refused.append(str(error))
 
     session.observe(watch)
     with session.batch() as batch:
-        accounting = batch.append("compaction/summarized", {"shadowedSeqs": [0, 1]})
-        batch.append("user/message", user_payload("summary", "m3"), _summary((0, 1)))
+        accounting = log_event(batch, "compaction/summarized", {"shadowedSeqs": [0, 1]})
+        log_event(batch, "user/message", user_payload("summary", "m3"), _summary((0, 1)))
         assert seen == [], "published before the block exited"
         assert session.seq == 2, "pushed before the block exited"
 
@@ -505,10 +505,10 @@ def test_a_batch_obeys_the_fold_laws() -> None:
     state the earlier members leave can accept."""
     batched = _conversation()
     with batched.batch() as batch:
-        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
-        batch.append("user/message", user_payload("summary", "m3"), _summary((0,)))
-        batch.append("user/message", user_payload("three", "m4"), SurfaceIntent())
-        batch.append("user/message", user_payload("three, shorter", "m5"), _summary((4,)))
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [0]})
+        log_event(batch, "user/message", user_payload("summary", "m3"), _summary((0,)))
+        log_event(batch, "user/message", user_payload("three", "m4"), SurfaceIntent())
+        log_event(batch, "user/message", user_payload("three, shorter", "m5"), _summary((4,)))
 
     single = _conversation()
     for event in batched.events[2:]:
@@ -517,7 +517,7 @@ def test_a_batch_obeys_the_fold_laws() -> None:
             if event.surface_op is None
             else SurfaceIntent(event.surface_op, event.source_event_seqs)
         )
-        single.append(event.type, thaw_json(event.data), surface)
+        log_event(single, event.type, thaw_json(event.data), surface)
 
     assert batched.surface.nodes == single.surface.nodes == (3, 1, 5)
     assert batched.derive_messages() == single.derive_messages()
@@ -532,8 +532,8 @@ def test_a_batch_whose_log_moved_is_refused_whole() -> None:
     session = _conversation()
     moved = pytest.raises(RuntimeError, match="moved from seq 2 to 3 while a batch was open")
     with moved, session.batch() as batch:
-        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
-        session.append("turn/start", {"turn": 1})
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [0]})
+        log_event(session, "turn/start", {"turn": 1})
     assert [event.type for event in session.events][2:] == ["turn/start"]
 
 
@@ -542,9 +542,9 @@ def test_a_batch_is_one_at_a_time_and_closes_behind_itself() -> None:
     with session.batch() as outer:
         with pytest.raises(RuntimeError, match="inside another"), session.batch():
             pass
-        outer.append("turn/start", {"turn": 1})
+        log_event(outer, "turn/start", {"turn": 1})
     with pytest.raises(RuntimeError, match="has closed"):
-        outer.append("turn/start", {"turn": 2})
+        log_event(outer, "turn/start", {"turn": 2})
     with session.batch():
         pass
     assert [event.type for event in session.events][2:] == ["turn/start"]
@@ -556,10 +556,10 @@ def test_every_member_of_a_batch_says_which_batch_and_one_alone_is_not_stamped()
     nothing to keep together. The wire form round-trips it."""
     session = _conversation()
     with session.batch() as batch:
-        batch.append("compaction/summarized", {"shadowedSeqs": [0]})
-        batch.append("user/message", user_payload("summary", "m3"), _summary((0,)))
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [0]})
+        log_event(batch, "user/message", user_payload("summary", "m3"), _summary((0,)))
     with session.batch() as alone:
-        alone.append("compaction/args-truncated", {"seqs": []})
+        log_event(alone, "compaction/args-truncated", {"seqs": []})
 
     pair, single = session.events[2:4], session.events[4]
     assert {event.batch for event in pair} == {BatchRef(first=2, count=2)}

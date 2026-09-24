@@ -35,7 +35,14 @@ from ph.llm.types import PluginSource
 from ph.persistence import read_session
 from ph.session import Session, SurfaceIntent, SurfaceReplace, is_fork_boundary
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-from ph.testing import MountProfile, assistant_payload, store_root, stored_log, user_payload
+from ph.testing import (
+    MountProfile,
+    assistant_payload,
+    log_event,
+    store_root,
+    stored_log,
+    user_payload,
+)
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS
 from ph_app.tui.trajectory import HANDLERS, RECORDLESS, TrajectoryRecord, build_trajectory
 from ph_app.wire import describe
@@ -160,8 +167,9 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
 def _conversation() -> Session:
     """One turn: a header, a user message, a step, an assistant reply, a tool."""
     session = Session("trajectory")
-    session.append("turn/start", {"turn": 1})
-    session.append(
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(
+        session,
         "request/header",
         {
             "header": {
@@ -171,10 +179,11 @@ def _conversation() -> Session:
             }
         },
     )
-    session.append("user/message", user_payload("what is in a.py?"), SurfaceIntent("append"))
-    session.append("step/start", {"turn": 1, "step": 0})
-    session.append("assistant/chunk", {"turn": 1, "step": 0, "delta": "look"})
-    session.append(
+    log_event(session, "user/message", user_payload("what is in a.py?"), SurfaceIntent("append"))
+    log_event(session, "step/start", {"turn": 1, "step": 0})
+    log_event(session, "assistant/chunk", {"turn": 1, "step": 0, "delta": "look"})
+    log_event(
+        session,
         "assistant/message",
         {
             **assistant_payload("looking now", "a1"),
@@ -182,9 +191,11 @@ def _conversation() -> Session:
         },
         SurfaceIntent("append"),
     )
-    session.append("tool/call", {"callId": "c1", "name": "read", "arguments": '{"path": "a.py"}'})
-    session.append("step/end", {"turn": 1, "step": 0})
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(
+        session, "tool/call", {"callId": "c1", "name": "read", "arguments": '{"path": "a.py"}'}
+    )
+    log_event(session, "step/end", {"turn": 1, "step": 0})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     return session
 
 
@@ -214,7 +225,8 @@ def test_a_system_record_carries_the_snapshot_and_the_one_it_replaced() -> None:
     is a real change — and the previous text is what makes it legible.
     """
     session = _conversation()
-    session.append(
+    log_event(
+        session,
         "request/header",
         {"header": {"config": {"provider": "fake", "model": "fake-1"}, "system": "You are pH v2."}},
     )
@@ -250,7 +262,7 @@ def test_timings_are_derived_from_the_log_not_the_clock() -> None:
 def test_a_timing_says_nothing_rather_than_guessing() -> None:
     """A message outside a step has no timings to report, and reports none."""
     session = Session("no-step")
-    session.append("assistant/message", assistant_payload("hi", "a1"), SurfaceIntent("append"))
+    log_event(session, "assistant/message", assistant_payload("hi", "a1"), SurfaceIntent("append"))
     (record,) = build_trajectory(session)
 
     assert record.timing is not None
@@ -262,7 +274,8 @@ def test_a_plugin_message_is_context_attributed_to_its_producer() -> None:
     """ "Inspect these records by source" is what `PluginSource` is for — the
     producer and the *form*, so an auditor can ask for every snapshot."""
     session = Session("context")
-    session.append(
+    log_event(
+        session,
         "user/message",
         {
             **user_payload("# Loaded context"),
@@ -283,8 +296,11 @@ def test_a_plugin_message_is_context_attributed_to_its_producer() -> None:
 def test_a_compaction_is_its_own_kind() -> None:
     """A summary that shadows a range is not an ordinary message that appeared."""
     session = Session("compacted")
-    first = session.append("user/message", user_payload("original", "m1"), SurfaceIntent("append"))
-    session.append(
+    first = log_event(
+        session, "user/message", user_payload("original", "m1"), SurfaceIntent("append")
+    )
+    log_event(
+        session,
         "user/message",
         user_payload("(summary of earlier)", "m2"),
         SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
@@ -352,7 +368,8 @@ def test_both_invariant_transitions_read_as_themselves() -> None:
     session it transcribes is the failure `ph.text` exists to prevent.
     """
     session = Session("invariants")
-    session.append(
+    log_event(
+        session,
         "supervisor/violated",
         {
             "violations": [
@@ -362,7 +379,7 @@ def test_both_invariant_transitions_read_as_themselves() -> None:
             "pid": 9,
         },
     )
-    session.append("supervisor/violated", {"violations": [], "pid": 9})
+    log_event(session, "supervisor/violated", {"violations": [], "pid": 9})
 
     broke, cleared = by_kind(build_trajectory(session), "event")
 
@@ -378,9 +395,10 @@ def test_both_invariant_transitions_read_as_themselves() -> None:
 def test_a_code_mode_sub_dispatch_is_a_subtool() -> None:
     """C2's records, in the view whose job is showing them: one cell, many calls."""
     session = Session("subtool")
-    session.append("tool/call", {"callId": "c1", "name": "ipython", "arguments": "{}"})
+    log_event(session, "tool/call", {"callId": "c1", "name": "ipython", "arguments": "{}"})
     for index in range(3):
-        session.append(
+        log_event(
+            session,
             "tool/code-dispatch",
             {"parentCallId": "c1", "subCallId": f"s{index}", "name": "read", "content": []},
         )
@@ -393,7 +411,7 @@ def test_an_unrecognized_harness_event_still_gets_a_row() -> None:
     """A view that hid what it could not name would be the silent omission A11
     forbids — so an event with no phrase for it renders from its payload."""
     session = Session("unknown")
-    session.append("fs/observed", {"path": "/tmp/a.py"})
+    log_event(session, "fs/observed", {"path": "/tmp/a.py"})
     (record,) = build_trajectory(session)
 
     assert record.kind == "event"
@@ -414,7 +432,7 @@ def test_fork_points_are_exactly_what_the_store_would_accept() -> None:
     session = _conversation()
     # A between-turn event *after* a closed turn: legal to fork at, and the
     # kind of row the `turn/end`-only rule refused.
-    session.append("fs/observed", {"path": "a.py"})
+    log_event(session, "fs/observed", {"path": "a.py"})
     records = build_trajectory(session)
 
     for record in records:
@@ -429,8 +447,8 @@ def test_fork_points_are_exactly_what_the_store_would_accept() -> None:
 def test_a_record_inside_an_open_turn_is_not_a_fork_point() -> None:
     """The rule's actual content: a turn that has not closed cannot be cut."""
     session = Session("open")
-    session.append("turn/start", {"turn": 1})
-    session.append("user/message", user_payload("mid-turn"), SurfaceIntent("append"))
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "user/message", user_payload("mid-turn"), SurfaceIntent("append"))
     records = build_trajectory(session)
 
     assert [record.fork_point for record in records] == [False, False]
@@ -454,7 +472,8 @@ async def test_a_stored_log_and_a_live_one_project_identically(
     for event in _conversation().events:
         # `thaw_json`, because a logged payload is frozen — its lists are tuples,
         # which the lossless-JSON guard refuses on the way back in.
-        live.append(
+        log_event(
+            live,
             event.type,
             thaw_json(event.data),
             SurfaceIntent("append") if event.surface_op else None,

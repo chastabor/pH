@@ -71,13 +71,17 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     SubagentStatus,
     admission_payload,
+    child_route,
     default_child_name,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import Session, SessionEvent, SessionObserver, derive_event_message, session_written
+from ph.session.writers import log_writer
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "MAX_NAME_CHARS",
@@ -351,7 +355,7 @@ class RlmChildProvider:
         run.result = self._awaiter(child)
 
         if log_admission:
-            parent_session.append(ADMITTED, admission_payload(run, request))
+            _LOG.append(parent_session, ADMITTED, admission_payload(run, request))
 
         # The child is an artifact of the *parent's* scope (I2), so a disposed
         # parent unwinds its children instead of leaving them running with nobody
@@ -426,8 +430,7 @@ class RlmChildProvider:
         choose, and the parent has no way to tell from the reply.
         """
         options = parent.options
-        provider_name = request.provider or options.provider
-        model = request.model or options.model
+        provider_name, model = child_route(request)
         if not provider_name or not model:
             raise SubagentSpawnError(
                 "a subagent needs a provider and a model; the parent has none to inherit"
@@ -577,7 +580,8 @@ class RlmChildProvider:
             # attributed nothing at all.
             if not isinstance(usage, Mapping):
                 return
-            parent_session.append(
+            _LOG.append(
+                parent_session,
                 USAGE,
                 {
                     "runId": run_id,
@@ -593,7 +597,9 @@ class RlmChildProvider:
         # Only the event, and only from the child's own parent log. A copy on the
         # handle would be a second source of truth for a fact the roster folds,
         # frozen at the last in-process update.
-        child.parent_session.append(STATUS, {"runId": child.run.id, "status": status, **extra})
+        _LOG.append(
+            child.parent_session, STATUS, {"runId": child.run.id, "status": status, **extra}
+        )
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
@@ -874,7 +880,7 @@ class RlmChildProvider:
         registry = self.ctx.get(SUBAGENTS)
         if registry is not None:
             registry.forget(run_id)
-        parent_session.append(DELETED, {"runId": run_id, "reason": reason})
+        _LOG.append(parent_session, DELETED, {"runId": run_id, "reason": reason})
         return True
 
 

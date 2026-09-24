@@ -60,11 +60,14 @@ from ph.json import JsonObject, as_str
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
 from ph.session import Session
+from ph.session.writers import log_writer
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
 from ph.wire import WireModel
 
 from .keys import CONTEXT_CORPUS
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "LOADED",
@@ -430,7 +433,8 @@ class ContextService:
             )
         # The recipe alone: `{loader, sources, digest}` plus what was said about
         # it. The manifest's counts stay derivable and off the wire.
-        session.append(
+        _LOG.append(
+            session,
             LOADED,
             {
                 "corpus": self.corpus.name,

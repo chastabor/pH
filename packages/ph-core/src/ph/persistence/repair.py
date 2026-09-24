@@ -25,8 +25,7 @@ answering. Without a closer those pairs stay half-written *forever*: every futur
 reader of a resumed log is told a decision is outstanding when nothing is waiting
 for one, and the transcript never says what became of the person's question.
 Since P10-09 they are two declared intent kinds like any other, so this module
-knows neither's keying nor its closer's words: each seam states both once, beside
-the fold that reads them.
+knows neither's keying nor its closer's words: `ph.session.kinds` states both once.
 
 **Every declared intent, in a turn or out of one** (P10-07, F13). The asks above are
 two of the pairs `ph.session.intents` declares; the others — a shell command the
@@ -41,13 +40,20 @@ this module knows no kind's keying: a second spelling of "what counts as open"
 here would be a second spelling of what repair must settle, drifting in the one
 direction nothing fails.
 
-**Not enforced: that a kind's declaring module is imported.** A kind is declared
-when the module that owns it is imported, and repair settles what is declared *in
-the resuming process*. For ph-core's own kinds this module imports their
-declarers before it settles anything, so a resume anywhere settles them; a
-package's kind is settled only by a process that imported the package, and a
-profile that resumes a log without it leaves those orphans open until one that
-has it resumes.
+**A kind this process never declared is refused, by name** (T4). Repair settles the
+kinds declared *in the resuming process*, and a kind is declared by importing the
+leaf that holds it: ph-core's by importing `ph.session`, which this module does, and
+a package's by importing the package (`ph_app` imports `ph_app.kinds`). The
+vocabulary's `INTENT_PAIRS` names every type that opens an intent and the leaf that
+declares its kind, so a log holding an open intent of a kind this process lacks —
+an open `client/command`, resumed without `ph_app` — raises `UndeclaredIntentError`
+naming the type and the leaf, where it used to be left open with nothing said.
+
+Not enforced: *which* intent is open, for a kind this process lacks. Without the
+kind's keys its records cannot be paired, so they are counted — more openings than
+settles means one is open. Exact for every kind today, since T3 made each settle
+close exactly one intent; a settle written with no opening (Code Mode's refused
+dispatch) would hide one, and that kind is ph-core's own, so always declared.
 
 For a turn parked on an ask, the turn is still closed `interrupted` and the tool
 result is still synthesized `TOOL_NOT_STARTED` — that is what keeps the rebuilt log
@@ -65,6 +71,7 @@ behavior that was tuned deliberately.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -75,6 +82,7 @@ from ..session import (
     IntentKind,
     IntentRecord,
     SessionEvent,
+    abandoned,
     declared_intents,
     extend_index,
     is_in_place_rewrite,
@@ -82,11 +90,13 @@ from ..session import (
     open_intents,
 )
 from ..session.json import freeze_json_value
+from ..session.known_event_types import INTENT_PAIRS, IntentPair
 
 __all__ = [
     "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN",
     "CallOutcome",
+    "UndeclaredIntentError",
     "interrupted_turn_closers",
     "unresolved_calls",
 ]
@@ -116,19 +126,27 @@ _OUTCOME_UNKNOWN_TEXT = (
 )
 
 
+class UndeclaredIntentError(IntentError):
+    """A log holds open intents of a kind this process never declared (T4)."""
+
+
 def _kinds() -> list[IntentKind]:
-    """Every declared kind, in type order — ph-core's own always among them.
-
-    ph-core's declaring modules are imported here for their declarations and
-    nothing else (`test_repair_no_longer_knows_the_ask_shapes` holds that line),
-    and **here rather than at the top**: `ph.seams.shell` reaches `ph.orphans`,
-    which imports this package, so a module-level import is a cycle for any
-    process that imports `ph.orphans` first.
-    """
-    from ..seams import approval, shell, user_questions  # noqa: F401
-    from ..tools import code_mode  # noqa: F401
-
+    """Every declared kind, in type order. ph-core's own are always among them:
+    `ph.session` imports their leaf, and this module imports `ph.session`."""
     return sorted(declared_intents(), key=lambda kind: kind.opened)
+
+
+def _refuse_undeclared(counted: Mapping[str, int], missing: Mapping[str, IntentPair]) -> None:
+    """Refuse, by name, a log with an open intent of a kind nothing here declares."""
+    for opened, pair in sorted(missing.items()):
+        left = counted.get(opened, 0) - counted.get(pair.settled, 0)
+        if left > 0:
+            raise UndeclaredIntentError(
+                f'this log holds {left} open "{opened}" intent(s), and this process declares '
+                f"no kind for them: they are declared in {pair.leaf}, which nothing here "
+                "imported. Resuming without it would leave them open; resume the log where "
+                "that package is installed."
+            )
 
 
 def _settled_intents(events: Sequence[SessionEvent]) -> list[dict[str, Any]]:
@@ -144,24 +162,34 @@ def _settled_intents(events: Sequence[SessionEvent]) -> list[dict[str, Any]]:
     is the one thing a repair must never do.
 
     :raises IntentError: when a kind's closer does not settle its own key.
+    :raises UndeclaredIntentError: when the log holds an open intent of a type
+        `INTENT_PAIRS` names and no declared kind opens.
     """
-    kinds = [kind for kind in _kinds() if kind.orphan != "owner-settles"]
+    declared = _kinds()
+    kinds = [kind for kind in declared if kind.orphan != "owner-settles"]
     by_type: dict[str, list[IntentKind]] = {}
     for kind in kinds:
         by_type.setdefault(kind.opened, []).append(kind)
         by_type.setdefault(kind.settled, []).append(kind)
+    opens = {kind.opened for kind in declared}
+    missing = {opened: pair for opened, pair in INTENT_PAIRS.items() if opened not in opens}
+    watched = {name for opened, pair in missing.items() for name in (opened, pair.settled)}
+    counted: Counter[str] = Counter()
     indexes: dict[IntentKind, dict[str, IntentRecord]] = {kind: {} for kind in kinds}
     for event in events:
+        if event.type in watched:
+            counted[event.type] += 1
         for kind in by_type.get(event.type, ()):
             extend_index(indexes[kind], (event,), kind)
+    _refuse_undeclared(counted, missing)
 
     settled: list[dict[str, Any]] = []
     for kind in kinds:
-        why, closer = kind.orphan, kind.closer
-        if why == "owner-settles" or closer is None:
+        why = kind.orphan
+        if why == "owner-settles":  # filtered out above; this narrows `why` to `Unsettled`
             continue
         for intent in open_intents(indexes[kind], kind):
-            data = freeze_json_value(closer(intent.opened, why))
+            data = freeze_json_value(abandoned(kind, intent.opened, why, "repair"))
             if key_of(kind.settled_key, kind.settled, data, intent.opened.seq) != intent.key:
                 raise IntentError(
                     f"the {kind.opened} closer declared by {kind.owner!r} does not settle "

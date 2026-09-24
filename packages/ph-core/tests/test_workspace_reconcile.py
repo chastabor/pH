@@ -31,6 +31,7 @@ from ph.seams.workspace import WorkspaceRecord, workspace_leaks
 from ph.session import Session
 from ph.testing import (
     MountProfile,
+    log_event,
 )
 from ph.testing import (
     workspace_acquired as _acquired,
@@ -245,7 +246,8 @@ async def test_a_leak_no_mounted_tier_can_reclaim_is_left_alone(
     tree.mkdir(parents=True)
     ctx = await mount()
     session = Session("crashed")
-    session.append(
+    log_event(
+        session,
         "workspace/acquired",
         {"agentId": "a", "kind": "worktree", "root": str(tree), "ref": "ph/s/a"},
     )
@@ -313,7 +315,8 @@ async def test_an_acquire_waits_for_the_reclaim_that_is_deleting_its_tree(
     leak = workspace_leaks(session)
     assert [one.agent_id for one in leak] == [agent.id]
     await seam.dispose(agent.id)
-    session.append(
+    log_event(
+        session,
         "workspace/acquired",
         {"agentId": agent.id, "kind": "worktree", "root": str(workspace.root), "ref": "ph/s1/a"},
     )

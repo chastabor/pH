@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -40,7 +40,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context, Profile
-from ph.json import JsonObject, as_obj, as_seq, as_str
+from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     INVARIANTS,
@@ -54,6 +54,7 @@ from ph.keys import (
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import resumption_of
+from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
 from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
@@ -61,14 +62,13 @@ from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import latest_checkpoint, workspace_of
 from ph.session import (
-    IntentKind,
     Session,
     SessionEvent,
-    Unsettled,
-    declare_intent,
     now_ms,
     session_written,
 )
+from ph.session.kinds import SESSION_HOLDER
+from ph.session.writers import log_writer
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
@@ -103,6 +103,8 @@ from .recovery import (
     Recovery,
     recovery_of,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "NON_GUARANTEES",
@@ -257,6 +259,14 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "every MCP tool today — keeps the unknown (P10-12, P10-13)",
     ),
     (
+        "credentials across a restart",
+        "not kept. A credential given over the wire (`credentials/store`) lives in this "
+        "daemon's memory and is gone after a restart; a root or child whose route names it "
+        "is held — `needs-credential`, no retry spent — and waits for it by name until it is "
+        "supplied again (T5). A credential a *tool* needs, such as an MCP token, is not "
+        "checked: the log records which tools were called, not which credential each would ask for",
+    ),
+    (
         "facts across two logs",
         "eventual, not atomic. A child's log and its parent's roster, a message sent and "
         "its receipt, are separate writes: a crash between them leaves one said and the "
@@ -284,43 +294,6 @@ true are the same strings. A paragraph in a docstring cannot be printed, and a
 sentence nobody can print is one nobody checks.
 """
 
-
-def _command(event: SessionEvent) -> str:
-    return as_str(event.data.get("command"))
-
-
-def _unknown(opened: SessionEvent, why: Unsettled) -> JsonObject:
-    """A verb whose settle nobody wrote: a crash, or an `act` that raised.
-
-    `unknown` either way, and that is the point (P10-10): the key was claimed,
-    so the act may have begun, and a retry told `repeated` with no more than
-    that would assume it finished. `not-started` cannot reach here — the kind
-    is `buffered` — and would say the same to a client: ask.
-    """
-    return {"command": _command(opened), "outcome": "unknown"}
-
-
-CLIENT_COMMAND = declare_intent(
-    IntentKind(
-        opened="client/command",
-        settled="client/command-settled",
-        opened_key=_command,
-        settled_key=_command,
-        orphan="outcome-unknown",
-        # **Buffered, not durable**, and that is P5-02's rule kept: the key goes
-        # to disk with the act's own records — the flush `_mutate` makes before
-        # it replies (F7), or an act's own barrier (`!!`) — never alone before
-        # the act. A key made durable first would turn a crash *before* the act
-        # into a refused retry for work that never began; a crash before any
-        # flush re-runs the verb, which a transcript shows, where a dropped one
-        # is invisible.
-        barrier="buffered",
-        closer=_unknown,
-        owner="ph_app.daemon.supervisor",
-    )
-)
-"""The record that makes a mutating command idempotent (P5-02), and its outcome
-(P10-10). Keyed by `clientId:commandId`."""
 
 WAKE_SLOTS = 8
 """How many un-acted-on doorbell rings to hold.
@@ -391,6 +364,29 @@ class Root:
     client: nobody attached means the ask waits, and the log holds it either
     way."""
 
+    @property
+    def needs_credential(self) -> str | None:
+        """The credential this root's own route names and its deployment cannot
+        supply, or `None` (T5). While set the root is held: its task does not drive
+        the agent, so a prompt waits in the inbox rather than failing at the adapter
+        edge, and `status` says `needs-credential`.
+
+        **Read from the log**, like `status`, rather than kept beside it: the hold is
+        a `credential/needed` record, written by the check at start and on every
+        `credentials/store`, and the journal's cached index answers from it.
+        """
+        return waiting_for(self.ctx, self.session).get(SESSION_HOLDER)
+
+    def ring(self) -> None:
+        """Ring the doorbell: tell the root's task there may be work in the inbox.
+
+        A full channel means the task has wakes pending and has not reached them
+        yet, so it will drain this work too — the inbox is the queue, and this is
+        only the doorbell.
+        """
+        with suppress(anyio.WouldBlock):
+            self.wake.send_nowait(None)
+
     def subscribe(self, subscriber: Subscriber) -> None:
         self.subscribers.add(subscriber)
 
@@ -448,6 +444,8 @@ class Root:
         # log, rather than from a flag set beside this class's own `await`.
         if live != "idle":
             return live
+        if self.needs_credential is not None:
+            return "needs-credential"
         if self.recovery.failed:
             return "failed"
         if self.recovery.attempts:
@@ -508,7 +506,8 @@ class Root:
         with a shorter ladder than it had actually spent. The same write-ahead
         ordering A10 applies to blobs and `CLIENT_COMMAND` applies to commands.
         """
-        self.session.append(
+        _LOG.append(
+            self.session,
             RETRY,
             {
                 "attempt": self.recovery.attempts + 1,
@@ -533,7 +532,7 @@ class Root:
         already climbed out of. It is also the *only* thing that resets the
         count, which is what keeps a failing retry from clearing its own bound.
         """
-        self.session.append(RECOVERED, {"afterAttempts": self.recovery.attempts})
+        _LOG.append(self.session, RECOVERED, {"afterAttempts": self.recovery.attempts})
         self.recovery = Recovery(attempts=0, failed=False)
         self.publish(SessionStatusNotice(session_id=self.id, status=self.status))
 
@@ -562,7 +561,7 @@ class Root:
         is whatever the root was doing ninety minutes ago and the pause reads as
         a crash.
         """
-        self.session.append(PASSIVATED, {"idleMs": idle_ms})
+        _LOG.append(self.session, PASSIVATED, {"idleMs": idle_ms})
         self.publish(SessionStatusNotice(session_id=self.id, status="passivated"))
 
     def unreachable(self, note: dict[str, Any]) -> None:
@@ -578,7 +577,7 @@ class Root:
         is the door. Reporting it as `failed` would put the recovery ladder to work
         climbing over a socket.
         """
-        self.session.append(UNREACHABLE, note)
+        _LOG.append(self.session, UNREACHABLE, note)
 
     def violated(self, note: dict[str, Any]) -> None:
         """Record that a pollable invariant did not hold for this root (I6).
@@ -591,7 +590,7 @@ class Root:
         that its work is — and routing it to the recovery ladder would restart a
         root over a cache, losing the in-flight turn *and* the evidence.
         """
-        self.session.append(VIOLATED, note)
+        _LOG.append(self.session, VIOLATED, note)
 
     def give_up(self, reason: str, *, attempts: int) -> None:
         """Record that the ladder is spent, and tell whoever is watching.
@@ -601,7 +600,7 @@ class Root:
         in its own trace whether or not a client was ever attached — and
         `Root.status` reads it straight back rather than keeping a copy.
         """
-        self.session.append(FAILED, {"attempts": attempts, "reason": reason})
+        _LOG.append(self.session, FAILED, {"attempts": attempts, "reason": reason})
         self.recovery = replace(self.recovery, failed=True)
         self.publish(SessionStatusNotice(session_id=self.id, status="failed"))
         log.error("ph_app.daemon: root %s failed after %d attempts — %s", self.id, attempts, reason)
@@ -677,7 +676,7 @@ def _recorded_violations(session: Session) -> set[str]:
     return {as_str(as_obj(one).get("invariant")) for one in as_seq(event.data.get("violations"))}
 
 
-QUIET: tuple[str, ...] = ("idle", "waiting", "failed")
+QUIET: tuple[str, ...] = ("idle", "waiting", "failed", "needs-credential")
 """The statuses that are not work in hand — read by `passivatable` and `busy`.
 
 `waiting` joins `idle`, which is the whole reason that status exists: a root
@@ -693,6 +692,10 @@ an ephemeral daemon — one started for a run, meant to exit when the work is do
 — stayed up for the life of the machine over a root that had already given up.
 The person is not waiting on it, which is what this tuple is asking.
 
+**`needs-credential` for `waiting`'s reason** (T5): the root cannot move until a
+person supplies a key, and its hold is in its log, so releasing it loses nothing —
+the next start asks again.
+
 Named rather than spelled twice, because the two readers answer *different*
 questions from the same rule — "may this root be released" and "may this process
 end" — and a status added to one tuple and not the other would move one answer
@@ -702,6 +705,32 @@ and not the other.
 
 def _nothing() -> None:
     """`Supervisor.moved`'s default: a supervisor nobody is watching."""
+
+
+def _say_what_waits(root: Root) -> None:
+    """One line per missing credential, naming the sessions held on it (T5).
+
+    Said when a root comes back, which after a restart is the moment somebody
+    reading the daemon's log wants it: a child held for a key looks, from outside,
+    exactly like one that is simply slow.
+    """
+    for name, holders in _waiting_on([root]):
+        log.warning(
+            "ph_app.daemon: credential %s is missing; held until it is supplied: %s",
+            name,
+            holders,
+        )
+
+
+def _waiting_on(roots: Iterable[Root]) -> list[tuple[str, str]]:
+    """`(credential, "root, root/run, …")` for every hold these roots' logs record."""
+    waiting: dict[str, list[str]] = {}
+    for root in roots:
+        for holder, name in waiting_for(root.ctx, root.session).items():
+            waiting.setdefault(name, []).append(
+                root.id if holder == SESSION_HOLDER else f"{root.id}/{holder}"
+            )
+    return [(name, ", ".join(holders)) for name, holders in sorted(waiting.items())]
 
 
 @dataclass(slots=True)
@@ -909,6 +938,11 @@ class Supervisor:
 
             exits.callback(forget)
             self.roots[root_id] = root
+            # **Nothing starts without its credentials** (T5): asked before the
+            # root can be driven and before its children are readmitted, so a key
+            # a restart lost holds the work that needs it, by name, rather than
+            # failing it at the first request.
+            await self._check_credential(root)
             # What this root's *children* are owed, once there is an agent for
             # them to hang off (P5-04). A daemon that stopped between a child's
             # admission and its first turn left that work described in the log
@@ -925,6 +959,7 @@ class Supervisor:
                         root_id,
                         len(revived),
                     )
+            _say_what_waits(root)
 
             def relay(source: Session, event: SessionEvent) -> None:
                 # Nothing is built before there is somebody to send it to: this
@@ -1085,9 +1120,43 @@ class Supervisor:
         """
         async with root.waiting:
             async for _ in root.waiting:
-                if root.agent.status != "idle":
+                # Held for a credential (T5): the message stays in the inbox, and
+                # `credential_supplied` rings again once the name arrives.
+                if root.agent.status != "idle" or root.needs_credential is not None:
                     continue
                 await self._drive(root)
+
+    async def _check_credential(self, root: Root) -> None:
+        """Hold or release `root` on its own route's credential, and say so in its log."""
+        options = root.agent.options
+        await hold_for_credential(
+            root.ctx, root.session, SESSION_HOLDER, options.provider or "", options.model or ""
+        )
+
+    async def credential_supplied(self, root: Root) -> None:
+        """A credential reached `root`: release whatever it was holding (T5).
+
+        The root itself, when its own route's name is here now — and its inbox is
+        rung, since a prompt that arrived while it was held is still waiting there —
+        and every child held for a name that has arrived. Asked of the log rather than
+        of the name just stored: one value can release a root and its children at
+        once, and asking again costs nothing when nothing changed.
+        """
+        held = root.needs_credential is not None
+        await self._check_credential(root)
+        if held and root.needs_credential is None:
+            root.ring()
+        subagents = root.ctx.get(SUBAGENTS)
+        if subagents is not None:
+            revived = await subagents.readmit_waiting(root.agent)
+            if revived:
+                log.info(
+                    "ph_app.daemon: root %s put %d child(ren) back to work once their "
+                    "credential arrived",
+                    root.id,
+                    len(revived),
+                )
+        await self._flush(root)
 
     async def _drive(self, root: Root) -> None:
         """One wake, and the ladder if the root's task crashes (P5-04).
@@ -1658,11 +1727,7 @@ class Supervisor:
             # The loop decides mid-turn-or-not, because the phase is its own and
             # a status read here could be stale by the time the verb lands.
             root.agent.interject(message)
-        # A full channel means the task has wakes pending and has not reached
-        # them yet, so it will drain this message too — the inbox is the queue,
-        # and this is only the doorbell.
-        with suppress(anyio.WouldBlock):
-            root.wake.send_nowait(None)
+        root.ring()
         return root
 
     async def shell(
@@ -1687,6 +1752,17 @@ class Supervisor:
 
     def describe(self) -> list[RootDescription]:
         return [root.describe() for root in self.roots.values()]
+
+    def awaited(self) -> list[tuple[str, str]]:
+        """Every credential a mounted root or its children wait for, and who waits:
+        `(name, "root, root/run, …")` rows for `phern agents doctor` (T5).
+
+        Read from each root's log, where the resume check recorded the holds, so
+        the doctor and a transcript say the same thing. Roots not mounted are not
+        asked: their holds are on disk, and are asked again when they are next
+        started.
+        """
+        return _waiting_on(self.roots.values())
 
     def passivatable(self, root: Root, *, now: int, after: float) -> bool:
         """Whether this root may be released (P5-05).

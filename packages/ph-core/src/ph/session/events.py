@@ -152,7 +152,7 @@ class BatchRef(WireModel):
 
 @dataclass(frozen=True, slots=True)
 class SurfaceIntent:
-    """Surface placement supplied at `Session.append`.
+    """Surface placement supplied at `Session._append`.
 
     Required on the three message-producing types and forbidden on every other:
     a message-producing event must declare how it joins the surface, since the
@@ -171,7 +171,7 @@ class _EventWire(WireModel):
     time: Seq
     data: dict[str, Any]
     """An object, refused otherwise. Every payload this harness writes is one —
-    `Session.append` takes a `Mapping` — and every log this repository carries,
+    `Session._append` takes a `Mapping` — and every log this repository carries,
     the dsh replay fixtures included, has only objects: 5 172 events across 283
     files, checked. Refusing the exception at the envelope is what lets
     `SessionEvent.data` be declared a `JsonObject` rather than asserted one, so a

@@ -408,7 +408,7 @@ class AnthropicAdapter:
         # instruction, the validation and the retry, and not the wire's guarantee
         # (P7-17). Passing it rather than leaving a default unremarked is what
         # stops the next adapter copying an omission it thought was an oversight.
-        return resolved(self.config, structured_output=False)
+        return resolved(self.config, structured_output=False, credential=self.config.api_key_env)
 
 
 @dataclass(slots=True)

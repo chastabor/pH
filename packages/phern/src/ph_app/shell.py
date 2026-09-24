@@ -12,7 +12,7 @@ draft had one, and it had already diverged inside a single increment.
 child starts, so a command that hangs — or that takes the daemon down with it —
 still says in the log what was started, which is exactly the command worth
 knowing about. One event on completion would lose it. The pair is an intent
-(`ph.seams.shell.SHELL_COMMAND`, P10-08): `ctx.intents` puts the command on disk
+(`ph.session.kinds.SHELL_COMMAND`, P10-08): `ctx.intents` puts the command on disk
 before the child starts, and repair settles one the daemon died during, so no
 reader is told forever that a command is still running.
 
@@ -36,13 +36,16 @@ side.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import JsonObject, as_int, as_str
 from ph.keys import INTENTS, SHELL
 from ph.llm.types import PluginSource, TextBlock, create_user_message
-from ph.seams.shell import SHELL_COMMAND, ShellResult, ShellService
-from ph.session import Prior, Session
+from ph.seams.shell import ShellResult, ShellService
+from ph.session import Session, Unsettled, unsettled_why
+from ph.session.kinds import SHELL_COMMAND
 from ph.text import NO_OUTPUT, truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 
@@ -87,7 +90,7 @@ reads, never what is kept, and a person who wants the rest can scroll.
 """
 
 
-INTERRUPTED: dict[str, str] = {
+INTERRUPTED: Mapping[Unsettled, str] = {
     "outcome-unknown": (
         "[ph: the harness stopped before this command's result was recorded; "
         "what it did is unknown]"
@@ -95,7 +98,7 @@ INTERRUPTED: dict[str, str] = {
     "not-started": "[ph: not run — the log could not record the command first]",
 }
 """What a card says for a result nobody saw the command write, by
-`SHELL_COMMAND`'s `interrupted` reason. Said, because a card that settled with no
+`unsettled` reason (`ph.session.unsettled_why`). Said, because a card that settled with no
 output and no exit code reads as a command that printed nothing and succeeded."""
 
 
@@ -126,9 +129,9 @@ def shell_body(data: JsonObject) -> str:
     code = data.get("exitCode")
     if code:
         parts.append(f"[exit {code}]")
-    interrupted = as_str(data.get("interrupted"))
-    if interrupted:
-        parts.append(INTERRUPTED.get(interrupted, INTERRUPTED["outcome-unknown"]))
+    why = unsettled_why(data)
+    if why is not None:
+        parts.append(INTERRUPTED[why])
     return "\n".join(parts)
 
 
@@ -213,9 +216,6 @@ async def run_shell(
     async with intents.claim(
         session, SHELL_COMMAND, {"command": command, "surface": surface}
     ) as held:
-        if isinstance(held, Prior):
-            # A command is keyed by its own seq, which no earlier record can hold.
-            raise RuntimeError(f"shell command at seq {held.opened.seq} was opened twice")
         result = await shell.run(command, agent=agent)
         settled = intents.settle(
             session,

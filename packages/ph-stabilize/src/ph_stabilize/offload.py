@@ -55,6 +55,7 @@ from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import ContentBlock, text_of
 from ph.seams.spill import SpillClaim
 from ph.session import Session
+from ph.session.writers import log_writer
 from ph.tools.definition import (
     Accept,
     PostToolDecision,
@@ -63,6 +64,8 @@ from ph.tools.definition import (
     text_content,
 )
 from ph.wire import WireModel
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "GENERIC_READER",
@@ -258,7 +261,8 @@ async def spill_tool_result(
     # Before the blob appears at `ref.locator`. See `SpillStore.reserve_bytes`:
     # a blob the log does not name is what the sweep collects, so writing first
     # raced the sweep over this row's own output.
-    session.append(
+    _LOG.append(
+        session,
         "offload/spilled",
         {"callId": call_id, "locator": ref.locator, "bytes": ref.bytes},
     )

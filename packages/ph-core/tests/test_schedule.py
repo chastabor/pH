@@ -83,6 +83,7 @@ from ph.seams.schedule import (
 )
 from ph.seams.schedule_index import INDEX_NAME, IndexWriter, ScheduleIndex
 from ph.session import Session, now_ms
+from ph.testing import log_event
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
@@ -306,8 +307,8 @@ def test_an_unusable_cron_declines_rather_than_raising() -> None:
     declining to write a new one. Same split as the interval pair below.
     """
     session = Session("sched")
-    session.append(
-        CREATED, Schedule(id="s1", kind="cron", spec="not a cron", prompt="go").to_wire()
+    log_event(
+        session, CREATED, Schedule(id="s1", kind="cron", spec="not a cron", prompt="go").to_wire()
     )
     made = schedules(session)["s1"].created_at
 
@@ -326,7 +327,9 @@ def test_a_nonsensical_interval_in_a_log_never_fires(spec: str) -> None:
     escaped the fold itself, so `reindex` failed for the whole session.
     """
     session = Session("sched")
-    session.append(CREATED, Schedule(id="s1", kind="interval", spec=spec, prompt="go").to_wire())
+    log_event(
+        session, CREATED, Schedule(id="s1", kind="interval", spec=spec, prompt="go").to_wire()
+    )
     made = schedules(session)["s1"].created_at
 
     assert due_at(schedules(session)["s1"], now=made + HOUR) is None
@@ -384,7 +387,7 @@ def test_a_log_with_no_schedules_is_not_walked() -> None:
     """
     session = Session("empty")
     for index in range(50):
-        session.append("assistant/chunk", {"i": index})
+        log_event(session, "assistant/chunk", {"i": index})
     assert schedules(session) == {}
 
 

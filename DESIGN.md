@@ -792,7 +792,17 @@ kinds declare their barrier** (`session/intents.py`). `ctx.intents` opens a
 `durable` kind's record and flushes it before handing out the claim — a `!!`
 command, an approval, a question — or leaves a `buffered` one for the next
 flush, which is how a daemon verb's key travels with its act; repair settles
-every declared kind a crash left open. The barriers that must run after every
+every declared kind a crash left open. Each package declares its kinds in one
+`kinds` leaf that its `__init__` imports (`ph.session.kinds`, `ph_app.kinds`), and
+a resume whose log holds an open intent of a kind the process never declared is
+refused by name rather than left open (T4). A resumed root or child whose route names
+a credential the deployment cannot supply is held rather than started — a
+`credential/needed` record, settled by `credential/supplied` when the name arrives —
+and no credential's value is ever stored (T5). **Nothing writes a log but a writer**
+(T6): `Session` has no public `append`, a module mints its own writer with
+`log_writer(__name__)` from its row in `known_event_types.WRITERS`, and the writer
+refuses any type that row does not grant — at the write, not only in a test
+(`session/writers.py`). The barriers that must run after every
 pre-execute gate stay `session-checkpoint-policy`'s — before every model
 request, before a top-level tool body and a nested dispatch that can reach past
 the workspace, after a rejected `agent/pre-step`
@@ -836,8 +846,8 @@ resume without a resume-only hook (`seams/workspace.py`).
 
 **Seed acceptance is one gate for every path** (fork, resume, replay, import):
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown
-non-ignorable types (`session/session.py`). **`Session.append` refuses the same
-types on the way in**, so no build writes a log it cannot read back; a package
+non-ignorable types (`session/session.py`). **The write door refuses the same types
+on the way in** (`Session._append`, behind every writer), so no build writes a log it cannot read back; a package
 outside ph-core adds its own with `declare_log_type`, naming an owner and whether
 another build may skip it (`session/known_event_types.py`). And the JSONL reader
 drops an unterminated final line — the one damage a death mid-write leaves,
@@ -1336,7 +1346,7 @@ nodes for one new node. The log keeps every event; only the *derivation* changes
 **The validation is a plan, not a mutation.** `validate_next(event)` plans the
 transition without committing it, so "a rejected append leaves the surface
 untouched — a partially mutated surface would be unrecoverable"
-(`surface.py`). `Session.append` validates **before** the push
+(`surface.py`). `Session._append` validates **before** the push
 (`session.py`).
 
 Four rules the planner enforces:
@@ -1553,7 +1563,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
-| **Posture types are not refused at runtime from a writer that is not their owner.** `WRITERS` holds every shipped `sandbox/mode`, `approval/policy`, `approval/mode` and `permission/preset` writer to the code that may write it (`test_log_writers.py`); a third-party row appending one at runtime is not refused, because the append cannot tell who is asking — the daemon's preset verb reaches `set_mode` with no row running. Said beside `SandboxSeam.logged_mode` and `approval_policy` | P10-02 spiked; not shipped, by decision 6 |
+| **A writer can be forged on purpose.** Every log write goes through a module's own writer, which refuses a type its row in `WRITERS` does not grant — a third-party row appending `sandbox/mode` is refused at the write (T6, closing F12). What the runtime cannot refuse is a module that imports another's writer, constructs a `LogWriter`, or calls `Session._append`: each is deliberate, and `test_log_writers.py` fails on all three | T6, by design (rule 6) |
 | **A workspace tree is not an intent kind.** Its openness is folded from `seed_length` and only over tiers with a fresh root (`workspace_survivors`), which a key-pair fold from seq 0 cannot express; `WorkspaceSeam.reconcile` stays its settler, and repair leaves it as it leaves an `owner-settles` kind | P10-11, by decision |
 | **A package's log type is known to a reader only once the package is imported.** `declare_log_type` has no entry-point group, so a stored log carrying a *required* plugin type is refused by a reader that never mounted the plugin; none ships today | P10-03, conditional on the first such type |
 | `phern attachments gc` is cited as precedent in two docstrings but **does not exist** | doc drift |

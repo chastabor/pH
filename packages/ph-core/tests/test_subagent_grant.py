@@ -53,6 +53,7 @@ from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
     StubSubagentProvider,
+    log_event,
     run_tool,
     simple_tool,
     skill,
@@ -698,7 +699,7 @@ class _RealisticProvider:
         run.dispose = lambda: self.released.append(run.id)
         session = request.parent.session
         assert session is not None, "a spawn is made by an agent, and an agent has a log"
-        session.append(ADMITTED, admission_payload(run, request))
+        log_event(session, ADMITTED, admission_payload(run, request))
         return run
 
 

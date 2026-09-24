@@ -11,15 +11,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.cordis import Context
-from ph.json import JsonValue
+from ph.json import JsonValue, as_str
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.llm.types import text_of
 from ph.persistence import interrupted_turn_closers
-from ph.session import Session
-from ph.testing import FAKE_OPTIONS, MountProfile, external_tool, run_tool, simple_tool
+from ph.session import Session, unsettled_why
+from ph.testing import FAKE_OPTIONS, MountProfile, external_tool, log_event, run_tool, simple_tool
 from ph.tools import ToolExecutionResult
 from ph.tools.registry import EFFECT_MAY_HAVE_HAPPENED
 
@@ -129,7 +130,7 @@ async def test_the_run_key_is_stable_across_a_tools_own_retries(mount: MountProf
 
 def _unknown_prior(session: Session) -> None:
     """The first attempt reached disk and a crash left it for repair to settle."""
-    session.append("tool/effect", {"key": "send:m1", "tool": "send", "callId": "c1"})
+    log_event(session, "tool/effect", {"key": "send:m1", "tool": "send", "callId": "c1"})
     for closer in interrupted_turn_closers(session.events):
         session.admit(closer)
 
@@ -160,3 +161,80 @@ async def test_a_tool_that_says_it_did_not_happen_runs_without_the_note(
 
     assert far.deliveries == ["the quarterly numbers"]
     assert "may already have happened" not in text_of(result.content)
+
+
+def _held_tool(far: list[str], release: anyio.Event, entered: anyio.Event) -> Any:  # noqa: ANN401
+    """A keyed tool whose delivery waits on `release` — a call still running."""
+
+    async def deliver(args: Any, _run: Any) -> str:  # noqa: ANN401
+        entered.set()
+        await release.wait()
+        far.append(as_str(args.get("message")))
+        return f"delivered {as_str(args.get('id'))}"
+
+    return simple_tool("send", deliver, idempotency_key=lambda args: as_str(args.get("id")))
+
+
+async def test_two_concurrent_calls_with_one_effect_run_it_once(mount: MountProfile) -> None:
+    """T0. The second call finds the first's intent open *in this process* — still
+    running, not a crash's orphan. It is refused rather than run, and rather than
+    opening a second intent underneath the first, which unseated the first call's
+    settle and raised it out of the pipeline.
+
+    Sabotage: drop the in-flight check and the far side hears it twice — and the
+    first call's settle raises `IntentError`.
+    """
+    ctx = await mount()
+    far: list[str] = []
+    release, entered = anyio.Event(), anyio.Event()
+    ctx.require(TOOLS).register(_held_tool(far, release, entered))
+    session = ctx.require(SESSIONS).create("in-flight")
+    results: dict[str, ToolExecutionResult] = {}
+
+    async def call(call_id: str) -> None:
+        results[call_id] = await _call(ctx, session, call_id, SEND)
+
+    # Bounded, so a regression that runs the second call fails rather than hangs:
+    # it would wait on the same `release` the test only sets after it returns.
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(call, "c1")
+            await entered.wait()
+            await call("c2")
+            release.set()
+
+    assert far == ["the quarterly numbers"], "one effect, however many asked for it"
+    assert text_of(results["c1"].content) == "delivered m1"
+    second = results["c2"]
+    assert second.is_error and second.error is not None
+    assert second.error.info == {"name": "ToolEffectInFlight", "code": "TOOL_EFFECT_IN_FLIGHT"}
+    assert "call c1" in text_of(second.content)
+    again = await _call(ctx, session, "c3", SEND)
+    assert again.meta is not None and again.meta["repeatOf"] == "c1", "answered from the log now"
+
+
+async def test_a_canceled_keyed_call_leaves_its_effect_unknown_not_running(
+    mount: MountProfile,
+) -> None:
+    """A cancellation with the body entered may have let the effect happen. Left
+    open, the intent would read as still running in this process and refuse every
+    repeat until a restart; settled `unknown`, the repeat runs with the note."""
+    ctx = await mount()
+    far: list[str] = []
+    release, entered = anyio.Event(), anyio.Event()
+    ctx.require(TOOLS).register(_held_tool(far, release, entered))
+    session = ctx.require(SESSIONS).create("canceled")
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_call, ctx, session, "c1", SEND)
+            await entered.wait()
+            tasks.cancel_scope.cancel()
+
+    settle = session.latest("tool/effect-settled")
+    assert settle is not None and unsettled_why(settle.data) == "outcome-unknown"
+    release.set()
+    with anyio.fail_after(5):
+        result = await _call(ctx, session, "c2", SEND)
+    assert far == ["the quarterly numbers"]
+    assert EFFECT_MAY_HAVE_HAPPENED.format(call_id="c1") in text_of(result.content)

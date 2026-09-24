@@ -39,6 +39,7 @@ from ph.session import SurfaceIntent
 from ph.session.invariant import violations as session_violations
 from ph.testing import (
     MountProfile,
+    log_event,
     raising,
     report_section,
     simple_tool,
@@ -151,7 +152,7 @@ async def test_a_log_written_behind_append_trips_the_events_snapshot(mount: Moun
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s1")
-    session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
 
     assert session_violations(ctx) == [], "a session built by appending disagreed with itself"
 
@@ -178,7 +179,7 @@ async def test_a_surface_that_outran_its_log_trips_the_session_invariant(
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s1")
-    session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
     assert session.surface.nodes, "the manager had not folded, so there is nothing to outrun"
 
     session._log.pop()
@@ -200,7 +201,7 @@ async def test_a_stale_derivation_trips_the_session_invariant(mount: MountProfil
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s1")
-    session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
     assert session.derive_messages(), "nothing was derived, so there is nothing to go stale"
 
     session._derived = ()

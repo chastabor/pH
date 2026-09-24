@@ -34,7 +34,7 @@ from ph.llm.replay import tool_call_chunks
 from ph.llm.types import GenerateOptions, text_of
 from ph.seams.skills import discover_skills, rendered_skill
 from ph.session import Session, SurfaceIntent
-from ph.testing import FAKE_OPTIONS, MountProfile, run_tool, write_skill
+from ph.testing import FAKE_OPTIONS, MountProfile, log_event, run_tool, write_skill
 from ph_stabilize.skill_steps import (
     MAX_NAMED,
     MAX_NUDGES,
@@ -362,7 +362,7 @@ class _Stopping:
 
     def steer(self, message: Any) -> None:  # noqa: ANN401
         self.steers.append(message)
-        self.session.append("user/message", message.to_wire(), SurfaceIntent("append"))
+        log_event(self.session, "user/message", message.to_wire(), SurfaceIntent("append"))
 
 
 async def _nudges(ctx: Any, stopping: _Stopping, tries: int) -> int:  # noqa: ANN401

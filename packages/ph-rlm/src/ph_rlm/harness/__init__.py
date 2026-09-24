@@ -40,6 +40,7 @@ from ph.paths import resolve_roots
 from ph.seams.commands import CommandContext, CommandDefinition
 from ph.seams.jobs import Job
 from ph.session import Session, SessionEvent
+from ph.session.writers import log_writer
 from ph.system_prompt.assembly import AssembleContext, PromptContext
 from ph.wire import WireModel
 
@@ -71,6 +72,8 @@ from .state import (
     read_global_events,
     refinement_line,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     # What a consumer of the harness actually needs: the row, the state
@@ -235,7 +238,8 @@ async def apply(ctx: Context, config: Config) -> None:
         return f"[{record.refine_id}] {record.summary} — {applied} edit(s) applied{refused}"
 
     def _considered(request: RefineRequest, reason: str) -> str:
-        request.session.append(
+        _LOG.append(
+            request.session,
             CONSIDERED,
             {"trigger": request.trigger, "scope": request.scope, "reason": reason},
         )

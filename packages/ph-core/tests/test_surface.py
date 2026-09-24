@@ -47,15 +47,17 @@ from ph.session.surface import (
     is_replacement_surface_event,
     is_surface_event,
 )
-from ph.testing import assistant_payload, tool_result_payload, user_payload
+from ph.testing import assistant_payload, log_event, tool_result_payload, user_payload
 
 
 def _conversation() -> Session:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("user/message", user_payload("one", "m1"), SurfaceIntent("append"))
-    session.append("assistant/message", assistant_payload("two", "m2"), SurfaceIntent("append", ()))
-    session.append("user/message", user_payload("three", "m3"), SurfaceIntent("append"))
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "user/message", user_payload("one", "m1"), SurfaceIntent("append"))
+    log_event(
+        session, "assistant/message", assistant_payload("two", "m2"), SurfaceIntent("append", ())
+    )
+    log_event(session, "user/message", user_payload("three", "m3"), SurfaceIntent("append"))
     return session
 
 
@@ -66,7 +68,8 @@ def test_only_surface_events_join_the_surface() -> None:
 def test_replace_shadows_nodes_and_leaves_the_log_intact() -> None:
     session = _conversation()
     before = len(session.events)
-    session.append(
+    log_event(
+        session,
         "user/message",
         user_payload("summary of one and two", "m4"),
         SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1, 2)),
@@ -81,7 +84,8 @@ def test_replace_shadows_nodes_and_leaves_the_log_intact() -> None:
 def test_replace_must_cite_every_shadowed_node() -> None:
     session = _conversation()
     with pytest.raises(SurfaceError, match="must include every shadowed"):
-        session.append(
+        log_event(
+            session,
             "user/message",
             user_payload("summary", "m4"),
             SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1,)),
@@ -102,7 +106,8 @@ def test_a_replace_must_name_nodes_that_are_on_the_surface_now() -> None:
     """
     session = _conversation()
     with pytest.raises(SurfaceError, match="seq 99 is not a current surface node"):
-        session.append(
+        log_event(
+            session,
             "user/message",
             user_payload("x", "m4"),
             SurfaceIntent(SurfaceReplace(replaces=(99, 2)), (99, 2)),
@@ -118,7 +123,8 @@ def test_the_order_the_names_are_given_in_does_not_matter() -> None:
     whichever way it was written.
     """
     session = _conversation()
-    event = session.append(
+    event = log_event(
+        session,
         "user/message",
         user_payload("x", "m5"),
         SurfaceIntent(SurfaceReplace(replaces=(2, 1)), (1, 2)),
@@ -140,34 +146,46 @@ def test_a_replace_must_name_something_and_name_it_once() -> None:
 def test_source_seqs_must_be_earlier_and_unique() -> None:
     session = _conversation()
     with pytest.raises(SurfaceError, match="must reference earlier events"):
-        session.append(
-            "assistant/message", assistant_payload("x", "m4"), SurfaceIntent("append", (99,))
+        log_event(
+            session,
+            "assistant/message",
+            assistant_payload("x", "m4"),
+            SurfaceIntent("append", (99,)),
         )
     with pytest.raises(SurfaceError, match="duplicates"):
-        session.append(
-            "assistant/message", assistant_payload("x", "m5"), SurfaceIntent("append", (1, 1))
+        log_event(
+            session,
+            "assistant/message",
+            assistant_payload("x", "m5"),
+            SurfaceIntent("append", (1, 1)),
         )
 
 
 def test_only_assistant_messages_may_cite_an_empty_source_set() -> None:
     session = _conversation()
-    session.append("assistant/message", assistant_payload("x", "m4"), SurfaceIntent("append", ()))
+    log_event(
+        session, "assistant/message", assistant_payload("x", "m4"), SurfaceIntent("append", ())
+    )
     with pytest.raises(SurfaceError, match="must not be empty except"):
-        session.append("user/message", user_payload("x", "m5"), SurfaceIntent("append", ()))
+        log_event(session, "user/message", user_payload("x", "m5"), SurfaceIntent("append", ()))
 
 
 def test_tool_result_replacement_may_change_only_content() -> None:
     session = Session("s")
-    session.append("tool/result", tool_result_payload("full output", "r1"), SurfaceIntent("append"))
+    log_event(
+        session, "tool/result", tool_result_payload("full output", "r1"), SurfaceIntent("append")
+    )
     # Offload rewrites the result content in place; everything else must match.
-    session.append(
+    log_event(
+        session,
         "tool/result",
         tool_result_payload("preview…", "r1"),
         SurfaceIntent(SurfaceReplace(replaces=(0,)), (0,)),
     )
     assert session.surface.nodes == (1,)
     with pytest.raises(SurfaceError, match="may change only content"):
-        session.append(
+        log_event(
+            session,
             "tool/result",
             tool_result_payload("preview…", "r2", call_id="OTHER"),
             SurfaceIntent(SurfaceReplace(replaces=(1,)), (1,)),
@@ -176,10 +194,11 @@ def test_tool_result_replacement_may_change_only_content() -> None:
 
 def test_tool_result_replacement_targets_exactly_one_node() -> None:
     session = Session("s")
-    session.append("tool/result", tool_result_payload("a", "r1"), SurfaceIntent("append"))
-    session.append("tool/result", tool_result_payload("b", "r2", "c2"), SurfaceIntent("append"))
+    log_event(session, "tool/result", tool_result_payload("a", "r1"), SurfaceIntent("append"))
+    log_event(session, "tool/result", tool_result_payload("b", "r2", "c2"), SurfaceIntent("append"))
     with pytest.raises(SurfaceError, match="exactly one current node"):
-        session.append(
+        log_event(
+            session,
             "tool/result",
             tool_result_payload("merged", "r3"),
             SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
@@ -188,7 +207,8 @@ def test_tool_result_replacement_targets_exactly_one_node() -> None:
 
 def test_fold_matches_the_incremental_manager() -> None:
     session = _conversation()
-    session.append(
+    log_event(
+        session,
         "user/message",
         user_payload("summary", "m4"),
         SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1, 2)),
@@ -205,13 +225,14 @@ def test_incremental_reads_see_only_the_delta() -> None:
     session = _conversation()
     assert session.surface.node_count == 3
     assert session.surface.nodes_from(2) == (3,)
-    session.append("user/message", user_payload("four", "m4"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("four", "m4"), SurfaceIntent("append"))
     assert session.surface.nodes_from(3) == (4,)
 
 
 def test_surface_predicates() -> None:
     session = _conversation()
-    session.append(
+    log_event(
+        session,
         "user/message",
         user_payload("summary", "m4"),
         SurfaceIntent(SurfaceReplace(replaces=(1, 2)), (1, 2)),
@@ -235,15 +256,17 @@ def test_an_in_place_rewrite_is_told_apart_from_a_substitution() -> None:
     range and shadows it.
     """
     session = Session("shapes")
-    first = session.append("user/message", user_payload("one", "m1"), SurfaceIntent("append"))
-    second = session.append("user/message", user_payload("two", "m2"), SurfaceIntent("append"))
+    first = log_event(session, "user/message", user_payload("one", "m1"), SurfaceIntent("append"))
+    second = log_event(session, "user/message", user_payload("two", "m2"), SurfaceIntent("append"))
 
-    in_place = session.append(
+    in_place = log_event(
+        session,
         "user/message",
         user_payload("one, elided", "m3"),
         SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
-    substitution = session.append(
+    substitution = log_event(
+        session,
         "user/message",
         user_payload("a summary of both", "m4"),
         SurfaceIntent(

@@ -44,7 +44,7 @@ from ph.seams.goals import (
 )
 from ph.seams.subagents import USAGE as CHILD_USAGE
 from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, not_none
+from ph.testing import MountProfile, assistant_payload, log_event, not_none
 
 
 def _open(session: Session, service: GoalService, gates: list[str] | None = None) -> Goal:
@@ -86,8 +86,9 @@ def test_spend_is_folded_from_the_log_not_carried_by_the_loop() -> None:
     goal = _open(session, service)
 
     service.continued(session, goal.id)
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    session.append(
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(
+        session,
         "assistant/message",
         {
             **assistant_payload("done", "m1"),
@@ -113,16 +114,19 @@ def test_spend_is_folded_from_the_log_not_carried_by_the_loop() -> None:
 def _spent_by_three_sources(session: Session, service: GoalService) -> Spent:
     """A goal whose run spent 100 own, 50 on a compaction and 30 in a child."""
     goal = _open(session, service)
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         {**assistant_payload("done", "m1"), "usage": {"inputTokens": 90, "outputTokens": 10}},
         SurfaceIntent("append"),
     )
-    session.append(
+    log_event(
+        session,
         "compaction/summarized",
         {"trigger": "pressure", "usage": {"inputTokens": 50, "outputTokens": 0}},
     )
-    session.append(
+    log_event(
+        session,
         CHILD_USAGE,
         {"runId": "r1", "targetSeq": 3, "childUsage": {"inputTokens": 0, "outputTokens": 30}},
     )
@@ -245,7 +249,7 @@ def test_an_unknown_outcome_leaves_the_goal_open() -> None:
     """
     session, service = Session("g"), GoalService()
     goal = _open(session, service)
-    session.append("goal/settled", {"id": goal.id, "outcome": "who-knows"})
+    log_event(session, "goal/settled", {"id": goal.id, "outcome": "who-knows"})
 
     assert goals(session)[goal.id].outcome is None
     assert service.open(session) is not None

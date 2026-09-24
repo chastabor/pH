@@ -38,7 +38,7 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, text_chunks, user_payload
+from ph.testing import MountProfile, assistant_payload, log_event, text_chunks, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -215,7 +215,7 @@ async def test_an_overflow_reaches_the_turn_instead_of_being_retried(mount: Moun
 def test_the_baseline_switches_from_estimate_to_usage() -> None:
     meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
     session = Session("s")
-    session.append("user/message", user_payload("hello there", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hello there", "m1"), SurfaceIntent("append"))
 
     before = meter.baseline(session)
     assert before.source == "estimate"
@@ -223,7 +223,7 @@ def test_the_baseline_switches_from_estimate_to_usage() -> None:
 
     payload = assistant_payload("a reply", "m2")
     payload["usage"] = TokenUsage(input_tokens=1_000, output_tokens=50).to_wire()
-    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
 
     after = meter.baseline(session)
     # The provider counted the prefix exactly; only a later tail is guessed.
@@ -243,10 +243,10 @@ def test_a_rewritten_message_does_not_erase_the_last_reported_usage() -> None:
     session = Session("s")
     counted = assistant_payload("hi", "m1")
     counted["usage"] = TokenUsage(input_tokens=1_000, output_tokens=50).to_wire()
-    session.append("assistant/message", counted, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", counted, SurfaceIntent("append", ()))
 
     rewritten = assistant_payload("hi", "m2")
-    session.append("assistant/message", rewritten, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", rewritten, SurfaceIntent("append", ()))
 
     usage = meter.last_usage(session)
     assert usage is not None and usage.input_tokens == 1_000
@@ -258,10 +258,10 @@ def test_pressure_needs_a_known_window() -> None:
     session = Session("s")
     payload = assistant_payload("hi", "m1")
     payload["usage"] = TokenUsage(input_tokens=500, output_tokens=0).to_wire()
-    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
     assert meter.baseline(session).pressure is None
 
-    session.append("request/context", {"provider": "p", "model": "m", "contextWindow": 1_000})
+    log_event(session, "request/context", {"provider": "p", "model": "m", "contextWindow": 1_000})
     assert meter.baseline(session).pressure == 0.5
 
 
@@ -272,7 +272,7 @@ def test_cached_tokens_count_toward_the_baseline() -> None:
     payload["usage"] = TokenUsage(
         input_tokens=100, output_tokens=10, cache_read_tokens=900
     ).to_wire()
-    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
     # Counts are disjoint, so the window's occupancy is their sum.
     assert meter.baseline(session).tokens == 1_010
 
@@ -290,7 +290,7 @@ def test_the_cache_reading_says_nothing_until_a_provider_reports_cache() -> None
 
     payload = assistant_payload("hi", "m1")
     payload["usage"] = TokenUsage(input_tokens=1_781, output_tokens=64).to_wire()
-    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
 
     assert meter.cache_reading(session) is None, "and so does a route that reports no cache"
 
@@ -309,7 +309,7 @@ def test_the_cache_reading_is_the_share_of_the_prompt_the_provider_reused() -> N
     payload["usage"] = TokenUsage(
         input_tokens=33, output_tokens=391, cache_read_tokens=1_777
     ).to_wire()
-    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
 
     reading = meter.cache_reading(session)
     assert reading is not None
@@ -329,7 +329,7 @@ def test_a_stored_prefix_is_not_reported_as_a_hit() -> None:
     payload["usage"] = TokenUsage(
         input_tokens=12, output_tokens=40, cache_write_tokens=2_048
     ).to_wire()
-    session.append("assistant/message", payload, SurfaceIntent("append", ()))
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
 
     reading = meter.cache_reading(session)
     assert reading is not None

@@ -18,16 +18,16 @@ from ph.session.request_header import (
     fold_request_header,
     header_equals,
 )
-from ph.testing import assistant_payload, block_text, user_payload
+from ph.testing import assistant_payload, block_text, log_event, user_payload
 
 
 def test_derivation_follows_the_surface() -> None:
     session = Session("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("user/message", user_payload("hi", "m1"), SurfaceIntent("append"))
-    session.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "usage"}})
-    session.append(
-        "assistant/message", assistant_payload("hey", "m2"), SurfaceIntent("append", (2,))
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "user/message", user_payload("hi", "m1"), SurfaceIntent("append"))
+    log_event(session, "assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "usage"}})
+    log_event(
+        session, "assistant/message", assistant_payload("hey", "m2"), SurfaceIntent("append", (2,))
     )
     messages = session.derive_messages()
     # Boundaries and raw chunks are trace data, so they are correctly absent.
@@ -39,7 +39,9 @@ def test_derivation_follows_the_surface() -> None:
 
 def test_empty_assistant_message_derives_to_nothing() -> None:
     session = Session("s")
-    session.append("assistant/message", assistant_payload("", "m1"), SurfaceIntent("append", ()))
+    log_event(
+        session, "assistant/message", assistant_payload("", "m1"), SurfaceIntent("append", ())
+    )
     # It exists only to host a max-tokens step's usage; a content-less
     # assistant turn is rejected by several providers.
     assert session.derive_messages() == ()
@@ -48,24 +50,27 @@ def test_empty_assistant_message_derives_to_nothing() -> None:
 
 def test_a_holder_never_sees_later_appends() -> None:
     session = Session("s")
-    session.append("user/message", user_payload("a", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("a", "m1"), SurfaceIntent("append"))
     held = session.derive_messages()
-    session.append("user/message", user_payload("b", "m2"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("b", "m2"), SurfaceIntent("append"))
     assert len(held) == 1
     assert len(session.derive_messages()) == 2
 
 
 def test_cache_rebuilds_only_on_a_surface_rewrite() -> None:
     session = Session("s")
-    session.append("user/message", user_payload("a", "m1"), SurfaceIntent("append"))
-    session.append("assistant/message", assistant_payload("b", "m2"), SurfaceIntent("append", ()))
+    log_event(session, "user/message", user_payload("a", "m1"), SurfaceIntent("append"))
+    log_event(
+        session, "assistant/message", assistant_payload("b", "m2"), SurfaceIntent("append", ())
+    )
     first = session.derive_messages()
     second = session.derive_messages()
     # Each node is projected once: identity proves the cache was reused — and
     # the whole tuple is the same object when nothing was appended.
     assert first is second
 
-    session.append(
+    log_event(
+        session,
         "user/message",
         user_payload("summary", "m3"),
         SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
@@ -77,9 +82,12 @@ def test_cache_rebuilds_only_on_a_surface_rewrite() -> None:
 
 def test_transcript_keeps_what_the_surface_shadows() -> None:
     session = Session("s")
-    session.append("user/message", user_payload("a", "m1"), SurfaceIntent("append"))
-    session.append("assistant/message", assistant_payload("b", "m2"), SurfaceIntent("append", ()))
-    session.append(
+    log_event(session, "user/message", user_payload("a", "m1"), SurfaceIntent("append"))
+    log_event(
+        session, "assistant/message", assistant_payload("b", "m2"), SurfaceIntent("append", ())
+    )
+    log_event(
+        session,
         "user/message",
         user_payload("summary", "m3"),
         SurfaceIntent(SurfaceReplace(replaces=(0, 1)), (0, 1)),
@@ -96,7 +104,7 @@ def test_request_header_folds_incrementally_and_matches_the_pure_fold() -> None:
     first = canonical_header(
         EpochHeader(config=LlmCallConfig(provider="fake", model="m1"), system="be brief")
     )
-    session.append("request/header", {"header": first.to_wire(), "reason": "initial"})
+    log_event(session, "request/header", {"header": first.to_wire(), "reason": "initial"})
     assert session.request_header() == first
 
     second = canonical_header(
@@ -105,7 +113,7 @@ def test_request_header_folds_incrementally_and_matches_the_pure_fold() -> None:
             tools=[ToolSchema(name="read", description="d", parameters={})],
         )
     )
-    session.append("request/header", {"header": second.to_wire(), "reason": "change"})
+    log_event(session, "request/header", {"header": second.to_wire(), "reason": "change"})
     live = session.request_header()
     assert live == second
     # The live incremental fold and the offline one must agree.
@@ -135,7 +143,7 @@ def test_header_equality_compares_tool_schemas_in_order() -> None:
 def test_request_context_folds() -> None:
     session = Session("s")
     assert session.request_context() is None
-    session.append("request/context", {"provider": "fake", "model": "m", "contextWindow": 100})
+    log_event(session, "request/context", {"provider": "fake", "model": "m", "contextWindow": 100})
     context = session.request_context()
     assert context is not None
     assert context.context_window == 100

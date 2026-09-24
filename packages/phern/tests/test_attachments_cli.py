@@ -24,6 +24,7 @@ from ph.json import JsonObject
 from ph.persistence import session_path
 from ph.seams.attachments import digest_of
 from ph.session import Session, SessionHeader, SurfaceIntent
+from ph.testing import log_event
 from ph_app.cli import app
 
 runner = CliRunner()
@@ -67,7 +68,7 @@ def _log(sessions: Path, session_id: str, *events: tuple[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     session = Session(session_id, header=header)
     for kind, data in events:
-        session.append(kind, data, SurfaceIntent("append") if kind == "user/message" else None)
+        log_event(session, kind, data, SurfaceIntent("append") if kind == "user/message" else None)
     lines: list[JsonObject] = [{"type": "session/header", "header": session.header.to_wire()}]
     lines += [event.to_wire() for event in session.events]
     path.write_text("".join(f"{json.dumps(line)}\n" for line in lines), encoding="utf-8")

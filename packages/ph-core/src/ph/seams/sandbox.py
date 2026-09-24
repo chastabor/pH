@@ -55,10 +55,13 @@ from ..json import JsonValue, as_str
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical
 from ..session import Session
+from ..session.writers import log_writer
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel, literal_lookup
 from ._registry import claim_slot, contribute_item
 from .tui_status import StatusField, StatusReading
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "DEFAULT_HOSTS",
@@ -638,12 +641,11 @@ class SandboxSeam:
         and "the deployment says workspace-write" are the same answer, and
         `effective` would overwrite every caller's mode with the default.
 
-        **Not enforced: who wrote it** (F12, P10-02). This trusts the last
-        `sandbox/mode` whoever appended it. Shipped writers are held to
-        `known_event_types.WRITERS` by `test_log_writers.py`; a third-party row that
-        appends one at runtime is not refused, because the append cannot tell who is
-        asking — the daemon's preset verb reaches `set_mode` with no row running, so a
-        runtime check would have to answer "allowed" when it cannot tell.
+        **Who wrote it is this seam** (T6, closing F12): `sandbox/mode` is written
+        only through this module's writer, which is the one `WRITERS` grants it, so a
+        third-party row that tries to write one is refused at the write. Not enforced:
+        a module that imports this one's writer, or reaches past it to
+        `Session._append` — deliberate acts `test_log_writers.py` fails on.
         """
         if session is None:
             return None
@@ -659,7 +661,7 @@ class SandboxSeam:
         return explicit or self.logged_mode(session) or self.default_mode
 
     def set_mode(self, session: Session, mode: SandboxMode) -> None:
-        session.append("sandbox/mode", {"mode": mode})
+        _LOG.append(session, "sandbox/mode", {"mode": mode})
 
     def mode_reading(self, session: Session) -> StatusReading:
         """`sandbox workspace-write` — what a confined command may write.
@@ -897,7 +899,7 @@ class SandboxSeam:
                 agent,
             )
             return
-        session.append(DENIED, denial.record(agent))
+        _LOG.append(session, DENIED, denial.record(agent))
 
     def _session_of(self, agent: str | None) -> Session | None:
         """The session an agent's records and posture belong to.

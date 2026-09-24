@@ -53,6 +53,7 @@ from ph.json import as_int, as_seq, as_str, thaw_json
 from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import Message, ToolCallBlock
 from ph.session import Session, SessionEvent, derive_event_message, is_in_place_rewrite
+from ph.session.writers import log_writer
 from ph.system_prompt.assembly import (
     ORDER_TOOL_GUIDANCE,
     AssembleContext,
@@ -71,6 +72,8 @@ from ph.tools.definition import (
     define_tool,
     text_content,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "MAX_REQUIRES",
@@ -711,7 +714,7 @@ async def apply(ctx: Context, config: None) -> None:
             # Tool-owned event: the tool that changed the list is the one that
             # records it, so "model-visible means logged" holds without the
             # pipeline learning what a todo is (I3).
-            session.append("todo/write", {"todos": todos})
+            _LOG.append(session, "todo/write", {"todos": todos})
         return {"todos": todos}
 
     ctx.require(TOOLS).register(

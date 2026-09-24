@@ -321,12 +321,26 @@ journal's doors are.
 In order. Each item says what "done" means as a gate. Every gate is sabotage-checked, as in
 Phase 10.
 
-- [ ] **T0 — Fix the concurrent-effect settle** (item 3's latent bug; small, standalone).
+- [x] **T0 — Fix the concurrent-effect settle** (item 3's latent bug; small, standalone).
   - The fix: a keyed call whose prior is still running *in this process* must not open a
     second intent underneath it.
   - *Gate:* two concurrent calls with one effect key both return; the first's settle does
     not raise, and the far side's count matches what ran.
-- [ ] **T1 — Write the goal as a gate first.** An end-to-end mass-restart test:
+  - *Landed.*
+    - A prior opened at or after `session.first_live_seq` and not settled is **running
+      here**. The second call is refused with `TOOL_EFFECT_IN_FLIGHT`, naming the running
+      call, rather than run or opened underneath it. After the first returns, a retry is
+      answered from the log.
+    - A cancellation with the body entered now settles the effect `unknown` (a
+      `BaseException` around `_dispatch`). Otherwise the intent would read as running here
+      and refuse every repeat until a restart.
+    - Gates, in `test_tools_idempotency.py`:
+      - `test_two_concurrent_calls_with_one_effect_run_it_once`;
+      - `test_a_canceled_keyed_call_leaves_its_effect_unknown_not_running`.
+    - Both are bounded by `fail_after`: the first sabotage, with no in-flight check,
+      *hangs* an unbounded test, because the second call waits on the release the test only
+      sets after it. Sabotaged both ways; each failed its gate.
+- [x] **T1 — Write the goal as a gate first.** An end-to-end mass-restart test:
   - a daemon with a root and several sub-agents mid-work (a `!!` running, a `write` in
     flight, an approval parked, a keyed effect, a queued child);
   - stopped without teardown, then restarted over the same `$PH_HOME`.
@@ -336,20 +350,105 @@ Phase 10.
     short.
   - Include **L2**: child sessions are opened without the I-5 lease, and a mass restart is
     exactly when two writers could meet on one child log.
-- [ ] **T2 — One outcome vocabulary and a re-open policy per kind** (item 3).
+  - *Landed* — `tests/test_mass_restart.py`, driven by `tests/mass_restart_host.py`.
+    - The host is a real process that the test **`SIGKILL`s**, so no teardown runs. It
+      leaves the listed work in flight:
+      - the root's `write` landed but held in `tools/post-execute`;
+      - a `!!` intent;
+      - an approval on an answerer that never answers;
+      - a keyed effect mid-body;
+      - two children under a concurrency of one.
+    - A fresh mount then does `Supervisor._start`'s two calls: `resume_session`, then
+      `resume_children`.
+    - **Today's code already passes the whole goal.** Both children finish; every root
+      intent is settled or reconciled (the `write` reports done off the file); every log
+      reads back with nothing open; a second restart closes nothing.
+    - L2 is a strict `xfail`: a readmitted child's log is not leased by the process that
+      resumed it.
+    - Sabotaged by emptying repair's intent pass; two of the three gates failed.
+- [x] **T2 — One outcome vocabulary and a re-open policy per kind** (item 3).
   - One marker on every settle the act did not write.
   - `Prior` exposes the outcome and whether it is *running here* or *orphaned*.
   - `IntentKind` declares what a prior means.
   - Readers (daemon repeat, tool pipeline, TUI, trajectory) use one reader function.
   - *Gate:* each kind's closer, `claim`'s failure settle and the journal's `not-started`
     settle read back through the one function as the right outcome.
-- [ ] **T3 — Unique intent keys, and split `open`** (item 2).
+  - *Landed.*
+    - **The marker.** `"unsettled": {"why": <Unsettled>, "by": "repair" | "process"}` is
+      merged into every settle the act did not write, by repair and by the journal (a failed
+      barrier, a raising `claim`), and by the pipeline for a canceled keyed call. The
+      closers stop writing their own:
+      - the shell's `interrupted: why`;
+      - the dispatch's `interrupted: why`;
+      - the effect's and the daemon verb's `outcome: "unknown"`;
+      - `claim`'s `failed: true`.
+
+      A kind's domain fields stay: an approval's `outcome`, a question's `resolution`,
+      which their own readers use. (A question's `interrupted` stayed too, until the
+      post-T6 cleanup found no reader and dropped it.) `by` is `repair` or `process` — the
+      distinction that matters after a restart, a dead process against a live one.
+    - **The reader.** `outcome_of(kind, settle)` returns
+      `done | failed | outcome-unknown | not-started`, with `failed` read by the kind's new
+      `IntentKind.failed` (the effect's `isError`). `unsettled_why(data)` serves readers
+      that hold only a payload (`shell_body`).
+    - **`Prior`** is its own dataclass again, carrying:
+      - `outcome`;
+      - `here`, meaning opened at or after `first_live_seq`;
+      - `running_here` (and `orphaned`, dropped in the post-T6 cleanup: no caller).
+    - **The re-open policy.** `IntentKind.reopen` is the set of outcomes after which `open`
+      opens the key again instead of answering with the prior. `TOOL_EFFECT` reopens on
+      `failed` and `not-started`; every other kind answers every prior.
+    - The daemon's `_repeat_outcome` and the pipeline's `_open_effect` read `Prior` rather
+      than decoding strings.
+    - Gates in `test_repair.py`:
+      - `test_every_core_kind_has_a_sample`;
+      - `test_what_repair_writes_reads_back_as_outcome_unknown_for_every_kind`;
+      - `test_what_the_journal_writes_reads_back_through_the_same_function`;
+      - `test_an_effect_that_reported_failure_reads_back_as_failed`.
+
+      Plus phern's `test_a_verb_repair_closed_reads_back_as_unknown`. Existing tests moved
+      onto the one reader.
+    - Sabotaged three ways — repair not stamping, the reader ignoring the marker, the
+      journal's not-started unmarked — each failed its gates.
+- [x] **T3 — Unique intent keys, and split `open`** (item 2).
   - Approvals and questions keyed by their opening seq; `askSeq` on their settles.
   - `open` (always new) and `open_once` (dedupe) replace the `dedupe` flag.
   - `settle` is strict for every kind.
   - *Gate:* two concurrent `tool_name="refine"` asks are settled separately; a crash with
     both parked settles both on resume; the three unreachable raises are gone.
-- [ ] **T4 — Kinds as data, one leaf per package, found statically** (item 1, decided).
+  - *Landed.*
+    - **Keys.** `APPROVAL_ASK` and `QUESTION_ASK` key an ask by `str(event.seq)` and its
+      settle by the new `askSeq` field, which every writer of `approval/decided` and
+      `question/answered` now carries: the live settle, the `never`-policy pair, both
+      kinds' closers, and the not-started settle. `callId`, `toolName` and `askId` stay
+      in the payloads; no reader pairs by them (the TUI rows each record alone).
+    - **Two opens.** `IntentJournal.open(session, kind, data) -> Claim` is always a new
+      intent. `open_once(..., key_scope=) -> Claim | Prior` keeps the dedupe, the re-open
+      policy and the process scope. Likewise `claim` and `claim_once`. `IntentKind.dedupe`
+      is gone. Callers:
+      - the approval and question seams, and phern's `run_shell`, use `open` / `claim`;
+      - the tool pipeline's `_open_effect` uses `open_once`;
+      - the daemon's `_mutate` uses `claim_once`.
+    - **Strict settle.** `settle` refuses any claim that is not the open intent under its
+      key, for every kind. The relaxed rule existed only because two asks of one tool
+      shared a key.
+    - **The three raises.** The `RuntimeError`s in `ApprovalService.request`,
+      `UserQuestionService.ask` and `run_shell`, which narrowed `Claim | Prior` to `Claim`,
+      are deleted. `open`'s return type now makes them unreachable, and mypy checks it.
+    - Gates:
+      - `test_seams.py::test_two_asks_of_one_tool_at_once_are_settled_separately`: two
+        `refine` asks with no call id, answered in reverse order; each decision's
+        `askSeq` names its own ask;
+      - `test_repair.py::test_asks_parked_under_one_name_are_each_settled_on_resume`: two
+        `refine` approvals and one question asked twice under one id, taken from the log
+        while all four are parked; repair settles each once, by its own seq.
+
+      Sabotaged by restoring the name keys (call id or tool name; `askId`): both gates
+      failed.
+    - `test_the_fold_agrees_with_the_folds_it_replaces` is retired. The folds it compared
+      used the name keys. Hand-built logs in `test_repair.py` and `test_seams.py` now
+      carry `askSeq`.
+- [x] **T4 — Kinds as data, one leaf per package, found statically** (item 1, decided).
   - **The leaves.**
     - `ph/session/kinds.py` for ph-core (`SHELL_COMMAND`, `APPROVAL_ASK`, `QUESTION_ASK`,
       `TOOL_DISPATCH`, `TOOL_EFFECT`) and `ph_app/kinds.py` for phern (`CLIENT_COMMAND`), each
@@ -377,7 +476,80 @@ Phase 10.
     - **the loud refusal**: a log with an open `client/command`, resumed by a process that
       never imported `ph_app`, is refused by name;
     - T1's restart scenario still settles every kind.
-- [ ] **T5 — Nothing resumes without its credentials** (item 4). No credential storage;
+  - *Landed.*
+    - **The leaves.**
+      - `ph/session/kinds.py` holds the five core kinds, their key functions and
+        closers, and the builders the closers and live settles share:
+        `approval_decided`, `question_answered`, `dispatch_identity`, `effect_settle`
+        and `command_seq`.
+      - Constants moved with them: `INTERRUPTED`, `AskResolution`,
+        `DISPATCH_INTERRUPTED`. The approval and question seams re-export theirs.
+      - `ph_app/kinds.py` holds `CLIENT_COMMAND` and `command_settled`.
+      - The seams, the registry, Code Mode, the daemon and the shell import their
+        kinds from the leaves. No seam re-exports a kind.
+    - **Each package imports its own leaf from its `__init__`** (`ph.session`,
+      `ph_app`). This is stronger than the plan's "each resuming module imports it":
+      loading any part of a package declares its kinds, so a new resume path cannot
+      miss them. Repair gets ph-core's through `ph.session` and imports no leaf itself.
+    - **The vocabulary** gains `INTENT_PAIRS`, which maps each opening type to its
+      settling type and its leaf.
+      - A log with an open intent of a kind the process never declared raises
+        `UndeclaredIntentError` (exported from `ph.persistence`), naming the type and
+        the leaf. The log is left as it was.
+      - Rule 6, in repair's docstring: without the kind its records cannot be paired,
+        so they are counted. That is exact today, since T3 made each settle close one
+        intent. A settle with no opening (Code Mode's refused dispatch, a core kind)
+        would hide one.
+      - A settled verb resumes normally.
+    - **The ten function-level imports are gone:**
+      - `repair._kinds()`'s two;
+      - `_reconciled`'s four;
+      - `resume_session`'s two;
+      - `isolated_intent_kinds`' two.
+
+      `ToolRuntime.reconciled(record, session, *, scope)` now reads the tool's name
+      and arguments off the record itself, and returns `None` for `Unknown`, so
+      persistence needs `ph.tools` only for its types.
+    - `isolated_intent_kinds(core=True)` now starts from exactly
+      `ph.session.kinds.KINDS`, whatever the interpreter has imported. That table is
+      what "a process without the app" holds.
+    - **`WRITERS` credits the leaves.**
+      - `ph.seams.shell`, `ph.seams.user_questions` and `ph.tools.registry` are no
+        longer writers.
+      - `ph.seams.approval` keeps the `never`-policy pair.
+      - `ph.tools.code_mode` keeps only its refused-dispatch `tool/code-dispatch`,
+        both of which are direct appends for T6.
+    - **One behavior change:** repair's effect settle is built by `effect_settle` and so
+      gains `"content": []`, the same shape as the pipeline's cancel settle.
+    - No `declare_log_type` ships, so none moved. `ph_app.kinds` notes that the leaf is
+      where one would go.
+    - **Gates:**
+      - `test_intent_kinds.py`:
+        - both leaves found;
+        - every `IntentKind(...)` in a leaf;
+        - `INTENT_PAIRS` equal to the leaves' pairs;
+        - leaf purity;
+        - each package imports its leaf at top;
+        - no kinds import below module top, in shipped code or any suite;
+        - no function-level import on the resume path;
+        - the refusal, in-process through `resume_session`;
+        - a settled verb resumes.
+      - `test_repair.py::test_a_fresh_process_declares_ph_cores_kinds_and_refuses_the_rest`:
+        a fresh interpreter that imports `ph.orphans` first. It has exactly the core
+        leaf's kinds and not `ph_app`, and refuses an open `client/command` by name.
+        This replaces `test_importing_repair_declares_every_core_kind`.
+      - `test_code_mode.py::test_the_leaf_spells_the_dispatch_identity_as_the_model_does`:
+        `DISPATCH_REF_KEYS` equals `CodeDispatchRef`'s wire keys.
+      - T1 still passes.
+    - **Sabotaged seven ways**, and each failed its gate:
+      - a `ph.wire` import in the core leaf;
+      - the `client/command` row dropped from `INTENT_PAIRS`;
+      - a kind declared in `ph.seams.shell`;
+      - `ph_app/__init__` not importing its leaf;
+      - `isolated_intent_kinds` importing the leaf inside the function;
+      - `_refuse_undeclared` skipped;
+      - a dispatch key respelled.
+- [x] **T5 — Nothing resumes without its credentials** (item 4). No credential storage;
   leave a source slot for a future secure plugin.
   - A check on open/resume, shaped like the spill sweep:
     - read the session's routes from its journal (`request/context`, else its configured
@@ -402,7 +574,95 @@ Phase 10.
       key;
     - supplying it releases them;
     - a second restart before supplying it holds them again and grows nothing.
-- [ ] **T6 — One door for every write** (item 5, your principle). In stages:
+  - *Landed.*
+    - **Which name a route needs.**
+      - `ResolvedModel.credential` is the name an adapter resolves at its edge.
+        `resolved(..., credential=)` is required, so no adapter can forget it; the
+        three shipped adapters pass their `api_key_env`.
+      - `ph.seams.credentials.missing_credential(ctx, provider, model)` asks the
+        mounted adapter for the name and `has()` for the value, and never sees one.
+      - A route with no adapter is not reported as missing a credential.
+    - **Checked against the route the session will run on, not `request/context`.**
+      That is a deviation from the plan's wording.
+      - The log's routes are the ones it has used. After a profile edit they need
+        not be the one a resume runs, and the question is "can it run here, now".
+      - A daemon root runs on its agent's options (the supervisor's route).
+      - A child runs on `child_route(request)`, "its selector, else its parent's".
+        That rule is now stated once in the seam and used by ph-rlm's
+        `_resolve_model`.
+    - **The hold is a journal kind.**
+      - `CREDENTIAL_WAIT` (`credential/needed` → `credential/supplied`, in
+        `ph.session.kinds` and `INTENT_PAIRS`) is `owner-settles`: repair leaves it.
+        It is keyed `holder:name`, where the holder is a run id or `session`.
+      - Its records hold names only and are ignorable.
+      - `record_wait(ctx, session, holder, name | None)` brings a holder's holds in
+        line with what it waits for now. It settles the others, and opens one
+        through `open_once` unless one is already open, so asking again appends
+        nothing. `reopen={"done"}` lets a released name be needed again.
+      - The journal's new `open_claim(session, kind, key)` hands the owner of an
+        `owner-settles` kind the claim on an intent it did not open in this call.
+        It refuses any other kind.
+      - `credential_waits(events)` is the fold every reader uses.
+    - **Children** (`SubagentService._readmit_children`).
+      - Before a queued child is readmitted, its route is checked. A missing name
+        records the hold and skips the child, which stays `queued`: live, no start
+        counted, and so no rung of the ladder spent.
+      - `readmit_waiting(parent)` runs the same sweep again when a credential
+        arrives.
+    - **Roots** (`Supervisor`).
+      - `_start` checks the root's own route before its children, and sets
+        `Root.needs_credential`. `_run` does not drive a held root, so a prompt
+        waits in the inbox.
+      - `status` reads `needs-credential`, which is in `QUIET` for `waiting`'s
+        reason.
+      - The `credentials/store` handler calls `credential_supplied(root)`. That
+        re-checks the root and rings its inbox if it was released, then readmits
+        the children waiting on the name.
+    - **Said where a person looks:**
+      - one daemon log line per missing name when a root comes back;
+      - a `credentials awaited` section in `phern agents doctor` (`Supervisor.awaited`);
+      - `sessions/list`'s status;
+      - TUI transcript rows and trajectory records for both types.
+
+      A held child's sidebar row still reads `queued`; its transcript row says what
+      it waits for.
+    - **`credentials/store` is unkeyed.**
+      - It is a `METHODS` row, and the TUI sends it with `call`.
+      - `IntentScope`, `key_scope`, `_lives`, the `"scope"` stamp and
+        `Mutation.key_scope` are gone.
+      - `StoreCredentialParams` refuses `clientId`/`commandId`. Protocol 4 is not
+        released yet (0.3.0 shipped protocol 3, and nothing has been pushed since
+        `bdb99a1`), so the change rides on 4 and needs no number of its own. The
+        version-4 note in `ph_app/protocol.py` records that a 0.3.x client, which
+        stamps a key, is refused.
+    - Nothing is stored. `CredentialRef.source` is already the slot a future
+      secure plugin would fill.
+    - A `NON_GUARANTEES` row, "credentials across a restart": the value is gone,
+      the work waits for it by name, and tool credentials are not checked.
+    - **Gates:**
+      - `tests/test_mass_restart.py`, T1's `SIGKILL` with the sub-agents on a
+        `keyed` route and the key absent:
+        - `test_a_sub_agent_whose_key_a_restart_lost_is_held_then_released`: both
+          children held, `starts` unchanged, every other intent settled, and
+          supplying the key runs both to done;
+        - `test_a_second_restart_before_the_key_arrives_holds_again_and_grows_nothing`:
+          the second resume appends exactly `session/end-seed` and
+          `session/resumed`.
+      - `test_daemon_mutations.py`:
+        - `test_a_root_whose_key_is_missing_is_held_and_the_key_releases_it`
+          covers the status, the doctor section, `sessions/list`, the prompt
+          waiting, and release;
+        - the re-send test, rewritten for an unkeyed verb.
+      - `test_credential_holds.py`: seven unit tests.
+      - `test_adapters.py::test_every_route_names_the_credential_its_adapter_resolves`.
+      - `test_repair.py::test_repair_leaves_a_credential_hold_to_its_owner`.
+    - **Sabotaged five ways**, and each failed its gate:
+      - the store keyed again;
+      - children never held;
+      - a hold opened on every ask;
+      - a held root driven;
+      - an adapter naming the default variable.
+- [x] **T6 — One door for every write** (item 5, your principle). In stages:
   - **T6a:** the `LogWriter` design; the journal holds kind writers and gains the two
     missing doors ("open and settle together", "settle with no open").
   - **T6b:** migrate ph-core's 21 modules, with a hot-path benchmark on `assistant/chunk`.
@@ -417,6 +677,71 @@ Phase 10.
   - *Gate:* T6e's two gates, sabotage-checked. A third-party row appending `sandbox/mode`
     is refused at runtime. The `WRITERS` table is derived from the writers minted, not
     maintained by hand.
+  - *Landed.*
+    - **T6a, the writer** (`ph/session/writers.py`).
+      - `LogWriter.append(log, type, data, surface)` takes a session or an open batch,
+        and refuses a type its owner is not the writer of record for (`LogWriteError`).
+      - `log_writer(__name__)` mints a module's own writer from its `_WRITTEN_BY` row
+        plus the types it declared. It refuses when the owner named is not the
+        calling module, read off the frame.
+      - `scaffolding_writer()` writes any type, for `ph.testing` only.
+      - `Session.append` and `SessionBatch.append` are now `_append`.
+      - `admit` is unchanged.
+    - **Kinds carry their leaf's writer.** `IntentKind.writer` (keyword-only) replaces
+      `owner`, which is now a property. `declare_intent` refuses a writer that does not
+      own both types, and the journal writes every pair through it.
+    - **The two missing doors:**
+      - `IntentJournal.open_settled(session, kind, data, settle)` writes both halves
+        in one batch. The approval `never` path uses it; `_record_asked` and
+        `_record_decided` are gone.
+      - `settle_unopened(session, kind, data)` is for Code Mode's refused dispatch,
+        and is refused while the key is open.
+      - `WRITERS` loses `ph.seams.approval`'s ask pair and `ph.tools.code_mode`
+        entirely.
+    - **T6b and T6c: 72 sites in 31 modules**, across ph-core, ph-stabilize, ph-rlm
+      and phern, moved to `_LOG.append(…)` by a codemod. `Inbox.append` is left
+      alone.
+      - Hot path: the writer measures 1.0-1.05× the bare append on `assistant/chunk`.
+      - `test_the_writer_costs_the_hot_path_almost_nothing` bounds it at 1.2×,
+        alternating the two measurements within each round.
+    - **T6d, tests.** `ph.testing.log_event(log, type, data, surface)` goes through
+      `SCAFFOLDING`. About 475 test sites were rewritten mechanically, and the star-arg
+      ones by hand. Test kinds carry `writer=SCAFFOLDING`. It defers unknown types to
+      the session's own F11 refusal, so F11 stays testable.
+    - **T6e, enforcement** (`test_log_writers.py`, rewritten).
+      - Statically, over every package:
+        - every write is the module's own writer, minted at module top and used
+          there alone;
+        - no import of another module's writer;
+        - no `LogWriter(...)` construction;
+        - no `scaffolding_writer` outside `ph.testing`;
+        - no `._append(` outside `ph.session`.
+      - The table equals what the writers write, in both directions.
+      - At runtime:
+        - a module's writer refuses `sandbox/mode`;
+        - `log_writer("ph.seams.sandbox")` is refused from another module;
+        - the scaffolding writer is refused outside `ph.testing`;
+        - `Session` has no `append`;
+        - a declared type is written by its owner and by nobody else.
+    - **"`WRITERS` derived from the writers minted" is realized as *checked against*
+      them, not *generated from* them.** If mint calls named their own types, any
+      module could claim `sandbox/mode`. So `_WRITTEN_BY` stays the authority, since
+      the writer is minted from it. The gate derives every module's writes from its
+      writer's call sites and kind declarations, and holds the two equal.
+    - F12 is closed. The F12/P10-02 caveats beside `SandboxSeam.logged_mode` and
+      `approval_policy`, and DESIGN's known-gaps row, now state the residual
+      deliberate bypass (rule 6).
+    - **Sabotaged eight ways**, and each failed its gate:
+      - the ownership check dropped;
+      - a module borrowing `ph.seams.sandbox`'s writer;
+      - a grant nothing writes;
+      - any module minting any writer;
+      - `declare_intent` without the writer check;
+      - a seam calling `_append` past its writer;
+      - the writer rebuilding its type set per call (1.23-1.32×, where the first
+        bound of 1.3× missed it and was tightened);
+      - and, in T6d, the `record` name colliding with locals, which mypy caught and
+        which led to the `log_event` rename.
 
 ## Next todo list, after this one
 
@@ -424,7 +749,7 @@ Two areas the cleanup pass also flagged, to be turned into their own list once t
 above is done:
 
 1. **Public API used only by tests**:
-   - `IntentJournal.pending` and `.outcome`;
+   - `IntentJournal.outcome` (`.pending` gained a real consumer in T5's `record_wait`);
    - `settled_record` and `is_declared` in `ph.session.__all__`;
    - `ToolRunContext.idempotency_key`;
    - the seams' `pending_approvals` / `pending_questions` now that repair no longer calls
@@ -433,14 +758,14 @@ above is done:
 
    For each, keep it (a real consumer is coming), make it private, or delete it.
 2. **Test consolidation**:
-   - one shared AST walker for `test_log_writers.py` and
-     `test_importing_repair_declares_every_core_kind`, on top of
-     `tests/workspace_layout.py`;
+   - ~~one shared AST walker for `test_log_writers.py` and `test_intent_kinds.py`~~ —
+     done in the post-T6 cleanup (`workspace_layout.parsed_modules`, `import_base`);
    - drop the per-package `*_in_the_vocabulary` tests (phern, ph-stabilize, ph-rlm) that the
      cross-package gate now covers;
-   - derive the test intent kinds from the real ones;
-   - retire `test_the_fold_agrees_with_the_folds_it_replaces`, which now compares the fold
-     with itself.
+   - derive the test intent kinds from the real ones.
+
+   (`test_the_fold_agrees_with_the_folds_it_replaces`, also on this list, was retired in
+   T3.)
 3. **Function-level imports across the codebase.**
    - T4 removes the ten on the kinds and resume path.
    - That leaves about 54 elsewhere: 36 in `ph` at the time of counting, then `ph_app`,

@@ -41,6 +41,7 @@ from ..cordis import Context, Disposer, Running, maybe_await, plugin, releasing,
 from ..json import JsonValue, as_int, as_str
 from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ..session import Session, SessionEvent, SessionFoldCache
+from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
 from ..tools.definition import Deny
 from ..tools.errors import (
@@ -53,8 +54,11 @@ from ..tools.errors import (
 from ..tools.registry import ToolRestriction
 from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
+from .credentials import hold_for_credential
 from .invariants import contribute_fold_cache
 from .skills import ORDER_SKILLS, SkillRestriction, SkillService
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "ADMITTED",
@@ -83,6 +87,7 @@ __all__ = [
     "admission_payload",
     "apply",
     "child_is_live",
+    "child_route",
     "default_child_name",
     "descendants",
     "downgrade_text",
@@ -172,6 +177,19 @@ that actually mean settled were missing. The effect was that a root which had
 ever run a child to completion could never be released: every settled child read
 as live, forever, which is most of what passivation exists to do.
 """
+
+
+def child_route(request: SubagentRequest) -> tuple[str, str]:
+    """The route a child runs on: its request's selector, else its parent's.
+
+    **No fallback on an explicit selector**: a child asked for a model runs on that
+    model or not at all, since falling back would answer the parent's question on a
+    model it did not choose. Stated here, once, for the provider that builds the
+    child and for the resume check that asks whether its credential is here (T5).
+    Empty where neither says; a provider refuses that.
+    """
+    options = request.parent.options
+    return request.provider or options.provider or "", request.model or options.model or ""
 
 
 def child_is_live(row: Mapping[str, Any]) -> bool:
@@ -849,7 +867,8 @@ class SubagentService:
         """
         if session is None:
             return
-        session.append(
+        _LOG.append(
+            session,
             STATUS,
             {"runId": run_id, "status": status, "detail": detail, "sessionId": session_id},
         )
@@ -1118,6 +1137,19 @@ class SubagentService:
             )
         return await self._readmit_children(parent, roster)
 
+    async def readmit_waiting(self, parent: AgentDriver) -> Sequence[str]:
+        """Put back to work the children of `parent` held for a credential that has
+        since arrived (T5). Returns the revived.
+
+        The same sweep a resume runs, asked again: a child still missing its
+        credential stays held and appends nothing, and one whose name is here now has
+        its hold settled and is readmitted. For whoever hands a deployment a
+        credential — the daemon's `credentials/store`.
+        """
+        if parent.session is None:
+            return []
+        return await self._readmit_children(parent, dict(self.roster(parent.session)))
+
     async def _readmit_children(
         self, parent: AgentDriver, roster: Mapping[str, Any]
     ) -> Sequence[str]:
@@ -1146,6 +1178,14 @@ class SubagentService:
         once allowed, and the child would stay queued for good. Guards gate new
         work; a readmit is old work resuming.
 
+        **A child whose route names a credential this deployment cannot supply is held,
+        not readmitted** (T5). Readmitted, it would fail at its first request and
+        spend its retry ladder on a key a person could supply in a second, had
+        anything said it was missing. Held, it stays `queued` — live, so its parent
+        is not released under it — no start is counted, and the parent's log says
+        which name it waits for (`record_wait`). `readmit_waiting` asks again when a
+        credential arrives.
+
         Returns the run ids that are running again. One child that cannot be
         rebuilt is logged and skipped rather than failing the sweep: a root
         coming back must not be held hostage by the least recoverable thing in
@@ -1156,7 +1196,14 @@ class SubagentService:
             if row.get("deleted") or row.get("status") != "queued" or run_id in self._runs:
                 continue
             try:
-                run = await self._readmit_one(parent, run_id, row)
+                request = self._request_of(parent, row)
+                # Only for a child something can readmit: one nothing can is settled
+                # below as unresumable, and holding it would leave it `queued` forever.
+                if self._readmitter(row) is not None and await self._held_for_credential(
+                    parent, run_id, request
+                ):
+                    continue
+                run = await self._readmit_one(parent, run_id, row, request)
             except Exception as error:
                 # **Logged *and* settled** (K4). Skipping alone left the row
                 # `queued`, which `child_is_live` reads as waiting for a slot —
@@ -1191,16 +1238,9 @@ class SubagentService:
             revived.append(run_id)
         return revived
 
-    async def _readmit_one(
-        self, parent: AgentDriver, run_id: str, row: Mapping[str, Any]
-    ) -> SubagentRun | None:
-        """One child, through the admission path it originally took."""
-        owner = as_str(row.get("owner"))
-        name = self.resolve(owner or None)
-        entry = self._providers.get(name or "")
-        if entry is None or not isinstance(entry.provider, ReadmittingProvider):
-            return None
-        request = self.resolve_preset(
+    def _request_of(self, parent: AgentDriver, row: Mapping[str, Any]) -> SubagentRequest:
+        """The request a child was admitted with, rebuilt from its roster row."""
+        return self.resolve_preset(
             SubagentRequest(
                 prompt=as_str(row.get("prompt")),
                 parent=parent,
@@ -1216,6 +1256,26 @@ class SubagentService:
                 tools=None if row.get("tools") is None else tuple(row["tools"]),
             )
         )
+
+    async def _held_for_credential(
+        self, parent: AgentDriver, run_id: str, request: SubagentRequest
+    ) -> bool:
+        """Whether this child waits for a credential, with the log made to say so."""
+        session = parent.session
+        if session is None:
+            return False
+        held = await hold_for_credential(self.ctx, session, run_id, *child_route(request))
+        return held is not None
+
+    async def _readmit_one(
+        self, parent: AgentDriver, run_id: str, row: Mapping[str, Any], request: SubagentRequest
+    ) -> SubagentRun | None:
+        """One child, through the admission path it originally took."""
+        owner = as_str(row.get("owner"))
+        name = self.resolve(owner or None)
+        entry = self._providers.get(name or "")
+        if entry is None or not isinstance(entry.provider, ReadmittingProvider):
+            return None
         boundary = self._delegating_boundary(request)
         held = self.held_by(request, boundary)
         self.check_grant(request, held)

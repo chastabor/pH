@@ -28,7 +28,7 @@ from ph.session.known_event_types import (
     KNOWN_SESSION_EVENT_TYPES,
 )
 from ph.system_prompt.assembly import CONTEXT_PLUGIN
-from ph.testing import FAKE_OPTIONS, MountProfile, user_payload
+from ph.testing import FAKE_OPTIONS, MountProfile, log_event, user_payload
 from ph_stabilize.input_offload import (
     HUMAN_TOKEN_LIMIT_BEFORE_EVICT,
     TOO_LARGE_HUMAN_MSG,
@@ -175,11 +175,14 @@ def test_a_replacement_is_never_offloaded_again() -> None:
     """
     config = Config(token_limit=100)
     session = Session("idempotent")
-    session.append("turn/start", {"turn": 1})
-    original = session.append("user/message", user_payload("p" * 2_001), SurfaceIntent("append"))
+    log_event(session, "turn/start", {"turn": 1})
+    original = log_event(
+        session, "user/message", user_payload("p" * 2_001), SurfaceIntent("append")
+    )
     assert _pending(session, config) is not None, "the paste should have been offloaded"
 
-    session.append(
+    log_event(
+        session,
         "user/message",
         user_payload("still long " * 100),
         SurfaceIntent(
@@ -204,10 +207,11 @@ def test_the_persons_paste_is_offloaded_not_the_harness_context_after_it() -> No
     """
     config = Config(token_limit=100)
     session = Session("batch")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    paste = session.append("user/message", user_payload("p" * 2_001), SurfaceIntent("append"))
-    session.append(
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    paste = log_event(session, "user/message", user_payload("p" * 2_001), SurfaceIntent("append"))
+    log_event(
+        session,
         "user/message",
         create_user_message(
             content=[{"type": "text", "text": "context " * 300}],

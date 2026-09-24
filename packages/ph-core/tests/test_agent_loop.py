@@ -48,7 +48,14 @@ from ph.llm.types import (
 from ph.session import SurfaceIntent, SurfaceReplace
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import MountProfile, block_text, plugin_payload, simple_tool, user_payload
+from ph.testing import (
+    MountProfile,
+    block_text,
+    log_event,
+    plugin_payload,
+    simple_tool,
+    user_payload,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -200,7 +207,8 @@ async def test_the_request_derives_its_messages_after_the_waterfall(mount: Mount
         proposal: RequestProposal, next_: Callable[..., Awaitable[LlmCallConfig]]
     ) -> LlmCallConfig:
         if not any(event.type == "assistant/message" for event in session.events):
-            session.append(
+            log_event(
+                session,
                 "user/message",
                 user_payload("appended from agent/request", "injected"),
                 SurfaceIntent("append"),
@@ -493,7 +501,7 @@ async def test_a_corrupt_inbox_splice_names_the_field_that_is_wrong(
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("corrupt")
-    session.append("agent/inbox/spliced", {"target": "next-turn", "start": 0, **splice})
+    log_event(session, "agent/inbox/spliced", {"target": "next-turn", "start": 0, **splice})
 
     with pytest.raises(ValueError, match="invalid persisted inbox splice") as caught:
         ctx.require(AGENTS).create(session, FAKE)
@@ -829,7 +837,8 @@ async def test_context_a_compaction_took_away_is_sent_again(mount: MountProfile)
     (snapshot,) = _plugin_snapshots(session)
 
     # The shape a compaction leaves: a summary replacing what it shadowed.
-    session.append(
+    log_event(
+        session,
         "user/message",
         plugin_payload("a summary of the conversation so far", "summary", plugin="compaction"),
         SurfaceIntent(

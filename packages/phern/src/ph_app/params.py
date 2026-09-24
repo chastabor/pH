@@ -6,7 +6,7 @@ at twenty-one sites, `params.get("cursor")` handed to a function that then asked
 those was a claim about the wire made at the point of use, and mypy could check
 none of them because a dict says nothing about its keys.
 
-Each model here is that claim, made once, at the edge. `Session.append`'s
+Each model here is that claim, made once, at the edge. `Session._append`'s
 argument for typing a payload applies unchanged: a producer that can be checked
 is, and the runtime gate — `parse_params`, refusing with `invalid_params` —
 stays for the one that cannot.
@@ -185,10 +185,15 @@ class PresetParams(MutationParams):
     preset: PresetName
 
 
-class StoreCredentialParams(MutationParams):
+class StoreCredentialParams(SessionParams):
     """`credentials/store`. **The value is used and not kept**: it is never
     logged, never echoed, and this model is the only thing that holds it —
-    for exactly as long as the call takes."""
+    for exactly as long as the call takes.
+
+    Not a `MutationParams` since T5: the verb takes no idempotence key, because
+    storing one value twice stores it once and a key would outlive the value it
+    named. A call that stamps one anyway is refused by `extra="forbid"` — see
+    `PROTOCOL_VERSION` 4 for the 0.3.x client that does."""
 
     name: str
     value: str

@@ -13,8 +13,9 @@ only ph-core — a producer in another package (the subagent providers,
 ph-stabilize's `tool-todo`) owes the same proof through its own bundle's tests,
 which is the deal the per-type comments below record.
 
-**And the write door now refuses what the read door refuses** (F11): `Session.append`
-raises `UnknownEventTypeError` for a type outside the vocabulary, where it used to
+**And the write door now refuses what the read door refuses** (F11): the append behind
+every writer (`Session._append`, T6) raises `UnknownEventTypeError` for a type outside
+the vocabulary, where it used to
 write it and leave the log unopenable at the next resume. A type that belongs to a
 package outside ph-core is added with `declare_log_type`, at import, the way a bus
 event is declared with `EventRegistry.declare`.
@@ -31,14 +32,18 @@ from types import MappingProxyType
 
 __all__ = [
     "IGNORABLE_SESSION_EVENT_TYPES",
+    "INTENT_PAIRS",
     "KNOWN_SESSION_EVENT_TYPES",
     "WRITERS",
+    "IntentPair",
     "LogTypeDeclaration",
     "LogTypeError",
     "UnknownEventTypeError",
     "declare_log_type",
+    "declared_owner",
     "is_ignorable",
     "is_known",
+    "written_by",
 ]
 
 KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
@@ -210,6 +215,13 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # reader that skipped them would run an effect the log says happened.
         "tool/effect",
         "tool/effect-settled",
+        # A session, or one of its children, waiting for a credential its route
+        # names and this deployment cannot supply (T5) — opened when the resume
+        # check holds it, settled when the name arrives. Names only, never values
+        # (I-3). Ignorable: a reader that skips them starts the work and meets the
+        # missing key at its first request, which is what every build did before.
+        "credential/needed",
+        "credential/supplied",
         # Persistent-kernel state (D17; emitted by ph-rlm's snapshot policy).
         # These are what make `persistence: "namespace"` admissible at all: the
         # seam takes the provider's promise at registration, and these events are
@@ -328,6 +340,8 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
 
 IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
     {
+        "credential/needed",
+        "credential/supplied",
         "kernel/snapshot",
         "kernel/restored",
         # Status mirroring and usage bookkeeping. `subagent/admitted` and
@@ -404,7 +418,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
 
 Ignorability is a property of the type, not of the call — "a reader that does
 not recognize this `type` may skip it" is true of every record of the type or
-none — so it is declared here, beside the type, and `Session.append` stamps it.
+none — so it is declared here, beside the type, and `Session._append` stamps it.
 A per-call flag would let two call sites disagree about one type, and a
 forgotten flag is an older build refusing a log it could have read.
 
@@ -415,118 +429,177 @@ attribution — belong here.
 """
 
 
+# ------------------------------------------------------------- intent pairs --
+
+
+@dataclass(frozen=True, slots=True)
+class IntentPair:
+    """What settles the intent one type opens, and the leaf that declares its kind."""
+
+    settled: str
+    leaf: str
+    """The module whose `IntentKind(...)` declares the pair — a package's `kinds`."""
+
+
+INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
+    {
+        "approval/asked": IntentPair("approval/decided", "ph.session.kinds"),
+        "credential/needed": IntentPair("credential/supplied", "ph.session.kinds"),
+        "client/command": IntentPair("client/command-settled", "ph_app.kinds"),
+        "question/asked": IntentPair("question/answered", "ph.session.kinds"),
+        "shell/command": IntentPair("shell/result", "ph.session.kinds"),
+        "tool/code-dispatch-start": IntentPair("tool/code-dispatch", "ph.session.kinds"),
+        "tool/effect": IntentPair("tool/effect-settled", "ph.session.kinds"),
+    }
+)
+"""Every type that opens an intent, by the type that opens it (T4).
+
+**What lets repair notice a kind it was never given.** A kind is declared by
+importing its leaf, and a process that never imported a package has none of that
+package's kinds: before this table, repair settled what was declared and silently
+left the rest open — an open `client/command`, resumed by a process without
+`ph_app`, read as a command still running forever. With it, repair refuses such a
+resume and names the leaf (`UndeclaredIntentError`).
+
+Here, beside the vocabulary, for decision 7's reason: ph-core's reader already knows
+every type a package writes, so it can know which of them open an intent without
+importing the package. `test_intent_kinds.py` holds this table equal to the kinds
+the leaves declare, in both directions — every `IntentKind(...)` in shipped code, its
+settling type and its module.
+
+Not enforced: an intent pair on a *declared* log type (`declare_log_type`). None
+ships; one would be a package's own, and a log carrying a required type this reader
+does not know is refused at seed already.
+"""
+
+
 # ---------------------------------------------------------- writers of record --
 
-_WRITTEN_BY: Mapping[str, frozenset[str]] = {
-    "ph.agent.inbox": frozenset({"agent/inbox/spliced"}),
-    "ph.agent_loop.driver": frozenset(
-        {
-            "assistant/chunk",
-            "assistant/message",
-            "request/context",
-            "request/header",
-            "step/end",
-            "step/retry",
-            "step/start",
-            "turn/end",
-            "turn/start",
-            "user/message",
-        }
-    ),
-    "ph.llm.media": frozenset({"attachment/degraded", "attachment/oversized"}),
-    "ph.llm.retry": frozenset({"llm/retry"}),
-    "ph.persistence.jsonl": frozenset({"session/resumed"}),
-    "ph.seams.approval": frozenset({"approval/asked", "approval/decided", "approval/policy"}),
-    "ph.seams.commands": frozenset({"command/done", "command/run"}),
-    "ph.seams.fs": frozenset({"fs/observed"}),
-    "ph.seams.goals": frozenset({"goal/continued", "goal/gate", "goal/set", "goal/settled"}),
-    "ph.seams.permission_presets": frozenset({"permission/preset"}),
-    "ph.seams.sandbox": frozenset({"sandbox/denied", "sandbox/mode"}),
-    "ph.seams.schedule": frozenset(
-        {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
-    ),
-    # Through `ctx.intents`: the declaring module is the writer of record (P10-08).
-    "ph.seams.shell": frozenset({"shell/command", "shell/result"}),
-    # The seam writes the terminal status for a child it gave up on — one the
-    # provider admitted and can no longer end — so the roster row closes.
-    "ph.seams.subagents": frozenset({"subagent/status"}),
-    "ph.seams.uploads": frozenset({"attachment/uploaded"}),
-    "ph.seams.user_questions": frozenset({"question/answered", "question/asked"}),
-    "ph.seams.workspace": frozenset(
-        {
-            "workspace/acquired",
-            "workspace/checkpoint",
-            "workspace/disposed",
-            "workspace/provisioned",
-            "workspace/retained",
-        }
-    ),
-    "ph.session.session": frozenset({"session/end-seed"}),
-    "ph.session.store": frozenset({"session/segmented"}),
-    "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
-    "ph.tools.code_mode": frozenset({"tool/code-dispatch", "tool/code-dispatch-start"}),
-    "ph.tools.registry": frozenset({"tool/effect", "tool/effect-settled"}),
-    "ph_app.daemon.supervisor": frozenset(
-        {
-            "client/command",
-            "client/command-settled",
-            "supervisor/failed",
-            "supervisor/passivated",
-            "supervisor/recovered",
-            "supervisor/retry",
-            "supervisor/unreachable",
-            "supervisor/violated",
-        }
-    ),
-    "ph_rlm.context_loader": frozenset({"context/loaded"}),
-    "ph_rlm.harness": frozenset({"harness/refine-considered"}),
-    "ph_rlm.harness.service": frozenset({"harness/refined"}),
-    "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
-    "ph_rlm.subagents": frozenset(
-        {"subagent/admitted", "subagent/deleted", "subagent/status", "subagent/usage-attributed"}
-    ),
-    # Compaction rewrites the model's history through surface `replace` — a
-    # summary as a `user/message`, an elided call as an `assistant/message`, a
-    # clipped result as a `tool/result` — which is why the three surface types
-    # have a second writer, and the one reason they may.
-    "ph_stabilize.compaction": frozenset(
-        {
-            "assistant/message",
-            "compaction/args-truncated",
-            "compaction/declined",
-            "compaction/summarized",
-            "tool/result",
-            "user/message",
-        }
-    ),
-    "ph_stabilize.hitl": frozenset({"approval/mode"}),
-    # An offloaded paste is a `user/message` replace for the same reason.
-    "ph_stabilize.input_offload": frozenset({"offload/input-spilled", "user/message"}),
-    "ph_stabilize.limits": frozenset({"limits/breaker-tripped", "limits/exceeded"}),
-    "ph_stabilize.offload": frozenset({"offload/spilled"}),
-    # Two writers of one list on purpose: a procedure a skill declares is a todo
-    # list, and both rows mean "the list is now this".
-    "ph_stabilize.skill_steps": frozenset({"skill-steps/budget", "todo/write"}),
-    "ph_stabilize.todo": frozenset({"todo/write"}),
-}
-"""Which shipped module appends which of ph-core's types (P10-01).
 
-**The one thing the runtime refusal cannot say.** Since F11 `Session.append` refuses a
-type this build could not read back; what is left is *who may write each one*, and a
-table that says so is the difference between "deliberately shared" and "nobody
-noticed". Grouped by module so each shared type carries its reason where it is shared.
+def _with_pairs(appended: Mapping[str, frozenset[str]]) -> Mapping[str, frozenset[str]]:
+    """`appended`, plus each intent pair credited to the leaf that declares its kind —
+    so `INTENT_PAIRS` is the one statement of which leaf writes which pair."""
+    table = dict(appended)
+    for opened, pair in INTENT_PAIRS.items():
+        table[pair.leaf] = table.get(pair.leaf, frozenset()) | {opened, pair.settled}
+    return table
 
-Held to the code by `test_log_writers.py`, which walks every shipped module in every
-package: an append site whose module is not listed for its type fails, and so does a
-listed pair nothing appends any more. **Lexical, not dynamic** — the module whose code
-calls `append`, not the row that happened to be running: `permission-presets` changes
-the sandbox posture by calling `SandboxSeam.set_mode`, and the append is the seam's.
 
-**A pair written through `ctx.intents` belongs to the module that declares its
-kind** (`IntentKind(opened=…, settled=…)`), not to the journal whose code calls
-`append` on its behalf, nor to the caller holding the kind: the declaration is the
-one place both types are named. Not enforced: which modules may *use* a declared
-kind — the walk sees the declaration, not who passes it to the journal.
+_WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
+    {
+        "ph.agent.inbox": frozenset({"agent/inbox/spliced"}),
+        "ph.agent_loop.driver": frozenset(
+            {
+                "assistant/chunk",
+                "assistant/message",
+                "request/context",
+                "request/header",
+                "step/end",
+                "step/retry",
+                "step/start",
+                "turn/end",
+                "turn/start",
+                "user/message",
+            }
+        ),
+        "ph.llm.media": frozenset({"attachment/degraded", "attachment/oversized"}),
+        "ph.llm.retry": frozenset({"llm/retry"}),
+        "ph.persistence.jsonl": frozenset({"session/resumed"}),
+        "ph.seams.approval": frozenset({"approval/policy"}),
+        "ph.seams.commands": frozenset({"command/done", "command/run"}),
+        "ph.seams.fs": frozenset({"fs/observed"}),
+        "ph.seams.goals": frozenset({"goal/continued", "goal/gate", "goal/set", "goal/settled"}),
+        "ph.seams.permission_presets": frozenset({"permission/preset"}),
+        "ph.seams.sandbox": frozenset({"sandbox/denied", "sandbox/mode"}),
+        "ph.seams.schedule": frozenset(
+            {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
+        ),
+        # The seam writes the terminal status for a child it gave up on — one the
+        # provider admitted and can no longer end — so the roster row closes.
+        "ph.seams.subagents": frozenset({"subagent/status"}),
+        "ph.seams.uploads": frozenset({"attachment/uploaded"}),
+        "ph.seams.workspace": frozenset(
+            {
+                "workspace/acquired",
+                "workspace/checkpoint",
+                "workspace/disposed",
+                "workspace/provisioned",
+                "workspace/retained",
+            }
+        ),
+        "ph.session.session": frozenset({"session/end-seed"}),
+        "ph.session.store": frozenset({"session/segmented"}),
+        "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
+        "ph_app.daemon.supervisor": frozenset(
+            {
+                "supervisor/failed",
+                "supervisor/passivated",
+                "supervisor/recovered",
+                "supervisor/retry",
+                "supervisor/unreachable",
+                "supervisor/violated",
+            }
+        ),
+        "ph_rlm.context_loader": frozenset({"context/loaded"}),
+        "ph_rlm.harness": frozenset({"harness/refine-considered"}),
+        "ph_rlm.harness.service": frozenset({"harness/refined"}),
+        "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
+        "ph_rlm.subagents": frozenset(
+            {
+                "subagent/admitted",
+                "subagent/deleted",
+                "subagent/status",
+                "subagent/usage-attributed",
+            }
+        ),
+        # Compaction rewrites the model's history through surface `replace` — a
+        # summary as a `user/message`, an elided call as an `assistant/message`, a
+        # clipped result as a `tool/result` — which is why the three surface types
+        # have a second writer, and the one reason they may.
+        "ph_stabilize.compaction": frozenset(
+            {
+                "assistant/message",
+                "compaction/args-truncated",
+                "compaction/declined",
+                "compaction/summarized",
+                "tool/result",
+                "user/message",
+            }
+        ),
+        "ph_stabilize.hitl": frozenset({"approval/mode"}),
+        # An offloaded paste is a `user/message` replace for the same reason.
+        "ph_stabilize.input_offload": frozenset({"offload/input-spilled", "user/message"}),
+        "ph_stabilize.limits": frozenset({"limits/breaker-tripped", "limits/exceeded"}),
+        "ph_stabilize.offload": frozenset({"offload/spilled"}),
+        # Two writers of one list on purpose: a procedure a skill declares is a todo
+        # list, and both rows mean "the list is now this".
+        "ph_stabilize.skill_steps": frozenset({"skill-steps/budget", "todo/write"}),
+        "ph_stabilize.todo": frozenset({"todo/write"}),
+    }
+)
+"""Which shipped module appends which of ph-core's types (P10-01). The leaves'
+rows — each kind's pair, through `ctx.intents` (P10-08, T4) — come from
+`INTENT_PAIRS`.
+
+**Who may write each type**, which F11's refusal of an unknown type cannot say: the
+difference between "deliberately shared" and "nobody noticed". Grouped by module so each
+shared type carries its reason where it is shared.
+
+**The authority a module's writer is minted from** (T6): `log_writer(__name__)` hands a
+module a writer for exactly its row, and the writer refuses any other type at the write
+(F12) — so this table is enforced at runtime, not only read by a test.
+`test_log_writers.py` holds it to the code in both directions: a module that writes a
+type its row does not grant fails, and so does a grant nothing writes any more.
+**Lexical, not dynamic** — the module whose writer writes, not the row that happened to
+be running: `permission-presets` changes the sandbox posture by calling
+`SandboxSeam.set_mode`, and the write is the seam's.
+
+**A pair written through `ctx.intents` belongs to the leaf that declares its
+kind** (`IntentKind(opened=…, settled=…)` in a package's `kinds`, T4), not to the
+journal that writes it through the leaf's writer (`IntentKind.writer`), nor to the
+seam holding the kind: the declaration is the one place both types are named, and a
+kind whose writer does not own both is refused. Not enforced: which modules may *use*
+a declared kind — the walk sees the declaration, not who passes it to the journal.
 
 Repair is not a writer here: its closers are synthesized onto a seed
 (`interrupted_turn_closers`), never appended.
@@ -617,13 +690,24 @@ def declare_log_type(name: str, *, owner: str, ignorable: bool) -> LogTypeDeclar
     return declaration
 
 
+def written_by(module: str) -> frozenset[str]:
+    """The ph-core types `module` is a writer of record for — what its writer may write."""
+    return _WRITTEN_BY.get(module, frozenset())
+
+
+def declared_owner(event_type: str) -> str | None:
+    """The module that declared `event_type` with `declare_log_type`, if one did."""
+    declared = _DECLARED.get(event_type)
+    return None if declared is None else declared.owner
+
+
 def is_known(event_type: str) -> bool:
     """Whether this build writes and reads `event_type`: ph-core's, or declared."""
     return event_type in KNOWN_SESSION_EVENT_TYPES or event_type in _DECLARED
 
 
 def is_ignorable(event_type: str) -> bool:
-    """Whether a build without this type may skip it. Stamped by `Session.append`."""
+    """Whether a build without this type may skip it. Stamped by `Session._append`."""
     if event_type in IGNORABLE_SESSION_EVENT_TYPES:
         return True
     declared = _DECLARED.get(event_type)

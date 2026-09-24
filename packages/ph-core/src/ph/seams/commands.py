@@ -32,8 +32,11 @@ from ..cordis import (
 from ..json import JsonValue
 from ..keys import COMMANDS
 from ..session import Session
+from ..session.writers import log_writer
 from ..wire import WireModel, declarable
 from ._registry import claim_key
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "CommandBody",
@@ -216,7 +219,7 @@ class CommandRegistry:
             raise KeyError(f'unknown command "/{name}"')
         definition = entry.definition
         if session is not None:
-            session.append("command/run", {"name": name, "argument": argument.strip()})
+            _LOG.append(session, "command/run", {"name": name, "argument": argument.strip()})
         outcome = "ok"
         detail: str | None = None
         try:
@@ -286,7 +289,7 @@ class CommandRegistry:
                 data: dict[str, JsonValue] = {"name": name, "outcome": outcome}
                 if detail is not None:
                     data["detail"] = detail
-                session.append("command/done", data)
+                _LOG.append(session, "command/done", data)
 
 
 @plugin("commands")

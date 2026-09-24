@@ -5,7 +5,7 @@
 conversions between the two in-memory shapes all live in `ph.json`, a
 stdlib-only leaf — see its docstring for what that separation costs and buys.
 What is here is what A1 needs: the walk that decides whether a payload may enter
-a log, and it is here because `Session.append` is the append site.
+a log, and it is here because `Session._append` is the append site.
 
 The session log is the durable source of truth, so a bad payload must fail at
 the append site rather than later during a backend flush. `freeze_json_value`

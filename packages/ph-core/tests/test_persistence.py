@@ -43,8 +43,9 @@ from ph.session import (
     SessionHeader,
     SurfaceIntent,
 )
+from ph.session.writers import LogWriter
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import MountProfile, stored_log, user_payload, write_reference_fork
+from ph.testing import MountProfile, log_event, stored_log, user_payload, write_reference_fork
 from ph.tools import ToolRunContext
 
 pytestmark = pytest.mark.anyio
@@ -68,8 +69,9 @@ def _caught_up(ctx: Any, session: Session | None) -> bool:  # noqa: ANN401
 
 def test_append_is_synchronous_and_io_free() -> None:
     # A coroutine here would put disk latency in front of every observer.
-    assert not inspect.iscoroutinefunction(Session.append)
-    assert "await" not in inspect.getsource(Session.append)
+    assert not inspect.iscoroutinefunction(Session._append)
+    assert "await" not in inspect.getsource(Session._append)
+    assert not inspect.iscoroutinefunction(LogWriter.append), "nor the door to it (T6)"
 
 
 async def test_flush_writes_a_header_line_and_one_line_per_event(
@@ -77,8 +79,8 @@ async def test_flush_writes_a_header_line_and_one_line_per_event(
 ) -> None:
     ctx = await mount(_root(tmp_path))
     session = ctx.require(SESSIONS).create("s")
-    session.append("turn/start", {"turn": 1})
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 
     path = stored_log(tmp_path / "sessions", "s")
     assert not path.exists(), "append must not touch the disk"
@@ -107,10 +109,10 @@ async def test_flush_is_idempotent_and_appends_only_new_events(
 ) -> None:
     ctx = await mount(_root(tmp_path))
     session = ctx.require(SESSIONS).create("s")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     await ctx.require(SESSIONS).flush(session)
     await ctx.require(SESSIONS).flush(session)
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await ctx.require(SESSIONS).flush(session)
 
     assert len(stored_log(tmp_path / "sessions", "s").read_text().splitlines()) == 3
@@ -133,8 +135,8 @@ async def test_a_forked_session_stores_a_reference_not_a_copy(
     """
     ctx = await mount(_root(tmp_path))
     parent = ctx.require(SESSIONS).create("parent")
-    parent.append("turn/start", {"turn": 1})
-    parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(parent, "turn/start", {"turn": 1})
+    log_event(parent, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await ctx.require(SESSIONS).flush(parent)
 
     child = ctx.require(SESSIONS).fork(parent, None, "child")
@@ -174,8 +176,8 @@ async def test_a_child_is_never_durable_before_the_prefix_it_references(
     """
     ctx = await mount(_root(tmp_path))
     parent = ctx.require(SESSIONS).create("parent")
-    parent.append("turn/start", {"turn": 1})
-    parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(parent, "turn/start", {"turn": 1})
+    log_event(parent, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 
     # The parent has never been flushed. Its file does not exist.
     child = ctx.require(SESSIONS).fork(parent, None, "child")
@@ -199,9 +201,9 @@ async def test_flushing_a_subagent_child_does_not_write_its_parent(
     ctx = await mount(_root(tmp_path))
     sessions = ctx.require(SESSIONS)
     parent = sessions.create("parent")
-    parent.append("turn/start", {"turn": 1})
+    log_event(parent, "turn/start", {"turn": 1})
     child = sessions.create("child", meta={"parentSession": "parent", "origin": "subagent"})
-    child.append("turn/start", {"turn": 1})
+    log_event(child, "turn/start", {"turn": 1})
 
     assert sessions.lineage(child) == (child,)
     await sessions.flush(child)
@@ -217,8 +219,8 @@ async def test_a_segment_still_writes_its_parent_first(mount: MountProfile, tmp_
     ctx = await mount(_root(tmp_path))
     sessions = ctx.require(SESSIONS)
     parent = sessions.create("parent")
-    parent.append("turn/start", {"turn": 1})
-    parent.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(parent, "turn/start", {"turn": 1})
+    log_event(parent, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 
     child = sessions.roll(parent, "child")
     assert sessions.lineage(child) == (parent, child)
@@ -320,7 +322,7 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
             call_id="c", name="touch", arguments={}, scope=ctx, session=session
         )
     )
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     await ctx.require(TOOLS).dispatch(run)
     # Nothing owed when the body ran: the barrier wrote it first.
     assert flushed_before_body == [True]
@@ -380,7 +382,7 @@ async def test_a_nested_dispatch_that_reaches_past_the_tree_is_preceded_by_a_bar
 
 def test_events_survive_a_wire_round_trip() -> None:
     session = Session("s")
-    session.append("user/message", user_payload("hi"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hi"), SurfaceIntent("append"))
     for event in session.events:
         assert SessionEvent.from_wire(event.to_wire()).to_wire() == event.to_wire()
 
@@ -427,17 +429,17 @@ async def test_segments_each_hold_only_their_own_run(mount: MountProfile, tmp_pa
     ctx = await mount(_root(tmp_path))
     first = ctx.require(SESSIONS).create("s0")
     for turn in (1, 2):
-        first.append("turn/start", {"turn": turn})
-        first.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+        log_event(first, "turn/start", {"turn": turn})
+        log_event(first, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
 
     second = ctx.require(SESSIONS).roll(first, "s1")
     for turn in (3, 4):
-        second.append("turn/start", {"turn": turn})
-        second.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+        log_event(second, "turn/start", {"turn": turn})
+        log_event(second, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
 
     third = ctx.require(SESSIONS).roll(second, "s2")
-    third.append("turn/start", {"turn": 5})
-    third.append("turn/end", {"turn": 5, "reason": {"kind": "completed"}})
+    log_event(third, "turn/start", {"turn": 5})
+    log_event(third, "turn/end", {"turn": 5, "reason": {"kind": "completed"}})
     await ctx.require(SESSIONS).flush(third)
 
     root = tmp_path / "sessions"
@@ -500,13 +502,13 @@ async def test_a_write_that_fails_part_way_takes_its_bytes_back(
     from ph.persistence import jsonl
 
     store, session = _tracked(tmp_path)
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     await store.flush(session)
     path = stored_log(tmp_path, "s")
     before = path.stat().st_size
 
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("step/end", {"turn": 1, "step": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "step/end", {"turn": 1, "step": 1})
     with monkeypatch.context() as patch:
         patch.setattr(jsonl, "_write_all", _half_then_full_disk)
         with pytest.raises(OSError, match="No space left"):
@@ -532,9 +534,9 @@ async def test_a_retry_behind_a_write_nobody_took_back_still_appends_cleanly(
     from ph.persistence import jsonl
 
     store, session = _tracked(tmp_path)
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     await store.flush(session)
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     with monkeypatch.context() as patch:
         patch.setattr(jsonl, "_write_all", _half_then_full_disk)
         patch.setattr(jsonl, "_take_back", lambda *_args: None)
@@ -627,7 +629,7 @@ async def test_a_resumed_log_appends_behind_its_torn_tail_cleanly(
     store, session = _tracked(
         tmp_path, Session("torn", seed=events, header=header, durable=len(events))
     )
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await store.flush(session)
 
     _header, reread = read_session(path)
@@ -691,7 +693,7 @@ async def test_a_resumed_log_appends_behind_a_dropped_batch_cleanly(tmp_path: Pa
     store, session = _tracked(
         tmp_path, Session("batched", seed=events, header=header, durable=len(events))
     )
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await store.flush(session)
 
     _header, reread = read_session(path)
@@ -717,12 +719,12 @@ async def test_a_final_record_longer_than_one_read_is_still_measured(tmp_path: P
     and the answer was "no records" — and a re-activated store wrote the whole
     log again behind itself. A large tool result is exactly such a record."""
     first, session = _tracked(tmp_path)
-    session.append("turn/start", {"turn": 1})
-    session.append("tool/call", {"callId": "c", "name": "read", "arguments": "x" * 200_000})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "tool/call", {"callId": "c", "name": "read", "arguments": "x" * 200_000})
     await first.flush(session)
 
     second, _ = _tracked(tmp_path, session)  # the row re-activates: a store new to it
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await second.flush(session)
 
     _header, events = read_session(stored_log(tmp_path, "s"))
@@ -762,8 +764,10 @@ async def test_what_a_teardown_appends_is_written_by_the_mounts_last_act(
     sessions = ctx.require(SESSIONS)
     session = sessions.create("s")
     agent = ctx.require(AGENTS).create(session, FAKE)
-    agent.ctx.add_disposer(lambda: session.append(*workspace_disposed(agent.id)), label="release")
-    session.append("turn/start", {"turn": 1})
+    agent.ctx.add_disposer(
+        lambda: log_event(session, *workspace_disposed(agent.id)), label="release"
+    )
+    log_event(session, "turn/start", {"turn": 1})
     await sessions.flush(session)  # what every host does, and all it did
     await ctx.dispose()
 
@@ -788,7 +792,9 @@ async def test_disposing_an_agent_writes_what_its_teardown_appended(
     ctx = await mount(_root(tmp_path))
     session = ctx.require(SESSIONS).create("s")
     agent = ctx.require(AGENTS).create(session, FAKE)
-    agent.ctx.add_disposer(lambda: session.append(*workspace_disposed(agent.id)), label="release")
+    agent.ctx.add_disposer(
+        lambda: log_event(session, *workspace_disposed(agent.id)), label="release"
+    )
     await ctx.require(AGENTS).dispose(agent.id)
 
     assert stored_types(ctx, "s")[-1] == DISPOSED

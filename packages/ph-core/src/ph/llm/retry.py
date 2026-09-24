@@ -29,8 +29,11 @@ import logging
 from ..agent.types import RequestErrorAction, RequestFailure
 from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS
+from ..session.writers import log_writer
 from ..wire import WireModel
 from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, LlmFailure
+
+_LOG = log_writer(__name__)
 
 __all__ = ["RETRIED", "ROW", "TRANSIENT_CODES", "apply", "is_transient"]
 
@@ -120,7 +123,8 @@ async def apply(ctx: Context, config: Config) -> None:
             # bucket refills.
             delay_ms = max(delay_ms, failure.provider_retry_after_ms)
 
-        session.append(
+        _LOG.append(
+            session,
             RETRIED,
             {
                 "turn": failure_payload.turn,

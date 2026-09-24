@@ -50,6 +50,7 @@ from ..json import JsonValue, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
 from ..session import Session, SessionEvent
+from ..session.writers import log_writer
 from ..tools.definition import ToolExecution, ToolExecutionResult
 from ..tools.errors import HarnessError
 from ..wire import WireModel, literal_lookup
@@ -67,6 +68,8 @@ from .sandbox import SandboxPolicy
 from .subagents import descendants
 from .telemetry import ops_record
 from .workspace_provision import ProvisionEntry, ProvisionReport
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "BRANCH_PREFIX",
@@ -1185,7 +1188,7 @@ class WorkspaceSeam:
                 current = held.workspace
                 kept = True if current.release is None else await current.release(current)
                 if held.session is not None:
-                    held.session.append(DISPOSED, self._payload(current, agent_id, kept=kept))
+                    _LOG.append(held.session, DISPOSED, self._payload(current, agent_id, kept=kept))
 
             return release
 
@@ -1218,9 +1221,10 @@ class WorkspaceSeam:
             # "no tier configured", which is a different fact and the one
             # `phern doctor` must not confuse it with (E15).
             data["declined"] = declined
-        session.append(ACQUIRED, data)
+        _LOG.append(session, ACQUIRED, data)
         if workspace.provision_failures:
-            session.append(
+            _LOG.append(
+                session,
                 "workspace/provisioned",
                 {"agentId": agent_id, "failed": list(workspace.provision_failures)},
             )
@@ -1247,8 +1251,8 @@ class WorkspaceSeam:
         if held.session is not None:
             # Durable at the moment of marking, not only on the closing half:
             # the worst way for a run to go wrong writes no `disposed`.
-            held.session.append(
-                RETAINED, pair_payload(agent_id, held.workspace.ref, retained=reason)
+            _LOG.append(
+                held.session, RETAINED, pair_payload(agent_id, held.workspace.ref, retained=reason)
             )
         return True
 
@@ -1288,8 +1292,10 @@ class WorkspaceSeam:
                 return
             # The pair closes either way: a leak left open is one reported at
             # every future open.
-            session.append(
-                DISPOSED, pair_payload(record.agent_id, record.ref, kept=kept, reconciled=True)
+            _LOG.append(
+                session,
+                DISPOSED,
+                pair_payload(record.agent_id, record.ref, kept=kept, reconciled=True),
             )
 
         # Concurrent: several subprocesses per leaked tree.
@@ -1541,7 +1547,7 @@ class WorkspaceSeam:
         token = await self.capture(workspace)
         if token is None:
             return None
-        session.append(CHECKPOINT, {"agentId": agent_id, "tree": token, "callId": call_id})
+        _LOG.append(session, CHECKPOINT, {"agentId": agent_id, "tree": token, "callId": call_id})
         return token
 
     async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]:

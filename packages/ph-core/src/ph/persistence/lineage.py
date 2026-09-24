@@ -118,7 +118,7 @@ def materialize(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
     """
     header, events = read_one(session_id, None, None)
     # A file that starts at 0 says it holds its own history. Cross-check that
-    # against the header before believing it: `Session.append` mints
+    # against the header before believing it: `Session._append` mints
     # `seq = len(self._log)`, so a reference-forked child built with an empty
     # seed writes its *first* event at 0 and would be read as a whole session
     # with its inherited prefix silently dropped. That is the trap step 4 walks

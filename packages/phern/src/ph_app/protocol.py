@@ -116,6 +116,13 @@ client reading a 0.4.x repeat ignores the field; a 0.4.x client reading a 0.3.x
 repeat refuses it, since the field is required, and restarting the daemon fixes
 that. Released with the session log's format 2 (P10-15), so each number moves once.
 
+The same number covers **`credentials/store` taking no idempotence key** (T5): it
+left `MUTATIONS`, so its params refuse `clientId`/`commandId`. A 0.3.x client stamps
+both on every call it knew as a mutation and is refused `invalid_params` by a 0.4.x
+daemon; a 0.4.x client sends neither, which a 0.3.x daemon serves unguarded. The
+store was idempotent anyway — one value stored twice is stored once — and its key
+outlived the value it named, since the value lives in daemon memory.
+
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by
 `phern agents doctor`; no client compares it and hangs up. So it documents a

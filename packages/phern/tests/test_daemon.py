@@ -157,7 +157,8 @@ from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.schedule import Schedule
 from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
-from ph.testing import ReapedHost, stored_log
+from ph.testing import ReapedHost, log_event, stored_log
+from ph_app import kinds as app_kinds
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
@@ -1041,8 +1042,10 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
     async with running(tmp_path) as daemon:
         supervisor = daemon.running.supervisor
         root = await supervisor.start("restores")
-        root.session.append("workspace/checkpoint", {"agentId": root.agent.id, "tree": "older"})
-        root.session.append("workspace/checkpoint", {"agentId": root.agent.id, "tree": "newest"})
+        log_event(root.session, "workspace/checkpoint", {"agentId": root.agent.id, "tree": "older"})
+        log_event(
+            root.session, "workspace/checkpoint", {"agentId": root.agent.id, "tree": "newest"}
+        )
 
         asked: list[str] = []
 
@@ -1349,17 +1352,17 @@ async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
             ("revoked", ("subagent/deleted", {"runId": "c", "reason": "revoked"})),
         ):
             root = await supervisor.start(label)
-            root.session.append("subagent/admitted", {"runId": "c"})
+            log_event(root.session, "subagent/admitted", {"runId": "c"})
             assert await supervisor.sweep(after=0) == [], f"{label}: released with a live child"
 
-            root.session.append(*settle)
+            log_event(root.session, *settle)
             assert await supervisor.sweep(after=0) == [label], f"{label}: child never settled"
 
         # An unrecognized status keeps the parent alive rather than releasing one
         # whose child may still be running.
         root = await supervisor.start("unknown")
-        root.session.append("subagent/admitted", {"runId": "c"})
-        root.session.append("subagent/status", {"runId": "c", "status": "who-knows"})
+        log_event(root.session, "subagent/admitted", {"runId": "c"})
+        log_event(root.session, "subagent/status", {"runId": "c", "status": "who-knows"})
         assert await supervisor.sweep(after=0) == [], "an unknown status released the parent"
 
 
@@ -1379,8 +1382,8 @@ def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
     from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 
     written = {
-        supervisor_module.CLIENT_COMMAND.opened,
-        supervisor_module.CLIENT_COMMAND.settled,
+        app_kinds.CLIENT_COMMAND.opened,
+        app_kinds.CLIENT_COMMAND.settled,
         recovery.RETRY,
         recovery.FAILED,
         recovery.RECOVERED,

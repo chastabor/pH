@@ -74,8 +74,11 @@ from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
 from ..paths import resolve_roots, write_atomic
 from ..session import Session, now_ms, session_written
+from ..session.writers import log_writer
 from ..wire import WireModel
 from ._registry import claim_key
+
+_LOG = log_writer(__name__)
 
 __all__ = ["FileHandle", "UploadRegistry", "Uploader", "apply", "record_uploaded"]
 
@@ -126,7 +129,8 @@ def record_uploaded(session: Session, handle: FileHandle, ref: AttachmentRef) ->
     expires, but that a named provider was given this file. A person auditing
     where their data went reads this; nothing reads it back to find a handle.
     """
-    session.append(
+    _LOG.append(
+        session,
         "attachment/uploaded",
         {
             "provider": handle.provider,

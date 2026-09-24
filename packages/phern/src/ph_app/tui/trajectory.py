@@ -429,6 +429,10 @@ HANDLERS: Mapping[str, Handler] = {
     "supervisor/passivated": _on_harness_event,
     "supervisor/unreachable": _on_harness_event,
     "supervisor/violated": _on_supervisor_violated,
+    # Records for the same reason (T5): a child that paused on a missing key and
+    # one that simply went quiet read the same without them.
+    "credential/needed": _on_harness_event,
+    "credential/supplied": _on_harness_event,
     "schedule/created": _on_harness_event,
     "schedule/canceled": _on_harness_event,
     "schedule/tick": _on_harness_event,

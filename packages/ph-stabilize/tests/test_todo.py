@@ -31,7 +31,7 @@ from ph.system_prompt.assembly import (
     render_context_sections,
     render_prompt,
 )
-from ph.testing import MountProfile, StubAgent, assistant_payload
+from ph.testing import MountProfile, StubAgent, assistant_payload, log_event
 from ph.tools.code_mode import CodeDispatchRef
 from ph_stabilize import BUNDLE
 from ph_stabilize.todo import (
@@ -581,7 +581,8 @@ async def test_work_inside_a_code_cell_counts_as_work(mount: MountProfile) -> No
     for index in range(3):
         # Through the real wire type, as `test_limits.py` does for the same
         # event: a renamed field then fails here rather than silently uncounting.
-        session.append(
+        log_event(
+            session,
             "tool/code-dispatch-start",
             CodeDispatchRef(
                 root_call_id="r1", parent_call_id="r1", sub_call_id=f"s{index}", name="read"
@@ -624,13 +625,15 @@ def test_the_parallel_rule_reads_the_message_being_executed_not_a_rewrite() -> N
     and the two-call message is read as the one-call rewrite.
     """
     session = Session("rewritten")
-    old = session.append(
+    old = log_event(
+        session,
         "assistant/message",
         _assistant([todo_call("c0", _todos(("early", "completed")))], "m1"),
         SurfaceIntent("append"),
     )
     # The message actually in flight: two calls, which the rule exists to refuse.
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         _assistant(
             [
@@ -645,7 +648,8 @@ def test_the_parallel_rule_reads_the_message_being_executed_not_a_rewrite() -> N
 
     # A clip lands, rewriting the *first* message in place. It is now the newest
     # `assistant/message` event in the log, and it is not new work.
-    session.append(
+    log_event(
+        session,
         "assistant/message",
         _assistant([todo_call("c0", _todos(("early", "completed")))], "m3"),
         SurfaceIntent(SurfaceReplace(replaces=(old.seq,)), (old.seq,)),

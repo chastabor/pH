@@ -515,7 +515,7 @@ class GoogleAdapter:
         # See `_body`: this route is asked for JSON and not held to a schema, so
         # it does not enforce one. Claiming otherwise would make a caller skip the
         # validation that is actually doing the work.
-        return resolved(self.config, structured_output=False)
+        return resolved(self.config, structured_output=False, credential=self.config.api_key_env)
 
 
 def _file_record(payload: dict[str, Any]) -> dict[str, Any]:

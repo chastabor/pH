@@ -41,6 +41,7 @@ from ph.session import (
     SurfaceIntent,
     is_surface_eligible_type,
 )
+from ph.testing import log_event
 
 pytestmark = pytest.mark.anyio
 
@@ -101,7 +102,7 @@ def _session(session_id: str, *events: tuple[str, Any]) -> Session:
     session = Session(session_id, header=SessionHeader(id=session_id, created_at=1))
     for kind, data in events:
         surface = SurfaceIntent("append") if is_surface_eligible_type(kind) else None
-        session.append(kind, data, surface)
+        log_event(session, kind, data, surface)
     return session
 
 

@@ -13,7 +13,13 @@ from .jsonl import (
 from .lease import SessionBusy, claim_session
 from .lineage import MAX_DEPTH, LineageError, ReadOne, lineage_faults, materialize
 from .protocol import ClaimingStore
-from .repair import TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, interrupted_turn_closers, repaired
+from .repair import (
+    TOOL_NOT_STARTED,
+    TOOL_OUTCOME_UNKNOWN,
+    UndeclaredIntentError,
+    interrupted_turn_closers,
+    repaired,
+)
 
 __all__ = [
     "MAX_DEPTH",
@@ -24,6 +30,7 @@ __all__ = [
     "LineageError",
     "ReadOne",
     "SessionBusy",
+    "UndeclaredIntentError",
     "claim_session",
     "interrupted_turn_closers",
     "lineage_faults",

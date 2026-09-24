@@ -110,7 +110,7 @@ class DaemonClient:
         landed, and an unkeyed retry runs the effect twice. So the stamp is
         applied here, once, rather than at each verb — `prompt` was the only verb
         that had it, and `session/command`, `session/shell`, `session/stage`,
-        `session/preset` and `credentials/store` are all in the same table.
+        and `session/preset` are all in the same table.
 
         The counter is this client's own, which is what makes a retry after a
         reconnect safe by default rather than by discipline.
@@ -127,8 +127,8 @@ class DaemonClient:
         **The reply is `R | MutationRepeated`, and that union is the honest
         one.** A repeat answers with one shape for every verb (`MUTATIONS` says
         why), and for the verbs whose own reply is a `RootDescription` the
-        repeat is a subtype — but `session/shell` answers with an exit code and
-        `credentials/store` with a name, so a caller that ignored the union
+        repeat is a subtype — but `session/shell` answers with an exit code, so a
+        caller that ignored the union
         would be reading fields off a description that is not there. Narrow on
         `isinstance(reply, MutationRepeated)`, which is the branch
         `MutationRepeated.repeated` was always for.

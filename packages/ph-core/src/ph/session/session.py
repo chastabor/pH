@@ -8,7 +8,8 @@ Three invariants live in this file:
   offload append a `replace`; nothing rewrites history.
 * **A1 — `seq == len(log)`.** The contiguity contract every backend relies on.
 
-`append` is the acceptance boundary: it validates and freezes the payload,
+`_append` is the acceptance boundary, reached only through a writer
+(`ph.session.writers`, T6): it validates and freezes the payload,
 validates the surface transition *before* the push, and only then publishes.
 A failure therefore leaves the log and the surface untouched, and a publication
 failure cannot un-append what is already committed.
@@ -46,6 +47,9 @@ from .request_header import (
     parse_request_header,
 )
 from .surface import SurfaceManager, fold_surface
+from .writers import log_writer
+
+_LOG = log_writer(__name__)
 
 __all__ = ["Session", "SessionBatch", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
 
@@ -268,7 +272,7 @@ class Session:
         self._publishing = False
         self._batch: SessionBatch | None = None
         """The batch whose block is open, if any — one at a time, and the only one
-        whose `append` still stamps."""
+        whose `_append` still stamps."""
         self._batch_open: BatchRef | None = None
         self._derived: tuple[Message, ...] = ()
         self._derived_nodes = 0
@@ -276,7 +280,7 @@ class Session:
         self._latest: dict[_Key, _LatestFold[object]] = {}
 
         if seed is not None:
-            # Validate the seed to the SAME invariants `append` enforces. A
+            # Validate the seed to the SAME invariants `_append` enforces. A
             # replay or fork must not be able to construct a live log that no
             # backend could store — otherwise a bad seed surfaces later as a
             # flush rejection or, worse, as a silent divergence from disk.
@@ -357,7 +361,7 @@ class Session:
         # in one is not re-marked, so repeatedly opening a cold session does not
         # grow its log per open.
         if seed is not None and (not self._log or self._log[-1].type != "session/end-seed"):
-            self.append("session/end-seed", {})
+            _LOG.append(self, "session/end-seed", {})
 
     # -------------------------------------------------------------- identity --
 
@@ -429,13 +433,14 @@ class Session:
 
         return off
 
-    def append(
+    def _append(
         self,
         event_type: str,
         data: Mapping[str, JsonValue],
         surface: SurfaceIntent | None = None,
     ) -> SessionEvent:
-        """Append one event and synchronously notify observers.
+        """Append one event and synchronously notify observers — **through a writer**
+        (`ph.session.writers`), which is the only caller outside this package (T6).
 
         `data` is a `Mapping` of JSON values, and that is the producer's half of
         A1 said in the type: a payload carrying a `Path`, a dataclass or a set is
@@ -471,8 +476,8 @@ class Session:
 
         ```python
         with session.batch() as batch:
-            batch.append("compaction/summarized", accounting)
-            batch.append("user/message", summary, SurfaceIntent(...))
+            _LOG.append(batch, "compaction/summarized", accounting)
+            _LOG.append(batch, "user/message", summary, SurfaceIntent(...))
         ```
 
         For records that only mean something together — an accounting record and
@@ -518,7 +523,7 @@ class Session:
         surface: SurfaceIntent | None,
         seq: int,
     ) -> SessionEvent:
-        """Build the event `append` would commit at `seq`, refusing what it refuses."""
+        """Build the event `_append` would commit at `seq`, refusing what it refuses."""
         if not is_known(event_type):
             raise UnknownEventTypeError(
                 f'"{event_type}" is not a session event type this build can read back; '
@@ -549,7 +554,7 @@ class Session:
     def admit(self, event: SessionEvent) -> SessionEvent:
         """Append an event that already carries its `seq` and `time` — a replica's path.
 
-        `append` is for the process that *owns* a log: it mints the seq and stamps
+        `_append` is for the process that *owns* a log: it mints the seq and stamps
         the clock. A front end mirroring a daemon's session over the wire owns
         nothing; it receives events the daemon already stamped and must keep them
         as they are — re-stamping `time` would put this client's clock on the
@@ -563,7 +568,7 @@ class Session:
         refuses a seq that is not the next index — a replica that skipped a frame
         must stop rather than admit a log with a hole in it — and an unrecognized
         required type. Then the surface is validated and the event published, the
-        same tail `append` uses, so an observer cannot tell which door an event
+        same tail `_append` uses, so an observer cannot tell which door an event
         came through.
 
         :raises ValueError: when `event.seq` is not `len(self)`, or its type is
@@ -578,7 +583,7 @@ class Session:
         return committed
 
     def _commit(self, event: SessionEvent) -> SessionEvent:
-        """Validate against the surface, push, and publish — `append` and `admit`'s
+        """Validate against the surface, push, and publish — `_append` and `admit`'s
         one tail.
 
         Validated BEFORE the push: a rejected candidate must leave both the log
@@ -667,7 +672,7 @@ class Session:
         Here rather than in the invariant row that declares it, for
         `ToolRuntime.stale_views`' reason: these caches are this class's own secret,
         and a check written against `_log` from outside is one a rename disables
-        without anybody noticing. Every trip path is a writer that bypassed `append`
+        without anybody noticing. Every trip path is a writer that bypassed `_append`
         — which is what these caches exist to be invalidated by, and what only a
         check inside the class can honestly detect.
 
@@ -838,13 +843,14 @@ class SessionBatch:
         membership on each."""
         return tuple(self._events)
 
-    def append(
+    def _append(
         self,
         event_type: str,
         data: Mapping[str, JsonValue],
         surface: SurfaceIntent | None = None,
     ) -> SessionEvent:
-        """Stamp an event for this batch, refused as `Session.append` would refuse it.
+        """Stamp an event for this batch, refused as `Session._append` would refuse it —
+        through a writer, as every write is (T6).
 
         Returned so a later member can cite its seq; **not yet in the log**, and
         not in it at all if the batch is refused.

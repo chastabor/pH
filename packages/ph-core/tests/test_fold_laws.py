@@ -28,6 +28,7 @@ from ph.testing import (
     assert_fold_laws,
     assistant_payload,
     check_fold_laws,
+    log_event,
     prefix_of,
 )
 
@@ -55,9 +56,9 @@ def _fork(parent: Session, child_id: str = "child") -> Session:
 def _turn_log(turns: int = 3) -> Session:
     session = Session("s")
     for turn in range(1, turns + 1):
-        session.append("turn/start", {"turn": turn})
-        session.append("assistant/chunk", {"text": "…"})
-        session.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+        log_event(session, "turn/start", {"turn": turn})
+        log_event(session, "assistant/chunk", {"text": "…"})
+        log_event(session, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
     return session
 
 
@@ -125,7 +126,7 @@ def test_a_fold_with_hidden_state_is_caught() -> None:
 
 def test_a_fold_that_writes_to_the_log_is_refused_before_anything_else() -> None:
     def appends(log: Session) -> int:
-        log.append("turn/start", {"turn": 99})
+        log_event(log, "turn/start", {"turn": 99})
         return _turns(log)
 
     findings = check_fold_laws(_turn_log(), appends)
@@ -160,7 +161,7 @@ def test_prefixes_begin_where_the_cache_could_first_have_read() -> None:
     path starts at the seed boundary — `goals` and `schedules` both do — is lawful
     as far as any cache can tell, and only a check told to start at 0 disagrees."""
     child = _fork(_turn_log(2))
-    child.append("turn/start", {"turn": 3})
+    log_event(child, "turn/start", {"turn": 3})
 
     def own_turns(log: Session) -> int:
         since = log.header.seed_length or 0
@@ -175,7 +176,7 @@ def test_a_fold_that_reads_process_state_is_caught_as_reading_more_than_the_log(
     about it; a replica of the same events starts at 0, and the fold must agree."""
     parent = _turn_log(2)
     child = Session("child", seed=list(parent.events))
-    child.append("turn/start", {"turn": 3})
+    log_event(child, "turn/start", {"turn": 3})
 
     def live_turns(log: Session) -> int:
         return sum(1 for event in log.events_from(log.first_live_seq) if event.type == "turn/start")
@@ -227,7 +228,7 @@ def test_an_entry_the_log_has_outgrown_is_not_drift() -> None:
     cache: SessionFoldCache[int] = SessionFoldCache(_turns, extend=_more_turns)
     session = _turn_log()
     cache.read(session)
-    session.append("turn/start", {"turn": 99})
+    log_event(session, "turn/start", {"turn": 99})
 
     assert cache.stale([session]) == []
 
@@ -250,10 +251,11 @@ def test_the_poll_can_only_speak_for_sessions_it_is_handed() -> None:
 def _goal_log(session: Session) -> Session:
     service = GoalService()
     goal = service.set(session, Goal(id="g1", objective="make the tests pass", gates=["pytest"]))
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     service.continued(session, goal.id)
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    session.append(
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(
+        session,
         "assistant/message",
         {
             **assistant_payload("done", "m1"),
@@ -261,11 +263,11 @@ def _goal_log(session: Session) -> Session:
         },
         SurfaceIntent("append"),
     )
-    session.append(GATE, {"id": goal.id, "gate": "pytest", "tree": "abc", "passed": False})
-    session.append(GATE, {"id": goal.id, "gate": "pytest", "tree": "def", "passed": True})
+    log_event(session, GATE, {"id": goal.id, "gate": "pytest", "tree": "abc", "passed": False})
+    log_event(session, GATE, {"id": goal.id, "gate": "pytest", "tree": "def", "passed": True})
     service.settle(session, goal.id, "achieved")
     service.set(session, Goal(id="g2", objective="then tidy up"))
-    session.append("turn/end", {"turn": 2, "reason": {"kind": "completed"}})
+    log_event(session, "turn/end", {"turn": 2, "reason": {"kind": "completed"}})
     return session
 
 
@@ -295,24 +297,30 @@ def test_the_schedule_fold_obeys_the_laws() -> None:
 def test_the_subagent_roster_obeys_the_laws() -> None:
     session = Session("parent")
     for run_id, name in (("r1", "scout"), ("r2", "recon")):
-        session.append(
-            ADMITTED, {"runId": run_id, "name": name, "model": "fake-1", "grantedAccess": "read"}
+        log_event(
+            session,
+            ADMITTED,
+            {"runId": run_id, "name": name, "model": "fake-1", "grantedAccess": "read"},
         )
-    session.append(STATUS, {"runId": "r1", "status": "running"})
-    session.append(USAGE, {"runId": "r1", "childUsage": {"inputTokens": 400, "outputTokens": 2}})
-    session.append(STATUS, {"runId": "r1", "status": "running", "cause": "resumed"})
-    session.append(STATUS, {"runId": "r1", "status": "done"})
-    session.append(STATUS, {"runId": "r2", "status": "done"})
-    session.append(DELETED, {"runId": "r2", "reason": "user"})
+    log_event(session, STATUS, {"runId": "r1", "status": "running"})
+    log_event(
+        session, USAGE, {"runId": "r1", "childUsage": {"inputTokens": 400, "outputTokens": 2}}
+    )
+    log_event(session, STATUS, {"runId": "r1", "status": "running", "cause": "resumed"})
+    log_event(session, STATUS, {"runId": "r1", "status": "done"})
+    log_event(session, STATUS, {"runId": "r2", "status": "done"})
+    log_event(session, DELETED, {"runId": "r2", "reason": "user"})
 
     assert_fold_laws(session, subagent_roster)
 
 
 def test_the_sandbox_refusal_count_obeys_the_laws() -> None:
     session = Session("boxed")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     for host in ("example.com", "example.org"):
-        session.append(DENIED, {"kind": "network", "via": "proxy", "message": host, "host": host})
-        session.append("assistant/chunk", {"text": "…"})
+        log_event(
+            session, DENIED, {"kind": "network", "via": "proxy", "message": host, "host": host}
+        )
+        log_event(session, "assistant/chunk", {"text": "…"})
 
     assert_fold_laws(session, denial_count, extend_denial_count)

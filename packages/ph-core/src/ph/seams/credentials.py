@@ -20,13 +20,26 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from ..cordis import Context, plugin
-from ..keys import CREDENTIALS
+from ..keys import CREDENTIALS, LLM
+from ..session import OpenIntent, Session, SessionEvent, intents_of, open_intents
+from ..session.kinds import CREDENTIAL_WAIT, credential_hold, hold_of
 from ..wire import WireModel
 
-__all__ = ["CredentialRef", "CredentialService", "SecretValue", "apply"]
+__all__ = [
+    "CredentialRef",
+    "CredentialService",
+    "SecretValue",
+    "apply",
+    "credential_waits",
+    "hold_for_credential",
+    "missing_credential",
+    "record_wait",
+    "waiting_for",
+]
 
 log = logging.getLogger("ph.seams.credentials")
 
@@ -104,6 +117,88 @@ class CredentialService:
                 "variable or provide it through ctx.credentials"
             )
         return resolved
+
+
+def missing_credential(ctx: Context, provider: str, model: str) -> str | None:
+    """The credential the route `provider`/`model` names and `ctx` cannot supply.
+
+    `None` when the route needs none, when it can be supplied, or when there is no
+    adapter for it to ask — `resolve_model` then names no credential, and a route with
+    no adapter fails for that reason, loudly; calling it a missing key would send a
+    person looking for the wrong thing.
+
+    **Names only** (I-3): the adapter says which name it resolves at its edge
+    (`ResolvedModel.credential`), and `has` answers whether a value exists without
+    handing one over. With no credential seam mounted, nothing can be supplied, so
+    the name is missing. The question behind the resume check (T5): can this
+    session run here, now?
+    """
+    llm = ctx.get(LLM)
+    if llm is None:
+        return None
+    name = llm.resolve_model(provider, model).credential
+    if not name:
+        return None
+    credentials = ctx.get(CREDENTIALS)
+    if credentials is not None and credentials.has(credentials.reference(name)):
+        return None
+    return name
+
+
+async def hold_for_credential(
+    ctx: Context, session: Session, holder: str, provider: str, model: str
+) -> str | None:
+    """Hold `holder` on the credential its route names if `ctx` cannot supply it, or
+    release it if it can — the log made to say which (T5). Returns the name it waits
+    for, or `None`.
+
+    The one check behind every resume: the daemon's for a root's own route, the
+    subagent seam's for each child it would readmit. Logs nothing: the daemon says
+    what waits, once per root, when the root comes back.
+    """
+    name = missing_credential(ctx, provider, model)
+    await record_wait(ctx, session, holder, name)
+    return name
+
+
+async def record_wait(ctx: Context, session: Session, holder: str, name: str | None) -> None:
+    """Make `session`'s log say what `holder` waits for now: `name`, or nothing (T5).
+
+    A hold for any other name is settled — its name arrived, or the route stopped
+    naming it — and a hold for `name` is opened unless one is open already, so
+    asking again with nothing changed appends nothing. That is what lets every open
+    of a session ask, a second restart before the key arrives included, without the
+    log growing a record per restart.
+
+    Through `ctx.intents`, as `CREDENTIAL_WAIT`'s records, never a direct append;
+    names only (I-3).
+    """
+    journal = intents_of(ctx)
+    for claim in journal.held(session, CREDENTIAL_WAIT):
+        waited_by, waited = hold_of(claim.opened)
+        if waited_by == holder and waited != name:
+            journal.settle(session, claim, credential_hold(holder, waited))
+    if name is not None:
+        await journal.open_once(session, CREDENTIAL_WAIT, credential_hold(holder, name))
+
+
+def credential_waits(events: Iterable[SessionEvent]) -> Mapping[str, str]:
+    """Who in this log waits for which credential: holder → name.
+
+    One name per holder, since `record_wait` settles a holder's other holds before it
+    opens one. A fold, for a reader with nothing mounted — a transcript, a test —
+    reading what the resume check recorded; a mounted one asks `waiting_for`.
+    """
+    return _waits(open_intents(events, CREDENTIAL_WAIT))
+
+
+def waiting_for(ctx: Context, session: Session) -> Mapping[str, str]:
+    """`credential_waits`, read off the journal's cached index rather than refolded."""
+    return _waits(intents_of(ctx).pending(session, CREDENTIAL_WAIT))
+
+
+def _waits(intents: Iterable[OpenIntent]) -> dict[str, str]:
+    return dict(hold_of(intent.opened) for intent in intents)
 
 
 @plugin("credentials-env")

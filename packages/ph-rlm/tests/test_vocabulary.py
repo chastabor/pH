@@ -18,7 +18,7 @@ from pathlib import Path
 import ph_rlm
 from ph.session import KNOWN_SESSION_EVENT_TYPES
 
-APPEND = re.compile(r"""\.append\(\s*["']([a-z0-9/\-]+)["']""")
+APPEND = re.compile(r"""_LOG\.append\(\s*[\w.]+,\s*["']([a-z0-9/\-]+)["']""")
 
 
 def _appended() -> set[str]:

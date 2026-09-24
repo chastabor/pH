@@ -105,10 +105,13 @@ from ph.session import (
     is_replacement_surface_event,
 )
 from ph.session.events import SurfaceReplace
+from ph.session.writers import log_writer
 from ph.text import block_marker, count_of
 from ph.wire import WireModel
 
 from .offload import HISTORY_PREFIX, spill_tool_result
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "KEEP_FRACTION",
@@ -956,7 +959,8 @@ class SummarizeEngine:
                 if replacement is None:
                     continue
                 payload, savings = replacement
-                batch.append(
+                _LOG.append(
+                    batch,
                     "assistant/message",
                     payload,
                     SurfaceIntent(
@@ -969,7 +973,8 @@ class SummarizeEngine:
                 # The harness's own statement of what it elided. Without it the
                 # only record is a diff between two events, and no record at all
                 # of *why*.
-                batch.append(
+                _LOG.append(
+                    batch,
                     "compaction/args-truncated",
                     {"trigger": trigger, "seqs": rewritten, "savedChars": saved},
                 )
@@ -1084,10 +1089,11 @@ class SummarizeEngine:
         if not isinstance(blocks, list) or not blocks or not isinstance(blocks[0], dict):
             return False
         # Only the result block's content changes — everything else, the message
-        # id included, must match: `Session.append` refuses a `tool/result`
+        # id included, must match: `Session._append` refuses a `tool/result`
         # replacement that touches anything but content.
         blocks[0] = {**blocks[0], "content": [{"type": "text", "text": replacement}]}
-        session.append(
+        _LOG.append(
+            session,
             "tool/result",
             payload,
             SurfaceIntent(
@@ -1277,7 +1283,8 @@ class SummarizeEngine:
         # and they land together, so a replacement the surface refuses no longer
         # leaves an accounting record for a summary that replaced nothing.
         with session.batch() as batch:
-            batch.append(
+            _LOG.append(
+                batch,
                 "compaction/summarized",
                 {
                     "trigger": trigger,
@@ -1302,7 +1309,8 @@ class SummarizeEngine:
                 if ref is None
                 else REPLACEMENT_WITH_PATH.format(file_path=ref.locator, summary=summary)
             )
-            replacement = batch.append(
+            replacement = _LOG.append(
+                batch,
                 "user/message",
                 create_user_message(
                     content=[{"type": "text", "text": text}],
@@ -1367,7 +1375,9 @@ class SummarizeEngine:
     def _decline(
         self, session: Session, trigger: CompactionTrigger, code: str, reason: str
     ) -> None:
-        session.append("compaction/declined", {"trigger": trigger, "code": code, "reason": reason})
+        _LOG.append(
+            session, "compaction/declined", {"trigger": trigger, "code": code, "reason": reason}
+        )
 
 
 @plugin(

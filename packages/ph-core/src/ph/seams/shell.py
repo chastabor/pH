@@ -6,11 +6,10 @@ subprocess seam, and everything that makes it *bounded* belongs to the sandbox
 seam. What is left here is turning a command string into an argv and asking for
 confinement when the policy says to.
 
-**The seam owns the pair a person's command writes** (P10-08): `SHELL_COMMAND`,
-`shell/command` opened before the child starts and `shell/result` settled after,
-through `ctx.intents`. Declared here rather than beside `ph_app.shell`, its one
-producer, because repair must settle the pair on any resume that has ph-core —
-and ph-core cannot import the app.
+The pair a person's command writes (P10-08) — `shell/command` opened before the
+child starts and `shell/result` settled after, through `ctx.intents` — is
+`SHELL_COMMAND`, declared in `ph.session.kinds` with ph-core's other kinds (T4)
+and filled by `ph_app.shell`, its one producer.
 
 @module ph.seams.shell
 """
@@ -24,58 +23,14 @@ from pathlib import Path
 from ..agent.types import AgentHandle
 from ..cancel import Cancellation
 from ..cordis import Context, plugin
-from ..json import JsonObject
 from ..keys import FS, SANDBOX, SHELL, SUBPROCESS
-from ..session import IntentKind, SessionEvent, Unsettled, declare_intent
 from .sandbox import ConfinedArgv, SandboxPolicy
 from .subprocess import SubprocessSpawnSpec, platform_shell
 from .workspace import workspace_of, workspace_policy
 
 log = logging.getLogger("ph.seams.shell")
 
-__all__ = ["SHELL_COMMAND", "ShellResult", "ShellService", "apply", "command_seq"]
-
-
-def _opened_key(event: SessionEvent) -> str:
-    """A command is keyed by its own seq: nothing else about it is unique."""
-    return str(event.seq)
-
-
-def command_seq(event: SessionEvent) -> str | None:
-    """The command a `shell/result` settles — its `commandSeq`, as a key."""
-    seq = event.data.get("commandSeq")
-    return str(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
-
-
-def _interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
-    """The settle for a command whose own result was never written.
-
-    `interrupted` says which half is known: `outcome-unknown` when the record
-    was on disk and the harness then stopped — the child may have run, may have
-    finished — and `not-started` when the record could not be written, so the
-    child was never spawned. `ok` is false either way: nothing here saw it
-    succeed.
-    """
-    return {"commandSeq": opened.seq, "ok": False, "interrupted": why}
-
-
-SHELL_COMMAND = declare_intent(
-    IntentKind(
-        opened="shell/command",
-        settled="shell/result",
-        opened_key=_opened_key,
-        settled_key=command_seq,
-        # The child may have run: a command that takes the daemon down with it is
-        # the case this pair exists for, and repair cannot know how far it got.
-        orphan="outcome-unknown",
-        # On disk before the child starts (F9): a command whose record cannot be
-        # written does not run.
-        barrier="durable",
-        closer=_interrupted,
-        owner="ph.seams.shell",
-    )
-)
-"""A person's `!` or `!!`: the command, then what it did."""
+__all__ = ["ShellResult", "ShellService", "apply"]
 
 
 @dataclass(frozen=True, slots=True)

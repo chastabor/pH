@@ -16,9 +16,6 @@ import pytest
 from ph.cordis import Context
 from ph.json import JsonObject, as_str
 from ph.keys import INTENTS, INVARIANTS, SESSION_PERSISTENCE, SESSIONS
-from ph.seams.approval import pending_approvals
-from ph.seams.shell import SHELL_COMMAND
-from ph.seams.user_questions import pending_questions
 from ph.session import (
     IntentError,
     IntentKind,
@@ -31,11 +28,21 @@ from ph.session import (
     declared_intents,
     fold_intents,
     open_intents,
+    outcome_of,
     settled_record,
 )
 from ph.session.journal import Claim, IntentJournal, IntentNotDurable, Prior
+from ph.session.kinds import SHELL_COMMAND
 from ph.session.store import SessionStore
-from ph.testing import MountProfile, check_fold_laws, isolated_intent_kinds, not_none
+from ph.session.writers import log_writer
+from ph.testing import (
+    SCAFFOLDING,
+    MountProfile,
+    check_fold_laws,
+    isolated_intent_kinds,
+    log_event,
+    not_none,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -59,7 +66,7 @@ APPROVAL = IntentKind(
     settled_key=_approval_key,
     orphan="not-started",
     closer=_denied,
-    owner="tests",
+    writer=SCAFFOLDING,
 )
 """The approval pair under the rule `pending_approvals` states — not the kind
 P10-09 declares, which is that row's to write."""
@@ -71,7 +78,7 @@ QUESTION = IntentKind(
     settled_key=_ask_key,
     orphan="not-started",
     closer=_denied,
-    owner="tests",
+    writer=SCAFFOLDING,
 )
 
 
@@ -88,27 +95,27 @@ def _approvals() -> Session:
     key among several, a decision nobody asked for, and a key read off the tool
     name because the call id is missing."""
     session = Session("s")
-    session.append("approval/asked", {"callId": "c1", "toolName": "write"})
-    session.append("approval/asked", {"callId": "c2", "toolName": "bash"})
-    session.append("approval/decided", {"callId": "c1", "decision": "allow"})
-    session.append("approval/asked", {"callId": "c2", "toolName": "bash", "reason": "again"})
-    session.append("approval/decided", {"callId": "c9", "decision": "deny"})
-    session.append("approval/asked", {"toolName": "fetch"})
-    session.append("approval/asked", {"callId": "c1", "toolName": "write"})
+    log_event(session, "approval/asked", {"callId": "c1", "toolName": "write"})
+    log_event(session, "approval/asked", {"callId": "c2", "toolName": "bash"})
+    log_event(session, "approval/decided", {"callId": "c1", "decision": "allow"})
+    log_event(session, "approval/asked", {"callId": "c2", "toolName": "bash", "reason": "again"})
+    log_event(session, "approval/decided", {"callId": "c9", "decision": "deny"})
+    log_event(session, "approval/asked", {"toolName": "fetch"})
+    log_event(session, "approval/asked", {"callId": "c1", "toolName": "write"})
     return session
 
 
 def _questions() -> Session:
     session = Session("s")
     for ask in ("q1", "q2", "q3"):
-        session.append("question/asked", {"askId": ask, "question": f"{ask}?"})
-    session.append("question/answered", {"askId": "q2", "answer": "yes"})
+        log_event(session, "question/asked", {"askId": ask, "question": f"{ask}?"})
+    log_event(session, "question/answered", {"askId": "q2", "answer": "yes"})
     return session
 
 
 def test_an_opened_intent_with_no_settle_is_open() -> None:
     session = Session("s")
-    session.append("approval/asked", {"callId": "c1", "toolName": "write"})
+    log_event(session, "approval/asked", {"callId": "c1", "toolName": "write"})
 
     (intent,) = open_intents(session.events, APPROVAL)
     assert intent == OpenIntent(key="c1", opened=session.events[0])
@@ -128,19 +135,6 @@ def test_a_settle_closes_only_its_own_key() -> None:
     ]
 
 
-def test_the_fold_agrees_with_the_folds_it_replaces() -> None:
-    """P10-09 moves both of these onto `open_intents`; it may only if they agree
-    on every log they have been asked about."""
-    approvals = _approvals()
-    assert [intent.opened.seq for intent in open_intents(approvals.events, APPROVAL)] == [
-        pending.seq for pending in pending_approvals(approvals.events)
-    ]
-    questions = _questions()
-    assert [intent.opened.seq for intent in open_intents(questions.events, QUESTION)] == [
-        pending.seq for pending in pending_questions(questions.events)
-    ]
-
-
 def test_the_settle_is_the_latest_opens_or_none() -> None:
     session = _approvals()
     events = session.events
@@ -148,7 +142,7 @@ def test_the_settle_is_the_latest_opens_or_none() -> None:
     assert settled_record(events, APPROVAL, "c1") is None, "c1 was asked again after"
     assert settled_record(events, APPROVAL, "c9") is None, "a settle nobody asked is no intent"
     assert settled_record(events, APPROVAL, "never") is None
-    session.append("approval/decided", {"callId": "c1", "decision": "deny"})
+    log_event(session, "approval/decided", {"callId": "c1", "decision": "deny"})
     assert settled_record(session.events, APPROVAL, "c1") is session.events[-1]
 
 
@@ -163,10 +157,11 @@ def test_a_record_with_no_key_is_not_part_of_the_pair() -> None:
         opened_key=keyed,
         settled_key=keyed,
         orphan="owner-settles",
+        writer=SCAFFOLDING,
     )
     session = Session("s")
-    session.append("approval/asked", {"toolName": "write"})
-    session.append("approval/decided", {"toolName": "write"})
+    log_event(session, "approval/asked", {"toolName": "write"})
+    log_event(session, "approval/decided", {"toolName": "write"})
     assert open_intents(session.events, kind) == ()
 
 
@@ -195,7 +190,7 @@ def test_extending_over_nothing_of_the_kind_hands_back_the_same_index() -> None:
     costs the slice, not a copy of every key the index holds."""
     session = _approvals()
     index = fold_intents(session.events, APPROVAL)
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     assert fold_intents(session.events_from(session.seq - 1), APPROVAL, since=index) is index
 
 
@@ -209,6 +204,7 @@ def test_a_kind_on_an_unknown_type_is_refused() -> None:
                 opened_key=_approval_key,
                 settled_key=_approval_key,
                 orphan="owner-settles",
+                writer=SCAFFOLDING,
             )
         )
     assert declared_intents() == ()
@@ -224,6 +220,7 @@ def test_a_kind_repair_cannot_settle_is_refused() -> None:
         opened_key=_approval_key,
         settled_key=_approval_key,
         orphan="outcome-unknown",
+        writer=SCAFFOLDING,
     )
     with pytest.raises(IntentError, match="needs a closer"):
         declare_intent(unsettleable)
@@ -235,6 +232,7 @@ def test_a_kind_repair_cannot_settle_is_refused() -> None:
                 opened_key=_approval_key,
                 settled_key=_approval_key,
                 orphan="owner-settles",
+                writer=SCAFFOLDING,
             )
         )
 
@@ -252,6 +250,7 @@ def test_a_kind_settled_on_the_surface_is_refused() -> None:
                 opened_key=_approval_key,
                 settled_key=_approval_key,
                 orphan="owner-settles",
+                writer=SCAFFOLDING,
             )
         )
 
@@ -266,11 +265,34 @@ def test_one_type_opens_one_kind() -> None:
         opened_key=_approval_key,
         settled_key=_ask_key,
         orphan="owner-settles",
-        owner="rival",
+        writer=SCAFFOLDING,
     )
-    with pytest.raises(IntentError, match="already opens an intent declared by 'tests'"):
+    with pytest.raises(IntentError, match=r"already opens an intent declared by 'ph\.testing'"):
         declare_intent(rival)
     assert declared_intents() == (APPROVAL,)
+
+
+@pytest.mark.usefixtures("kinds")
+def test_a_kind_whose_writer_does_not_own_its_types_is_refused() -> None:
+    """T6. The journal writes a kind's pair through the kind's writer, so a kind is
+    declared only by a module that is the writer of record for both of its types —
+    this module is for neither, and could otherwise write a posture record through
+    a kind it made up.
+
+    Sabotage: drop the writer check from `declare_intent`, and this declares.
+    """
+    with pytest.raises(IntentError, match='is not a writer of record for "sandbox/mode"'):
+        declare_intent(
+            IntentKind(
+                opened="sandbox/mode",
+                settled="sandbox/denied",
+                opened_key=_approval_key,
+                settled_key=_approval_key,
+                orphan="owner-settles",
+                writer=log_writer(__name__),
+            )
+        )
+    assert declared_intents() == ()
 
 
 # ------------------------------------------------------------ the journal --
@@ -284,7 +306,7 @@ DURABLE = IntentKind(
     settled_key=_approval_key,
     orphan="not-started",
     closer=_denied,
-    owner="tests",
+    writer=SCAFFOLDING,
 )
 BUFFERED = replace(
     DURABLE,
@@ -367,35 +389,17 @@ async def test_a_second_open_of_one_key_returns_the_prior_and_appends_nothing(
     mount: MountProfile,
 ) -> None:
     _, journal, session = await _journal(mount)
-    first = await journal.open(session, DURABLE, ASK)
+    first = await journal.open_once(session, DURABLE, ASK)
     assert isinstance(first, Claim)
 
-    assert await journal.open(session, DURABLE, ASK) == Prior(opened=first.opened, settled=None)
+    running = await journal.open_once(session, DURABLE, ASK)
+    assert isinstance(running, Prior) and running.opened == first.opened
+    assert (running.settled, running.outcome, running.running_here) == (None, None, True)
     settled = journal.settle(session, first, {"callId": "c1", "decision": "allow"})
-    assert await journal.open(session, DURABLE, ASK) == Prior(first.opened, settled)
+    done = await journal.open_once(session, DURABLE, ASK)
+    assert isinstance(done, Prior) and (done.settled, done.outcome) == (settled, "done")
     assert session.seq == 2, "a prior appends nothing"
     assert journal.outcome(session, DURABLE, "c1") is settled
-
-
-@pytest.mark.usefixtures("kinds")
-async def test_a_process_scoped_key_is_no_prior_to_the_next_process() -> None:
-    """L1's rule, in the journal. A key whose effect lived in a process's memory
-    dedupes within that process and not after it: the next process has the key
-    on its log and not the effect. A log-scoped key dedupes across both."""
-    declare_intent(BUFFERED)
-    first = Session("s")
-    held = await IntentJournal(sessions=None).open(
-        first, BUFFERED, {"askId": "q1"}, key_scope="process"
-    )
-    assert isinstance(held, Claim) and held.opened.data["scope"] == "process"
-    await IntentJournal(sessions=None).open(first, BUFFERED, {"askId": "q2"})
-    journal = IntentJournal(sessions=None)
-    assert isinstance(await journal.open(first, BUFFERED, {"askId": "q1"}), Prior)
-
-    later = Session("s", seed=list(first.events))
-    journal = IntentJournal(sessions=None)
-    assert isinstance(await journal.open(later, BUFFERED, {"askId": "q1"}), Claim)
-    assert isinstance(await journal.open(later, BUFFERED, {"askId": "q2"}), Prior)
 
 
 @pytest.mark.usefixtures("kinds")
@@ -409,7 +413,8 @@ async def test_claim_settles_as_failed_when_the_body_raises(mount: MountProfile)
             assert isinstance(held, Claim)
             raise LookupError("the act failed")
     settle = not_none(journal.outcome(session, BUFFERED, "q1"))
-    assert (settle.data["failed"], settle.data["why"]) == (True, "outcome-unknown")
+    assert outcome_of(BUFFERED, settle) == "outcome-unknown"
+    assert settle.data["unsettled"] == {"why": "outcome-unknown", "by": "process"}
 
     with pytest.raises(LookupError):
         async with journal.claim(session, BUFFERED, {"askId": "q2"}) as held:
@@ -417,7 +422,7 @@ async def test_claim_settles_as_failed_when_the_body_raises(mount: MountProfile)
             journal.settle(session, held, {"askId": "q2", "answer": "yes"})
             raise LookupError("after the settle")
     assert [event.type for event in session.events].count("question/answered") == 2
-    assert "failed" not in not_none(journal.outcome(session, BUFFERED, "q2")).data
+    assert outcome_of(BUFFERED, not_none(journal.outcome(session, BUFFERED, "q2"))) == "done"
 
 
 @pytest.mark.usefixtures("kinds")
@@ -438,7 +443,7 @@ async def test_what_the_journal_refuses_to_open(mount: MountProfile) -> None:
     """A kind repair does not know, a record whose key cannot be read, and a
     durable kind opened without its barrier — each refused before any append."""
     _, journal, session = await _journal(mount)
-    stranger = replace(DURABLE, owner="nobody")
+    stranger = replace(DURABLE, reopen=frozenset({"failed"}))
 
     with pytest.raises(IntentError, match="not a declared intent kind"):
         await journal.open(session, stranger, ASK)

@@ -45,10 +45,13 @@ from ..cordis import Context, plugin
 from ..json import as_bool, as_str
 from ..keys import GOALS
 from ..session import Session, SessionEvent, SessionFoldCache
+from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
 from .subagents import USAGE as CHILD_USAGE
 from .token_meter import reported_usage
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "CONTINUED",
@@ -364,7 +367,7 @@ class GoalService:
         """Record a goal. Refuses a second while one is open."""
         if self.open(session) is not None:
             raise ValueError("a goal is already open in this session")
-        session.append(SET, goal.to_wire())
+        _LOG.append(session, SET, goal.to_wire())
         return goal
 
     def continued(self, session: Session, goal_id: str) -> None:
@@ -373,16 +376,16 @@ class GoalService:
         Write-ahead, like every other claim here: a continuation that ran and
         was not recorded is a budget the next daemon hands back.
         """
-        session.append(CONTINUED, {"id": goal_id})
+        _LOG.append(session, CONTINUED, {"id": goal_id})
 
     def record_gate(
         self, session: Session, goal_id: str, *, gate: str, tree: str, passed: bool
     ) -> None:
         """Record a gate's verdict against the tree it ran on."""
-        session.append(GATE, {"id": goal_id, "gate": gate, "tree": tree, "passed": passed})
+        _LOG.append(session, GATE, {"id": goal_id, "gate": gate, "tree": tree, "passed": passed})
 
     def settle(self, session: Session, goal_id: str, outcome: Outcome, *, detail: str = "") -> None:
-        session.append(SETTLED, {"id": goal_id, "outcome": outcome, "detail": detail})
+        _LOG.append(session, SETTLED, {"id": goal_id, "outcome": outcome, "detail": detail})
 
     def unchanged_failure(self, session: Session, goal_id: str, *, gate: str, tree: str) -> bool:
         """Whether this gate already failed against this exact tree.

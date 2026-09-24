@@ -33,24 +33,25 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import Any, BinaryIO
 
 import anyio
 from pydantic import ValidationError
 
 from ..cordis import DEPLOYMENT, Context, plugin
 from ..json import as_str, dumps
-from ..keys import SESSION_PERSISTENCE, SESSIONS
+from ..keys import SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ..paths import resolve_roots
 from ..session import BatchRef, Session, SessionEvent, SessionHeader
+from ..session.writers import log_writer
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
 from .protocol import SessionPersistence, StoredSession, attach, stored_row, write_on_unwind
+from .repair import CallOutcome, interrupted_turn_closers, unresolved_calls
 
-if TYPE_CHECKING:
-    from .repair import CallOutcome
+_LOG = log_writer(__name__)
 
 __all__ = [
     "JsonlSessionStore",
@@ -177,7 +178,7 @@ def _read_tail(path: Path) -> _Tail | None:
     offset needs to know which index the file *starts* at, and the two numbers
     available — `durable_length` and `header.seed_length` — disagree for a
     reference fork, so the arithmetic silently dropped a fork's first events.
-    A seq is absolute: `Session.append` assigns `seq == len(log)` (A1) and a
+    A seq is absolute: `Session._append` assigns `seq == len(log)` (A1) and a
     seed preserves it, so `events[i].seq == i` for every log, forked or not.
 
     Read from the end rather than by scanning: only the last line is wanted, so
@@ -789,9 +790,6 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     signal for "this crashed" as against "this was reopened": a clean stop
     synthesizes no closers.
     """
-    from ..session import Session
-    from .repair import interrupted_turn_closers
-
     # Through the Protocol, not through this backend's filename: a store that
     # keeps sessions in a database has no path to build, and `resume_session` is
     # the one function every host calls to pick work back up.
@@ -813,7 +811,8 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     # nobody is watching, which is the daemon and a cron-started agent, and it
     # is what lets `phern doctor`, a trajectory reader or a person scrolling back
     # find the seam. One event per reopen, not per turn.
-    session.append(
+    _LOG.append(
+        session,
         "session/resumed",
         {
             "events": len(events),
@@ -842,29 +841,24 @@ async def _reconciled(
     call in flight, and the copy is the price of letting a tool read its own
     context (a workspace root, say) the way it would read a live one.
     """
-    from ..keys import TOOLS
-    from ..tools import NotDone
-    from ..tools.batch import parse_arguments
-    from .repair import CallOutcome, unresolved_calls
-
     tools = ctx.get(TOOLS)
     if tools is None:
         return {}
     answers: dict[str, CallOutcome] = {}
     view: Session | None = None
     for call in unresolved_calls(events):
-        name = as_str(call.data.get("name"))
-        definition = tools.get(name, scope=DEPLOYMENT)
+        definition = tools.get(as_str(call.data.get("name")), scope=DEPLOYMENT)
         if definition is None or definition.reconcile is None:
             continue
         view = view or Session(session_id, seed=events, header=header)
-        arguments = parse_arguments(as_str(call.data.get("arguments")))
-        said = await tools.reconciled(name, arguments, call, view, scope=DEPLOYMENT)
-        call_id = as_str(call.data.get("callId"))
-        if isinstance(said, tuple):
-            answers[call_id] = CallOutcome(done=True, content=tuple(b.to_wire() for b in said))
-        elif isinstance(said, NotDone):
-            answers[call_id] = CallOutcome(done=False)
+        said = await tools.reconciled(call, view, scope=DEPLOYMENT)
+        if said is None:
+            continue
+        answers[as_str(call.data.get("callId"))] = (
+            CallOutcome(done=True, content=tuple(block.to_wire() for block in said))
+            if isinstance(said, tuple)
+            else CallOutcome(done=False)
+        )
     return answers
 
 

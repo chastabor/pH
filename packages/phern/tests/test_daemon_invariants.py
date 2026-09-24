@@ -30,7 +30,7 @@ from daemon_helpers import running, until
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import SESSION_PERSISTENCE
 from ph.session import SurfaceIntent
-from ph.testing import user_payload
+from ph.testing import log_event, user_payload
 from ph_app.daemon.recovery import VIOLATED
 
 pytestmark = pytest.mark.anyio
@@ -46,7 +46,7 @@ def _drift(root: object) -> None:
     which is the point of the invariant.
     """
     session = root.session  # type: ignore[attr-defined]
-    session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
+    log_event(session, "user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
     assert session.derive_messages(), "nothing derived, so there is nothing to go stale"
     session._derived = ()
 
@@ -59,7 +59,9 @@ async def test_a_deployment_that_holds_records_nothing(tmp_path: Path) -> None:
     """
     async with running(tmp_path) as daemon:
         root = await daemon.root("quiet")
-        root.session.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
+        log_event(
+            root.session, "user/message", user_payload("hello", "m1"), SurfaceIntent("append")
+        )
 
         assert await daemon.running.supervisor.verify_invariants() == {}
         assert VIOLATED not in [one.type for one in root.session.events]
@@ -169,7 +171,7 @@ async def test_a_busy_drifting_root_is_still_recorded_only_once(tmp_path: Path) 
             details.extend(one.detail for one in found["busy"])
             # The session grows, so the *next* poll's detail says something new.
             payload = user_payload(f"more {turn}", f"m{turn + 2}")
-            root.session.append("user/message", payload, SurfaceIntent("append"))
+            log_event(root.session, "user/message", payload, SurfaceIntent("append"))
 
         assert len(set(details)) > 1, "the detail really does change as the log grows"
         recorded = [one for one in root.session.events if one.type == VIOLATED]

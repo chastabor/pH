@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING
 
 from ..cordis import Context
 from ..json import JsonObject
@@ -40,11 +40,15 @@ from .intents import (
     IntentKind,
     IntentRecord,
     OpenIntent,
+    Outcome,
+    Unsettled,
+    abandoned,
     extend_index,
     fold_intents,
     is_declared,
     key_of,
     open_intents,
+    outcome_of,
     settled_record,
 )
 from .session import Session
@@ -52,18 +56,7 @@ from .session import Session
 if TYPE_CHECKING:
     from .store import SessionStore
 
-__all__ = ["Claim", "IntentJournal", "IntentNotDurable", "IntentScope", "Prior", "intents_of"]
-
-
-IntentScope: TypeAlias = Literal["log", "process"]
-"""How long a key names its act: for the life of the **log**, or of the **process**
-that opened it.
-
-`process` is for an act whose effect lives in process memory — a credential handed
-to the daemon (L1). Its key is on the log after a restart and its effect is not, so
-refusing a re-send as repeated would refuse the only way the value comes back. The
-opened record carries `"scope": "process"`, and a key opened before this process's
-`first_live_seq` is no prior."""
+__all__ = ["Claim", "IntentJournal", "IntentNotDurable", "Prior", "intents_of"]
 
 
 class IntentNotDurable(RuntimeError):
@@ -80,9 +73,25 @@ class Claim:
     opened: SessionEvent
 
 
-Prior: TypeAlias = IntentRecord
-"""A key this log had already opened, so nothing was: the fold's own record of it —
-what it opened then, and its settle, `None` while that intent is still open."""
+@dataclass(frozen=True, slots=True)
+class Prior:
+    """A key this log had already opened, so nothing was: what it opened then, how
+    it settled, and what that means — read once, here, so no caller decodes a
+    payload to find out (T2)."""
+
+    opened: SessionEvent
+    settled: SessionEvent | None
+    """`None` while the intent is open."""
+    outcome: Outcome | None
+    """`outcome_of` its settle; `None` while it is open."""
+    here: bool
+    """Whether this process opened it (its seq is at or after `first_live_seq`)."""
+
+    @property
+    def running_here(self) -> bool:
+        """Open, and opened by this process: still being carried out, now."""
+        return self.settled is None and self.here
+
 
 _Index = Mapping[str, IntentRecord]
 
@@ -96,43 +105,57 @@ class IntentJournal:
     nothing writes a log and so nothing can fail to — `session_written`'s reading."""
     _indexes: dict[IntentKind, SessionFoldCache[_Index]] = field(default_factory=dict)
 
-    async def open(
-        self,
-        session: Session,
-        kind: IntentKind,
-        data: JsonObject,
-        *,
-        key_scope: IntentScope = "log",
-    ) -> Claim | Prior:
-        """Open an intent under the key `data` carries, unless the log already has.
+    async def open(self, session: Session, kind: IntentKind, data: JsonObject) -> Claim:
+        """Open a new intent under the key `data` carries.
 
-        **Dedupe first.** A key this log already opened — settled or not — returns
-        `Prior` and appends nothing, so a retried act is answered from the log
-        rather than done twice.
+        **Always a new one** (T3): this door does not look for a prior. Keys that
+        name one act for the life of the log are `open_once`'s; a kind whose every
+        act is its own — an ask, a command — opens here, keyed by its own record.
 
-        **Then the barrier**, for a `durable` kind: the opening record is flushed
-        before the claim is handed out, and a flush that fails hands out none —
-        fail-closed, as the checkpoint policy's barriers are. The intent is then
-        settled `not-started` in memory (when the kind has a closer), so the next
-        flush that works writes an honest pair rather than an orphan for repair.
-        A `buffered` or `tools-execute` kind is not flushed here; see `Barrier`.
-
-        A kind that does not `dedupe` skips the first step: its keys are reused
-        on purpose, and a second open is a new intent. A `process`-scoped key
-        opened by an earlier process is no prior either (`IntentScope`).
+        **The barrier**, for a `durable` kind: the opening record is flushed before
+        the claim is handed out, and a flush that fails hands out none — fail-closed,
+        as the checkpoint policy's barriers are. The intent is then settled
+        `not-started` in memory (when the kind has a closer), so the next flush that
+        works writes an honest pair rather than an orphan for repair. A `buffered` or
+        `tools-execute` kind is not flushed here; see `Barrier`.
 
         :raises IntentNotDurable: when a durable kind's record could not be written.
         :raises IntentError: when the kind is undeclared or `data` carries no key.
         """
         self._require_declared(kind)
-        if key_scope == "process":
-            data = {**data, "scope": "process"}
         key = _key(kind.opened, kind.opened_key, data, session.seq)
-        if kind.dedupe:
-            prior = self._index(session, kind).get(key)
-            if prior is not None and _lives(prior.opened, session):
+        return await self._opened(session, kind, key, data)
+
+    async def open_once(
+        self, session: Session, kind: IntentKind, data: JsonObject
+    ) -> Claim | Prior:
+        """Open an intent under the key `data` carries — unless the log already has.
+
+        A key this log already opened, settled or not, is answered with its `Prior`
+        and nothing is appended, so a retried act is answered from the log rather
+        than done twice. Except where the kind says a prior of that outcome may be
+        tried again (`IntentKind.reopen`): then this opens anew, as `open` does.
+
+        A key names its act for the life of the log. There was a `process` scope for
+        the one act whose effect lived in process memory — a credential handed to the
+        daemon — and it went when that verb stopped taking a key (T5).
+
+        :raises IntentNotDurable: when a durable kind's record could not be written.
+        :raises IntentError: when the kind is undeclared or `data` carries no key.
+        """
+        self._require_declared(kind)
+        key = _key(kind.opened, kind.opened_key, data, session.seq)
+        record = self._index(session, kind).get(key)
+        if record is not None:
+            prior = _prior(kind, record, session)
+            if prior.outcome is None or prior.outcome not in kind.reopen:
                 return prior
-        claim = Claim(kind=kind, key=key, opened=session.append(kind.opened, data))
+        return await self._opened(session, kind, key, data)
+
+    async def _opened(
+        self, session: Session, kind: IntentKind, key: str, data: JsonObject
+    ) -> Claim:
+        claim = Claim(kind=kind, key=key, opened=kind.writer.append(session, kind.opened, data))
         if kind.barrier != "durable" or self.sessions is None:
             return claim
         try:
@@ -151,7 +174,7 @@ class IntentJournal:
         return claim
 
     def record(self, session: Session, kind: IntentKind, data: JsonObject) -> Claim:
-        """Open an intent with no barrier and no dedupe.
+        """`open` with no barrier — so synchronous.
 
         For the `tools-execute` kinds, whose records are written by the tool batch
         and whose flush the checkpoint policy places after every pre-execute gate —
@@ -167,7 +190,62 @@ class IntentJournal:
                 f'"{kind.opened}" is durable; open it with `open`, which writes it first'
             )
         key = _key(kind.opened, kind.opened_key, data, session.seq)
-        return Claim(kind=kind, key=key, opened=session.append(kind.opened, data))
+        return Claim(kind=kind, key=key, opened=kind.writer.append(session, kind.opened, data))
+
+    def open_settled(
+        self,
+        session: Session,
+        kind: IntentKind,
+        data: JsonObject,
+        settle: Callable[[SessionEvent], JsonObject],
+    ) -> tuple[SessionEvent, SessionEvent]:
+        """Open an intent and settle it together: an act decided as it was asked (T6).
+
+        For the approval `never` policy, which has answered every ask in advance: the
+        ask is recorded so the log says why, and its decision beside it. One
+        `Session.batch()`, so the pair lands whole or not at all; and no barrier,
+        because nothing acts between the two, so there is no "before the act" for the
+        opening to be on disk ahead of. `settle` builds the settle from the opening
+        record, which is how it learns the seq a seq-keyed kind is keyed by.
+
+        :raises IntentError: when the kind is undeclared, `data` carries no key, or
+            the settle names another.
+        """
+        self._require_declared(kind)
+        key = _key(kind.opened, kind.opened_key, data, session.seq)
+        with session.batch() as batch:
+            opened = kind.writer.append(batch, kind.opened, data)
+            settled_data = settle(opened)
+            closes = _key(kind.settled, kind.settled_key, settled_data, opened.seq + 1)
+            if closes != key:
+                raise IntentError(
+                    f"a settle for {closes!r} cannot close the intent opened as {key!r}"
+                )
+            settled = kind.writer.append(batch, kind.settled, settled_data)
+        return opened, settled
+
+    def settle_unopened(self, session: Session, kind: IntentKind, data: JsonObject) -> SessionEvent:
+        """Write a settle no intent opened: an act refused before it began (T6).
+
+        For a Code Mode dispatch the pipeline refused at its gate. Its readers still
+        want the record — the card shows the refusal — but nothing started, so there
+        is nothing to open, and no fold pairs it (`IntentRecord` says why). Refused
+        while the key is open: that intent's claim is what settles it.
+
+        Rule 6: repair counts a kind's records when the resuming process lacks the
+        kind (`UndeclaredIntentError`), and a settle with no opening hides one open
+        intent from that count. Harmless for Code Mode's kind, which ph-core always
+        declares; a package kind that settles unopened weakens its own refusal.
+
+        :raises IntentError: when the kind is undeclared, `data` carries no key, or
+            an intent under that key is open.
+        """
+        self._require_declared(kind)
+        key = _key(kind.settled, kind.settled_key, data, session.seq)
+        record = self._index(session, kind).get(key)
+        if record is not None and record.settled is None:
+            raise IntentError(f"{kind.opened} {key!r} is open; its claim is what settles it")
+        return kind.writer.append(session, kind.settled, data)
 
     def settle(self, session: Session, claim: Claim, data: JsonObject) -> SessionEvent:
         """Append the settle of `claim`.
@@ -175,13 +253,6 @@ class IntentJournal:
         **Only the claim's own intent, and only once**: the settle must carry the
         claim's key where the kind reads it, and the intent must still be the open
         one under that key — not settled already, not opened again since.
-
-        **A kind that reuses keys is held to the first half only.** Two asks of one
-        tool with no call id share a key, and when they run concurrently the
-        second open replaces the first in the fold — which could never tell them
-        apart, and does not now. Refusing the first ask's settle would turn that
-        old ambiguity into an error raised from a `finally`; so for a kind that
-        does not `dedupe`, the settle closes its key, as the fold reads it.
 
         :raises IntentError: when `data` names another key, or the intent is not open.
         """
@@ -191,44 +262,83 @@ class IntentJournal:
             raise IntentError(
                 f"a settle for {key!r} cannot close the intent opened as {claim.key!r}"
             )
-        if kind.dedupe and not self.is_open(session, claim):
+        if not self.is_open(session, claim):
             raise IntentError(f"{kind.opened} {claim.key!r} is not open, so it cannot be settled")
-        return session.append(kind.settled, data)
+        return kind.writer.append(session, kind.settled, data)
+
+    def held(self, session: Session, kind: IntentKind) -> tuple[Claim, ...]:
+        """Every open intent of `kind`, as claims its owner can settle — for an
+        `owner-settles` kind only (T5), in opening order.
+
+        Such a kind's intents are settled by their owner when it looks, which may be
+        in a later process than the one that opened them, or in another call than
+        the one holding the claim. So the owner asks the log for its claims rather
+        than keeping them. Any other kind's orphans are repair's to settle, and its
+        live intents are settled by the caller that opened them.
+
+        :raises IntentError: when the kind is undeclared or not `owner-settles`.
+        """
+        self._require_declared(kind)
+        if kind.orphan != "owner-settles":
+            raise IntentError(
+                f'"{kind.opened}" is settled by repair or by its opener, not claimed back '
+                "from the log"
+            )
+        return tuple(
+            Claim(kind=kind, key=intent.key, opened=intent.opened)
+            for intent in self.pending(session, kind)
+        )
 
     @asynccontextmanager
     async def claim(
-        self,
-        session: Session,
-        kind: IntentKind,
-        data: JsonObject,
-        *,
-        key_scope: IntentScope = "log",
-    ) -> AsyncIterator[Claim | Prior]:
+        self, session: Session, kind: IntentKind, data: JsonObject
+    ) -> AsyncIterator[Claim]:
         """`open`, and a settle nobody can forget when the body raises.
 
         A body that raises — or is canceled — while its intent is open has it
-        settled `outcome-unknown` with `"failed": true`, the way `step/end` is
-        written in a `finally`, so a caller cannot leave a pair open by raising.
-        A body that returns without settling leaves it open: that is a caller that
-        settles later, which only its owner can do. A `Prior` is handed through
-        untouched — there is nothing of this caller's to settle.
+        settled `outcome-unknown`, the way `step/end` is written in a `finally`, so
+        a caller cannot leave a pair open by raising. A body that returns without
+        settling leaves it open: that is a caller that settles later, which only
+        its owner can do.
         """
-        held = await self.open(session, kind, data, key_scope=key_scope)
+        held = await self.open(session, kind, data)
+        async with self._settling_on_failure(session, held):
+            yield held
+
+    @asynccontextmanager
+    async def claim_once(
+        self, session: Session, kind: IntentKind, data: JsonObject
+    ) -> AsyncIterator[Claim | Prior]:
+        """`open_once`, with `claim`'s settle on failure. A `Prior` is handed through
+        untouched — there is nothing of this caller's to settle."""
+        held = await self.open_once(session, kind, data)
         if isinstance(held, Prior):
             yield held
             return
-        try:
+        async with self._settling_on_failure(session, held):
             yield held
+
+    @asynccontextmanager
+    async def _settling_on_failure(self, session: Session, held: Claim) -> AsyncIterator[None]:
+        try:
+            yield
         except BaseException:
-            if kind.closer is not None and self.is_open(session, held):
-                self.settle(
-                    session, held, {**kind.closer(held.opened, "outcome-unknown"), "failed": True}
-                )
+            self.abandon(session, held, "outcome-unknown")
             raise
 
     def _not_started(self, session: Session, claim: Claim) -> None:
-        if claim.kind.closer is not None:
-            self.settle(session, claim, claim.kind.closer(claim.opened, "not-started"))
+        self.abandon(session, claim, "not-started")
+
+    def abandon(self, session: Session, claim: Claim, why: Unsettled) -> SessionEvent | None:
+        """Settle `claim` on its act's behalf — the act raised, was canceled, or never
+        started — with the kind's closer, marked `by: "process"` (T2).
+
+        `None`, writing nothing, when the intent is no longer open or its kind has
+        no closer (an `owner-settles` kind, which only its owner settles).
+        """
+        if claim.kind.closer is None or not self.is_open(session, claim):
+            return None
+        return self.settle(session, claim, abandoned(claim.kind, claim.opened, why, "process"))
 
     def is_open(self, session: Session, claim: Claim) -> bool:
         """Whether `claim` is still the open intent under its key."""
@@ -306,9 +416,14 @@ def _index_cache(kind: IntentKind) -> SessionFoldCache[_Index]:
     return SessionFoldCache(compute, extend=extend)
 
 
-def _lives(opened: SessionEvent, session: Session) -> bool:
-    """Whether a key opened by `opened` still names its act in this process."""
-    return opened.data.get("scope") != "process" or opened.seq >= session.first_live_seq
+def _prior(kind: IntentKind, record: IntentRecord, session: Session) -> Prior:
+    settled = record.settled
+    return Prior(
+        opened=record.opened,
+        settled=settled,
+        outcome=None if settled is None else outcome_of(kind, settled),
+        here=record.opened.seq >= session.first_live_seq,
+    )
 
 
 def _key(

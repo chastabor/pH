@@ -39,6 +39,7 @@ from ph.testing import (
     MountProfile,
     StubSubagentProvider,
     assert_fold_laws,
+    log_event,
     session_of,
     simple_tool,
     tool_result_payload,
@@ -117,11 +118,11 @@ def test_the_counts_are_a_fold_a_resume_reproduces() -> None:
     exactly what it spent.
     """
     session = Session("counted")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "read"})
-    session.append("turn/start", {"turn": 2})
-    session.append("step/start", {"turn": 2, "step": 1})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "tool/call", {"turn": 1, "step": 1, "callId": "c1", "name": "read"})
+    log_event(session, "turn/start", {"turn": 2})
+    log_event(session, "step/start", {"turn": 2, "step": 1})
 
     counts = counts_of(session)
 
@@ -137,8 +138,9 @@ def test_a_failure_run_is_counted_per_tool_and_reset_by_a_success() -> None:
     session = Session("failing")
     for index, is_error in enumerate([True, True, False, True], start=1):
         call_id = f"c{index}"
-        session.append("tool/call", {"turn": 1, "step": 1, "callId": call_id, "name": "bash"})
-        session.append(
+        log_event(session, "tool/call", {"turn": 1, "step": 1, "callId": call_id, "name": "bash"})
+        log_event(
+            session,
             "tool/result",
             tool_result_payload("out", f"m{index}", call_id, is_error=is_error),
             SurfaceIntent("append"),
@@ -153,22 +155,25 @@ def test_the_counts_obey_the_fold_laws() -> None:
     that exercises each counted type and the reset a `turn/start` performs."""
     session = Session("lawful")
     for turn in (1, 2):
-        session.append("turn/start", {"turn": turn})
-        session.append("step/start", {"turn": turn, "step": 1})
-        session.append("step/retry", {"turn": turn, "step": 1, "attempt": 1, "by": "llm-retry"})
+        log_event(session, "turn/start", {"turn": turn})
+        log_event(session, "step/start", {"turn": turn, "step": 1})
+        log_event(session, "step/retry", {"turn": turn, "step": 1, "attempt": 1, "by": "llm-retry"})
         for index, is_error in enumerate([True, False], start=1):
             call_id = f"t{turn}c{index}"
-            session.append(
-                "tool/call", {"turn": turn, "step": 1, "callId": call_id, "name": "bash"}
+            log_event(
+                session, "tool/call", {"turn": turn, "step": 1, "callId": call_id, "name": "bash"}
             )
-            session.append(
+            log_event(
+                session,
                 "tool/result",
                 tool_result_payload("out", f"m{call_id}", call_id, is_error=is_error),
                 SurfaceIntent("append"),
             )
-        session.append("assistant/chunk", {"text": "…"})
-    session.append(
-        ADMITTED, {"runId": "r1", "name": "scout", "model": "fake-1", "grantedAccess": "read"}
+        log_event(session, "assistant/chunk", {"text": "…"})
+    log_event(
+        session,
+        ADMITTED,
+        {"runId": "r1", "name": "scout", "model": "fake-1", "grantedAccess": "read"},
     )
 
     assert_fold_laws(session, counts_of, _extend)
@@ -186,12 +191,14 @@ def test_a_retried_call_is_a_model_call() -> None:
     the steps.
     """
     session = Session("retried")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("step/retry", {"turn": 1, "step": 1, "attempt": 1, "by": "llm-retry"})
-    session.append("step/retry", {"turn": 1, "step": 1, "attempt": 2, "by": "compaction-summarize"})
-    session.append("turn/start", {"turn": 2})
-    session.append("step/start", {"turn": 2, "step": 1})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "step/retry", {"turn": 1, "step": 1, "attempt": 1, "by": "llm-retry"})
+    log_event(
+        session, "step/retry", {"turn": 1, "step": 1, "attempt": 2, "by": "compaction-summarize"}
+    )
+    log_event(session, "turn/start", {"turn": 2})
+    log_event(session, "step/start", {"turn": 2, "step": 1})
 
     counts = counts_of(session)
 
@@ -203,9 +210,9 @@ async def test_the_step_gate_counts_the_retries_already_made(mount: MountProfile
     ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("capped")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("step/retry", {"turn": 1, "step": 1, "attempt": 1, "by": "llm-retry"})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "step/retry", {"turn": 1, "step": 1, "attempt": 1, "by": "llm-retry"})
 
     decision = await _pre_step(ctx, agent, turn=1, step=2)
 
@@ -283,9 +290,9 @@ async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: MountProfi
     ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("capped")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
-    session.append("step/start", {"turn": 1, "step": 2})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 2})
 
     decision = await _pre_step(ctx, agent, turn=1, step=3)
 
@@ -585,9 +592,9 @@ async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: MountProfil
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("later")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     await run_tool_calls(ctx, session, bash_call("c1"), bash_call("c2"))
-    session.append("turn/start", {"turn": 2})
+    log_event(session, "turn/start", {"turn": 2})
 
     assert (await _pre_step(ctx, agent, turn=2, step=1)).kind == "enter"
 
@@ -663,10 +670,12 @@ async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None
         row("limits", modelCalls={"turnLimit": 10}, toolCalls={"turnLimit": 4}), profile=PROFILE
     )
     session = ctx.require(SESSIONS).create("gauged")
-    session.append("turn/start", {"turn": 1})
-    session.append("step/start", {"turn": 1, "step": 1})
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
     for index in range(3):
-        session.append("tool/call", {"turn": 1, "step": 1, "callId": f"c{index}", "name": "bash"})
+        log_event(
+            session, "tool/call", {"turn": 1, "step": 1, "callId": f"c{index}", "name": "bash"}
+        )
 
     reading = _limits_reading(ctx, session)
 
@@ -674,7 +683,7 @@ async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None
     assert reading.text == "tools 3/4"
     assert reading.level == "normal", "0.75 is short of the gauge's own 0.85"
 
-    session.append("tool/call", {"turn": 1, "step": 1, "callId": "c3", "name": "bash"})
+    log_event(session, "tool/call", {"turn": 1, "step": 1, "callId": "c3", "name": "bash"})
     reading = _limits_reading(ctx, session)
 
     assert reading.text == "tools 4/4"
@@ -709,9 +718,9 @@ async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: MountProfile) -
     for sub, failed in (("d1", False), ("d2", True)):
         start = CodeDispatchLog(**ref, sub_call_id=sub, is_error=failed).to_wire()
         del start["isError"]
-        session.append("tool/code-dispatch-start", {**start, "arguments": {}})
+        log_event(session, "tool/code-dispatch-start", {**start, "arguments": {}})
         settle = CodeDispatchLog(**ref, sub_call_id=sub, is_error=failed).to_wire()
-        session.append("tool/code-dispatch", {**settle, "content": []})
+        log_event(session, "tool/code-dispatch", {**settle, "content": []})
 
     current = counts_of(session)
     assert (current.turn_tools, current.session_tools) == (2, 2)
@@ -745,7 +754,7 @@ async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(
     session, parent, provider = await _parent(ctx)
 
     first = await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
-    session.append(ADMITTED, {**first.to_wire(), "prompt": "go"})
+    log_event(session, ADMITTED, {**first.to_wire(), "prompt": "go"})
 
     with pytest.raises(SubagentSpawnError, match=r"turn limit exceeded \(2/1 children\)"):
         await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="again", parent=parent))
@@ -795,7 +804,7 @@ async def test_the_child_ceiling_has_the_postures_its_siblings_have(
     session, parent, _provider = await _parent(ctx)
 
     first = await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
-    session.append(ADMITTED, {**first.to_wire(), "prompt": "go"})
+    log_event(session, ADMITTED, {**first.to_wire(), "prompt": "go"})
 
     with pytest.raises(SubagentSpawnError) as caught:
         await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="again", parent=parent))

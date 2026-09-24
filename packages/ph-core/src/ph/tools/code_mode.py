@@ -46,21 +46,13 @@ from pydantic import Field
 
 from ..cancel import CancelToken
 from ..cordis import Context, events, maybe_await, plugin
-from ..json import JsonObject, JsonValue, as_str, thaw_json
+from ..json import thaw_json
 from ..keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
 from ..llm.types import ContentBlock, ToolSchema
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace, CodeRunRequest
-from ..session import (
-    Claim,
-    IntentJournal,
-    IntentKind,
-    Session,
-    SessionEvent,
-    Unsettled,
-    declare_intent,
-    intents_of,
-)
+from ..session import Claim, IntentJournal, Session, intents_of
 from ..session.json import freeze_json_value
+from ..session.kinds import TOOL_DISPATCH
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..wire import WireModel
 from .definition import (
@@ -179,59 +171,10 @@ class CodeDispatchLog(CodeDispatchRef):
     is_error: bool
 
 
-DISPATCH_INTERRUPTED = (
-    "The harness stopped while this call was running, so its result was never "
-    "recorded. Its outcome is unknown."
-)
-"""The body of a dispatch settled by repair — what its card shows (P10-11)."""
-
-
-_REF_KEYS: tuple[str, ...] = tuple(
-    field.alias or name for name, field in CodeDispatchRef.model_fields.items()
-)
-"""`CodeDispatchRef`'s wire keys, read off the model — so the settle repair writes
-pairs by the same fields as the two records the pipeline writes (its docstring
-says why that must be one type)."""
-
-
-def _sub_call_id(event: SessionEvent) -> str:
-    return as_str(event.data.get("subCallId"))
-
-
-def _interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
-    """The settle for a dispatch whose own was never written.
-
-    The start record's identity, so every reader pairs it by the fields
-    `CodeDispatchRef` names, an error, and a text body saying why — which is what
-    a dispatch card draws, so a crash no longer leaves one running forever. The
-    parent call's own `tool/result` is the turn repair's, `TOOL_OUTCOME_UNKNOWN`.
-    """
-    identity: dict[str, JsonValue] = {key: opened.data.get(key) for key in _REF_KEYS}
-    return {
-        **identity,
-        "isError": True,
-        "interrupted": why,
-        "content": [{"type": "text", "text": DISPATCH_INTERRUPTED}],
-    }
-
-
-TOOL_DISPATCH = declare_intent(
-    IntentKind(
-        opened="tool/code-dispatch-start",
-        settled="tool/code-dispatch",
-        opened_key=_sub_call_id,
-        settled_key=_sub_call_id,
-        # Recorded once the pipeline decided and before the binding ran: the call
-        # may have happened.
-        orphan="outcome-unknown",
-        # The checkpoint policy's barrier before tools execute, which it places
-        # after every pre-execute gate and skips where a restore covers the tool.
-        barrier="tools-execute",
-        closer=_interrupted,
-        owner="ph.tools.code_mode",
-    )
-)
-"""A Code Mode sub-dispatch: started, then settled — by the pipeline, or repair."""
+# `TOOL_DISPATCH` — the pair a dispatch's two records make — is declared in
+# `ph.session.kinds` with ph-core's other kinds (T4), with `DISPATCH_INTERRUPTED`,
+# the body its repaired settle carries. The leaf spells `CodeDispatchRef`'s wire keys
+# (`DISPATCH_REF_KEYS`) because it cannot import this model; a test holds them equal.
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,8 +379,9 @@ class DispatchBridge:
         if started is None:
             # Refused before it started — a denial, an approval that said no — so
             # there is no intent to settle, and the record says what became of the
-            # call on its own, as it always has.
-            self.session.append("tool/code-dispatch", data)
+            # call on its own, as it always has: the journal's door for a settle
+            # nothing opened (T6).
+            self._journal.settle_unopened(self.session, TOOL_DISPATCH, data)
         else:
             self._journal.settle(self.session, started, data)
 

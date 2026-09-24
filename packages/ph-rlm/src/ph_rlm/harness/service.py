@@ -46,6 +46,7 @@ from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
 from ph.locks import file_lock
 from ph.paths import write_atomic, write_text_under
 from ph.session import Session, SessionFoldCache
+from ph.session.writers import log_writer
 
 from .state import (
     GLOBAL_LOG_NAME,
@@ -63,6 +64,8 @@ from .state import (
     local_fold_cache,
     read_global_events,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = ["HarnessService", "RefinementRefused", "slugify"]
 
@@ -349,7 +352,7 @@ class HarnessService:
         if scope == "local":
             if session is None:
                 raise RefinementRefused("a local refinement needs a session to record it in")
-            session.append(REFINED, record.to_wire())
+            _LOG.append(session, REFINED, record.to_wire())
         else:
             await anyio.to_thread.run_sync(self._append_global, record)
         await self.write_projection(session)

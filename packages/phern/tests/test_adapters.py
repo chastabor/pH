@@ -1069,6 +1069,28 @@ def test_every_route_capability_reaches_resolve_model() -> None:
             ), f"{type(route).__name__} declared {name} and it did not reach the resolved model"
 
 
+def test_every_route_names_the_credential_its_adapter_resolves() -> None:
+    """T5. The resume check asks a route which credential it needs, and the answer
+    must be the name the adapter resolves at its edge — so a renamed `apiKeyEnv` is
+    the name a held session waits for, never the default it was written against.
+
+    Sabotage: drop `credential=` from any adapter's `resolve_model`, and it fails to
+    type-check; pass the default's name instead, and this names the adapter.
+    """
+    routes: list[tuple[Any, Any]] = [
+        (AnthropicConfig(api_key_env="PH_RENAMED_A"), AnthropicAdapter),
+        (ProviderProfile(provider="p", api_key_env="PH_RENAMED_O"), None),
+        (GoogleConfig(api_key_env="PH_RENAMED_G"), GoogleAdapter),
+    ]
+    for route, adapter_type in routes:
+        adapter = (
+            OpenAiCompatibleAdapter(ctx=Context(), profile=route)
+            if adapter_type is None
+            else adapter_type(ctx=Context(), config=route)
+        )
+        assert adapter.resolve_model("p", "m").credential == route.api_key_env, type(route)
+
+
 async def test_a_renderer_with_no_shape_for_a_block_says_so(tmp_path: Path) -> None:
     """The renderer is total over its own wire vocabulary.
 

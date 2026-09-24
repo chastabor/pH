@@ -36,6 +36,7 @@ from ..cordis import Context, Next, plugin
 from ..json import JsonObject, as_seq
 from ..keys import ATTACHMENTS, LLM, SESSIONS
 from ..session import Session
+from ..session.writers import log_writer
 from .adapter import ResolvedModel
 from .types import (
     AttachmentRef,
@@ -46,6 +47,8 @@ from .types import (
     TextBlock,
     attachment_of,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "ATTACHABLE",
@@ -258,7 +261,9 @@ def _record_once(session: Session, event_type: str, provider: str, items: list[J
         and [str(one) for one in as_seq(previous.data.get("attachmentIds"))] == ids
     ):
         return False
-    session.append(event_type, {"provider": provider, "attachmentIds": ids, "attachments": items})
+    _LOG.append(
+        session, event_type, {"provider": provider, "attachmentIds": ids, "attachments": items}
+    )
     return True
 
 

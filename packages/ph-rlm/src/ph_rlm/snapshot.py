@@ -49,9 +49,12 @@ from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
 from ph.seams.spill import SpillClaim
 from ph.session import Session
+from ph.session.writers import log_writer
 from ph.wire import WireModel
 
 from .keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "INLINE_BLOB_MAX",
@@ -180,7 +183,8 @@ class KernelSnapshotPolicy:
             if encoded is None:
                 continue
             record, payload = encoded
-            session.append(
+            _LOG.append(
+                session,
                 "kernel/snapshot",
                 {"namespace": namespace, "run": run_id, "record": record.to_wire()},
             )
@@ -300,7 +304,7 @@ class KernelSnapshotPolicy:
         session = self._session(namespace)
         if session is None:
             return
-        session.append("kernel/restored", {"namespace": namespace, **outcome})
+        _LOG.append(session, "kernel/restored", {"namespace": namespace, **outcome})
 
 
 def render_live_variables(session: Session) -> str:

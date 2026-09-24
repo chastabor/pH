@@ -18,11 +18,14 @@ from ..cordis import Context, plugin
 from ..json import as_str
 from ..keys import APPROVAL, PERMISSION_PRESETS, SANDBOX, TUI_STATUS
 from ..session import Session
+from ..session.writers import log_writer
 from ..wire import WireModel
 from ._registry import contribute_item
 from .approval import ApprovalPolicy
 from .sandbox import SandboxMode
 from .tui_status import StatusField, StatusReading
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "PRESETS",
@@ -127,7 +130,7 @@ class PermissionPresetService:
         preset = PRESETS[name]
         self.active = name
         if session is not None:
-            session.append("permission/preset", {"preset": name})
+            _LOG.append(session, "permission/preset", {"preset": name})
             sandbox = self.ctx.get(SANDBOX)
             if sandbox is not None:
                 sandbox.set_mode(session, preset.sandbox_mode)

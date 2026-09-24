@@ -80,9 +80,12 @@ from ..llm.types import (
 )
 from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
+from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptAssembly, context_message, render_prompt
 from ..tools.batch import execute_tool_calls
 from ..tools.errors import error_info
+
+_LOG = log_writer(__name__)
 
 __all__ = ["AgentCanceled", "ReactLoopAgent"]
 
@@ -303,7 +306,7 @@ class ReactLoopAgent:
         phase = self._phase
         self._throw_if_canceled()
         turn = phase.turn + 1
-        self.session.append("turn/start", {"turn": turn})
+        _LOG.append(self.session, "turn/start", {"turn": turn})
         phase.turn = turn
         turn_ends: TurnEndReason | None = None
         capped = False
@@ -333,12 +336,12 @@ class ReactLoopAgent:
                     turn_ends = TurnEndReason(kind="completed")
                     return False
                 self._throw_if_canceled()
-                self.session.append("step/start", {"turn": turn, "step": step})
+                _LOG.append(self.session, "step/start", {"turn": turn, "step": step})
                 phase.step = step
                 try:
                     for message in decision.messages:
-                        self.session.append(
-                            "user/message", message.to_wire(), SurfaceIntent("append")
+                        _LOG.append(
+                            self.session, "user/message", message.to_wire(), SurfaceIntent("append")
                         )
                     assert decision.assembly is not None
                     step_end = await self._step(decision.assembly)
@@ -352,7 +355,7 @@ class ReactLoopAgent:
                     capped = capped or (step_end is not None and step_end.kind == "max-tokens")
                     turn_ends = step_end
                 finally:
-                    self.session.append("step/end", {"turn": turn, "step": step})
+                    _LOG.append(self.session, "step/end", {"turn": turn, "step": step})
                 self._throw_if_canceled()
                 if turn_ends is not None and not self.inbox.next_step:
                     await self.ctx.serial("agent/turn-stopping", self, turn)
@@ -380,7 +383,8 @@ class ReactLoopAgent:
             self._report(error)
             raise
         finally:
-            self.session.append(
+            _LOG.append(
+                self.session,
                 "turn/end",
                 {"turn": turn, "reason": _turn_reason(turn_ends, capped).to_wire()},
             )
@@ -425,7 +429,8 @@ class ReactLoopAgent:
                     # token-level replay fidelity even for a stream that later
                     # fails.
                     chunk_seqs.append(
-                        self.session.append(
+                        _LOG.append(
+                            self.session,
                             "assistant/chunk",
                             {
                                 "turn": turn,
@@ -466,7 +471,8 @@ class ReactLoopAgent:
                 # to "how many model calls", whichever row asked for the retry.
                 # `llm/retry` is `llm-retry`'s account of itself and a compaction
                 # retry writes none, so a ceiling counting those undercounts.
-                self.session.append(
+                _LOG.append(
+                    self.session,
                     "step/retry",
                     {"turn": turn, "step": step, "attempt": attempt, "by": by},
                 )
@@ -567,7 +573,9 @@ class ReactLoopAgent:
             data["usage"] = usage.to_wire()
         if interrupted:
             data["interrupted"] = True
-        self.session.append("assistant/message", data, SurfaceIntent("append", tuple(chunk_seqs)))
+        _LOG.append(
+            self.session, "assistant/message", data, SurfaceIntent("append", tuple(chunk_seqs))
+        )
 
     async def _build_request(
         self, turn: int, step: int, assembly: PromptAssembly, system: str
@@ -605,20 +613,21 @@ class ReactLoopAgent:
         )
         baseline = session.request_header()
         if not self._request_header_logged:
-            session.append(
+            _LOG.append(
+                session,
                 "request/header",
                 {"header": header.to_wire(), "reason": "initial" if baseline is None else "resume"},
             )
             self._request_header_logged = True
         elif baseline is None or not header_equals(baseline, header):
-            session.append("request/header", {"header": header.to_wire(), "reason": "change"})
+            _LOG.append(session, "request/header", {"header": header.to_wire(), "reason": "change"})
 
         resolved = self.ctx.require(LLM).resolve_model(proposed.provider, proposed.model)
         request_context = RequestContext(
             provider=proposed.provider, model=proposed.model, context_window=resolved.context_window
         )
         if session.request_context() != request_context:
-            session.append("request/context", request_context.to_wire())
+            _LOG.append(session, "request/context", request_context.to_wire())
         self._throw_if_canceled()
 
         return GenerateOptions(

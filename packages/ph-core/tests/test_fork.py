@@ -65,7 +65,7 @@ from ph.session import (
 )
 from ph.session.events import SessionEvent
 from ph.session.store import SessionStore, new_session_id
-from ph.testing import block_text, user_payload
+from ph.testing import block_text, log_event, user_payload
 
 
 def _store() -> SessionStore:
@@ -73,11 +73,11 @@ def _store() -> SessionStore:
 
 
 def _closed_turn(session: Session, turn: int, text: str) -> None:
-    session.append("turn/start", {"turn": turn})
-    session.append("step/start", {"turn": turn, "step": 1})
-    session.append("user/message", user_payload(text, f"m{turn}"), SurfaceIntent("append"))
-    session.append("step/end", {"turn": turn, "step": 1})
-    session.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    log_event(session, "turn/start", {"turn": turn})
+    log_event(session, "step/start", {"turn": turn, "step": 1})
+    log_event(session, "user/message", user_payload(text, f"m{turn}"), SurfaceIntent("append"))
+    log_event(session, "step/end", {"turn": turn, "step": 1})
+    log_event(session, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
 
 
 def test_seeding_marks_the_end_of_the_seed() -> None:
@@ -154,9 +154,9 @@ def test_fork_at_an_earlier_boundary_takes_only_that_prefix() -> None:
 def test_fork_inside_an_open_turn_is_refused() -> None:
     store = _store()
     parent = store.create("parent")
-    parent.append("turn/start", {"turn": 1})
-    parent.append("step/start", {"turn": 1, "step": 1})
-    parent.append("user/message", user_payload("mid-turn", "m1"), SurfaceIntent("append"))
+    log_event(parent, "turn/start", {"turn": 1})
+    log_event(parent, "step/start", {"turn": 1, "step": 1})
+    log_event(parent, "user/message", user_payload("mid-turn", "m1"), SurfaceIntent("append"))
 
     with pytest.raises(SessionForkError) as caught:
         store.fork(parent, parent.events[-1].seq, "child")
@@ -240,10 +240,10 @@ def test_fork_boundaries_agrees_with_the_per_boundary_rule() -> None:
     """
     session = Session("boundaries")
     _closed_turn(session, 1, "first")
-    session.append("approval/policy", {"mode": "ask"})
+    log_event(session, "approval/policy", {"mode": "ask"})
     _closed_turn(session, 2, "second")
-    session.append("turn/start", {"turn": 3})
-    session.append("user/message", user_payload("mid-turn"), SurfaceIntent("append"))
+    log_event(session, "turn/start", {"turn": 3})
+    log_event(session, "user/message", user_payload("mid-turn"), SurfaceIntent("append"))
     log = session.events
 
     fast = fork_boundaries(log)
@@ -303,7 +303,7 @@ def test_a_roll_inside_an_open_turn_is_refused() -> None:
     begins mid-step is not resumable, however it came to begin there."""
     store = _store()
     session = store.create("p")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
 
     with pytest.raises(SessionForkError) as caught:
         store.roll(session)

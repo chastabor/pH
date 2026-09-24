@@ -55,10 +55,13 @@ from ph.json import JsonValue
 from ph.keys import APPROVAL, TOOLS
 from ph.seams.approval import ApprovalDecisionName
 from ph.session import Session
+from ph.session.writers import log_writer
 from ph.tools.definition import Ask, PreToolDecision, ToolExecution
 from ph.tools.registry import RUN_CODE
 from ph.wire import WireModel
 from ph_stabilize.destructive import findings, strings_in
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "DESTRUCTIVE",
@@ -183,7 +186,7 @@ def _matches(arguments: JsonValue, patterns: tuple[str, ...]) -> list[str]:
 
 def set_mode(session: Session, mode: ApprovalMode) -> None:
     """Record a posture change. The last one recorded is the one in force."""
-    session.append("approval/mode", {"mode": mode})
+    _LOG.append(session, "approval/mode", {"mode": mode})
 
 
 def _mode(session: Session | None, config: Config) -> ApprovalMode:

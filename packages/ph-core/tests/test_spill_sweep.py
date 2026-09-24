@@ -38,6 +38,7 @@ import pytest
 from ph.cordis import Context
 from ph.seams.spill import SpillClaim, SpillStore
 from ph.session import Session
+from ph.testing import log_event
 
 pytestmark = pytest.mark.anyio
 
@@ -55,7 +56,7 @@ def _claim(label: str, owner: str, event_type: str = SPILLED) -> SpillClaim:
 
 def _named(session: Session, event_type: str, locator: str) -> None:
     """The event a producer appends after a successful spill."""
-    session.append(event_type, {"locator": locator, "bytes": 1})
+    log_event(session, event_type, {"locator": locator, "bytes": 1})
 
 
 # ------------------------------------------------------------------ the union --

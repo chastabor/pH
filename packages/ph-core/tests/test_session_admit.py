@@ -21,7 +21,7 @@ import pytest
 
 from ph.session import BatchRef, Session, SessionEvent, SurfaceError, SurfaceIntent
 from ph.session.session import SessionHeader
-from ph.testing import assistant_payload, user_payload
+from ph.testing import assistant_payload, log_event, user_payload
 
 
 def _owner() -> Session:
@@ -31,9 +31,11 @@ def _owner() -> Session:
     the smallest log with a surface worth comparing.
     """
     owner = Session("s", header=SessionHeader(id="s", created_at=1_700_000_000_000))
-    owner.append("user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
-    owner.append("assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "usage"}})
-    owner.append("assistant/message", assistant_payload("hi", "m2"), SurfaceIntent("append", (1,)))
+    log_event(owner, "user/message", user_payload("hello", "m1"), SurfaceIntent("append"))
+    log_event(owner, "assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "usage"}})
+    log_event(
+        owner, "assistant/message", assistant_payload("hi", "m2"), SurfaceIntent("append", (1,))
+    )
     return owner
 
 
@@ -133,8 +135,8 @@ def test_a_replica_admits_a_batch_one_member_at_a_time() -> None:
     mid-batch between them — legitimately. Only a *seed* must not end inside one."""
     owner = Session("s")
     with owner.batch() as batch:
-        batch.append("compaction/args-truncated", {"n": 1})
-        batch.append("compaction/args-truncated", {"n": 2})
+        log_event(batch, "compaction/args-truncated", {"n": 1})
+        log_event(batch, "compaction/args-truncated", {"n": 2})
     replica = Session("s")
 
     replica.admit(owner.events[0])
@@ -152,8 +154,8 @@ def test_an_event_that_breaks_a_batch_is_refused_by_admit() -> None:
     both refused."""
     owner = Session("s")
     with owner.batch() as batch:
-        batch.append("compaction/args-truncated", {"n": 1})
-        batch.append("compaction/args-truncated", {"n": 2})
+        log_event(batch, "compaction/args-truncated", {"n": 1})
+        log_event(batch, "compaction/args-truncated", {"n": 2})
     first, second = owner.events
 
     interrupted = Session("s")

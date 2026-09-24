@@ -1,7 +1,13 @@
-"""`ph.session` — the append-only log, the surface, and the derived history."""
+"""`ph.session` — the append-only log, the surface, and the derived history.
+
+**ph-core's intent kinds are declared by importing this package** (T4): `kinds` is
+imported below, statically, so no process can hold a session log without the kinds
+repair must settle in it. See `ph.session.kinds` for why they live in a leaf.
+"""
 
 from __future__ import annotations
 
+from . import kinds as kinds
 from .derive import derive_event_message, derive_transcript
 from .events import (
     SESSION_FORMAT_VERSION,
@@ -16,13 +22,17 @@ from .events import (
 )
 from .folds import SessionFoldCache, SessionLog
 from .intents import (
+    UNSETTLED,
     Barrier,
     IntentError,
     IntentKind,
     IntentOrphan,
     IntentRecord,
     OpenIntent,
+    Outcome,
+    SettledBy,
     Unsettled,
+    abandoned,
     declare_intent,
     declared_intents,
     extend_index,
@@ -30,9 +40,12 @@ from .intents import (
     is_declared,
     key_of,
     open_intents,
+    outcome_of,
     settled_record,
+    unsettled,
+    unsettled_why,
 )
-from .journal import Claim, IntentJournal, IntentNotDurable, IntentScope, Prior, intents_of
+from .journal import Claim, IntentJournal, IntentNotDurable, Prior, intents_of
 from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import (
     IGNORABLE_SESSION_EVENT_TYPES,
@@ -87,6 +100,7 @@ __all__ = [
     "KNOWN_SESSION_EVENT_TYPES",
     "SESSION_FORMAT_VERSION",
     "SURFACE_EVENT_TYPES",
+    "UNSETTLED",
     "Barrier",
     "BatchRef",
     "Claim",
@@ -97,11 +111,11 @@ __all__ = [
     "IntentNotDurable",
     "IntentOrphan",
     "IntentRecord",
-    "IntentScope",
     "InvalidJsonValueError",
     "LogTypeDeclaration",
     "LogTypeError",
     "OpenIntent",
+    "Outcome",
     "Prior",
     "RequestContext",
     "Session",
@@ -114,6 +128,7 @@ __all__ = [
     "SessionLog",
     "SessionObserver",
     "SessionStore",
+    "SettledBy",
     "SurfaceError",
     "SurfaceFoldReplacement",
     "SurfaceFoldResult",
@@ -123,6 +138,7 @@ __all__ = [
     "SurfaceReplace",
     "UnknownEventTypeError",
     "Unsettled",
+    "abandoned",
     "canonical_header",
     "cwd_tag",
     "declare_intent",
@@ -149,11 +165,15 @@ __all__ = [
     "is_surface_eligible_type",
     "is_surface_event",
     "key_of",
+    "kinds",
     "new_session_id",
     "now_ms",
     "open_intents",
     "open_turn_at",
+    "outcome_of",
     "session_written",
     "settled_record",
+    "unsettled",
+    "unsettled_why",
     "valid_session_id",
 ]

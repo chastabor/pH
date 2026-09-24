@@ -40,9 +40,12 @@ from ..json import JsonValue, as_int, as_str
 from ..keys import SCHEDULE
 from ..paths import resolve_roots
 from ..session import Session, SessionFoldCache, now_ms
+from ..session.writers import log_writer
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
 from .schedule_index import IndexRecorder, IndexWriter, ScheduleIndex
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "CANCELED",
@@ -399,7 +402,7 @@ class ScheduleService:
         can never fire never becomes a fact about the session.
         """
         _refuse_unfireable(schedule, now=now_ms())
-        session.append(CREATED, schedule.to_wire())
+        _LOG.append(session, CREATED, schedule.to_wire())
         self.reindex(session)
         return schedule
 
@@ -416,7 +419,7 @@ class ScheduleService:
         state = self.states(session).get(schedule_id)
         if state is None or state.canceled:
             return False
-        session.append(CANCELED, {"id": schedule_id})
+        _LOG.append(session, CANCELED, {"id": schedule_id})
         self.reindex(session)
         return True
 
@@ -439,7 +442,7 @@ class ScheduleService:
                 continue
             # The due moment goes in the event and nowhere else: one fact with two
             # carriers is one that can disagree.
-            session.append(TICK, {"id": state.schedule.id, "dueAt": moment, "firedAt": now})
+            _LOG.append(session, TICK, {"id": state.schedule.id, "dueAt": moment, "firedAt": now})
             claimed.append(state.schedule)
         if claimed:
             # After the appends, so the fold this reads has the ticks in it: an
@@ -475,7 +478,7 @@ class ScheduleService:
         `live` is passed rather than re-derived: the caller has just asked
         whether this root has any, and folding again to count them was the
         second of two folds per beat."""
-        session.append(HEARTBEAT, {"at": now, "live": live})
+        _LOG.append(session, HEARTBEAT, {"at": now, "live": live})
 
 
 class Config(WireModel):

@@ -45,6 +45,7 @@ from ph.seams.workspace import (
 )
 from ph.session import Session, SessionEvent, SessionHeader
 from ph.testing import (
+    log_event,
     workspace_acquired,
     workspace_seam,
 )
@@ -236,7 +237,7 @@ def test_the_fold_starts_after_the_seed() -> None:
         seed=list(parent.events),
         header=SessionHeader(id="c", created_at=1, seed_length=len(parent.events)),
     )
-    child.append(*_acquired("c", "/trees/c"))
+    log_event(child, *_acquired("c", "/trees/c"))
 
     assert [one.agent_id for one in workspace_survivors(child)] == ["c"]
 
@@ -309,8 +310,8 @@ def test_a_parent_reads_what_its_family_left_without_opening_a_child_log() -> No
     """
     parent = _log(_acquired("p", "/trees/p"), _disposed("p", kept=True), session_id="p")
     kid = Session("kid", header=SessionHeader(id="kid", created_at=1, parent_session="p"))
-    kid.append(*_acquired("k", "/trees/k"))
-    kid.append(*_disposed("k", kept=True, retained="error"))
+    log_event(kid, *_acquired("k", "/trees/k"))
+    log_event(kid, *_disposed("k", kept=True, retained="error"))
     stranger = _log(_acquired("x", "/trees/x"), _disposed("x", kept=True), session_id="x")
 
     found = family_survivors([parent, kid, stranger], "p")

@@ -37,28 +37,17 @@ import logging
 import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
-from ..json import JsonObject, as_str
 from ..keys import USER_QUESTIONS
-from ..session import (
-    Claim,
-    IntentKind,
-    IntentNotDurable,
-    Session,
-    SessionEvent,
-    Unsettled,
-    declare_intent,
-    intents_of,
-    open_intents,
-)
+from ..session import IntentNotDurable, Session, SessionEvent, intents_of, open_intents
+from ..session.kinds import QUESTION_ASK, AskResolution, question_answered
 from ..wire import WireModel
 from ._registry import claim_entry
 
 __all__ = [
-    "QUESTION_ASK",
     "AskOutcome",
     "AskResolution",
     "PendingQuestion",
@@ -68,14 +57,8 @@ __all__ = [
     "pending_questions",
 ]
 
-AskResolution = Literal["answered", "unattended", "declined", "canceled", "failed"]
-"""Every way one question can end. Closed, because a caller renders each.
-
-`ask` used to fold all four failures into `None`, and the caller then guessed
-which it had been by sampling `attended` — a *live* probe, read at a different
-moment from the one this seam checked. A cancelled ask still reads as attended,
-so the guess said "somebody was asked and declined" about a question nobody was
-put (K7, and the same false-story class K7 set out to remove)."""
+# `AskResolution` — every way one question can end — is declared with the kind in
+# `ph.session.kinds` (T4), since the answered payload carries it, and re-exported here.
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,45 +155,6 @@ def pending_questions(events: Sequence[SessionEvent]) -> list[PendingQuestion]:
         )
         for intent in open_intents(events, QUESTION_ASK)
     ]
-
-
-def _ask_id(event: SessionEvent) -> str:
-    return as_str(event.data.get("askId"))
-
-
-def _closed(opened: SessionEvent, why: Unsettled) -> JsonObject:
-    """The answer nobody gave, as it has always been written.
-
-    `not-started` is the barrier failing — the question could not be written,
-    so it was not delivered, and closes `failed` as a live ask does when the
-    machinery does not reach a person. `outcome-unknown` is repair's: the
-    process died while somebody may have been answering, which says
-    `interrupted` and pointedly **not** `declined` — declined means "somebody
-    was there and declined", and claiming that of a person who was never
-    reached is the false statement this module opens by refusing to make.
-    """
-    if why == "not-started":
-        asked = UserQuestion.model_validate(opened.data)
-        return UserQuestionService._answered_data(asked, AskOutcome("failed"))
-    return {"askId": _ask_id(opened), "interrupted": True}
-
-
-QUESTION_ASK = declare_intent(
-    IntentKind(
-        opened="question/asked",
-        settled="question/answered",
-        opened_key=_ask_id,
-        settled_key=_ask_id,
-        orphan="outcome-unknown",
-        # On disk before it is delivered (F8).
-        barrier="durable",
-        closer=_closed,
-        owner="ph.seams.user_questions",
-        # A question re-posed after a resume keeps its id; it is asked again.
-        dedupe=False,
-    )
-)
-"""A question put to a person, then answered — or settled by repair (P10-09)."""
 
 
 def _always() -> bool:
@@ -321,10 +265,8 @@ class UserQuestionService:
             held = await journal.open(session, QUESTION_ASK, asked.to_wire())
         except IntentNotDurable:
             return AskOutcome("failed")
-        if not isinstance(held, Claim):
-            raise RuntimeError("QUESTION_ASK does not dedupe, so no ask has a prior")
         outcome = await self._deliver(asked)
-        journal.settle(session, held, self._answered_data(asked, outcome))
+        journal.settle(session, held, self._answered_data(asked, outcome, ask_seq=held.opened.seq))
         return outcome
 
     async def _deliver(self, asked: UserQuestion) -> AskOutcome:
@@ -347,7 +289,9 @@ class UserQuestionService:
         return AskOutcome("answered", answer) if answer is not None else AskOutcome("declined")
 
     @staticmethod
-    def _answered_data(question: UserQuestion, outcome: AskOutcome) -> dict[str, Any]:
+    def _answered_data(
+        question: UserQuestion, outcome: AskOutcome, *, ask_seq: int
+    ) -> dict[str, Any]:
         """Close the pair, and say *how* it closed.
 
         The ask itself is `question.to_wire()` whole, rather than built field by
@@ -360,25 +304,19 @@ class UserQuestionService:
         was the same collapse `AskResolution` exists to undo: a front end that
         fell over mid-ask recorded "asked and not answered", and the transcript
         renders that as *"No answer given."* — a person choosing not to answer a
-        question they were never shown. The closer repair writes through
-        (`_closed`) says `interrupted` rather than `declined` for exactly this
-        reason, so the log's vocabulary already knows the distinction is
-        load-bearing; a live ask has to supply it too.
+        question they were never shown. The closer repair writes through says
+        `interrupted` rather than `declined` for exactly this reason, so the log's
+        vocabulary already knows the distinction is load-bearing; a live ask has to
+        supply it too.
 
-        `declined` is kept beside it for every non-answer, because logs written
-        before `resolution` existed carry only that — so the *reader* still has
-        to fold on it, and writing both keeps one reader rather than two.
-        (`pending_questions` needs neither: it pops on the event type.)
+        Built by the kind's own `question_answered`, which the closer calls as well.
         """
-        data: dict[str, Any] = {"askId": question.ask_id, "resolution": outcome.resolution}
-        if outcome.resolution == "answered":
-            data["answer"] = outcome.answer
-        else:
-            # Asked and *not* answered. Distinct from never being asked, which
-            # appends nothing at all, and recorded so the fold stops calling it
-            # pending.
-            data["declined"] = True
-        return data
+        return question_answered(
+            ask_id=question.ask_id,
+            ask_seq=ask_seq,
+            resolution=outcome.resolution,
+            answer=outcome.answer,
+        )
 
 
 @plugin("user-questions")

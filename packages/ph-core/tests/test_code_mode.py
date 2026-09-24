@@ -26,11 +26,13 @@ from ph.keys import AGENTS, CODE_RUNTIME_STUB, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolSchema
 from ph.persistence import interrupted_turn_closers
 from ph.seams.code_runtime import CodeBindingNamespace
-from ph.session import Session
+from ph.session import Session, unsettled_why
+from ph.session.kinds import DISPATCH_INTERRUPTED, DISPATCH_REF_KEYS
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
+    log_event,
     not_none,
     noting,
     parked_gate,
@@ -40,7 +42,6 @@ from ph.testing import (
 )
 from ph.tools import Deny, ToolExecutionInput, ToolExecutionResult, text_content
 from ph.tools.code_mode import (
-    DISPATCH_INTERRUPTED,
     CodeDispatchRef,
     ToolCallError,
     governed_binding,
@@ -733,6 +734,17 @@ async def test_a_dispatch_and_its_settle_are_paired_by_one_declaration(mount: Mo
     assert {key: start.data[key] for key in identity} == {key: settle.data[key] for key in identity}
 
 
+def test_the_leaf_spells_the_dispatch_identity_as_the_model_does() -> None:
+    """T4. The settle repair writes pairs by `DISPATCH_REF_KEYS`, which `ph.session.kinds`
+    spells because a leaf cannot import this model — so the two are held equal here.
+
+    Sabotage: rename a `CodeDispatchRef` field, and repair's settle of a crashed
+    dispatch would stop pairing with its start while every live test kept passing.
+    """
+    model = tuple(info.alias or name for name, info in CodeDispatchRef.model_fields.items())
+    assert model == DISPATCH_REF_KEYS
+
+
 async def test_a_dispatch_parked_on_its_gate_has_no_start_record(mount: MountProfile) -> None:
     """The second instance of P7-15: `tool/code-dispatch-start` is a write-ahead too.
 
@@ -796,7 +808,7 @@ async def test_an_orphaned_dispatch_is_settled_by_repair(mount: MountProfile) ->
     assert settle.type == "tool/code-dispatch"
     identity = ("rootCallId", "parentCallId", "subCallId", "name")
     assert [settle.data[key] for key in identity] == [start.data[key] for key in identity]
-    assert settle.data["isError"] is True and settle.data["interrupted"] == "outcome-unknown"
+    assert settle.data["isError"] is True and unsettled_why(settle.data) == "outcome-unknown"
     assert as_obj(as_seq(settle.data["content"])[0])["text"] == DISPATCH_INTERRUPTED
 
 
@@ -809,7 +821,8 @@ async def test_revert_still_lists_an_orphaned_dispatch_as_not_undone() -> None:
     tools = ToolRuntime(ctx=root)
     root.provide(TOOLS, tools)
     session = Session("s")
-    session.append(
+    log_event(
+        session,
         "tool/code-dispatch-start",
         {
             "rootCallId": "c1",

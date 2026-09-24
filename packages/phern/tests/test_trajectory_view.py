@@ -27,6 +27,7 @@ from ph.session import Session, SurfaceIntent
 from ph.testing import (
     MountProfile,
     assistant_payload,
+    log_event,
     store_root,
     stored_log,
     user_payload,
@@ -41,15 +42,17 @@ pytestmark = pytest.mark.anyio
 
 def _log(session: Session) -> Session:
     """One turn with a tool call, so there is something to search and fork at."""
-    session.append("turn/start", {"turn": 1})
-    session.append("user/message", user_payload("read a.py"), SurfaceIntent("append"))
-    session.append("step/start", {"turn": 1, "step": 0})
-    session.append("assistant/message", assistant_payload("reading", "a1"), SurfaceIntent("append"))
-    session.append(
-        "tool/call", {"callId": "c1", "name": "read", "arguments": '{"path": "src/a.py"}'}
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "user/message", user_payload("read a.py"), SurfaceIntent("append"))
+    log_event(session, "step/start", {"turn": 1, "step": 0})
+    log_event(
+        session, "assistant/message", assistant_payload("reading", "a1"), SurfaceIntent("append")
     )
-    session.append("step/end", {"turn": 1, "step": 0})
-    session.append("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    log_event(
+        session, "tool/call", {"callId": "c1", "name": "read", "arguments": '{"path": "src/a.py"}'}
+    )
+    log_event(session, "step/end", {"turn": 1, "step": 0})
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     return session
 
 
@@ -453,9 +456,9 @@ def test_a_handler_that_adds_nothing_does_not_stamp_a_previous_record() -> None:
     and many.
     """
     session = Session("broken-header")
-    session.append("turn/start", {"turn": 1})
+    log_event(session, "turn/start", {"turn": 1})
     # A `request/header` whose payload `parse_request_header` refuses.
-    session.append("request/header", {"header": {"nonsense": True}, "reason": "initial"})
+    log_event(session, "request/header", {"header": {"nonsense": True}, "reason": "initial"})
     records = build_trajectory(session)
 
     assert [record.type for record in records] == ["turn/start"], "the bad header made no record"
@@ -465,6 +468,6 @@ def test_a_handler_that_adds_nothing_does_not_stamp_a_previous_record() -> None:
 def test_a_leading_unparsable_header_does_not_crash_the_fold() -> None:
     """The `IndexError` case: nothing has been added yet when the handler bails."""
     session = Session("header-first")
-    session.append("request/header", {"header": {"nonsense": True}, "reason": "initial"})
+    log_event(session, "request/header", {"header": {"nonsense": True}, "reason": "initial"})
 
     assert build_trajectory(session) == []

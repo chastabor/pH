@@ -37,6 +37,7 @@ from ..json import dumps
 from ..keys import TOOLS
 from ..llm.types import Message, ToolCallBlock, new_message_id
 from ..session import Session, SurfaceIntent
+from ..session.writers import log_writer
 from .definition import (
     ToolExecutionInput,
     ToolExecutionResult,
@@ -45,6 +46,8 @@ from .definition import (
 )
 from .json_schema import parse_arguments
 from .registry import PreparedCall, ToolRuntime
+
+_LOG = log_writer(__name__)
 
 __all__ = ["BatchOutcome", "execute_tool_calls", "parse_arguments"]
 
@@ -288,7 +291,8 @@ def _append_call(
     the substitution serialized the way the log serializes everything, since
     there is no model text for it.
     """
-    event = session.append(
+    event = _LOG.append(
+        session,
         "tool/call",
         {
             "turn": turn,
@@ -333,8 +337,11 @@ def _append_result(
             data["error"] = result.error.info
     if result.meta is not None:
         data["meta"] = result.meta
-    session.append(
-        "tool/result", data, SurfaceIntent("append", (call_seq,) if call_seq >= 0 else None)
+    _LOG.append(
+        session,
+        "tool/result",
+        data,
+        SurfaceIntent("append", (call_seq,) if call_seq >= 0 else None),
     )
 
 

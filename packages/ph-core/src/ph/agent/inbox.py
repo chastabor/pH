@@ -27,7 +27,10 @@ from pydantic import ConfigDict
 from ..json import JsonObject
 from ..llm.types import Message
 from ..session import Session
+from ..session.writers import log_writer
 from ..wire import WireModel
+
+_LOG = log_writer(__name__)
 
 __all__ = ["Inbox", "InboxNotifications", "InboxTarget"]
 
@@ -163,7 +166,7 @@ class Inbox:
         # The durable event commits BEFORE the live projection mutates, so a
         # synchronous `session/event` observer sees the pre-splice lists and can
         # reconstruct exactly what was removed from the normalized coordinates.
-        self._session.append("agent/inbox/spliced", splice.to_wire())
+        _LOG.append(self._session, "agent/inbox/spliced", splice.to_wire())
         removed = pending[start : start + delete_count]
         pending[start : start + delete_count] = inserted
         if discard_removed:

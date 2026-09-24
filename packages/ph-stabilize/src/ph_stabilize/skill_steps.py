@@ -44,6 +44,7 @@ from ph.cordis import Context, plugin
 from ph.json import as_int, as_obj, as_str
 from ph.llm.types import PluginSource, create_user_message
 from ph.session import Session
+from ph.session.writers import log_writer
 from ph.text import count_of
 from ph.wire import WireModel
 
@@ -58,6 +59,8 @@ from .todo import (
     steps_of,
     todos_of,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = ["Config", "apply", "latest_skill_budget", "nudges_since", "seeded", "steer_text"]
 
@@ -270,11 +273,13 @@ async def apply(ctx: Context, config: Config) -> None:
         # The same event the tool writes, because it means one thing — "the list
         # is now this" — and a second type would give `todos_of` two things to
         # fold and the sidebar two things to draw.
-        session.append("todo/write", {"todos": grown})
+        _LOG.append(session, "todo/write", {"todos": grown})
         # Recorded even when `null`: that is what hands a later procedure back
         # to the profile's budget rather than the previous skill's.
-        session.append(
-            BUDGET, {"skill": payload["skill"].name, "maxNudges": payload.get("max_nudges")}
+        _LOG.append(
+            session,
+            BUDGET,
+            {"skill": payload["skill"].name, "maxNudges": payload.get("max_nudges")},
         )
 
     async def keep_going(agent: AgentDriver, turn: int) -> None:

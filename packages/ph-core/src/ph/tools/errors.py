@@ -17,6 +17,7 @@ __all__ = [
     "TOOL_ABORTED_BEFORE_DISPATCH",
     "TOOL_BUDGET_SPENT",
     "TOOL_DENIED",
+    "TOOL_EFFECT_IN_FLIGHT",
     "TOOL_TURN_CONCLUDED",
     "HarnessError",
     "ToolNotFoundError",
@@ -65,6 +66,17 @@ the call: `code_mode.CodeRunFailure` already separates `budget` from `denied`
 on exactly this line, and `fs.FileTooLarge` from `fs.FsDenied` on the same one.
 """
 
+
+TOOL_EFFECT_IN_FLIGHT = "TOOL_EFFECT_IN_FLIGHT"
+"""The same effect is already being carried out by another call in this process.
+
+A tool that names its effect (`ToolDefinition.idempotency_key`) is run once per
+effect. A second call asking for it while the first is still running is refused
+rather than run: running it would be the repeat the key exists to prevent, and
+opening a second intent underneath the first would unseat the first's settle.
+`failed` in kind — nothing ran — and safe to retry once the first has returned, when
+the retry is answered from the log.
+"""
 
 TOOL_TURN_CONCLUDED = "TOOL_TURN_CONCLUDED"
 """The turn ended before this call ran (C13).

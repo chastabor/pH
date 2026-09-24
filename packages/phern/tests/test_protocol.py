@@ -14,6 +14,7 @@ from typing import Any, cast
 import pytest
 
 from ph.session import Session
+from ph.testing import log_event
 from ph.wire import WireModel
 from ph_app.protocol import (
     Cursor,
@@ -121,7 +122,7 @@ def test_a_cursor_has_one_spelling() -> None:
     model, so the dict a client sends is the dict the server's model accepts."""
     session = Session("s")
     for index in range(4):
-        session.append("turn/start", {"turn": index})
+        log_event(session, "turn/start", {"turn": index})
     generation = str(session.header.created_at)
 
     built = cursor_of(session)

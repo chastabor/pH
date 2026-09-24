@@ -199,7 +199,6 @@ MUTATING = (
     SESSION_STAGE,
     SESSION_SHELL,
     SESSION_PRESET,
-    CREDENTIALS_STORE,
 )
 """The verbs that change a root under an idempotence key.
 
@@ -207,7 +206,10 @@ Named here rather than only in the server's table so a *client* can tell which
 door a verb goes through — `mutate` stamps the key, `call` does not, and a
 mutation sent through `call` silently loses the write-ahead guard. Deliberately
 absent, and `MUTATIONS` says why: `attachment/put` (content-addressed, so a
-retry is already a no-op) and `session/new` (`start` is idempotent by id).
+retry is already a no-op), `session/new` (`start` is idempotent by id) and
+`credentials/store` (storing one value twice stores it once, and a key would
+outlive the value it named: the value lives in this process's memory, and after a
+restart a re-send is the only way it comes back — T5).
 """
 
 VOCABULARY_VERBS: tuple[Verb[Any, Any] | Notify[Any], ...] = tuple(

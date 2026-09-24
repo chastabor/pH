@@ -58,11 +58,14 @@ from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import ADMITTED, SubagentRequest
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import Session, SessionEvent, SessionFoldCache, derive_event_message
+from ph.session.writers import log_writer
 from ph.tools import TOOL_DISPATCH_EVENT_TYPES
 from ph.tools.definition import Deny, PreToolDecision, ToolExecution
 from ph.wire import WireModel
 
 from .compaction import TRIGGER_FRACTION
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "BREAKER_DENIAL",
@@ -481,7 +484,7 @@ def _record(session: Session, kind: str, posture: str, detail: dict[str, Any]) -
     this record rather than the tool result, and "the ceiling was hit" is a
     different fact from "and here is what happened next".
     """
-    session.append("limits/exceeded", {"limit": kind, "posture": posture, **detail})
+    _LOG.append(session, "limits/exceeded", {"limit": kind, "posture": posture, **detail})
 
 
 @plugin("limits", inject=[SESSIONS], config=Config)
@@ -687,7 +690,8 @@ async def apply(ctx: Context, config: Config) -> None:
         failures = current.consecutive_failures.get(execution.name, 0)
         if limit is None or failures < limit:
             return None
-        session.append(
+        _LOG.append(
+            session,
             "limits/breaker-tripped",
             {"tool": execution.name, "failures": failures, "limit": limit},
         )

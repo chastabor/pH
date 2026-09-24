@@ -47,6 +47,7 @@ from ph.session import (
     is_replacement_surface_event,
 )
 from ph.session.events import SurfaceReplace
+from ph.session.writers import log_writer
 from ph.text import count_of
 from ph.wire import WireModel
 
@@ -57,6 +58,8 @@ from .offload import (
     over_token_limit,
     spill_wording,
 )
+
+_LOG = log_writer(__name__)
 
 __all__ = [
     "HUMAN_TOKEN_LIMIT_BEFORE_EVICT",
@@ -165,7 +168,8 @@ async def apply(ctx: Context, config: Config) -> None:
         # does not name is garbage by definition, so writing first left this
         # blob indistinguishable from garbage for as long as it took to get
         # here — and the sweep runs on another task.
-        session.append(
+        _LOG.append(
+            session,
             "offload/input-spilled",
             {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
         )
@@ -177,7 +181,8 @@ async def apply(ctx: Context, config: Config) -> None:
             file_path=ref.locator,
             content_sample=content_preview(text),
         )
-        session.append(
+        _LOG.append(
+            session,
             "user/message",
             create_user_message(
                 content=[{"type": "text", "text": preview}],

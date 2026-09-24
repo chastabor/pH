@@ -61,7 +61,7 @@ from ph.seams.subprocess import (
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session
-from ph.testing import MountProfile, StubAgent, noted, raising, settled, stored_types
+from ph.testing import MountProfile, StubAgent, log_event, noted, raising, settled, stored_types
 
 pytestmark = pytest.mark.anyio
 
@@ -210,12 +210,13 @@ async def test_a_question_is_on_disk_before_it_is_delivered(mount: MountProfile)
 
 
 async def test_an_ask_under_a_key_asked_before_is_put_again() -> None:
-    """P10-09. An ask is keyed by call id, or by tool name when there is none,
-    so one key is asked many times in a session — and a question re-posed after
-    a resume keeps its id. Neither kind dedupes: each ask reaches a person.
+    """P10-09. One tool is asked about many times in a session, and a question
+    re-posed after a resume keeps its id. Each ask reaches a person.
 
-    Sabotage: declare either kind with `dedupe=True` and the second ask is
-    answered from the log, never shown to anybody.
+    Held twice over since T3: both seams open with `open`, which is always a new
+    intent, and an ask's key is its own seq, which no earlier record holds — so no
+    single edit answers the second ask from the log any more. The test stays as the
+    statement of the property.
     """
     from ph.seams.user_questions import UserQuestion, UserQuestionService
 
@@ -240,6 +241,48 @@ async def test_an_ask_under_a_key_asked_before_is_put_again() -> None:
 
     assert reached == ["edit", "Which?", "edit", "Which?"]
     assert [event.type for event in session.events].count("approval/decided") == 2
+
+
+async def test_two_asks_of_one_tool_at_once_are_settled_separately() -> None:
+    """T3: two asks with no call id open two intents, and each decision closes its own.
+
+    The Continual Harness asks `tool_name="refine"` with no call id. Keyed by tool
+    name, two such asks shared one key: the second replaced the first in the fold, so
+    the first was never settled and a restart left it open to no fold at all. Answered
+    in the opposite order to the asking, so a decision matched to the wrong ask shows.
+    """
+    root = Context()
+    service = ApprovalService(ctx=root)
+    session = Session("s")
+    release = {"first": anyio.Event(), "second": anyio.Event()}
+    answer = {"first": "allowed-once", "second": "rejected"}
+
+    async def approve(request: ApprovalRequest, next_: object) -> str:
+        reason = as_str(request.reason)
+        await release[reason].wait()
+        return answer[reason]
+
+    service.register_answerer(approve)
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            for reason in ("first", "second"):
+                tasks.start_soon(
+                    partial(
+                        service.request, agent=_agent(session), tool_name="refine", reason=reason
+                    )
+                )
+                await anyio.wait_all_tasks_blocked()
+            assert len(pending_approvals(session.events)) == 2, "both asks are open"
+            release["second"].set()
+            await anyio.wait_all_tasks_blocked()
+            release["first"].set()
+
+    asked = {e.data["reason"]: e.seq for e in session.events if e.type == "approval/asked"}
+    decided = {
+        e.data["askSeq"]: e.data["outcome"] for e in session.events if e.type == "approval/decided"
+    }
+    assert decided == {asked["first"]: "allowed-once", asked["second"]: "rejected"}
+    assert pending_approvals(session.events) == []
 
 
 async def test_register_answerer_is_the_waterfall_by_another_name() -> None:
@@ -328,11 +371,15 @@ async def test_the_ask_does_not_carry_the_arguments_it_shows() -> None:
 
 async def test_an_asked_approval_with_no_decision_is_pending_on_resume() -> None:
     session = Session("s")
-    session.append("approval/asked", {"toolName": "edit", "callId": "c1"})
+    asked = log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
     (pending,) = pending_approvals(session.events)
     assert pending.tool_name == "edit"
 
-    session.append("approval/decided", {"toolName": "edit", "callId": "c1", "outcome": "rejected"})
+    log_event(
+        session,
+        "approval/decided",
+        {"toolName": "edit", "callId": "c1", "askSeq": asked.seq, "outcome": "rejected"},
+    )
     # Derived from the log, so a crash between the two cannot lose the question.
     assert pending_approvals(session.events) == []
 

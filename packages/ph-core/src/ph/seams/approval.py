@@ -32,21 +32,14 @@ from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonObject, JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import (
-    Claim,
-    IntentKind,
-    IntentNotDurable,
-    Session,
-    SessionEvent,
-    Unsettled,
-    declare_intent,
-    intents_of,
-    open_intents,
-)
+from ..session import Claim, IntentNotDurable, Session, SessionEvent, intents_of, open_intents
+from ..session.kinds import APPROVAL_ASK, INTERRUPTED, approval_decided
+from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
 
+_LOG = log_writer(__name__)
+
 __all__ = [
-    "APPROVAL_ASK",
     "APPROVAL_OUTCOMES",
     "DENIAL_REASONS",
     "INTERRUPTED",
@@ -74,21 +67,8 @@ ApprovalOutcome: TypeAlias = Literal[
 ]
 """The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
 
-INTERRUPTED: ApprovalOutcome = "interrupted"
-"""The process died while a person was being asked (P5-13).
-
-**Written only by repair, never by an answerer**, which is what separates it from
-the four beside it. Those four say what happened when the question was *put*:
-somebody allowed it, somebody refused, the work was canceled, or nobody could
-be asked. This one says the question was never resolved at all, because the
-process holding it stopped existing — and it is recorded on resume so that
-`pending_approvals` stops reporting a question no one can answer.
-
-Not `canceled`, which claims somebody stopped the work; not `unavailable`,
-which is the live answer when no front end takes the prompt and is a *denial* a
-turn continues from. Naming it apart is the point: a person reading a transcript
-can tell "I was asked and the daemon died" from "I was asked and said no".
-"""
+# `INTERRUPTED` — the answer only repair writes — is declared with the kind in
+# `ph.session.kinds` (T4), and re-exported here with the seam's vocabulary.
 
 APPROVAL_OUTCOMES: Mapping[str, ApprovalOutcome] = literal_lookup(ApprovalOutcome)
 """Every `ApprovalOutcome` by its own spelling — the read-side check. See
@@ -313,57 +293,12 @@ def _str_or_none(value: JsonValue) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _ask_key(event: SessionEvent) -> str:
-    """An ask is keyed by its call id, or by the tool's name when it has none —
-    the rule both halves of the pair have always been read by."""
-    return as_str(event.data.get("callId") or event.data.get("toolName"))
-
-
-def _closed(opened: SessionEvent, why: Unsettled) -> JsonObject:
-    """The decision nobody made, as it has always been written.
-
-    `not-started` is the barrier failing: the ask could not be written, so nobody
-    was asked, and the live answer for that is `unavailable` — a denial the turn
-    continues from. `outcome-unknown` is repair's: the process died while a
-    person may have been deciding, which is `INTERRUPTED`, `automatic` because
-    no person made it — the flag a policy of `never` sets for the same reason.
-    """
-    request = ApprovalRequest(
-        tool_name=as_str(opened.data.get("toolName")),
-        call_id=_str_or_none(opened.data.get("callId")),
-    )
-    if why == "not-started":
-        return ApprovalService._decided_data(request, "unavailable", automatic=False)
-    return ApprovalService._decided_data(request, INTERRUPTED, automatic=True)
-
-
-APPROVAL_ASK = declare_intent(
-    IntentKind(
-        opened="approval/asked",
-        settled="approval/decided",
-        opened_key=_ask_key,
-        settled_key=_ask_key,
-        # A person may have decided on a screen whose answer never reached the
-        # log: the question's outcome is what is unknown.
-        orphan="outcome-unknown",
-        # On disk before anybody is asked (F8).
-        barrier="durable",
-        closer=_closed,
-        owner="ph.seams.approval",
-        # Keyed by tool name when there is no call id, so one key is asked many
-        # times in a session; each ask is its own.
-        dedupe=False,
-    )
-)
-"""An approval: asked, then decided — by a person, a policy, or repair (P10-09)."""
-
-
 def approval_policy(session: Session) -> ApprovalPolicy:
     """The policy in force: the last `approval/policy` event, else `ask`.
 
-    **Not enforced: who wrote it** — the same statement as `SandboxSeam.logged_mode`,
-    for the same reason. The writers are checked where they are shipped, not at the
-    append.
+    **Who wrote it is this seam** — the same statement as `SandboxSeam.logged_mode`:
+    `approval/policy` is written only through this module's writer (T6), and what is
+    not enforced is the same deliberate bypass.
     """
     event = session.latest("approval/policy")
     if event is None:
@@ -425,8 +360,16 @@ class ApprovalService:
         if session is not None and approval_policy(session) == "never":
             # A deployment that turned prompting off has answered in advance;
             # the decision is still recorded so the log says why.
-            self._record_asked(session, request)
-            self._record_decided(session, request, "rejected", automatic=True)
+            # Asked and decided together, through the journal (T6): one batch, so
+            # the pair lands whole.
+            intents_of(self.ctx).open_settled(
+                session,
+                APPROVAL_ASK,
+                self._asked_data(request),
+                lambda asked: self._decided_data(
+                    request, "rejected", automatic=True, ask_seq=asked.seq
+                ),
+            )
             return "rejected"
 
         journal = intents_of(self.ctx)
@@ -440,12 +383,9 @@ class ApprovalService:
             # The journal closes that pair `unavailable` itself, and does the same
             # if the write is canceled.
             try:
-                opened = await journal.open(session, APPROVAL_ASK, self._asked_data(request))
+                held = await journal.open(session, APPROVAL_ASK, self._asked_data(request))
             except IntentNotDurable:
                 return "unavailable"
-            if not isinstance(opened, Claim):
-                raise RuntimeError("APPROVAL_ASK does not dedupe, so no ask has a prior")
-            held = opened
 
         # **The pair closes even when the wait does not return** (K7).
         # `_route` checks the token on the way *in*, so `"canceled"` was reachable
@@ -467,7 +407,11 @@ class ApprovalService:
             return outcome
         finally:
             if session is not None and held is not None:
-                journal.settle(session, held, self._decided_data(request, outcome, automatic=False))
+                journal.settle(
+                    session,
+                    held,
+                    self._decided_data(request, outcome, automatic=False, ask_seq=held.opened.seq),
+                )
 
     async def _route(self, request: ApprovalRequest, cancel: Cancellation | None) -> ApprovalAnswer:
         if is_canceled(cancel):
@@ -516,11 +460,12 @@ class ApprovalService:
             return "unavailable"
         return answer
 
-    def _record_asked(self, session: Session, request: ApprovalRequest) -> None:
+    @staticmethod
+    def _asked_data(request: ApprovalRequest) -> dict[str, Any]:
         """The ask, as the log keeps it.
 
         Built field by field rather than by subtracting `arguments` from
-        `to_wire()`, and symmetric with `_record_decided` for the reason: the
+        `to_wire()`, and symmetric with `_decided_data` for the reason: the
         request is the *answerer's* view and will grow fields for its benefit — a
         diff preview, a risk label — and every one of them would otherwise land
         in the log by default, silently, with the filter needing to be remembered
@@ -528,10 +473,6 @@ class ApprovalService:
         the assistant message holds them; two statements of one fact are two that
         can disagree.
         """
-        session.append("approval/asked", self._asked_data(request))
-
-    @staticmethod
-    def _asked_data(request: ApprovalRequest) -> dict[str, Any]:
         data: dict[str, Any] = {"toolName": request.tool_name}
         if request.call_id is not None:
             data["callId"] = request.call_id
@@ -543,38 +484,31 @@ class ApprovalService:
             data["allowedDecisions"] = list(request.allowed_decisions)
         return data
 
-    def _record_decided(
-        self,
-        session: Session,
-        request: ApprovalRequest,
-        outcome: ApprovalAnswer,
-        *,
-        automatic: bool,
-    ) -> None:
-        session.append(
-            "approval/decided", self._decided_data(request, outcome, automatic=automatic)
-        )
-
     @staticmethod
     def _decided_data(
-        request: ApprovalRequest, outcome: ApprovalAnswer, *, automatic: bool
+        request: ApprovalRequest, outcome: ApprovalAnswer, *, automatic: bool, ask_seq: int
     ) -> dict[str, Any]:
-        data: dict[str, Any] = {"toolName": request.tool_name, "outcome": answer_kind(outcome)}
+        """The decision, built by the kind's own builder — the one repair's closer
+        calls too, so the two cannot drift."""
+        answer: JsonObject | None = None
         if isinstance(outcome, Edited):
             # The substitution itself: the assistant message holds what the model
             # asked for, and `tool/call` will record what ran (P7-15).
-            data["arguments"] = outcome.arguments
+            answer = {"arguments": outcome.arguments}
         elif isinstance(outcome, Responded):
-            data["message"] = outcome.message
-        if request.call_id is not None:
-            data["callId"] = request.call_id
-        if automatic:
-            data["automatic"] = True
-        return data
+            answer = {"message": outcome.message}
+        return approval_decided(
+            tool_name=request.tool_name,
+            call_id=request.call_id,
+            outcome=answer_kind(outcome),
+            ask_seq=ask_seq,
+            automatic=automatic,
+            answer=answer,
+        )
 
     def set_policy(self, session: Session, policy: ApprovalPolicy) -> None:
         """Record a policy change. The last one recorded is the one in force."""
-        session.append("approval/policy", {"policy": policy})
+        _LOG.append(session, "approval/policy", {"policy": policy})
 
 
 @plugin("approval")
