@@ -30,10 +30,7 @@ from ph.cordis import DEPLOYMENT, Context
 from ph.keys import SESSIONS, SPILL_STORE, TOOLS
 from ph.llm.types import ToolCallBlock, ToolResultBlock, ToolSource, text_of
 from ph.session import Session, SessionEvent, derive_event_message
-from ph.session.known_event_types import (
-    IGNORABLE_SESSION_EVENT_TYPES,
-    KNOWN_SESSION_EVENT_TYPES,
-)
+from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.testing import (
     MountProfile,
     StubAgent,
@@ -329,10 +326,9 @@ async def test_only_the_oversized_sibling_is_replaced(mount: MountProfile) -> No
     ]
 
 
-def test_the_event_type_is_in_the_vocabulary() -> None:
-    """ph-core's `append(`-site walker sees only ph-core, so a producer in
-    another package owes this proof through its own bundle's tests."""
-    assert "offload/spilled" in KNOWN_SESSION_EVENT_TYPES
+def test_the_event_type_is_ignorable() -> None:
+    """A reader that skips it keeps the conversation: the spilled body's stand-in is
+    in the result itself. (That it is *known* is `test_log_writers.py`'s.)"""
     assert "offload/spilled" in IGNORABLE_SESSION_EVENT_TYPES
 
 

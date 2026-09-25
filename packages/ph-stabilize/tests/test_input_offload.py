@@ -23,10 +23,7 @@ from ph.keys import AGENTS, SESSIONS
 from ph.llm.types import PluginSource, create_user_message, text_of
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SurfaceReplace
-from ph.session.known_event_types import (
-    IGNORABLE_SESSION_EVENT_TYPES,
-    KNOWN_SESSION_EVENT_TYPES,
-)
+from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import CONTEXT_PLUGIN
 from ph.testing import FAKE_OPTIONS, MountProfile, log_event, user_payload
 from ph_stabilize.input_offload import (
@@ -249,9 +246,9 @@ async def test_a_spill_that_fails_keeps_the_message(
     assert original in _model_text(session)
 
 
-def test_the_event_type_is_in_the_vocabulary() -> None:
-    """The proof a producer outside ph-core owes through its own bundle."""
-    assert "offload/input-spilled" in KNOWN_SESSION_EVENT_TYPES
+def test_the_event_type_is_ignorable() -> None:
+    """For `offload/spilled`'s reason: the paste's replacement is what the model
+    reads. (That it is *known* is `test_log_writers.py`'s.)"""
     assert "offload/input-spilled" in IGNORABLE_SESSION_EVENT_TYPES
 
 

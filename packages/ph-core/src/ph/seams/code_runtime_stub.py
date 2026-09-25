@@ -21,6 +21,7 @@ from typing import Any
 
 from ..cordis import Context, maybe_await, plugin
 from ..keys import CODE_RUNTIME, CODE_RUNTIME_STUB
+from ..tools.code_mode import CodeRunFailure
 from .code_runtime import CodeRunRequest, CodeRunResult, Isolation, Persistence
 
 __all__ = ["StubCodeRuntime", "apply"]
@@ -60,8 +61,6 @@ class StubCodeRuntime:
             # A raise inside the program is the program's outcome, not the
             # runtime's failure — except for the ones the bridge raises to end
             # the run, which the transport re-raises.
-            from ..tools.code_mode import CodeRunFailure
-
             if isinstance(error, CodeRunFailure):
                 raise
             return CodeRunResult(logs="\n".join(emitted), error=str(error))

@@ -121,7 +121,8 @@ def username() -> str:
     if name:
         return name
     try:
-        import pwd
+        # POSIX-only, and its absence is handled below.
+        import pwd  # noqa: PLC0415
 
         return pwd.getpwuid(os.getuid()).pw_name
     except Exception:  # pragma: no cover - no pwd (Windows) or no passwd entry

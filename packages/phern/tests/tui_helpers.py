@@ -20,6 +20,7 @@ from textual.pilot import Pilot
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph_app.daemon.supervisor import Root
+from ph_app.payloads import AskKey
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.state import Surface
 
@@ -148,12 +149,12 @@ class StubHost:
     def __init__(self) -> None:
         self.approvals: list[ApprovalRequest] = []
         self.questions: list[UserQuestion] = []
-        self.withdrawn: list[str] = []
+        self.withdrawn: list[AskKey] = []
         self.redraws = 0
         self.redrawn = Surface.NOTHING
 
     async def ask_approval(
-        self, request: ApprovalRequest, *, ask_id: str = ""
+        self, request: ApprovalRequest, *, ask: AskKey | None = None
     ) -> tuple[ApprovalAnswer, str]:
         # `ApprovalAnswer`, not `tuple[str, str]`: `ModalHost` promises the
         # narrowed answer, and the whole reason it is a Protocol is that a
@@ -161,12 +162,14 @@ class StubHost:
         self.approvals.append(request)
         return "allowed-once", ""
 
-    async def ask_question(self, question: UserQuestion, *, ask_id: str = "") -> str | None:
+    async def ask_question(
+        self, question: UserQuestion, *, ask: AskKey | None = None
+    ) -> str | None:
         self.questions.append(question)
         return "42"
 
-    def withdraw_ask(self, ask_id: str, *, reason: str = "") -> None:
-        self.withdrawn.append(ask_id)
+    def withdraw_ask(self, ask: AskKey, *, reason: str = "") -> None:
+        self.withdrawn.append(ask)
 
     def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
         # Unioned so a test can assert what a batch did *not* reach.

@@ -300,7 +300,8 @@ async def test_a_refused_open_leaves_an_ops_record(profile: Profile, tmp_path: P
     not ours to write — which is exactly what the `ops` channel is for, and why
     it had no producer until something had a fact of that shape to record.
     """
-    from ph_app.runtime import mounted, open_session
+    from ph.persistence import open_session
+    from ph_app.runtime import mounted
 
     seen: list[Any] = []
     with hold_session(tmp_path / "sessions", "held"):

@@ -18,9 +18,8 @@ a different and false claim.
 So attendance is decided **first**, and an unattended ask appends nothing and
 returns at once. A deliverable one appends `question/asked` *before* the
 waterfall runs and `question/answered` after, which is §5 rule 2 in the order
-`ApprovalService._record_asked` already uses: a crash between them leaves the
-question in the log with no answer, which is exactly the pending state
-`pending_questions` folds.
+approvals use: a crash between them leaves the question in the log with no answer
+— `QUESTION_ASK` open — which repair settles on resume.
 
 Reachability is the answerer's own claim, because only the answerer knows. An
 in-process front end *is* the person's screen and says so by saying nothing —
@@ -35,14 +34,14 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin, settled_or_none
 from ..keys import USER_QUESTIONS
-from ..session import IntentNotDurable, Session, SessionEvent, intents_of, open_intents
+from ..session import IntentNotDurable, Session, intents_of
 from ..session.kinds import QUESTION_ASK, AskResolution, question_answered
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -50,11 +49,9 @@ from ._registry import claim_entry
 __all__ = [
     "AskOutcome",
     "AskResolution",
-    "PendingQuestion",
     "UserQuestion",
     "UserQuestionService",
     "apply",
-    "pending_questions",
 ]
 
 # `AskResolution` — every way one question can end — is declared with the kind in
@@ -113,48 +110,6 @@ class UserQuestion(WireModel):
 
     `None` for a caller that has no natural key; `ask()` fills it in.
     """
-
-
-@dataclass(frozen=True, slots=True)
-class PendingQuestion:
-    """An `asked` with no `answered` — a question a resume should put back.
-
-    Carries the `UserQuestion` itself rather than a copy of its fields. The
-    record *is* a serialized question (`_record_asked` writes `to_wire()`
-    whole), so re-listing the fields here would be a second field list to keep
-    in step — and the one that fails silently, by dropping whatever the model
-    gains next rather than by not compiling. This is where it differs from
-    `PendingApproval`, whose request deliberately does not reach the log intact.
-    """
-
-    seq: int
-    question: UserQuestion
-
-    @property
-    def ask_id(self) -> str:
-        return self.question.ask_id or ""
-
-
-def pending_questions(events: Sequence[SessionEvent]) -> list[PendingQuestion]:
-    """Questions this log put to a person and never recorded an answer for.
-
-    Derived rather than tracked, for the reason `pending_approvals` is: the log
-    *is* the pending state, so a crash between the two events cannot lose the
-    question.
-
-    **Events rather than a `Session`**, for `pending_approvals`' reason: repair
-    is the caller that has no session, and it settles these on resume so the
-    fold stops reporting a question nobody can answer.
-    """
-    # `model_validate` off the event data, the way `RequestContext` and `Message`
-    # are already rehydrated: `WireModel` owns the camelCase aliases and the log's
-    # frozen mapping, so neither is spelled here.
-    return [
-        PendingQuestion(
-            seq=intent.opened.seq, question=UserQuestion.model_validate(intent.opened.data)
-        )
-        for intent in open_intents(events, QUESTION_ASK)
-    ]
 
 
 def _always() -> bool:
@@ -252,7 +207,7 @@ class UserQuestionService:
             return await self._deliver(asked)
         # On disk before it is delivered (F8), which is the whole reason the ask
         # is appended ahead of the waterfall: a crash while somebody was deciding
-        # must leave the question in the log for `pending_questions` to fold. The
+        # must leave the question open in the log, for repair to settle. The
         # kind's barrier does it; one that cannot be written is not asked, and
         # the journal closes it `failed`.
         #
@@ -279,8 +234,8 @@ class UserQuestionService:
         except Exception:
             # An answerer that raises and one that answers the wrong shape are the
             # same failure to this seam, and either way the ask has to be closed
-            # in the log — the `asked`/`answered` pair is what `pending_questions`
-            # folds.
+            # in the log — the `asked`/`answered` pair is `QUESTION_ASK`, and an
+            # open one is what repair settles on resume.
             log.exception("ph.seams.user_questions: an answerer failed")
             return AskOutcome("failed")
         # Delivered and unanswered is a *person* declining; the failure above is

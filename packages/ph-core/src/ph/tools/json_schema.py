@@ -24,9 +24,10 @@ import re
 from functools import cache
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..json import JsonValue
+from ..wire import validation_errors
 
 __all__ = [
     "CONSTRAINING_KEYWORDS",
@@ -148,10 +149,6 @@ def validate_json_schema_value(
     the tool's own model is the validator.
     """
     if isinstance(schema, type) and issubclass(schema, BaseModel):
-        from pydantic import ValidationError
-
-        from ..wire import validation_errors
-
         try:
             schema.model_validate(value)
         except ValidationError as error:

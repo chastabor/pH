@@ -85,9 +85,10 @@ class Config(WireModel):
 async def apply(ctx: Context, config: Config) -> None:
     """Register the exporter as a sink, or refuse with a reason."""
     try:
-        from opentelemetry._logs import SeverityNumber
-        from opentelemetry.sdk._logs import LoggerProvider
-        from opentelemetry.sdk.resources import Resource
+        # Not a declared dependency: the row checks for it before this runs.
+        from opentelemetry._logs import SeverityNumber  # noqa: PLC0415
+        from opentelemetry.sdk._logs import LoggerProvider  # noqa: PLC0415
+        from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
 
         # Inside the guard, because `_pipeline` imports the *other* half of the
         # extra: a deployment with the SDK but no OTLP exporter refuses here
@@ -152,8 +153,11 @@ def _pipeline(config: Config) -> Any:  # noqa: ANN401
     this single substitution, and the pair had `apply` importing a class purely
     to hand it to a one-line helper.
     """
-    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    # Not a declared dependency: the row checks for it before this runs.
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import (  # noqa: PLC0415
+        OTLPLogExporter,
+    )
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor  # noqa: PLC0415
 
     return BatchLogRecordProcessor(OTLPLogExporter(endpoint=config.endpoint))
 

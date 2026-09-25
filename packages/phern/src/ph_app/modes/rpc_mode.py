@@ -24,6 +24,7 @@ from ph.agent.types import AgentOptions
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
+from ph.persistence import open_session
 from ph.session import Session, SessionEvent
 from ph.wire import WireModel
 
@@ -44,7 +45,7 @@ from ..protocol import (
     parse_params,
     respond,
 )
-from ..runtime import mounted, open_session
+from ..runtime import mounted
 
 __all__ = ["RpcServer", "run_rpc"]
 

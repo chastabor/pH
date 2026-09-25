@@ -26,6 +26,7 @@ from ..seams.workspace import Workspace
 from ..seams.workspace_git import git
 from ..session import Session
 from . import MountProfile
+from .builders import FAKE_OPTIONS
 
 __all__ = ["WORKTREE_ROWS", "git", "git_repo", "worktree_agent"]
 
@@ -54,8 +55,6 @@ async def worktree_agent(
     suite initializing git repositories inside pH's own tree and sharing one
     branch namespace. That mistake has been made once already.
     """
-    from ..testing import FAKE_OPTIONS
-
     ctx = await mount(*WORKTREE_ROWS, *extra_rows)
     base = await git_repo(ctx, tmp_path / "repo")
     (base / ".gitignore").write_text("*.log\n", encoding="utf-8")

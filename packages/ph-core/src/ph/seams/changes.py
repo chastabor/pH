@@ -111,9 +111,13 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
+import anyio
+
 from ..cordis import Context
 from ..keys import WORKSPACE
 from .workspace import Backend, SnapshottingProvider, VersionedProvider, WorkspaceProvider
+from .workspace_git import git
+from .workspace_jj import jj
 
 __all__ = [
     "Backend",
@@ -279,8 +283,6 @@ async def _git_state(ctx: Context, root: Path) -> TreeState:
     caller stored, which costs a re-read — where trusting two vocabularies to
     agree costs a stale index.
     """
-    from .workspace_git import git
-
     answers = await _gathered(
         listed=git(ctx, root, "ls-files", "--full-name", "-s"),
         dirty=git(ctx, root, "status", "--porcelain", "--untracked-files=all"),
@@ -384,8 +386,6 @@ def _snapshotting(ctx: Context, root: Path) -> Callable[..., Awaitable[tuple[int
     to hold out: an undeclared tier is the person's own checkout, where the seam
     provisioned nothing and `auto_track(())` is `()` anyway.
     """
-    from .workspace_jj import jj
-
     tier = _tier(ctx)
     if isinstance(tier, SnapshottingProvider):
         return lambda *args: tier.snapshotting(root, *args)
@@ -405,8 +405,6 @@ async def _gathered(
     `listed[1]` and `dirty[0]` said nothing about which command answered, and the
     third call arrived by adding a subscript to that.
     """
-    import anyio
-
     results: dict[str, tuple[int, str, str]] = {}
 
     async def run(name: str, awaitable: Awaitable[tuple[int, str, str]]) -> None:

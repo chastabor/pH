@@ -417,9 +417,14 @@ async def test_a_pre_execute_denial_of_a_sub_call_also_fails_the_run(mount: Moun
         await ns["tools"].touch(n=1)
         return "done"
 
-    result, _session = await _run(ctx, "pre-denied", program)
+    result, session = await _run(ctx, "pre-denied", program)
     assert result.is_error
     assert "not now" in not_none(result.error).message
+    # A refusal is still an opened-and-settled pair (P7-15): the pipeline writes the
+    # start for every call its gate decides. Repair's count for a kind it lacks is
+    # exact only because nothing writes a settle with no opening.
+    types = [e.type for e in session.events if e.type.startswith("tool/code-dispatch")]
+    assert types == ["tool/code-dispatch-start", "tool/code-dispatch"]
 
 
 # ------------------------------------------------- transport presentation --

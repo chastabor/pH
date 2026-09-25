@@ -22,9 +22,9 @@ That re-posing is **in-memory, and so lasts as long as the daemon does** — whi
 is the whole of what it promises, and no longer a silent edge. A restart cannot
 carry the ask across, because what was waiting on it was a coroutine inside a
 turn, and both are gone. What it does instead is **settle** it: repair writes the
-`approval/decided` the crash never got to (P5-13), so `pending_approvals` stops
-reporting a question nobody can answer and the transcript says the person was
-still being asked when the harness stopped.
+`approval/decided` the crash never got to (P5-13), so the log holds no ask nobody
+can answer and the transcript says the person was still being asked when the
+harness stopped.
 
 So the guarantee is bounded and stated rather than absent. Within one daemon, an
 ask outlives every front end and waits for whoever turns up. Across a restart it
@@ -104,6 +104,22 @@ class AskDesk:
     root: Root
     front_ends: set[FrontEnd] = field(default_factory=set)
     asks: dict[str, PendingAsk] = field(default_factory=dict)
+    asked: int = 0
+    """How many asks this desk has named. The next is `ask-<asked + 1>`.
+
+    The desk names each ask itself, because nothing the seams hand it is unique.
+    The Continual Harness's `refine` approvals have no call id, which leaves only
+    the tool name, and a question's `ask_id` is whatever its caller passed. Two
+    asks under one name shared an entry in `asks`: the first to finish took the
+    other's with it, and the root read as idle while still parked on a person.
+
+    Unique within this root only, and on purpose: a root is self-contained and
+    coordinates with no other. Every ask frame and `ask.settled` carries the root's
+    `sessionId`, so a front end attached to two roots files an ask by both
+    (`AskKey`, each frame's `key`). A root started again has a new desk, counting
+    from 1 again. That is safe because `Supervisor.passivatable` never releases a
+    root with a front end attached, and a front end that loses the daemon takes its
+    own modals down."""
 
     # ------------------------------------------------------------- wiring --
 
@@ -175,13 +191,14 @@ class AskDesk:
     ) -> ApprovalAnswer:
         """`ctx.approval`'s answerer, over the socket.
 
-        The ask is keyed by the same string `pending_approvals` uses — the call
-        id, or the tool name when there is none — so a question re-posed after a
-        restart is recognizably the one the log is still holding open.
+        Named on the wire by the desk (`asked`), not by its call id, which a
+        `refine` ask does not have. The call id and the tool name still travel, in
+        `request`.
         """
-        ask_id = request.call_id or request.tool_name
         result = ApprovalAskReply.model_validate(
-            await self._ask(ApprovalAsk(session_id=self.root.id, ask_id=ask_id, request=request))
+            await self._ask(
+                ApprovalAsk(session_id=self.root.id, ask_id=self._name(), request=request)
+            )
         )
         if reason := result.reason:
             # "No, use the existing helper" redirects a turn where a bare refusal
@@ -199,21 +216,21 @@ class AskDesk:
     ) -> str | None:
         """`ctx.user_questions`' answerer, over the socket.
 
-        Keyed by the question's own `ask_id`, which `UserQuestionService.ask`
-        fills in before any answerer sees it — so the frame a front end answers
-        and the record a resume would re-pose from are the same string rather
-        than two that happen to line up. Minting a fallback here would be a
-        second, weaker id scheme (a counter that restarts at 1 after a resume)
-        for a value the seam already mints so that it cannot collide.
+        Named on the wire by the desk (`asked`), as an approval is. The question's
+        own `ask_id`, the log's `askId`, still travels, in `question`.
         """
         result = QuestionAskReply.model_validate(
             await self._ask(
-                QuestionAsk(session_id=self.root.id, ask_id=str(question.ask_id), question=question)
+                QuestionAsk(session_id=self.root.id, ask_id=self._name(), question=question)
             )
         )
         return result.answer
 
     # ------------------------------------------------------------ the ask --
+
+    def _name(self) -> str:
+        self.asked += 1
+        return f"ask-{self.asked}"
 
     async def _ask(self, ask: ApprovalAsk | QuestionAsk) -> dict[str, Any]:
         """Put one question to every front end and wait for the first answer.

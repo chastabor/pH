@@ -45,6 +45,7 @@ from ph.json import dumps
 from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
 from ph.locks import file_lock
 from ph.paths import write_atomic, write_text_under
+from ph.seams.code_runtime import CodeRunRequest
 from ph.session import Session, SessionFoldCache
 from ph.session.writers import log_writer
 
@@ -225,7 +226,6 @@ class HarnessService:
             # A mounted seam with no provider is the seam's own error to word:
             # `runtime.run` raises it, and the except below reports it.
             return "no code runtime is mounted to resolve it against"
-        from ph.seams.code_runtime import CodeRunRequest
 
         try:
             outcome = await runtime.run(

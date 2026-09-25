@@ -49,10 +49,7 @@ from ph.seams.compaction import CompactionError, CompactionNote
 from ph.session import Session, SurfaceIntent, derive_event_message
 from ph.session.events import SurfaceReplace
 from ph.session.json import InvalidJsonValueError
-from ph.session.known_event_types import (
-    IGNORABLE_SESSION_EVENT_TYPES,
-    KNOWN_SESSION_EVENT_TYPES,
-)
+from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -1458,14 +1455,14 @@ async def test_a_note_that_renders_nothing_costs_no_prompt(mount: MountProfile) 
 # ------------------------------------------------------------ the vocabulary --
 
 
-def test_the_event_types_are_in_the_vocabulary() -> None:
-    """The proof a producer outside ph-core owes through its own bundle."""
+def test_the_event_types_are_ignorable() -> None:
+    """Accounting beside the replacement it describes, which is what a reader reads.
+    (That they are *known* is `test_log_writers.py`'s, for every package.)"""
     for event_type in (
         "compaction/summarized",
         "compaction/declined",
         "compaction/args-truncated",
     ):
-        assert event_type in KNOWN_SESSION_EVENT_TYPES
         assert event_type in IGNORABLE_SESSION_EVENT_TYPES
 
 

@@ -141,8 +141,7 @@ the four answers beside it in `ph.seams.approval.ApprovalOutcome`. Those four sa
 what happened when the question was *put*: somebody allowed it, somebody refused,
 the work was canceled, or nobody could be asked. This one says the question was
 never resolved at all, because the process holding it stopped existing — and it is
-recorded on resume so that `pending_approvals` stops reporting a question no one
-can answer.
+recorded on resume so that the log holds no open ask no one can answer.
 
 Not `canceled`, which claims somebody stopped the work; not `unavailable`, which is
 the live answer when no front end takes the prompt and is a *denial* a turn

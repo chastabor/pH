@@ -38,7 +38,7 @@ shape is the tool registry's. Both are handed on to something that knows them.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import Any, ClassVar, Literal, NamedTuple, TypeAlias
 
 from pydantic import Field
 
@@ -60,6 +60,7 @@ __all__ = [
     "NOTICES",
     "ApprovalAsk",
     "ApprovalAskReply",
+    "AskKey",
     "AskSettledNotice",
     "AttachReply",
     "AttachmentStored",
@@ -532,14 +533,33 @@ class SessionNotice(SessionScoped):
     """A frame the daemon *announces*: no reply, no id, watch or ignore."""
 
 
+class AskKey(NamedTuple):
+    """An ask as the daemon names it. Its `ask_id` is unique within its root only.
+
+    Each root's desk counts its own asks and coordinates with no other root, so a
+    front end attached to two roots can be asked two `ask-1`s. The pair tells them
+    apart. Both frames that name an ask hand it over as `key`, so a front end files
+    an ask by what the wire says rather than rebuilding the pair.
+    """
+
+    session_id: str
+    ask_id: str
+
+
 class SessionAsk(SessionScoped):
     """A frame the daemon *asks*: it expects a typed answer back.
 
     `ask_id` lives here rather than on each ask — it was declared twice, and
-    `AskDesk` keys its pending table on it either way.
+    `AskDesk` keys its pending table on it either way. The desk mints it, unique
+    within its root only, so a front end files its modals by `key`, the root and
+    the name together. It is not the log's name for the ask.
     """
 
     ask_id: str
+
+    @property
+    def key(self) -> AskKey:
+        return AskKey(self.session_id, self.ask_id)
 
 
 class SessionEventNotice(SessionNotice, _CarriesJson):
@@ -631,6 +651,11 @@ class AskSettledNotice(SessionNotice):
 
     METHOD: ClassVar[str] = "ask.settled"
     ask_id: str
+
+    @property
+    def key(self) -> AskKey:
+        """The ask it settles, as the frame that asked it named it."""
+        return AskKey(self.session_id, self.ask_id)
 
 
 NOTICES: Mapping[str, type[SessionNotice]] = {

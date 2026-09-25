@@ -9,23 +9,19 @@ profile semantics.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
-from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS
-from ph.persistence import ClaimingStore, SessionBusy, resume_session
-from ph.seams.telemetry import ops_record
-from ph.session import Session, SessionForkError, new_session_id, valid_session_id
+from ph.keys import AGENTS, SESSIONS
+from ph.persistence import open_session
+from ph.session import Session
 
 from .attach import ingest, prompt_message
 
-__all__ = ["mounted", "open_session", "prompted"]
-
-log = logging.getLogger("ph_app.runtime")
+__all__ = ["mounted", "prompted"]
 
 
 @asynccontextmanager
@@ -57,78 +53,6 @@ async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIter
         # every lease, worktree and kernel the mount was holding.
         await ctx.drain()
         await ctx.dispose()
-
-
-async def open_session(
-    ctx: Context, session_id: str | None = None, *, cwd: str | None = None
-) -> Session:
-    """Claim a session against every other writer, then resume it or create it (I-5).
-
-    **The one door every host opens a session through** — the daemon's roots, the
-    one-shot modes, rpc mode. Before it each host wrote its own, and the one-shot
-    path did not resume at all: `phern -p --session x` on an id already on disk
-    *created* a second session over the first one's file — the store saw the file,
-    skipped the header and appended `seq` from zero — so two plain `phern -p` runs on
-    one id, with no daemon and no race, left a log the trajectory reader refuses
-    outright (P5-03). Resuming was the daemon's behavior and is now everyone's.
-
-    The claim comes first and comes from the store (`ClaimingStore`): the writer
-    owns the lock, so a daemon, an rpc peer and a print run refuse each other with
-    one code, `session_already_active`. A backend that cannot claim is said out
-    loud rather than skipped — a silent skip is the shape that hides two daemons
-    on one session.
-
-    `cwd` reaches the *header* of a session created here, which is storage
-    metadata beside the log rather than an event in it — so it describes where
-    this conversation happened without becoming something the model reads or a
-    replay has to re-apply. `SessionHeader` validates that it is absolute, so a
-    relative path is refused rather than resolved against this process's own
-    working directory, which is not the caller's.
-    """
-    resolved = session_id or new_session_id()
-    # **Before anything builds a path from it** (K9). `SessionStore.create` and
-    # `.adopt` check this too, and by then it is too late here: `claim` below
-    # creates `<root>/.leases/<id>.lock`, `exists` locates `<root>/<id>/<id>.jsonl`,
-    # and `resume_session` *opens and parses* that file — all from the raw id, and
-    # all before a `Session` object exists for the store to refuse. This is the
-    # door the docstring above calls "the one door every host opens a session
-    # through", so it is where the id stops being arbitrary.
-    if not valid_session_id(resolved):
-        raise SessionForkError(
-            f'session id "{resolved}" is not usable as a path component', "SESSION_ID_INVALID"
-        )
-    store = ctx.get(SESSION_PERSISTENCE)
-    if isinstance(store, ClaimingStore):
-        try:
-            await store.claim(resolved, scope=ctx)
-        except SessionBusy:
-            # An `ops` fact, not a session one: the session it concerns is the
-            # one this process was just refused, so its log is not ours to write.
-            await ops_record(
-                ctx,
-                "session refused: already active in another process",
-                severity="warn",
-                session_id=resolved,
-            )
-            raise
-    elif store is not None:
-        log.warning(
-            "ph_app.runtime: %s cannot claim a session; I-5 is not enforced for %s",
-            type(store).__name__,
-            resolved,
-        )
-        await ops_record(
-            ctx,
-            "I-5 is not enforced: this session store cannot claim a session",
-            severity="warn",
-            session_id=resolved,
-            store=type(store).__name__,
-        )
-    if store is not None and store.exists(resolved):
-        session: Session = await resume_session(ctx, resolved)
-        return session
-    created: Session = ctx.require(SESSIONS).create(resolved, meta={"cwd": cwd} if cwd else None)
-    return created
 
 
 @asynccontextmanager

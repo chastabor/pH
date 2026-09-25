@@ -96,11 +96,10 @@ async def test_opening_a_session_makes_its_teardown_durable() -> None:
     """
     from ph.keys import AGENTS, SESSIONS
     from ph.paths import resolve_roots
-    from ph.persistence import read_session
+    from ph.persistence import open_session, read_session
     from ph.seams.workspace import DISPOSED
     from ph.testing import stored_log, workspace_disposed
     from ph_app.profiles import profile_or_exit
-    from ph_app.runtime import open_session
 
     async with mounted(profile_or_exit("headless")) as ctx:
         session = await open_session(ctx, "teardown")

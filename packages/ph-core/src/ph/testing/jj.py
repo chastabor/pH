@@ -24,6 +24,8 @@ from ..keys import AGENTS, FS, SESSIONS
 from ..seams.workspace_jj import jj
 from ..session import Session
 from . import MountProfile
+from .builders import FAKE_OPTIONS
+from .git import git_repo
 
 __all__ = ["JJ_ROWS", "jj", "jj_agent", "jj_repo"]
 
@@ -47,8 +49,6 @@ async def jj_repo(ctx: Context, path: Path) -> Path:
     and `commit.gpgsign` settings that make git work on a machine with no global
     config are stated once.
     """
-    from .git import git_repo
-
     await git_repo(ctx, path)
     await jj(ctx, path, "git", "init", "--colocate")
     # On the repository rather than inherited, `git_repo`'s rule: a machine with
@@ -74,8 +74,6 @@ async def jj_agent(
     have every command in this file report nothing and every assertion pass for the
     wrong reason.
     """
-    from ..testing import FAKE_OPTIONS
-
     ctx = await mount(*JJ_ROWS, *extra_rows)
     base = await jj_repo(ctx, ctx.require(FS).root)
     session = ctx.require(SESSIONS).create("s1")

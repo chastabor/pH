@@ -252,7 +252,7 @@ def _next_cron_after(spec: str, *, now: int) -> int | None:
     refusal shape: an expression nobody can parse is logged and declines, so a
     listing loses one row rather than the command.
     """
-    from croniter import croniter
+    from croniter import croniter  # noqa: PLC0415
 
     try:
         moment: datetime = croniter(spec, _local(now)).get_next(datetime)
@@ -289,7 +289,7 @@ def _last_cron_before(spec: str, *, after: int, now: int) -> int | None:
     `base.yaml` row, so the module loads in every host, and the import is paid on
     every `phern -p` and every TUI start that never sees a cron expression.
     """
-    from croniter import croniter
+    from croniter import croniter  # noqa: PLC0415
 
     try:
         # From `now + 1ms`, because `get_prev` is strictly *before* its start:

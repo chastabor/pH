@@ -37,7 +37,7 @@ from ph.llm.types import (
     UsageChunk,
     create_user_message,
 )
-from ph.persistence import interrupted_turn_closers
+from ph.persistence import interrupted_turn_closers, repaired
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.kinds import DISPATCH_INTERRUPTED
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
@@ -469,6 +469,49 @@ async def test_an_interrupted_command_is_drawn_as_interrupted(mount: MountProfil
     (card,) = [item.tool for item in _replay(session).visible_items() if item.tool]
     assert card.settled and card.is_error
     assert INTERRUPTED["outcome-unknown"] in card.body
+
+
+def test_a_question_the_harness_stopped_during_is_not_drawn_as_an_answer() -> None:
+    """Repair settles a question it finds open on resume, and that settle carries no
+    `answer`. Read as one, it drew an empty row in the person's name — a reply
+    nobody gave. The log a 0.3.x repair left (`interrupted`) reads the same way.
+
+    Sabotage: drop the stopped branch from `_on_question_answered`, and the empty
+    user row comes back for both logs.
+    """
+    fresh = Session("stopped")
+    log_event(fresh, "turn/start", {"turn": 1})
+    log_event(fresh, "question/asked", {"askId": "q1", "question": "Which color?"})
+    resumed = Session("stopped-2", seed=repaired(fresh.events))
+    old = Session("stopped-0.3")
+    log_event(old, "question/asked", {"askId": "q1", "question": "Which color?"})
+    log_event(old, "question/answered", {"askId": "q1", "interrupted": True})
+
+    for session in (resumed, old):
+        shape = _shape(_replay(session))
+        assert not [row for row in shape if row[0] == "user"], (session.id, shape)
+        assert ("notice", "Which color?") in shape
+        assert any("harness stopped" in text for role, text in shape if role == "notice")
+
+
+def test_a_question_nobody_could_be_asked_still_says_so() -> None:
+    """The other settle not written by an answer: the question could not be
+    written, so it was not delivered — `declined` and `failed`, as before."""
+    session = Session("undelivered")
+    log_event(session, "question/asked", {"askId": "q1", "question": "Which color?"})
+    log_event(
+        session,
+        "question/answered",
+        {
+            "askId": "q1",
+            "askSeq": 0,
+            "resolution": "failed",
+            "declined": True,
+            "unsettled": {"why": "not-started", "by": "process"},
+        },
+    )
+
+    assert _shape(_replay(session))[-1] == ("notice", "pH could not deliver the question.")
 
 
 async def test_an_orphaned_dispatch_is_drawn_settled(mount: MountProfile) -> None:

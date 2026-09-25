@@ -43,6 +43,7 @@ from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session
 
+from ..payloads import AskKey
 from ..sessions import SessionSummary
 from .screens import AppSurface
 from .state import Surface, TuiState
@@ -54,20 +55,22 @@ class ModalHost(Protocol):
     """What the front-end needs from whatever is drawing it."""
 
     async def ask_approval(
-        self, request: ApprovalRequest, *, ask_id: str = ""
+        self, request: ApprovalRequest, *, ask: AskKey | None = None
     ) -> tuple[ApprovalAnswer, str]:
         """Put the approval modal up and wait. Must be called from a worker.
 
-        `ask_id` is what `withdraw_ask` takes it down by. Defaulted rather than
-        required so an in-process caller with no wire ask can leave it out.
+        `ask` is what `withdraw_ask` takes it down by. Optional so an in-process
+        caller with no wire ask can leave it out.
         """
         ...
 
-    async def ask_question(self, question: UserQuestion, *, ask_id: str = "") -> str | None:
+    async def ask_question(
+        self, question: UserQuestion, *, ask: AskKey | None = None
+    ) -> str | None:
         """Put the ask-user modal up and wait. Must be called from a worker."""
         ...
 
-    def withdraw_ask(self, ask_id: str, *, reason: str = "") -> None:
+    def withdraw_ask(self, ask: AskKey, *, reason: str = "") -> None:
         """Take down a modal that can no longer be answered here (H1).
 
         The daemon asks *every* attached front end and keeps the first answer,
@@ -77,7 +80,7 @@ class ModalHost(Protocol):
         in silence, and the modal they had just dismissed was the only evidence
         they had that anything happened.
 
-        Sync, and safe to call for an id this host has never seen: a client that
+        Sync, and safe to call for an ask this host has never seen: a client that
         was not asked still receives the notice. `reason` is what the person is
         told; empty says nothing, for a caller with a better sentence of its own.
         """

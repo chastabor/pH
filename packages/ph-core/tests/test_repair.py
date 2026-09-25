@@ -37,11 +37,10 @@ from ph.persistence.repair import (
     interrupted_turn_closers,
     repaired,
 )
-from ph.seams.approval import INTERRUPTED, ApprovalService, pending_approvals
+from ph.seams.approval import INTERRUPTED, ApprovalService
 from ph.seams.user_questions import (
     UserQuestion,
     UserQuestionService,
-    pending_questions,
 )
 from ph.session import (
     Claim,
@@ -49,12 +48,11 @@ from ph.session import (
     IntentKind,
     IntentNotDurable,
     Session,
-    SessionEvent,
     SurfaceIntent,
     SurfaceReplace,
-    Unsettled,
     declare_intent,
     declared_intents,
+    open_intents,
     outcome_of,
     unsettled_why,
 )
@@ -69,7 +67,6 @@ from ph.session.kinds import (
 )
 from ph.session.store import SessionStore
 from ph.testing import (
-    SCAFFOLDING,
     MountProfile,
     StubAgent,
     assistant_payload,
@@ -286,7 +283,7 @@ def test_a_turn_parked_on_a_human_settles_the_question_it_was_parked_on() -> Non
     """
     session = _parked_turn(recorded_call=False)
 
-    asked = [one.call_id for one in pending_approvals(session.events)]
+    asked = [one.opened.data.get("callId") for one in open_intents(session.events, APPROVAL_ASK)]
     assert asked == ["c1"], "the ask is pending"
 
     closers = interrupted_turn_closers(session.events)
@@ -318,16 +315,16 @@ def test_a_turn_parked_on_a_human_settles_the_question_it_was_parked_on() -> Non
 def test_the_repaired_log_reports_no_pending_approval() -> None:
     """The fold is the thing being fixed, so the fold is what the test reads.
 
-    `pending_approvals` is the one reader that matters here: it is what a resume,
+    The approvals' open fold is the one reader that matters here: it is what a resume,
     a UI listing "what needs your attention", or an operator would ask. Asserting
     on the closers alone would pass while the fold still reported a ghost.
     """
     session = _parked_turn(recorded_call=False)
-    assert pending_approvals(session.events), "pending before repair"
+    assert open_intents(session.events, APPROVAL_ASK), "pending before repair"
 
     repaired_session = Session("s2", seed=repaired(session.events))
 
-    assert pending_approvals(repaired_session.events) == [], "and settled after it"
+    assert open_intents(repaired_session.events, APPROVAL_ASK) == (), "and settled after it"
 
 
 def test_repair_settles_every_parked_ask_not_only_the_first() -> None:
@@ -388,13 +385,14 @@ async def test_asks_parked_under_one_name_are_each_settled_on_resume() -> None:
     settled = [as_int(e.data["askSeq"]) for e in closers if e.type in answers]
     assert len(asks) == 4 and sorted(settled) == asks, "every ask, once, by its own seq"
     revived = Session("s2", seed=repaired(parked))
-    assert pending_approvals(revived.events) == [] and pending_questions(revived.events) == []
+    assert open_intents(revived.events, APPROVAL_ASK) == ()
+    assert open_intents(revived.events, QUESTION_ASK) == ()
 
 
 def test_a_parked_user_question_is_settled_too() -> None:
     """The other dangling-ask fold, which DESIGN names in the same gap row.
 
-    `pending_questions` is `pending_approvals` with different nouns — asked,
+    The questions' fold is the approvals' with different nouns — asked,
     never answered, log is the pending state — and it had the identical bug.
     Fixing only the approval half would have left `phern doctor` declaring the gap
     that remained while the one that closed went unmentioned, and a resumed log
@@ -419,11 +417,11 @@ def test_a_parked_user_question_is_settled_too() -> None:
     assert "answer" not in answered.data, "and nobody answered"
 
     resumed = Session("s2", seed=repaired(session.events))
-    assert pending_questions(resumed.events) == [], "the fold stops reporting it"
+    assert open_intents(resumed.events, QUESTION_ASK) == (), "the fold stops reporting it"
 
 
 def test_an_answered_question_is_not_settled_twice() -> None:
-    """`pending_questions`' own pop rule, relied on rather than re-derived."""
+    """The fold's own rule — a settle closes its ask — relied on rather than re-derived."""
     session = _open_turn_with_unstarted_call()
     asked = log_event(session, "question/asked", {"askId": "q1", "question": "which one?"})
     log_event(
@@ -559,7 +557,7 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
     them together, so a parked ask sat in every resumed log forever.
 
     So this drives the real `resume_session` against a real store. What it asserts
-    is not the closer but the **fold** — `pending_approvals` on the revived
+    is not the closer but the **fold** — `APPROVAL_ASK`'s open intents on the revived
     session — because that is what a resume, a UI listing what needs attention, or
     an operator would actually ask.
     """
@@ -571,13 +569,15 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
     log_event(session, "step/start", {"turn": 1, "step": 1})
     log_event(session, "assistant/message", _assistant_with_call("c1"), SurfaceIntent("append", ()))
     log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
-    assert pending_approvals(session.events), "parked before the crash"
+    assert open_intents(session.events, APPROVAL_ASK), "parked before the crash"
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("parked")
 
     revived = await resume_session(ctx, "parked")
 
-    assert pending_approvals(revived.events) == [], "the question is settled, not still being asked"
+    assert open_intents(revived.events, APPROVAL_ASK) == (), (
+        "the question is settled, not still being asked"
+    )
     (decided,) = [one for one in revived.events if one.type == "approval/decided"]
     assert decided.data["outcome"] == INTERRUPTED
     assert decided.data["automatic"] is True
@@ -586,7 +586,7 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
     # or the fold comes back wrong on the resume after this one.
     await ctx.require(SESSIONS).flush(revived)
     _, stored = ctx.require(SESSION_PERSISTENCE).read("parked")
-    assert pending_approvals(stored) == []
+    assert open_intents(stored, APPROVAL_ASK) == ()
 
 
 @pytest.mark.anyio
@@ -640,27 +640,6 @@ async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_
 # whether or not a turn is open, since most of them happen between turns.
 
 
-def _command_key(event: SessionEvent) -> str | None:
-    value = event.data.get("id")
-    return value if isinstance(value, str) else None
-
-
-def _unknown(opened: SessionEvent, why: Unsettled) -> JsonObject:
-    return {"id": opened.data["id"], "ok": False, "why": why}
-
-
-COMMAND = IntentKind(
-    # A pair no ph-core kind declares, so the test's closer is the only one.
-    opened="command/run",
-    settled="command/done",
-    opened_key=_command_key,
-    settled_key=_command_key,
-    orphan="outcome-unknown",
-    closer=_unknown,
-    writer=SCAFFOLDING,
-)
-
-
 @pytest.fixture
 def kinds() -> Iterator[None]:
     """The intent registry, isolated so a test's kinds do not outlive it, with
@@ -670,28 +649,26 @@ def kinds() -> Iterator[None]:
 
 
 def _between_turns() -> Session:
-    """A finished turn, then a command run outside any turn and never settled."""
+    """A finished turn, then a `!!` command run outside any turn and never settled —
+    the shipped between-turns kind (N2), not a pair made up for the test."""
     session = Session("s")
     log_event(session, "turn/start", {"turn": 1})
     log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    log_event(session, "command/run", {"id": "x1", "command": "make"})
+    log_event(session, "shell/command", {"command": "make", "surface": False})
     return session
 
 
-@pytest.mark.usefixtures("kinds")
 def test_an_orphan_outside_any_turn_is_settled() -> None:
     """F13. The turn is balanced, so repair used to return `[]` and leave the
     command running forever in the eyes of every reader."""
-    declare_intent(COMMAND)
     closers = interrupted_turn_closers(_between_turns().events)
 
     assert [(event.type, dict(event.data)) for event in closers] == [
         (
-            "command/done",
+            "shell/result",
             {
-                "id": "x1",
+                "commandSeq": 2,
                 "ok": False,
-                "why": "outcome-unknown",
                 "unsettled": {"why": "outcome-unknown", "by": "repair"},
             },
         )
@@ -699,7 +676,6 @@ def test_an_orphan_outside_any_turn_is_settled() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.usefixtures("kinds")
 async def test_an_orphan_outside_any_turn_is_settled_on_resume(
     mount: MountProfile, tmp_path: Path
 ) -> None:
@@ -707,7 +683,6 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
     nothing, which is what keeps reopening a session from growing it."""
     from ph.persistence import resume_session
 
-    declare_intent(COMMAND)
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("between")
     for event in _between_turns().events:
@@ -717,7 +692,7 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
 
     revived = await resume_session(ctx, "between")
     assert [event.type for event in revived.events][-3:] == [
-        "command/done",
+        "shell/result",
         "session/end-seed",
         "session/resumed",
     ]
@@ -729,21 +704,19 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
     assert again.events[-1].data["closed"] == 0
 
 
-@pytest.mark.usefixtures("kinds")
 def test_an_owner_settles_kind_is_left_for_its_owner() -> None:
     """The owner can look — a tree is on disk or it is not — so a guess from
     repair would be worse than the owner's reconcile."""
     # With a closer, so the policy is what leaves it and not the absence of a
     # way to settle it.
-    declare_intent(replace(COMMAND, orphan="owner-settles"))
-    assert interrupted_turn_closers(_between_turns().events) == []
+    with isolated_intent_kinds(core=False):
+        declare_intent(replace(SHELL_COMMAND, orphan="owner-settles"))
+        assert interrupted_turn_closers(_between_turns().events) == []
 
 
-@pytest.mark.usefixtures("kinds")
 def test_a_balanced_log_still_resumes_with_no_closers() -> None:
-    declare_intent(COMMAND)
     session = _between_turns()
-    log_event(session, "command/done", {"id": "x1", "ok": True})
+    log_event(session, "shell/result", {"commandSeq": 2, "ok": True})
     assert interrupted_turn_closers(session.events) == []
 
 
@@ -752,9 +725,8 @@ def test_closers_are_deterministic_and_backdated() -> None:
     """Seqs continue the log, the time is the last real event's, the same log
     repairs the same way twice — and inside a turn, intents settle after the
     asks and before the tool results, step and turn."""
-    declare_intent(COMMAND)
     session = _parked_turn(recorded_call=True)
-    log_event(session, "command/run", {"id": "x1", "command": "make"})
+    log_event(session, "shell/command", {"command": "make", "surface": False})
     last = session.events[-1]
 
     closers = interrupted_turn_closers(session.events)
@@ -766,19 +738,21 @@ def test_closers_are_deterministic_and_backdated() -> None:
     assert {event.time for event in closers} == {last.time}
     assert [event.type for event in closers] == [
         "approval/decided",
-        "command/done",
+        "shell/result",
         "tool/result",
         "step/end",
         "turn/end",
     ]
 
 
-@pytest.mark.usefixtures("kinds")
 def test_a_closer_that_does_not_settle_its_own_key_is_refused() -> None:
     """Otherwise the intent stays open and every resume writes another settle."""
-    declare_intent(replace(COMMAND, closer=lambda opened, why: {"id": "someone-else"}))
-    with pytest.raises(IntentError, match="does not settle 'x1'"):
-        interrupted_turn_closers(_between_turns().events)
+    with isolated_intent_kinds(core=False):
+        declare_intent(
+            replace(SHELL_COMMAND, closer=lambda opened, why: {"commandSeq": 99, "ok": False})
+        )
+        with pytest.raises(IntentError, match="does not settle '2'"):
+            interrupted_turn_closers(_between_turns().events)
 
 
 @pytest.mark.anyio

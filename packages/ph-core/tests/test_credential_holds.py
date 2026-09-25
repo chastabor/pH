@@ -4,8 +4,8 @@ A route names the credential its adapter resolves at the edge, by name
 (`ResolvedModel.credential`); `missing_credential` asks the credential seam whether
 this deployment can supply it, without a value ever leaving the seam (I-3). A
 session or child whose route's name is missing is held, and the hold is a pair of
-journal records — `credential/needed`, then `credential/supplied` — written through
-`record_wait`, which asks again on every open and appends nothing when nothing
+journal records — `credential/needed`, then `credential/supplied` — written by
+`hold_for_credential`, which asks again on every open and appends nothing when nothing
 changed. The subagent seam and the daemon build on these; `tests/test_mass_restart.py`
 holds the whole of it after a real `SIGKILL`.
 """
@@ -17,7 +17,7 @@ import pytest
 from ph.cordis import Context
 from ph.keys import CREDENTIALS, INTENTS, LLM_FAKE, SESSIONS
 from ph.llm.adapter import ResolvedModel
-from ph.seams.credentials import credential_waits, missing_credential, record_wait
+from ph.seams.credentials import hold_for_credential, missing_credential, waiting_for
 from ph.session import IntentError, Session
 from ph.session.kinds import CREDENTIAL_WAIT, SESSION_HOLDER, SHELL_COMMAND
 from ph.testing import MountProfile
@@ -68,6 +68,11 @@ async def test_a_route_with_no_credential_or_no_adapter_is_missing_nothing(
     assert missing_credential(ctx, "nobody", "m") is None, "no adapter to ask"
 
 
+async def _hold(ctx: Context, session: Session, holder: str) -> str | None:
+    """The check a resume makes, for the fake route: hold `holder` or release it."""
+    return await hold_for_credential(ctx, session, holder, "fake", "fake-1")
+
+
 async def test_a_hold_is_recorded_once_however_often_it_is_asked(mount: MountProfile) -> None:
     """Every open asks again — a second restart before the key arrives included — and
     the log must not grow a record per ask."""
@@ -75,28 +80,32 @@ async def test_a_hold_is_recorded_once_however_often_it_is_asked(mount: MountPro
     session = ctx.require(SESSIONS).create("held")
 
     for _ in range(3):
-        await record_wait(ctx, session, "run-1", KEY)
+        assert await _hold(ctx, session, "run-1") == KEY
 
     assert _types(session) == ["credential/needed"]
-    assert credential_waits(session.events) == {"run-1": KEY}
+    assert waiting_for(ctx, session) == {"run-1": KEY}
     (needed,) = [event for event in session.events if event.type == "credential/needed"]
     assert dict(needed.data) == {"key": f"run-1:{KEY}", "holder": "run-1", "name": KEY}, (
         "the name and who waits, and never a value"
     )
 
 
-async def test_a_hold_is_released_by_name_and_can_be_needed_again(mount: MountProfile) -> None:
+async def test_a_hold_is_released_by_name_and_can_be_needed_again(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ctx = await _keyed(mount)
     session = ctx.require(SESSIONS).create("released")
-    await record_wait(ctx, session, SESSION_HOLDER, KEY)
+    await _hold(ctx, session, SESSION_HOLDER)
 
-    await record_wait(ctx, session, SESSION_HOLDER, None)
+    monkeypatch.setenv(KEY, "arrived")
+    assert await _hold(ctx, session, SESSION_HOLDER) is None
     assert _types(session) == ["credential/needed", "credential/supplied"]
-    assert credential_waits(session.events) == {}
+    assert waiting_for(ctx, session) == {}
 
-    await record_wait(ctx, session, SESSION_HOLDER, KEY)
+    monkeypatch.delenv(KEY)
+    assert await _hold(ctx, session, SESSION_HOLDER) == KEY
     assert _types(session)[-1] == "credential/needed", "a new wait, not the old one answered"
-    assert credential_waits(session.events) == {SESSION_HOLDER: KEY}
+    assert waiting_for(ctx, session) == {SESSION_HOLDER: KEY}
 
 
 async def test_a_route_that_stops_naming_a_credential_releases_its_old_hold(
@@ -106,22 +115,29 @@ async def test_a_route_that_stops_naming_a_credential_releases_its_old_hold(
     is settled rather than left waiting for a name nothing will ever supply."""
     ctx = await _keyed(mount)
     session = ctx.require(SESSIONS).create("renamed")
-    await record_wait(ctx, session, "run-1", "PH_OLD_NAME")
+    ctx.require(LLM_FAKE).route = ResolvedModel(credential="PH_OLD_NAME")
+    await _hold(ctx, session, "run-1")
 
-    await record_wait(ctx, session, "run-1", KEY)
+    ctx.require(LLM_FAKE).route = ResolvedModel(credential=KEY)
+    await _hold(ctx, session, "run-1")
 
-    assert credential_waits(session.events) == {"run-1": KEY}
+    assert waiting_for(ctx, session) == {"run-1": KEY}
 
 
-async def test_holds_of_two_holders_are_their_own(mount: MountProfile) -> None:
+async def test_holds_of_two_holders_are_their_own(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One key arriving releases only the holder that is asked again: each resume
+    asks for its own session or child, and the rest keep what they recorded."""
     ctx = await _keyed(mount)
     session = ctx.require(SESSIONS).create("two")
-    await record_wait(ctx, session, "run-1", KEY)
-    await record_wait(ctx, session, "run-2", KEY)
+    await _hold(ctx, session, "run-1")
+    await _hold(ctx, session, "run-2")
 
-    await record_wait(ctx, session, "run-1", None)
+    monkeypatch.setenv(KEY, "arrived")
+    await _hold(ctx, session, "run-1")
 
-    assert credential_waits(session.events) == {"run-2": KEY}
+    assert waiting_for(ctx, session) == {"run-2": KEY}
 
 
 async def test_claims_are_handed_back_only_for_a_kind_its_owner_settles(

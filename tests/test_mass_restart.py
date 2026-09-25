@@ -50,7 +50,7 @@ from ph.llm.types import (
 )
 from ph.persistence import interrupted_turn_closers, resume_session
 from ph.persistence.lease import SessionBusy, claim_session
-from ph.seams.credentials import credential_waits
+from ph.seams.credentials import waiting_for
 from ph.seams.subagents import subagent_roster
 from ph.session import Session, SessionEvent, declared_intents, open_intents, outcome_of
 from ph.session.kinds import APPROVAL_ASK, SHELL_COMMAND, TOOL_EFFECT
@@ -230,7 +230,7 @@ async def test_a_sub_agent_whose_key_a_restart_lost_is_held_then_released(
     assert (roster[running]["status"], roster[queued]["status"]) == ("queued", "queued")
     assert roster[running]["starts"] == 1, "held, so no rung of its ladder spent"
     assert "resumes" not in roster[queued]
-    assert credential_waits(root.events) == {running: KEY, queued: KEY}
+    assert waiting_for(ctx, root) == {running: KEY, queued: KEY}
     assert _latest(root, "session/resumed").data["interrupted"] is True, "the root resumed"
     assert [one.split()[0] for one in _open(root.events)] == ["credential/needed"] * 2, (
         "everything else the crash left open was settled as before"
@@ -241,7 +241,7 @@ async def test_a_sub_agent_whose_key_a_restart_lost_is_held_then_released(
     await _until_settled(root, running, queued)
 
     assert sorted(revived) == sorted([running, queued])
-    assert credential_waits(root.events) == {}
+    assert waiting_for(ctx, root) == {}
     assert subagent_roster(root)[running]["starts"] == 2, "its one restart, counted once"
 
 
@@ -260,18 +260,22 @@ async def test_a_second_restart_before_the_key_arrives_holds_again_and_grows_not
 
     assert grown == ["session/end-seed", "session/resumed"], grown
     running, queued = crashed_keyed["running"]["run"], crashed_keyed["queued"]["run"]
-    assert credential_waits(root.events) == {running: KEY, queued: KEY}
+    assert waiting_for(again, root) == {running: KEY, queued: KEY}
     assert subagent_roster(root)[running]["starts"] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="L2: a readmitted child's log is opened without the I-5 lease, so a second "
-    "process could write it at the same time — T1 records the gap; a later row closes it",
-)
 async def test_a_readmitted_childs_log_is_leased_by_the_process_that_resumed_it(
     crashed: dict[str, Any], mount: MountProfile
 ) -> None:
+    """L2, closed. A child's log is a session of its own, openable by its id, so the
+    process that resumed it must hold its lease as a root's is held (I-5) — or a
+    second process opening the child while this one drives it makes two writers on
+    one log. T1 recorded this as a strict `xfail`; `_child_session` now opens the
+    child through `open_session`, which claims it.
+
+    Sabotage: open the child with `resume_session` directly again, and the second
+    claim below is granted.
+    """
     ctx, root = await _restart(mount)
     await _until_settled(root, crashed["running"]["run"], crashed["queued"]["run"])
     store = ctx.require(SESSION_PERSISTENCE)

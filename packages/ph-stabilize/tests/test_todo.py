@@ -25,7 +25,7 @@ from ph.json import as_obj, as_seq, as_str
 from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.session import Session, SurfaceIntent, SurfaceReplace
-from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
+from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.system_prompt.assembly import (
     join_context_sections,
     render_context_sections,
@@ -550,17 +550,12 @@ async def test_the_list_rides_the_context_and_not_the_cached_prefix(mount: Mount
     assert "survey" not in join_context_sections(render_context_sections(before))
 
 
-def test_the_event_type_is_in_the_vocabulary() -> None:
-    """`todo/write` was a declared forward reference until this row.
-
-    Required rather than ignorable: the list reaches the model through a prompt
-    context, so a reader that skipped the event would assemble a different
-    prompt than the session had.
+def test_the_event_type_is_required_not_ignorable() -> None:
+    """Required rather than ignorable: the list reaches the model through a prompt
+    context, so a reader that skipped the event would assemble a different prompt
+    than the session had. (That it is *known* at all is `test_log_writers.py`'s, for
+    every write in every package.)
     """
-    assert "todo/write" in KNOWN_SESSION_EVENT_TYPES
-
-    from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
-
     assert "todo/write" not in IGNORABLE_SESSION_EVENT_TYPES
 
 

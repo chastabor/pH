@@ -51,9 +51,10 @@ naming the type and the leaf, where it used to be left open with nothing said.
 
 Not enforced: *which* intent is open, for a kind this process lacks. Without the
 kind's keys its records cannot be paired, so they are counted — more openings than
-settles means one is open. Exact for every kind today, since T3 made each settle
-close exactly one intent; a settle written with no opening (Code Mode's refused
-dispatch) would hide one, and that kind is ph-core's own, so always declared.
+settles means one is open. Exact, because the journal writes a settle only through a
+claim on an open intent: T3 made each settle close exactly one, and nothing writes a
+settle with no opening (a refused Code Mode dispatch has its start too, P7-15). A
+journal door that settled with no opening would make the count miss an open intent.
 
 For a turn parked on an ask, the turn is still closed `interrupted` and the tool
 result is still synthesized `TOOL_NOT_STARTED` — that is what keeps the rebuilt log
@@ -137,7 +138,11 @@ def _kinds() -> list[IntentKind]:
 
 
 def _refuse_undeclared(counted: Mapping[str, int], missing: Mapping[str, IntentPair]) -> None:
-    """Refuse, by name, a log with an open intent of a kind nothing here declares."""
+    """Refuse, by name, a log with an open intent of a kind nothing here declares.
+
+    Counted, since the kind's keys are not here to pair its records with: more
+    openings than settles means one is open.
+    """
     for opened, pair in sorted(missing.items()):
         left = counted.get(opened, 0) - counted.get(pair.settled, 0)
         if left > 0:

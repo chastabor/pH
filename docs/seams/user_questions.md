@@ -34,9 +34,9 @@ So attendance is decided **first**:
 * deliverable → append `question/asked` *before* the waterfall, `question/answered`
   after (§5 rule 2, the same order `ApprovalService` uses).
 
-A crash between them leaves the question in the log with no answer, which is
-exactly the pending state `pending_questions` folds — the same log-as-state
-design [`ctx.approval`](approval.md) uses.
+A crash between them leaves the question in the log with no answer: the
+journal's `QUESTION_ASK` intent, open. Repair settles it when the session is next
+opened, the same way [`ctx.approval`](approval.md) settles an open ask.
 
 ## The surface
 
@@ -44,7 +44,6 @@ design [`ctx.approval`](approval.md) uses.
 await ctx.user_questions.ask(question, session=...)   # -> str | None
 ctx.user_questions.register_answerer(answerer, reachable=...)
 ctx.user_questions.attended()                          # is anyone there?
-pending_questions(session)                             # the fold
 ```
 
 A `UserQuestion` carries `question`, optional `options`, a `header`,

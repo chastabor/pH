@@ -61,6 +61,7 @@ from ph.session import (
     SurfaceReplace,
     is_in_place_rewrite,
     is_replacement_surface_event,
+    unsettled_why,
 )
 from ph.session.kinds import SESSION_HOLDER, hold_of
 from ph.session.request_header import parse_request_context
@@ -554,6 +555,26 @@ class TuiEventAdapter:
         self._row("asked", "notice", f"{label}{event.data.get('question')}", event)
 
     def _on_question_answered(self, event: SessionEvent, frame: Frame) -> None:
+        """What became of a question — and, when nobody answered it, never an answer.
+
+        **A question the harness stopped during is a notice, not a reply.** Repair
+        settles one it finds open on resume, and that settle carries neither
+        `declined` nor an `answer`; read as the person's answer, it drew an empty
+        row in their name — a reply nobody gave. The marker says so today
+        (`unsettled`, T2); a 0.3.x repair wrote `interrupted` instead, and logs on
+        disk still carry it, so both are read. A question that could not be written
+        at all (`not-started`) is the `declined` case below: nobody was asked.
+        """
+        stopped = unsettled_why(event.data) == "outcome-unknown"
+        if stopped or event.data.get("interrupted"):
+            self._row(
+                "answered",
+                "notice",
+                "You were still being asked this when the harness stopped — it was never "
+                "answered, and the question is closed.",
+                event,
+            )
+            return
         if event.data.get("declined"):
             # Asked and not answered. A row rather than silence: the transcript
             # otherwise shows a question and then the model carrying on, which

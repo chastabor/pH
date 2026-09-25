@@ -49,7 +49,6 @@ from .intents import (
     key_of,
     open_intents,
     outcome_of,
-    settled_record,
 )
 from .session import Session
 
@@ -224,29 +223,6 @@ class IntentJournal:
             settled = kind.writer.append(batch, kind.settled, settled_data)
         return opened, settled
 
-    def settle_unopened(self, session: Session, kind: IntentKind, data: JsonObject) -> SessionEvent:
-        """Write a settle no intent opened: an act refused before it began (T6).
-
-        For a Code Mode dispatch the pipeline refused at its gate. Its readers still
-        want the record — the card shows the refusal — but nothing started, so there
-        is nothing to open, and no fold pairs it (`IntentRecord` says why). Refused
-        while the key is open: that intent's claim is what settles it.
-
-        Rule 6: repair counts a kind's records when the resuming process lacks the
-        kind (`UndeclaredIntentError`), and a settle with no opening hides one open
-        intent from that count. Harmless for Code Mode's kind, which ph-core always
-        declares; a package kind that settles unopened weakens its own refusal.
-
-        :raises IntentError: when the kind is undeclared, `data` carries no key, or
-            an intent under that key is open.
-        """
-        self._require_declared(kind)
-        key = _key(kind.settled, kind.settled_key, data, session.seq)
-        record = self._index(session, kind).get(key)
-        if record is not None and record.settled is None:
-            raise IntentError(f"{kind.opened} {key!r} is open; its claim is what settles it")
-        return kind.writer.append(session, kind.settled, data)
-
     def settle(self, session: Session, claim: Claim, data: JsonObject) -> SessionEvent:
         """Append the settle of `claim`.
 
@@ -262,7 +238,7 @@ class IntentJournal:
             raise IntentError(
                 f"a settle for {key!r} cannot close the intent opened as {claim.key!r}"
             )
-        if not self.is_open(session, claim):
+        if not self._is_open(session, claim):
             raise IntentError(f"{kind.opened} {claim.key!r} is not open, so it cannot be settled")
         return kind.writer.append(session, kind.settled, data)
 
@@ -336,11 +312,11 @@ class IntentJournal:
         `None`, writing nothing, when the intent is no longer open or its kind has
         no closer (an `owner-settles` kind, which only its owner settles).
         """
-        if claim.kind.closer is None or not self.is_open(session, claim):
+        if claim.kind.closer is None or not self._is_open(session, claim):
             return None
         return self.settle(session, claim, abandoned(claim.kind, claim.opened, why, "process"))
 
-    def is_open(self, session: Session, claim: Claim) -> bool:
+    def _is_open(self, session: Session, claim: Claim) -> bool:
         """Whether `claim` is still the open intent under its key."""
         record = self._index(session, claim.kind).get(claim.key)
         return (
@@ -350,10 +326,6 @@ class IntentJournal:
     def pending(self, session: Session, kind: IntentKind) -> tuple[OpenIntent, ...]:
         """Intents of `kind` this log opened and never settled, in opening order."""
         return open_intents(self._index(session, kind), kind)
-
-    def outcome(self, session: Session, kind: IntentKind, key: str) -> SessionEvent | None:
-        """The settle of the latest intent opened under `key`, or `None`."""
-        return settled_record(self._index(session, kind), kind, key)
 
     def stale(self, sessions: Iterable[Session]) -> list[str]:
         """Every cached index that no longer equals its fold (I6), by kind."""

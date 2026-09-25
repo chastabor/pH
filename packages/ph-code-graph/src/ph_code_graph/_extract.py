@@ -40,6 +40,7 @@ query alone yields two tags and no calls — measured. `INHERITS` is that fact.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import cache
@@ -129,7 +130,8 @@ class Extraction:
 
 
 def _pack() -> Any:  # noqa: ANN401
-    import tree_sitter_language_pack
+    # Not a declared dependency: the row checks for it before this runs.
+    import tree_sitter_language_pack  # noqa: PLC0415
 
     return tree_sitter_language_pack
 
@@ -196,8 +198,6 @@ def use_cache(directory: Path) -> Path:
     An operator who set the environment variable deliberately keeps it — their
     spelling wins, which is what makes the variable still mean something.
     """
-    import os
-
     global _configured
 
     override = os.environ.get("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR")
@@ -343,7 +343,8 @@ def _tags_query(language: str) -> Any:  # noqa: ANN401
     for the same reason: a `Query` is read-only once built, and `extract` makes
     a fresh `QueryCursor` per call — which is the mutable half.
     """
-    from tree_sitter import Query
+    # Not a declared dependency: the row checks for it before this runs.
+    from tree_sitter import Query  # noqa: PLC0415
 
     pack = _pack()
     sources = [pack.get_tags_query(one) for one in INHERITS.get(language, ())]
@@ -359,7 +360,8 @@ def extract(path: str, text: str, language: str) -> Extraction:
         should stop the batch or be reported and skipped is its decision, not
         this function's.
     """
-    from tree_sitter import QueryCursor
+    # Not a declared dependency: the row checks for it before this runs.
+    from tree_sitter import QueryCursor  # noqa: PLC0415
 
     pack = _pack()
     config = pack.ProcessConfig(

@@ -53,7 +53,7 @@ from ph.keys import (
 )
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
-from ph.persistence import resumption_of
+from ph.persistence import open_session, resumption_of
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
 from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
@@ -84,7 +84,7 @@ from ..payloads import (
     ShellReply,
 )
 from ..protocol import Refusal, cursor_of
-from ..runtime import mounted, open_session
+from ..runtime import mounted
 from ..sessions import recorded_cwd
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
@@ -247,8 +247,8 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "and puts it to whoever attaches next; across a restart it is not re-asked, "
         "because the turn that was waiting is gone (P7-09). The log is not left "
         "half-written, though: repair settles an unanswered `question/asked` on "
-        "resume, so `pending_questions` stops reporting a question nobody can answer "
-        "and the transcript says it was interrupted rather than declined",
+        "resume, so no question nobody can answer is left open, and the transcript "
+        "says it was interrupted rather than declined",
     ),
     (
         "an outside effect after a crash",
@@ -1094,7 +1094,7 @@ class Supervisor:
         previous run crashed. The durable record is the `session/resumed` event, so a
         cron job leaves the fact in the trace whether or not anyone reads stderr.
         """
-        session = await open_session(ctx, root_id, cwd=cwd)
+        session = await open_session(ctx, root_id, meta={"cwd": cwd} if cwd else None)
         resumed = resumption_of(session)
         if resumed is not None:
             log.warning(

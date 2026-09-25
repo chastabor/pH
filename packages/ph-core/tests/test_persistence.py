@@ -34,7 +34,9 @@ from typing import Any
 import pytest
 
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
+from ph.locks import LockBusy, acquire_file_lock
 from ph.persistence.jsonl import JsonlSessionStore, read_session
+from ph.persistence.lease import lease_path
 from ph.session import (
     SESSION_FORMAT_VERSION,
     BatchRef,
@@ -773,6 +775,48 @@ async def test_what_a_teardown_appends_is_written_by_the_mounts_last_act(
 
     _header, events = read_session(stored_log(tmp_path / "sessions", "s"))
     assert [event.type for event in events][-2:] == ["turn/start", DISPOSED]
+
+
+async def test_a_scope_holding_many_leases_writes_each_log_once_while_it_is_held(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2 for a scope that claims more than one session, as a root claims each of
+    its sub-agents' logs (L2).
+
+    Every claim registers the last write, since only the newest registration sits
+    above the newest lease. So each log has to be written before any lease is given
+    back, and once: each registration used to walk every live session again, which
+    grew with the square of a root's children.
+
+    Sabotage: drop the `owed` check in `write_on_unwind`, and each log is written
+    once per claim. Register only at a scope's first claim, and the second log is
+    written after its lease is given back.
+    """
+    ctx = await mount(_root(tmp_path))
+    store = ctx.require(SESSION_PERSISTENCE)
+    assert isinstance(store, JsonlSessionStore)
+    sessions = ctx.require(SESSIONS)
+    for name in ("first", "second"):
+        await store.claim(name, scope=ctx)
+        sessions.create(name)
+    written: list[tuple[str, bool]] = []
+    flush = JsonlSessionStore.flush
+
+    async def watched(self: JsonlSessionStore, session: Session) -> None:
+        try:
+            acquire_file_lock(lease_path(self.root, session.id), timeout=0, what="a probe")()
+        except LockBusy:
+            written.append((session.id, True))
+        else:
+            written.append((session.id, False))
+        await flush(self, session)
+
+    monkeypatch.setattr(JsonlSessionStore, "flush", watched)
+    await ctx.dispose()
+
+    assert sorted(written) == [("first", True), ("second", True)], (
+        "each log written once, while this process still held it"
+    )
 
 
 async def test_disposing_an_agent_writes_what_its_teardown_appended(

@@ -32,7 +32,7 @@ from ph.agent.types import AgentHandle
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
 from ph.json import as_str
 from ph.seams._names import SLUG_CHARACTERS
-from ph.seams.approval import ApprovalRequest, ApprovalService, Edited, pending_approvals
+from ph.seams.approval import ApprovalRequest, ApprovalService, Edited
 from ph.seams.code_runtime import (
     CodeBindingNamespace,
     CodeRuntimeSeam,
@@ -60,7 +60,8 @@ from ph.seams.subprocess import (
 )
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
-from ph.session import Session
+from ph.session import Session, open_intents
+from ph.session.kinds import APPROVAL_ASK
 from ph.testing import MountProfile, StubAgent, log_event, noted, raising, settled, stored_types
 
 pytestmark = pytest.mark.anyio
@@ -124,7 +125,7 @@ async def test_a_cancel_while_a_person_is_being_asked_still_closes_the_pair() ->
 
     assert [event.type for event in session.events] == ["approval/asked", "approval/decided"]
     assert as_str(session.events[-1].data["outcome"]) == "canceled"
-    assert pending_approvals(session.events) == [], "repair would stamp this interrupted"
+    assert open_intents(session.events, APPROVAL_ASK) == (), "repair would stamp this interrupted"
 
 
 async def test_an_ask_is_on_disk_before_anybody_is_asked(mount: MountProfile) -> None:
@@ -272,7 +273,7 @@ async def test_two_asks_of_one_tool_at_once_are_settled_separately() -> None:
                     )
                 )
                 await anyio.wait_all_tasks_blocked()
-            assert len(pending_approvals(session.events)) == 2, "both asks are open"
+            assert len(open_intents(session.events, APPROVAL_ASK)) == 2, "both asks are open"
             release["second"].set()
             await anyio.wait_all_tasks_blocked()
             release["first"].set()
@@ -282,7 +283,7 @@ async def test_two_asks_of_one_tool_at_once_are_settled_separately() -> None:
         e.data["askSeq"]: e.data["outcome"] for e in session.events if e.type == "approval/decided"
     }
     assert decided == {asked["first"]: "allowed-once", asked["second"]: "rejected"}
-    assert pending_approvals(session.events) == []
+    assert open_intents(session.events, APPROVAL_ASK) == ()
 
 
 async def test_register_answerer_is_the_waterfall_by_another_name() -> None:
@@ -372,8 +373,8 @@ async def test_the_ask_does_not_carry_the_arguments_it_shows() -> None:
 async def test_an_asked_approval_with_no_decision_is_pending_on_resume() -> None:
     session = Session("s")
     asked = log_event(session, "approval/asked", {"toolName": "edit", "callId": "c1"})
-    (pending,) = pending_approvals(session.events)
-    assert pending.tool_name == "edit"
+    (pending,) = open_intents(session.events, APPROVAL_ASK)
+    assert pending.opened.data["toolName"] == "edit"
 
     log_event(
         session,
@@ -381,7 +382,7 @@ async def test_an_asked_approval_with_no_decision_is_pending_on_resume() -> None
         {"toolName": "edit", "callId": "c1", "askSeq": asked.seq, "outcome": "rejected"},
     )
     # Derived from the log, so a crash between the two cannot lose the question.
-    assert pending_approvals(session.events) == []
+    assert open_intents(session.events, APPROVAL_ASK) == ()
 
 
 async def test_a_never_policy_answers_without_asking_anyone() -> None:

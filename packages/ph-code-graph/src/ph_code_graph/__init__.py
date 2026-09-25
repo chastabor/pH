@@ -42,6 +42,7 @@ answers most of what an agent actually asks and reports where it cannot.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -198,7 +199,8 @@ class CodeGraphSeam:
 
     def report(self) -> list[tuple[str, str]]:
         """`phern doctor`'s section."""
-        import tree_sitter
+        # Not a declared dependency: the row checks for it before this runs.
+        import tree_sitter  # noqa: PLC0415
 
         # No `hasattr` guard: the row declares `inject=[FS]`, so `ctx.fs` is
         # present for as long as it is active — and a `Path.cwd()` fallback
@@ -494,8 +496,6 @@ def offer_skills(ctx: Context) -> None:
 @plugin("code-graph", inject=[TOOLS, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam and register both tools."""
-    import importlib.util
-
     for module in ("tree_sitter", "tree_sitter_language_pack"):
         if importlib.util.find_spec(module) is None:
             raise MountRefusal(MISSING)

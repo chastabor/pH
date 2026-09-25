@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import math
 import signal
+import time
 from typing import Any
 
 __all__ = [
@@ -63,8 +64,6 @@ except ImportError:  # pragma: no cover — Windows has no `resource` module
 def cpu_seconds_used() -> float:
     """CPU seconds this process has consumed, user + system."""
     if resource is None:  # pragma: no cover
-        import time
-
         return time.process_time()
     usage = resource.getrusage(resource.RUSAGE_SELF)
     return float(usage.ru_utime + usage.ru_stime)

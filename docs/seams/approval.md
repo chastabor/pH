@@ -78,12 +78,15 @@ questions, because everything here is gated on a decision that must fail closed.
 It is read from the log rather than held in memory, so a resume keeps the posture
 the person chose.
 
-## Re-asking on resume falls out of the log
+## A crash mid-ask is settled on resume
 
-There is no pending-approvals table. `approval/asked` without a matching
-`approval/decided` **is** the pending state, so a crash between the two leaves a
-question a resumed session can find and put back to the human —
-`pending_approvals(session)` is that fold.
+There is no pending-approvals table. The pair is the journal's `APPROVAL_ASK`
+intent: `approval/asked` opens it and `approval/decided` settles it, keyed by the
+ask's own seq (`askSeq`). A crash between the two leaves the intent open, and
+repair settles it when the session is next opened: it writes the
+`approval/decided` the crash never got to, saying the person was still being
+asked when the harness stopped. Nothing ran, and the resumed turn reads the call
+as not started, so the model asks again, to whoever is attached by then.
 
 That is also why both events are appended: the ask is durable evidence that the
 harness stopped and waited, and a consumer that recorded only decisions would

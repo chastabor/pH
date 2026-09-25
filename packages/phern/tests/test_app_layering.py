@@ -29,7 +29,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-OPTIONAL = ("textual", "textual_serve", "aiohttp", "jinja2", "opentelemetry")
+OPTIONAL = ("textual", "textual_serve", "aiohttp", "jinja2", "opentelemetry", "croniter")
 """Heavy or extra-only packages `ph_app.cli` must not import to be loaded.
 
 `textual` is the oldest of these promises and was untested until now: `cli.py`
@@ -44,6 +44,11 @@ branch wraps its import in the one `try` that turns that into an install line.
 `otel` extra. It is here for the same reason as the rest — a tracing stack is not
 something a one-shot `phern -p` should load — and not because ph-core is wrong to
 have it.
+
+`croniter` is a ph-core dependency and so always installed, but it costs about 20ms
+to import. `ph.seams.schedule` loads with every host, and so with the CLI, while
+only a cron schedule needs it, so the module imports it where one is read. N3 once
+lifted it to the top, which nothing here caught.
 """
 
 FRONT_END_FORBIDS = ("ph_app.daemon.server", "ph_app.daemon.supervisor")

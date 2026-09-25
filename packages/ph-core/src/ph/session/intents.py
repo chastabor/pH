@@ -24,13 +24,11 @@ second copy on the envelope would be a second carrier of one fact.
 package imports, and a package's in its own `kinds`, which that package imports.
 
 **One fold, `fold_intents`**: per key, the latest intent opened under it and the
-settle that closed it. `open_intents` and `settled_record` are both read off it, so
-"open" and "settled" cannot come to mean two different things. Its rule is the one
-`pending_approvals` and `pending_questions` already had, so moving them onto it
-changes nothing a reader sees: an open of a key replaces the intent before it (the
-later ask is the live one), a settle closes only its own key, a record whose key
-cannot be read is not part of the pair, and open intents come back in the order
-they were opened.
+settle that closed it. `open_intents` and the journal's `Prior` are both read off it,
+so "open" and "settled" cannot come to mean two different things. Its rule: an open of
+a key replaces the intent before it (the later one is the live one), a settle closes
+only its own key, a record whose key cannot be read is not part of the pair, and open
+intents come back in the order they were opened.
 
 @module ph.session.intents
 """
@@ -67,7 +65,6 @@ __all__ = [
     "key_of",
     "open_intents",
     "outcome_of",
-    "settled_record",
     "unsettled",
     "unsettled_why",
 ]
@@ -223,9 +220,9 @@ class OpenIntent:
 class IntentRecord:
     """One key's latest intent: the record that opened it, and its settle, if any.
 
-    A settle under a key nothing opened is not an intent, and is not folded — a Code
-    Mode dispatch refused before it started writes one, and there is nothing open for
-    it to close.
+    A settle under a key nothing opened is not an intent, and is not folded: there is
+    nothing open for it to close. The journal writes none, but a log need not have
+    come from this journal.
     """
 
     opened: SessionEvent
@@ -367,14 +364,3 @@ def open_intents(
         if record.settled is None
     ]
     return tuple(sorted(found, key=lambda intent: intent.opened.seq))
-
-
-def settled_record(
-    events: Iterable[SessionEvent] | Mapping[str, IntentRecord], kind: IntentKind, key: str
-) -> SessionEvent | None:
-    """The settle of the latest intent opened under `key`, or `None`.
-
-    `None` when that intent is still open, and when the key was never used."""
-    index = events if isinstance(events, Mapping) else fold_intents(events, kind)
-    record = index.get(key)
-    return None if record is None else record.settled

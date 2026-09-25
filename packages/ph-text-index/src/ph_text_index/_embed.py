@@ -162,7 +162,8 @@ class SentenceTransformerEmbedder:
 
     def _load(self) -> Any:  # noqa: ANN401
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            # Not a declared dependency: the row checks for it before this runs.
+            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
 
             log.info("ph_text_index: loading %s", self.model_name)
             self._model = SentenceTransformer(
@@ -208,7 +209,8 @@ class SentenceTransformerEmbedder:
         return self._model is not None
 
     def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
-        import numpy as np
+        # Heavy, and needed only where an index is built or searched.
+        import numpy as np  # noqa: PLC0415
 
         prefix = self.query_prefix if query else self.document_prefix
         rows = self._load().encode(

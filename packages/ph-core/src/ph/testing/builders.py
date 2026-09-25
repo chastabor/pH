@@ -26,8 +26,9 @@ from ..json import JsonValue, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
 from ..locks import file_lock
-from ..persistence.jsonl import HEADER_LINE_TYPE, locate_session, session_path
+from ..persistence.jsonl import HEADER_LINE_TYPE, JsonlSessionStore, locate_session, session_path
 from ..persistence.lease import lease_path
+from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
 from ..seams.workspace import (
     ACQUIRED,
@@ -53,6 +54,7 @@ from ..tools.definition import (
     NotDone,
     Reconciled,
     ToolDefinition,
+    ToolExecutionInput,
     ToolOutput,
     define_tool,
     text_content,
@@ -103,8 +105,8 @@ async def settled(check: Callable[[], object], what: str) -> None:
     `fail_after` alone raises a bare `TimeoutError` naming neither the wait nor
     the reason, which is what `what` is for.
     """
-    import anyio
-    import pytest
+    # `ph.testing` is shipped, and its helpers import where pytest is not installed.
+    import pytest  # noqa: PLC0415
 
     try:
         with anyio.fail_after(5):
@@ -299,8 +301,6 @@ async def run_tool(
     below, and not the seam's — that one P6-32 deleted, because a seam given no
     boundary used to answer with the widest one it had.
     """
-    from ..tools.definition import ToolExecutionInput
-
     return await ctx.require(TOOLS).execute(
         ToolExecutionInput(
             call_id=call_id,
@@ -746,9 +746,6 @@ def store_root(ctx: Context) -> Path:
     the narrowing happens here and the assertion names what the test is
     assuming: a store that has a path on disk at all.
     """
-    from ..persistence.jsonl import JsonlSessionStore
-    from ..persistence.turso import TursoSessionStore
-
     store = ctx.require(SESSION_PERSISTENCE)
     assert isinstance(store, JsonlSessionStore | TursoSessionStore), (
         f"{type(store).__name__} keeps no logs on disk, so it has no root"

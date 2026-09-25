@@ -378,7 +378,9 @@ class TursoSessionStore:
     def _connect(self, session_id: str, path: Path | None = None) -> Any:  # noqa: ANN401
         connection = self._connections.get(session_id)
         if connection is None:
-            import turso
+            # The native driver, loaded on the first connection, so importing this
+            # backend opens nothing.
+            import turso  # noqa: PLC0415
 
             # the family directory is created with the path in `_path_for`
             path = path if path is not None else self._path_for(session_id)

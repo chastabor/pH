@@ -375,15 +375,12 @@ class DispatchBridge:
         if self.session is None:
             return
         data = {**record.to_wire(), "content": [block.to_wire() for block in shaped]}
-        started = self._started.pop(ref.sub_call_id, None)
-        if started is None:
-            # Refused before it started — a denial, an approval that said no — so
-            # there is no intent to settle, and the record says what became of the
-            # call on its own, as it always has: the journal's door for a settle
-            # nothing opened (T6).
-            self._journal.settle_unopened(self.session, TOOL_DISPATCH, data)
-        else:
-            self._journal.settle(self.session, started, data)
+        # Always opened: the pipeline writes the start for every call its gate
+        # decides, a refusal included (`ToolRuntime.prepare`, P7-15), so a settle
+        # always has its intent — and one that did not would be a bug to surface,
+        # not a record to write on its own.
+        started = self._started.pop(ref.sub_call_id)
+        self._journal.settle(self.session, started, data)
 
 
 class Config(WireModel):

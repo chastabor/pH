@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cache
 
 __all__ = [
     "REPO",
@@ -86,12 +88,15 @@ class ParsedModule:
     """Whether this is a package's `__init__`, which relative imports resolve from."""
 
 
-def parsed_modules() -> dict[str, ParsedModule]:
-    """Every shipped module by its dotted name, parsed once.
+@cache
+def parsed_modules() -> Mapping[str, ParsedModule]:
+    """Every shipped module by its dotted name, parsed once per test run.
 
-    For the source-reading gates — the writers of record (`test_log_writers.py`) and
-    the intent-kind leaves (`test_intent_kinds.py`) — which each wrote this walk out
-    before; `workspace_packages`' argument, one level down.
+    For the source-reading gates: the writers of record (`test_log_writers.py`), the
+    intent-kind leaves (`test_intent_kinds.py`) and the import-cycle probe
+    (`test_import_cycles.py`), which each wrote this walk out before;
+    `workspace_packages`' argument, one level down. Cached, and so read-only: a
+    `Mapping`, since every gate shares the one parse.
     """
     found: dict[str, ParsedModule] = {}
     for package in workspace_packages():

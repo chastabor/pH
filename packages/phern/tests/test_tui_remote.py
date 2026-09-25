@@ -42,7 +42,7 @@ from ph_app import verbs
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.follow import Followed
 from ph_app.params import CancelScheduleParams, CreateScheduleParams
-from ph_app.payloads import DaemonLifetime, MutationRepeated, RepeatOutcome, StatusFacts
+from ph_app.payloads import AskKey, DaemonLifetime, MutationRepeated, RepeatOutcome, StatusFacts
 from ph_app.protocol import Cursor
 from ph_app.tui.adapter import TuiEventAdapter
 from ph_app.tui.commands import TUI_VERBS
@@ -655,11 +655,13 @@ async def test_a_second_terminals_modal_comes_down_when_the_first_answers(
         def __init__(self) -> None:
             super().__init__()
             self.release = anyio.Event()
+            self.asked_under: list[AskKey | None] = []
 
         async def ask_approval(
-            self, request: ApprovalRequest, *, ask_id: str = ""
+            self, request: ApprovalRequest, *, ask: AskKey | None = None
         ) -> tuple[ApprovalAnswer, str]:
             self.approvals.append(request)
+            self.asked_under.append(ask)
             await self.release.wait()
             return "rejected", "too late"
 
@@ -680,9 +682,10 @@ async def test_a_second_terminals_modal_comes_down_when_the_first_answers(
         assert outcome == "allowed-once", "the fast terminal's answer is the decision"
         assert [one.tool_name for one in fast.approvals] == ["write"]
         await until(
-            lambda: slow.withdrawn == ["c1"],
+            lambda: bool(slow.withdrawn),
             what="the other terminal to be told its modal is moot",
         )
+        assert slow.withdrawn == slow.asked_under, "the modal it was asked under"
         # And the decision is recorded once, whatever the slow one does next.
         slow.release.set()
         assert [one.type for one in root.session.events].count("approval/decided") == 1

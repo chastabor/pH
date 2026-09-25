@@ -6,12 +6,11 @@ by a newer harness, and an unrecognized *required* event may change how the rest
 of the log is read — so silently skipping it would reconstruct a wrong session
 rather than an incomplete one.
 
-Kept beside the code that appends these types, and checked by a test that walks
-every `append(` call site in `ph-core`: a type that ships without an entry here
-would be a log this build could write and then refuse to read. That walker sees
-only ph-core — a producer in another package (the subagent providers,
-ph-stabilize's `tool-todo`) owes the same proof through its own bundle's tests,
-which is the deal the per-type comments below record.
+Checked by `test_log_writers.py`, which walks every write in **every** package's
+shipped code — ph-core's and the bundles' alike: a type that ships without an entry
+here would be a log this build could write and then refuse to read. Whether a type
+is *ignorable* is its own decision, argued in the comment beside it and pinned by
+its producer's tests.
 
 **And the write door now refuses what the read door refuses** (F11): the append behind
 every writer (`Session._append`, T6) raises `UnknownEventTypeError` for a type outside
@@ -145,7 +144,7 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # emitted by `tool-ask-user`). Two events for the reason approvals have
         # two: the ask is appended before the waterfall runs, so a crash while
         # somebody was deciding leaves the question in the log rather than losing
-        # it — which is what `pending_questions` folds.
+        # it — `QUESTION_ASK` open, which repair settles on resume.
         #
         # Only a question that was actually *delivered* appears at all. An
         # unattended ask resolves to "no answer" without appending, so a log

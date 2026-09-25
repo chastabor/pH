@@ -30,10 +30,7 @@ from ph.keys import AGENTS, LLM, SESSIONS, SUBAGENTS, TOOLS, TUI_STATUS
 from ph.llm.types import Finish, FinishReason, GenerateOptions, LlmFailure, ToolCallBlock
 from ph.seams.subagents import ADMITTED, SubagentRequest, SubagentSpawnError
 from ph.session import Session, SurfaceIntent
-from ph.session.known_event_types import (
-    IGNORABLE_SESSION_EVENT_TYPES,
-    KNOWN_SESSION_EVENT_TYPES,
-)
+from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -631,10 +628,10 @@ async def test_a_success_resets_the_breaker(mount: MountProfile) -> None:
     assert not _denied(session, "c4", "is not being called again")
 
 
-def test_the_event_types_are_in_the_vocabulary() -> None:
-    """The proof a producer outside ph-core owes through its own bundle."""
+def test_the_event_types_are_ignorable() -> None:
+    """Accounting a reader may skip: the turn it bounded is in the log either way.
+    (That they are *known* is `test_log_writers.py`'s, for every package.)"""
     for event_type in ("limits/exceeded", "limits/breaker-tripped"):
-        assert event_type in KNOWN_SESSION_EVENT_TYPES
         assert event_type in IGNORABLE_SESSION_EVENT_TYPES
 
 

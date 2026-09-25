@@ -133,7 +133,8 @@ class TokenMeter:
         if not self._encoder_tried:
             self._encoder_tried = True
             try:
-                import tiktoken  # type: ignore[import-not-found]
+                # Not a declared dependency: the row checks for it before this runs.
+                import tiktoken  # type: ignore[import-not-found]  # noqa: PLC0415
 
                 self._encoder = tiktoken.get_encoding("cl100k_base")
             except Exception:

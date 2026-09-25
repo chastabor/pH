@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from ..cordis import Context, plugin
 from ..keys import CREDENTIALS, LLM
-from ..session import OpenIntent, Session, SessionEvent, intents_of, open_intents
+from ..session import Session, intents_of
 from ..session.kinds import CREDENTIAL_WAIT, credential_hold, hold_of
 from ..wire import WireModel
 
@@ -34,10 +34,8 @@ __all__ = [
     "CredentialService",
     "SecretValue",
     "apply",
-    "credential_waits",
     "hold_for_credential",
     "missing_credential",
-    "record_wait",
     "waiting_for",
 ]
 
@@ -157,11 +155,11 @@ async def hold_for_credential(
     what waits, once per root, when the root comes back.
     """
     name = missing_credential(ctx, provider, model)
-    await record_wait(ctx, session, holder, name)
+    await _record_wait(ctx, session, holder, name)
     return name
 
 
-async def record_wait(ctx: Context, session: Session, holder: str, name: str | None) -> None:
+async def _record_wait(ctx: Context, session: Session, holder: str, name: str | None) -> None:
     """Make `session`'s log say what `holder` waits for now: `name`, or nothing (T5).
 
     A hold for any other name is settled — its name arrived, or the route stopped
@@ -182,23 +180,16 @@ async def record_wait(ctx: Context, session: Session, holder: str, name: str | N
         await journal.open_once(session, CREDENTIAL_WAIT, credential_hold(holder, name))
 
 
-def credential_waits(events: Iterable[SessionEvent]) -> Mapping[str, str]:
-    """Who in this log waits for which credential: holder → name.
-
-    One name per holder, since `record_wait` settles a holder's other holds before it
-    opens one. A fold, for a reader with nothing mounted — a transcript, a test —
-    reading what the resume check recorded; a mounted one asks `waiting_for`.
-    """
-    return _waits(open_intents(events, CREDENTIAL_WAIT))
-
-
 def waiting_for(ctx: Context, session: Session) -> Mapping[str, str]:
-    """`credential_waits`, read off the journal's cached index rather than refolded."""
-    return _waits(intents_of(ctx).pending(session, CREDENTIAL_WAIT))
+    """Who in `session`'s log waits for which credential: holder → name.
 
-
-def _waits(intents: Iterable[OpenIntent]) -> dict[str, str]:
-    return dict(hold_of(intent.opened) for intent in intents)
+    One name per holder, since `_record_wait` settles a holder's other holds before
+    it opens one. Read off the journal's cached index rather than refolded, so the
+    doctor, a root's status and its startup summary cost what the log grew since.
+    """
+    return dict(
+        hold_of(intent.opened) for intent in intents_of(ctx).pending(session, CREDENTIAL_WAIT)
+    )
 
 
 @plugin("credentials-env")

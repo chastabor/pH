@@ -292,7 +292,8 @@ class TextIndex:
 
         :raises IndexMismatch: when the vectors' width is not the index's.
         """
-        import numpy as np
+        # Heavy, and needed only where an index is built or searched.
+        import numpy as np  # noqa: PLC0415
 
         if len(chunks) != int(vectors.shape[0]):
             raise ValueError(f"{len(chunks)} chunks against {vectors.shape[0]} vectors")
@@ -326,7 +327,8 @@ class TextIndex:
 
     def _maybe_calibrate(self, rows: Vectors) -> None:
         """Fit TQ+ before the first add, when this batch is a fair sample of it."""
-        import numpy as np
+        # Heavy, and needed only where an index is built or searched.
+        import numpy as np  # noqa: PLC0415
 
         if not self.calibrate or int(rows.shape[0]) < CALIBRATION_SAMPLE:
             return
@@ -361,7 +363,8 @@ class TextIndex:
         this layer's answer to give because turbovec raises on an empty
         allowlist and cannot tell the two apart.
         """
-        import numpy as np
+        # Heavy, and needed only where an index is built or searched.
+        import numpy as np  # noqa: PLC0415
 
         if self._index is None or not self._records:
             return []
@@ -428,6 +431,7 @@ class TextIndex:
 def _turbovec() -> Any:  # noqa: ANN401
     # No py.typed marker upstream, and the surface used here is four methods on
     # one class — a stub file would be more of this module than the module.
-    import turbovec  # type: ignore[import-untyped]
+    # Heavy, and needed only where an index is built or searched.
+    import turbovec  # type: ignore[import-untyped]  # noqa: PLC0415
 
     return turbovec

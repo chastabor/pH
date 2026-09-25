@@ -19,12 +19,15 @@ answer wins, and the rest are told.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import Daemon, running
+from daemon_helpers import Daemon, running, until
 
 from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.seams.approval import ApprovalAnswer
@@ -43,10 +46,12 @@ async def _root(daemon: Daemon, session_id: str = "asked") -> Root:
     return await daemon.running.supervisor.start(session_id)
 
 
-async def _ask(root: Root) -> ApprovalAnswer:
+async def _ask(
+    root: Root, *, tool_name: str = "write", call_id: str | None = "c1"
+) -> ApprovalAnswer:
     """Fire one approval through the seam, exactly as a gated tool does."""
     return await root.ctx.require(APPROVAL).request(
-        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
+        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name=tool_name, call_id=call_id
     )
 
 
@@ -350,29 +355,91 @@ async def test_a_question_over_the_socket_reaches_a_front_end(tmp_path: Path) ->
         assert types.count("question/answered") == 1
 
 
-async def test_the_wire_ask_id_is_the_one_the_log_wrote(tmp_path: Path) -> None:
-    """One identity for one question, not two that happen to agree.
+@dataclass(frozen=True)
+class _Twice:
+    """Two asks under one name, and where each frame still carries that name."""
 
-    The front end answers a frame keyed by `askId`, and a resume would re-pose
-    from a log record keyed by `askId`. If the desk minted its own counter those
-    are different strings, and the re-posed question could never be recognized as
-    the one already open — which is the whole point of holding it in the log.
+    ask: Callable[[Root], Awaitable[object]]
+    reply: ApprovalAskReply | QuestionAskReply
+    body: str
+    field: str
+    name: str
+
+
+ASKED_TWICE = {
+    # With no call id, as the Continual Harness asks for `refine`.
+    "approval/ask": _Twice(
+        partial(_ask, tool_name="refine", call_id=None),
+        ApprovalAskReply(answer="allowed-once"),
+        "request",
+        "toolName",
+        "refine",
+    ),
+    "question/ask": _Twice(
+        _ask_question, QuestionAskReply(answer="8080"), "question", "askId", "call-1"
+    ),
+}
+
+
+@pytest.mark.parametrize("method", sorted(ASKED_TWICE))
+async def test_two_asks_under_one_name_are_two_asks_on_the_wire(
+    tmp_path: Path, method: str
+) -> None:
+    """T3's collision, in memory: two `refine` approvals at once, which have only
+    the tool name, and two questions under one `ask_id`.
+
+    Named on the wire by those, the two shared an entry in the desk's `asks`. The
+    first to be answered took the other's with it, so the root read as idle while
+    still parked on a person, and a front end that attached then was never posed
+    the ask still open. The desk names each ask itself, and the names the seams
+    gave still travel inside the frame, for whoever reads it against the log.
+
+    Sabotage: name an approval by `request.call_id or request.tool_name` again, or
+    a question by its own `ask_id`, and its case fails.
     """
+    twice = ASKED_TWICE[method]
     async with running(tmp_path) as daemon:
-        posed: list[dict[str, Any]] = []
+        parked: list[tuple[dict[str, Any], anyio.Event]] = []
+        late: list[dict[str, Any]] = []
+        outcomes: list[object] = []
 
-        async def answer(params: dict[str, Any]) -> QuestionAskReply:
-            posed.append(params)
-            return QuestionAskReply(answer="8080")
+        async def park(params: dict[str, Any]) -> ApprovalAskReply | QuestionAskReply:
+            answered = anyio.Event()
+            parked.append((params, answered))
+            await answered.wait()
+            return twice.reply
 
-        root = await _root(daemon, "keyed")
-        await _front_end(daemon, root, answer, "question/ask")
+        async def answer_now(params: dict[str, Any]) -> ApprovalAskReply | QuestionAskReply:
+            late.append(params)
+            return twice.reply
 
-        await _ask_question(root)
+        async def asking() -> None:
+            outcomes.append(await twice.ask(root))
 
-        asked = root.session.latest("question/asked")
-        assert asked is not None
-        assert [one["askId"] for one in posed] == [asked.data["askId"]] == ["call-1"]
+        root = await _root(daemon, "asked-twice")
+        await _front_end(daemon, root, park, method)
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(asking)
+            tasks.start_soon(asking)
+            await until(lambda: len(parked) == 2, what="both asks to be posed")
+            (first, first_answered), (second, second_answered) = parked
+
+            second_answered.set()
+            await until(lambda: bool(outcomes), what="the second ask to be answered")
+            assert root.desk is not None and root.desk.waiting, "still parked on the first"
+
+            await _front_end(daemon, root, answer_now, method)
+            await until(lambda: len(outcomes) == 2, what="the late front end's answer")
+            # The first front end's answer to it comes too late, and is discarded.
+            first_answered.set()
+
+        assert [one["askId"] for one in late] == [first["askId"]], (
+            "a front end that attached late is posed the ask still open, and only it"
+        )
+        assert first["askId"] != second["askId"]
+        assert [one[twice.body][twice.field] for one in (first, second)] == [twice.name] * 2, (
+            "each frame still carries the name the seam gave it"
+        )
 
 
 async def test_a_daemon_with_no_front_end_does_not_log_a_question(tmp_path: Path) -> None:
@@ -435,4 +502,6 @@ async def test_re_attaching_while_a_question_is_open_does_not_ask_twice(
             await anyio.sleep(0.05)
             answer.set()
 
-        assert [one["askId"] for one in posed] == ["c1"], "one person, one question, once"
+        assert [one["request"]["callId"] for one in posed] == ["c1"], (
+            "one person, one question, once"
+        )

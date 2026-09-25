@@ -102,11 +102,21 @@ src = [
 # ANN401 only, not all of ANN: mypy's strict mode already requires the
 # annotations the rest of the group asks for. The `Any` parameters that predate
 # the rule carry `# noqa: ANN401`, which RUF100 deletes as each one is retired.
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN401"]
+#
+# PLC0415, an import inside a function, for shipped code (N3). One runs only when its
+# function does, so a misspelled name or an import cycle waits for the process that
+# calls it in that order. Each that stays says why in a comment above it and carries
+# `# noqa: PLC0415`: optional, heavy and platform modules, and the CLI's late loads.
+# RUF100 deletes a noqa that stops suppressing anything. `tests/test_import_cycles.py`
+# is what makes moving one to the top safe.
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN401", "PLC0415"]
 # B008: Typer expresses CLI options as call-valued defaults.
 # UP040: PEP 695 `type` aliases are lazily evaluated, and pydantic resolves the
 #   discriminated-union aliases in this codebase at class-definition time.
 ignore = ["B008", "UP040"]
+
+[tool.ruff.lint.per-file-ignores]
+"!packages/*/src/**" = ["PLC0415"]
 
 [tool.ruff.format]
 quote-style = "double"

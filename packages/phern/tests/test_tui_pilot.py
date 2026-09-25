@@ -36,6 +36,7 @@ from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, simple_tool
 from ph_app.daemon.supervisor import Root
+from ph_app.payloads import AskKey
 from ph_app.trust import TrustStore
 from ph_app.tui.app import VERB_GROUP, PHTuiApp, run_tui
 from ph_app.tui.modals.approval import ApprovalModal
@@ -311,6 +312,47 @@ async def test_escape_denies_rather_than_leaving_it_open(make_tui_app: MakeApp) 
         await pilot.press(app.keys.cancel)
         await until(pilot, lambda: bool(answers))
         assert answers[0][0] == "rejected"
+
+
+async def test_an_ask_is_withdrawn_by_its_root_and_its_name(make_tui_app: MakeApp) -> None:
+    """Two roots' asks, both named `ask-1`, up at once, and the lower one withdrawn.
+
+    Each root's desk counts its own asks, so a terminal attached to two can be
+    asked `ask-1` by both. Filed by the name alone, the second took the first's
+    entry, and `ask.settled` for one root's ask took the other root's modal down.
+    And `dismiss` pops whichever screen is on top, so withdrawing a modal with
+    another above it took the upper one down instead, and its ask never heard back.
+
+    Sabotage: file `_open_asks` by `ask.ask_id` alone, or withdraw with a plain
+    `dismiss`, and the upper ask is not the one left up.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        answers: dict[str, Any] = {}
+
+        async def ask(session_id: str, tool_name: str) -> None:
+            answers[tool_name] = await app.ask_approval(
+                ApprovalRequest(tool_name=tool_name), ask=AskKey(session_id, "ask-1")
+            )
+
+        def showing(tool_name: str) -> bool:
+            screen = app.screen
+            return isinstance(screen, ApprovalModal) and screen.request.tool_name == tool_name
+
+        app.run_worker(ask("root-a", "lower"))
+        await until(pilot, lambda: showing("lower"))
+        app.run_worker(ask("root-b", "upper"))
+        await until(pilot, lambda: showing("upper"))
+
+        app.withdraw_ask(AskKey("root-a", "ask-1"))
+        await pilot.pause()
+        assert showing("upper"), "the other root's ask is still the one up"
+        await pilot.click("#approval-approve")
+        await until(pilot, lambda: len(answers) == 2)
+
+        assert answers == {"upper": ("allowed-once", ""), "lower": ("rejected", "")}
+        assert not isinstance(app.screen, ApprovalModal), (
+            "the withdrawn modal went when it reached the top"
+        )
 
 
 # -------------------------------------------------------------- ask the user --

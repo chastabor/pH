@@ -58,6 +58,7 @@ from ph.session import new_session_id
 
 from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
+from ..payloads import AskKey
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
 from .commands import TUI_VERBS, VIEW_USAGE, VIEWS, app_bindings
@@ -211,8 +212,8 @@ class PHTuiApp(App[str | None]):
         self._client: DaemonClient | None = None
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
-        self._open_asks: dict[str, PhModal[Any]] = {}
-        """Ask modals currently up, by the `ask_id` the daemon asked under (H1).
+        self._open_asks: dict[AskKey, PhModal[Any]] = {}
+        """Ask modals currently up, by the root and name the daemon asked under (H1).
 
         So that `withdraw_ask` can take one down when another terminal answers
         first. Empty for an ask with no id — an in-process caller has no second
@@ -696,8 +697,8 @@ class PHTuiApp(App[str | None]):
         # the read loop, and Textual leaves a screen on the stack when its waiter
         # goes — so without this the person is left holding a modal while the
         # notification below tells them the daemon is gone.
-        for ask_id in list(self._open_asks):
-            self.withdraw_ask(ask_id, reason="")
+        for ask in list(self._open_asks):
+            self.withdraw_ask(ask, reason="")
         self.notify(
             "The daemon is no longer reachable. The agent keeps running; reopen to attach.",
             title="pH lost the daemon",
@@ -725,25 +726,28 @@ class PHTuiApp(App[str | None]):
     # ------------------------------------------------------------ modal host --
 
     async def ask_approval(
-        self, request: ApprovalRequest, *, ask_id: str = ""
+        self, request: ApprovalRequest, *, ask: AskKey | None = None
     ) -> tuple[ApprovalAnswer, str]:
-        decision = await self._ask(ask_id, ApprovalModal(request))
+        decision = await self._ask(ask, ApprovalModal(request))
         return decision.answer, decision.reason
 
-    async def ask_question(self, question: UserQuestion, *, ask_id: str = "") -> str | None:
-        answer = await self._ask(ask_id, AskUserModal(question))
+    async def ask_question(
+        self, question: UserQuestion, *, ask: AskKey | None = None
+    ) -> str | None:
+        answer = await self._ask(ask, AskUserModal(question))
         return answer if isinstance(answer, str) else None
 
-    async def _ask[T](self, ask_id: str, modal: PhModal[T]) -> T:
-        """Push one ask modal and wait, findable by `ask_id` while it is up."""
-        if ask_id:
-            self._open_asks[ask_id] = modal
+    async def _ask[T](self, ask: AskKey | None, modal: PhModal[T]) -> T:
+        """Push one ask modal and wait, findable by `ask` while it is up."""
+        if ask is not None:
+            self._open_asks[ask] = modal
         try:
             return await self.push_screen_wait(modal)
         finally:
-            self._open_asks.pop(ask_id, None)
+            if ask is not None:
+                self._open_asks.pop(ask, None)
 
-    def withdraw_ask(self, ask_id: str, *, reason: str = ANSWERED_ELSEWHERE) -> None:
+    def withdraw_ask(self, ask: AskKey, *, reason: str = ANSWERED_ELSEWHERE) -> None:
         """`ModalHost`: this ask can no longer be delivered (H1).
 
         Dismissed with the modal's own cancel value — the same one Esc produces —
@@ -755,12 +759,12 @@ class PHTuiApp(App[str | None]):
         something better: the daemon going away takes every open ask with it, and
         one notification per modal would bury the sentence that explains them.
         """
-        modal = self._open_asks.pop(ask_id, None)
+        modal = self._open_asks.pop(ask, None)
         if modal is None:
             return
         if reason:
             self.notify(reason, severity="information")
-        modal.dismiss(modal.cancel_value)
+        modal.withdraw()
 
     # -------------------------------------------------------------- actions --
     # One per `TuiVerb`. Reached by key, by `/command`, and by `run_action`.

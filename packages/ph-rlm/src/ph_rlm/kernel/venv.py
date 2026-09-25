@@ -26,6 +26,7 @@ first cell of somebody's session (D7).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cache
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -99,8 +101,6 @@ def guest_project_dir() -> Path | None:
     there is no project directory above the package and this returns `None`,
     which is the signal to install by requirement name instead.
     """
-    import importlib.util
-
     spec = importlib.util.find_spec("ph_runtime")
     if spec is None or not spec.origin:
         return None
@@ -132,8 +132,6 @@ def _host_can_import_guest(python: Path) -> bool:
 
 
 def _marker(skills: Sequence[str]) -> dict[str, object]:
-    from importlib.metadata import PackageNotFoundError, version
-
     try:
         guest = version("ph-runtime-guest")
     except PackageNotFoundError:  # pragma: no cover — a checkout without install

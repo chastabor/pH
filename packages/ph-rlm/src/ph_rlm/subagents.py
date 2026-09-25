@@ -52,10 +52,10 @@ from pydantic import Field
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
-from ph.keys import AGENTS, FS, JOBS, LLM, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, WORKSPACE
+from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
-from ph.persistence import resume_session
+from ph.persistence import open_session
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
@@ -382,20 +382,28 @@ class RlmChildProvider:
         return run
 
     async def _child_session(self, session_id: str, parent_session: Session, depth: int) -> Session:
-        """This child's session — resumed when a log for it survived, else fresh.
+        """This child's session — claimed, then resumed when a log for it survived,
+        else fresh — through `open_session`, the door every session is opened by.
 
-        A readmitted child usually has no log at all: it never ran a turn, and
-        what little its session held was still in a buffer when the daemon
-        stopped. But a child that *did* reach disk must be resumed rather than
-        recreated, for the reason `open_session` gives one layer up — a store
-        that already holds this id appends, so creating over it puts `seq`
+        A readmitted child usually has no log at all: it never ran a turn, and what
+        little its session held was still in a buffer when the daemon stopped. But a
+        child that *did* reach disk must be resumed rather than recreated, for the
+        reason `open_session` gives — creating over a stored log puts `seq`
         backwards mid-file and the log stops being readable at all (P5-03).
+
+        **Claimed, as a root is (I-5, L2).** A child's log is a session of its own,
+        openable by its id — `phern -p --session <child>`, a daemon's `session/new`
+        naming it — and it was the one writer the lease did not see, so a second
+        process could write it while this one drove the child. The lease is held
+        by the mount's scope, like the root's (`open_session` claims on `ctx.root`):
+        the child's session lives in the deployment's store for as long as the root
+        is mounted, and the mount's last act writes it before the lease is given
+        back. A child another
+        process holds refuses with `SessionBusy`, which a readmission settles as
+        one it could not resume.
         """
-        store = self.ctx.get(SESSION_PERSISTENCE)
-        if store is not None and store.exists(session_id):
-            resumed: Session = await resume_session(self.ctx, session_id)
-            return resumed
-        created: Session = self.ctx.require(SESSIONS).create(
+        return await open_session(
+            self.ctx,
             session_id,
             meta={
                 "parentSession": parent_session.id,
@@ -404,7 +412,6 @@ class RlmChildProvider:
                 "agentPreset": "rlm",
             },
         )
-        return created
 
     def _resolve_name(
         self, requested: str | None, prompt: str, run_id: str, taken: list[str]

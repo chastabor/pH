@@ -43,6 +43,7 @@ them.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -545,8 +546,6 @@ def offer_skills(ctx: Context) -> None:
 @plugin("text-index", inject=[TOOLS, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam, and register the tools once an embedder exists."""
-    import importlib.util
-
     if importlib.util.find_spec("turbovec") is None:
         raise MountRefusal(MISSING_TURBOVEC)
 
@@ -810,8 +809,6 @@ async def _passages(
 @plugin("text-index-local", inject=[TEXT_INDEX], config=LocalConfig)
 async def local(ctx: Context, config: LocalConfig) -> None:
     """Register a local `sentence-transformers` model as the embedder."""
-    import importlib.util
-
     # The package, not the weights: see `SentenceTransformerEmbedder`. Refusing
     # here is the difference between "this deployment cannot embed" — which an
     # operator can fix — and a tool that fails on its first call in a session

@@ -1183,7 +1183,7 @@ class SubagentService:
         spend its retry ladder on a key a person could supply in a second, had
         anything said it was missing. Held, it stays `queued` — live, so its parent
         is not released under it — no start is counted, and the parent's log says
-        which name it waits for (`record_wait`). `readmit_waiting` asks again when a
+        which name it waits for (`hold_for_credential`). `readmit_waiting` asks again when a
         credential arrives.
 
         Returns the run ids that are running again. One child that cannot be

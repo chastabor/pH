@@ -10,10 +10,9 @@ said no. Collapsing them would make a missing UI look like a decision.
 prompt, an exception inside an answerer — every one of them denies. A permission
 system whose failure mode is "allow" is not a permission system.
 
-**Re-asking on resume** falls out of the log rather than being remembered:
-`approval/asked` without a matching `approval/decided` *is* the pending state, so
-a crash between the two leaves a question a resumed session can find and put
-back to the human.
+**An ask a crash left open is settled, not re-asked**: `approval/asked` without a
+matching `approval/decided` is `APPROVAL_ASK` open in the log, and repair closes
+it `interrupted` on resume (P5-13), since the turn that was waiting on it is gone.
 
 @module ph.seams.approval
 """
@@ -21,7 +20,7 @@ back to the human.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
@@ -32,7 +31,7 @@ from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonObject, JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import Claim, IntentNotDurable, Session, SessionEvent, intents_of, open_intents
+from ..session import Claim, IntentNotDurable, Session, intents_of
 from ..session.kinds import APPROVAL_ASK, INTERRUPTED, approval_decided
 from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
@@ -50,14 +49,12 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalService",
     "Edited",
-    "PendingApproval",
     "Responded",
     "answer_from_wire",
     "answer_kind",
     "answer_to_wire",
     "apply",
     "denial_reason",
-    "pending_approvals",
 ]
 
 log = logging.getLogger("ph.seams.approval")
@@ -253,44 +250,6 @@ class ApprovalRequest(WireModel):
     **Deliberately not recorded on `approval/asked`.** The assistant message
     already holds them; a second copy in the log is two statements of one fact
     that can disagree, and this one is here to be *shown*, not stored."""
-
-
-@dataclass(frozen=True, slots=True)
-class PendingApproval:
-    """An `asked` with no `decided` — a question a resume must put back."""
-
-    seq: int
-    tool_name: str
-    call_id: str | None
-    reason: str | None
-
-
-def pending_approvals(events: Sequence[SessionEvent]) -> list[PendingApproval]:
-    """Approvals this log asked and never recorded an answer for.
-
-    Derived, not tracked: the log is the pending state, so a crash between the
-    two events cannot lose the question.
-
-    **Events rather than a `Session`**, so `ph.persistence.repair` can call it
-    with the raw sequence it is handed. Repair is the one caller that has no
-    session — it runs while the log is being rebuilt — and it needs *this* rule,
-    not a copy of it: it writes the `approval/decided` that makes a pending ask
-    stop being pending, so a second spelling of the key here is a second
-    spelling of what repair must settle.
-    """
-    return [
-        PendingApproval(
-            seq=intent.opened.seq,
-            tool_name=as_str(intent.opened.data.get("toolName")),
-            call_id=_str_or_none(intent.opened.data.get("callId")),
-            reason=_str_or_none(intent.opened.data.get("reason")),
-        )
-        for intent in open_intents(events, APPROVAL_ASK)
-    ]
-
-
-def _str_or_none(value: JsonValue) -> str | None:
-    return value if isinstance(value, str) else None
 
 
 def approval_policy(session: Session) -> ApprovalPolicy:

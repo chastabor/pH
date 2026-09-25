@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess as _sp
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -621,8 +622,6 @@ class SubprocessService:
 
 
 def _stdio(mode: Stdio) -> int | None:
-    import subprocess as _sp
-
     if mode == "pipe":
         return _sp.PIPE
     if mode == "null":

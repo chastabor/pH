@@ -968,8 +968,8 @@ async def test_a_traversing_session_id_is_refused_before_any_path_is_built(
     `session/*` method on both transports takes — a handler cannot forget a
     check the model already made.
     """
+    from ph.persistence import open_session
     from ph_app.protocol import SessionParams
-    from ph_app.runtime import open_session
 
     root = Context()
     with pytest.raises(SessionForkError) as caught:

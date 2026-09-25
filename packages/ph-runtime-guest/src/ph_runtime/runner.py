@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import io
 import json
 import os
@@ -321,8 +322,6 @@ class Runner:
         the harness's surface: a skill is capability the deployment installed,
         not cell state, and snapshotting it would try to pickle a module.
         """
-        import importlib
-
         for name in names:
             try:
                 module = importlib.import_module(name)

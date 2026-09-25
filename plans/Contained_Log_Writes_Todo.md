@@ -365,6 +365,39 @@ Phase 10.
       reads back with nothing open; a second restart closes nothing.
     - L2 is a strict `xfail`: a readmitted child's log is not leased by the process that
       resumed it.
+    - **L2 closed after T6.**
+      - `open_session` moved from `ph_app.runtime` into `ph.persistence.opening`.
+        ph-rlm sits below phern and could not reach the door, which is why children
+        were never claimed. It gained `meta` for the child's header, and after the
+        /simplify pass `meta` is the only way in: the supervisor passes
+        `meta={"cwd": …}` where it used to pass `cwd=`.
+      - `_child_session` now opens every child through it, fresh or resumed. The
+        lease is held on the mount's scope (`ctx.root`) like the root's, since a
+        child's session lives in the deployment's store for as long as the root is
+        mounted, and the mount's last act writes it before the lease goes.
+        `open_session` claims on `ctx.root` itself, so no caller can hand the lease
+        a shorter life.
+      - One scope now holds a lease per child, and each claim registered a last write
+        that walked every live session: a root with 200 children spent 472ms
+        unwinding, against 260ms with one walk. Each claim still registers, since
+        only the newest registration sits above the newest lease, but the first to
+        run writes everything and the rest return (`write_on_unwind`'s `_OWED`).
+        `test_persistence.py::test_a_scope_holding_many_leases_writes_each_log_once_while_it_is_held`
+        holds both halves: dropping the check writes each log once per claim, and
+        registering once gives the second lease back before its log is written.
+      - Not changed: a settled child's lease is held until the root unwinds, so
+        `phern -p --session <child>` is refused while its root is mounted. Releasing
+        it at `_quiesce` would mean disposing the child's session there.
+      - A readmission refused by another holder is settled "could not be resumed".
+      - The xfail is removed. `test_subagents.py` gains
+        `test_a_live_childs_log_refuses_a_second_opener`.
+      - Its in-process restart tests now resume from a snapshot of the logs: the
+        first harness, still alive, rightly holds its children's leases.
+      - Sabotaged by opening the child directly again; both tests failed.
+      - Two collisions I first listed (a daemon restarting inside the old one's
+        grace period, a second daemon sharing `$PH_HOME`) were already covered by
+        the root's lease, since children are readmitted only by whoever starts the
+        root. The real gap was a second opener naming the child's own id.
     - Sabotaged by emptying repair's intent pass; two of the three gates failed.
 - [x] **T2 — One outcome vocabulary and a re-open policy per kind** (item 3).
   - One marker on every settle the act did not write.
@@ -497,9 +530,10 @@ Phase 10.
         `UndeclaredIntentError` (exported from `ph.persistence`), naming the type and
         the leaf. The log is left as it was.
       - Rule 6, in repair's docstring: without the kind its records cannot be paired,
-        so they are counted. That is exact today, since T3 made each settle close one
-        intent. A settle with no opening (Code Mode's refused dispatch, a core kind)
-        would hide one.
+        so they are counted. That is exact, since T3 made each settle close one intent
+        and nothing writes a settle with no opening. (T6's `settle_unopened` door was
+        the one exception; the post-T6 cleanup found its only caller was dead and
+        removed both.)
       - A settled verb resumes normally.
     - **The ten function-level imports are gone:**
       - `repair._kinds()`'s two;
@@ -694,8 +728,13 @@ Phase 10.
       - `IntentJournal.open_settled(session, kind, data, settle)` writes both halves
         in one batch. The approval `never` path uses it; `_record_asked` and
         `_record_decided` are gone.
-      - `settle_unopened(session, kind, data)` is for Code Mode's refused dispatch,
-        and is refused while the key is open.
+      - `settle_unopened(session, kind, data)` was for Code Mode's refused dispatch.
+        **Removed after T6:** the pipeline writes the start record for every call its
+        gate decides, a refusal included (P7-15), so the branch that called it was
+        dead — a probe raising there reached no test in any suite. With no settle
+        lacking an opening, repair's count for an undeclared kind is exact.
+        `test_a_pre_execute_denial_of_a_sub_call_also_fails_the_run` now pins that a
+        refused dispatch is an opened-and-settled pair.
       - `WRITERS` loses `ph.seams.approval`'s ask pair and `ph.tools.code_mode`
         entirely.
     - **T6b and T6c: 72 sites in 31 modules**, across ph-core, ph-stabilize, ph-rlm
@@ -743,38 +782,211 @@ Phase 10.
       - and, in T6d, the `record` name colliding with locals, which mypy caught and
         which led to the `log_event` rename.
 
-## Next todo list, after this one
+## Second todo list: what the cleanup passes flagged
 
-Two areas the cleanup pass also flagged, to be turned into their own list once the one
-above is done:
+*2026-09-24, after T0–T6. The three areas the first list deferred, audited and turned into
+rows. Same rules: in order, every gate sabotage-checked, the four gates green, nothing
+committed by Claude.*
 
-1. **Public API used only by tests**:
-   - `IntentJournal.outcome` (`.pending` gained a real consumer in T5's `record_wait`);
-   - `settled_record` and `is_declared` in `ph.session.__all__`;
-   - `ToolRunContext.idempotency_key`;
-   - the seams' `pending_approvals` / `pending_questions` now that repair no longer calls
-     them;
-   - anything T6 leaves public that only a fixture reaches.
-
-   For each, keep it (a real consumer is coming), make it private, or delete it.
-2. **Test consolidation**:
-   - ~~one shared AST walker for `test_log_writers.py` and `test_intent_kinds.py`~~ —
-     done in the post-T6 cleanup (`workspace_layout.parsed_modules`, `import_base`);
-   - drop the per-package `*_in_the_vocabulary` tests (phern, ph-stabilize, ph-rlm) that the
-     cross-package gate now covers;
-   - derive the test intent kinds from the real ones.
-
-   (`test_the_fold_agrees_with_the_folds_it_replaces`, also on this list, was retired in
-   T3.)
-3. **Function-level imports across the codebase.**
-   - T4 removes the ten on the kinds and resume path.
-   - That leaves about 54 elsewhere: 36 in `ph` at the time of counting, then `ph_app`,
-     `ph_text_index`, `ph_code_graph`, `ph_rlm` and `ph_runtime`.
-   - Each one either:
-     - moves to module top;
-     - becomes a leaf split, where it was dodging a cycle;
-     - or stays as a named, justified exception, such as an optional heavy dependency a
-       process may not have installed.
-   - An AST gate holds the list, so a new one is a decision, not a habit. The same principle
-     as T4: a mistake the checker or a test can catch should not wait for a process that
-     happens to import things in a different order.
+- [x] **N1 — Public API only tests use.** Audited over Phase 10's and T0–T6's surface: for
+  each name, keep it (name the consumer), make it private, or delete it.
+  - **Delete**, each with no shipped caller, the tests reaching the same state another
+    way:
+    - `IntentJournal.outcome`, and `settled_record`, whose only shipped caller it was.
+      Tests read `fold_intents(...)[key].settled`.
+    - `pending_approvals` / `PendingApproval` and `pending_questions` / `PendingQuestion`.
+      Repair stopped calling them in P10-09, and nothing else ever did. Tests ask
+      `open_intents(events, APPROVAL_ASK)`, the one fold.
+    - `credential_waits`, which T5's cleanup left with no shipped caller: the supervisor
+      reads `waiting_for`, off the journal's index. Tests do the same.
+  - **Make private:**
+    - `IntentJournal.is_open`: only the journal calls it.
+    - `record_wait`: only `hold_for_credential` calls it. Its tests move onto
+      `hold_for_credential`, driving the fake route's credential name, which exercises
+      the real path.
+  - **Stop re-exporting** `is_declared` from `ph.session`. The journal keeps it; tests ask
+    `kind in declared_intents()`.
+  - **Keep:**
+    - `ToolRunContext.idempotency_key`: the tool author's half of P10-12, the key a tool
+      hands a far side (`Idempotency-Key`). It is documented contract on the object every
+      tool body receives.
+    - `missing_credential`: the credential seam's own question, "can this route run here,
+      now", beside `has`.
+    - `LogWriteError` and `UndeclaredIntentError`: the exceptions public doors raise.
+    - `EFFECT_MAY_HAVE_HAPPENED`: a sentence tests quote rather than restate.
+  - Stale docstrings that name a deleted fold or its keying go with it
+    (`daemon/frontend.py`'s "keyed by the same string `pending_approvals` uses").
+  - *Gate:* mypy and the suite, since a caller left behind fails to type-check. Nothing
+    to sabotage for a deletion; each private rename is checked by an import from outside
+    failing mypy.
+  - *Landed*, as listed. Deleted: `IntentJournal.outcome`, `settled_record`, both
+    `pending_*` folds with their dataclasses, and `credential_waits`. Private:
+    `IntentJournal._is_open`, `_record_wait`. `is_declared` is no longer in
+    `ph.session.__all__`.
+    - Tests now read `open_intents(events, APPROVAL_ASK)` and `fold_intents(...)[key]`.
+      Thin `_asked` / `_questioned` helpers in `test_seams.py` and `test_repair.py` wrap
+      the one fold.
+    - The hold tests go through `hold_for_credential`, with the fake route's name and the
+      environment driving each case.
+    - The docstrings that promised "re-asking on resume" (the approval seam, the ask desk,
+      the question seam, the vocabulary) now say what happens: repair settles the ask.
+    - Found on the way, and not fixed here: the daemon's `AskDesk` names an ask on the
+      wire by call id or tool name, so two concurrent `refine` asks share a desk entry.
+      That is T3's collision, in memory.
+      - *Fixed after N3.* Each root's desk names its own asks, `ask-<n>` from its own
+        count (`AskDesk.asked`), and coordinates with no other root. The call id and
+        the question's `askId` still travel inside the frame.
+        - The name is unique within its root only. A front end attached to two roots
+          files an ask by the frame's `sessionId` and `askId` together:
+          `ph_app.payloads.AskKey`, which both frames that name an ask hand over as
+          `key`, and which `ModalHost` now takes.
+        - A root started again counts from 1 again. That is safe because
+          `passivatable` never releases a root with a front end attached, and the TUI
+          takes its own modals down when it loses the daemon.
+        - What the shared entry broke:
+          - the first ask answered removed the other's entry, so the root read as idle
+            while still parked on a person, and a front end attaching then was not
+            posed the open ask;
+          - the TUI files modals by this name, so `ask.settled` for one withdrew the
+            other's modal, and that modal's cancel value went back as the other ask's
+            answer.
+        - `test_daemon_asks.py::test_the_wire_ask_id_is_the_one_the_log_wrote` argued
+          for the old naming by a re-pose on resume that repair replaced, and is
+          retired. `test_two_asks_under_one_name_are_two_asks_on_the_wire` replaces it:
+          two `refine` approvals, and two questions under one `askId`.
+        - Sabotaged by restoring each old name (`call_id or tool_name`, the question's
+          own `ask_id`): each fails its own case, on the root no longer reading as
+          waiting.
+        - Found on the way, in the TUI: `withdraw_ask` took down the wrong modal when
+          two were stacked. Textual's `dismiss` gives this screen's waiter its result
+          but pops whichever screen is on top, so withdrawing the lower one popped the
+          upper one, and that ask never heard back. `PhModal.withdraw` now dismisses a
+          modal on top, and marks one under another to dismiss itself when it reaches
+          the top.
+          - Gate: `test_tui_pilot.py::test_an_ask_is_withdrawn_by_its_root_and_its_name`
+            stacks two roots' `ask-1`s and withdraws the lower one.
+          - Sabotaged by filing modals by `ask_id` alone, and by withdrawing with a
+            plain `dismiss`: both fail it.
+- [x] **N2 — Test consolidation.**
+  - **The per-package "is in the vocabulary" tests** (ph-rlm's `test_vocabulary.py`,
+    phern's `test_every_type_this_package_writes_is_in_the_vocabulary`, and five in
+    ph-stabilize) each assert two things.
+    - That a type is *known*, which `test_log_writers.py`'s cross-package walk now covers
+      for every write in every package. Those halves go, along with the files that held
+      nothing else.
+    - That a type is *ignorable* or *required*: a per-type decision nothing else pins,
+      argued in each test's docstring. Those stay, renamed for what they hold.
+    - `known_event_types`' module docstring still says the walker "sees only ph-core". It
+      is corrected.
+  - **Derive the test intent kinds from the real ones.** `test_intents.py`'s `APPROVAL`,
+    `QUESTION`, `DURABLE` and `BUFFERED` claim `approval/*` and `question/*` under the
+    call-id-or-tool-name key that T3 removed, so they test a keying rule nothing ships.
+    - They become `dataclasses.replace` of real field-keyed kinds (`TOOL_EFFECT`,
+      `TOOL_DISPATCH`) with only the property under test changed (barrier, orphan). So
+      their keys, closers and payload shapes are the shipped ones.
+    - `test_repair.py`'s `COMMAND` (a made-up `command/run` pair) becomes the real
+      `SHELL_COMMAND`, which is the between-turns kind it stands in for.
+  - *Gate:* sabotage the cross-package walk's known-type check, and confirm the deleted
+    per-package halves are not needed to catch a package writing an unknown type.
+  - *Landed.*
+    - **The vocabulary tests.** ph-rlm's `test_vocabulary.py` and phern's
+      known-types-only test are gone.
+      - ph-stabilize's five keep their ignorability pins, each renamed for what it holds
+        (`..._is_required_not_ignorable`, `..._are_ignorable`), with the reason in the
+        docstring.
+      - `known_event_types`' module docstring now says the walk covers every package.
+      - Sabotaged by giving a ph-stabilize write a misspelled type: the cross-package
+        walk failed on its own (`test_every_write_in_every_package_names_a_known_type`,
+        and the writers table).
+    - **The test kinds.**
+      - `test_intents.py`'s fold tests run on the shipped `TOOL_EFFECT` and
+        `TOOL_DISPATCH` records.
+      - Its refusal tests use `replace(TOOL_EFFECT, …)` with the one field under test
+        changed.
+      - Its journal kinds are `DURABLE = replace(TOOL_EFFECT, barrier="durable")` and
+        `BUFFERED = replace(TOOL_DISPATCH, barrier="buffered")`.
+      - The keyless-record test moved to `SHELL_COMMAND`, whose settle key reads `None`
+        without a `commandSeq`. The effect and dispatch keys read `""` instead, which
+        the journal refuses at the write.
+      - `test_repair.py`'s `command/run` pair became `SHELL_COMMAND`, with its variants
+        (`owner-settles`, a closer that settles the wrong key) declared into their own
+        isolated table.
+      - Sabotaged by changing the shipped effect kind's settle key: five of these tests
+        failed, where the made-up kinds could not have noticed.
+- [x] **N3 — Function-level imports across the codebase.** 55 in shipped code today:
+  26 in `ph`, 8 in `ph_app`, 8 in `ph_text_index`, 6 in `ph_code_graph`, 4 in
+  `ph_runtime` and 3 in `ph_rlm`. Each is one of three things:
+  - **Moves to module top.** Standard library and in-package imports with no stated
+    reason, checked for cycles by a fresh-interpreter import of every module.
+  - **A leaf split**, where it was dodging a cycle.
+  - **A named exception, with its reason:**
+    - an optional or heavy dependency a process may not have installed (tree-sitter,
+      turso, croniter, opentelemetry, tiktoken, numpy, sentence-transformers, turbovec,
+      dill);
+    - a platform-only module (`pwd`, `resource`);
+    - the CLI's deliberate late loads, which `test_app_layering.py` already argues (the
+      TUI, the web server, the daemon);
+    - `ph.testing`'s `pytest`.
+  - *Gate:*
+    - a new AST test holds the exception table, keyed by module, enclosing function and
+      imported module, each with its reason;
+    - a function-level import not in the table fails, and so does a table entry the code
+      no longer has;
+    - a fresh-interpreter import of every shipped module, in two orders, proves the moves
+      opened no cycle;
+    - sabotaged by adding a function-level import, and by moving an exception's import to
+      the top where a cycle or an optional dependency makes it wrong.
+  - *Landed.*
+    - **Moved to the top: 24.** None was dodging a cycle, so no leaf split was needed.
+      - Standard library and declared dependencies:
+        - `os` (`ph_code_graph._extract`);
+        - `importlib.util` (the `ph_code_graph` and `ph_text_index` rows,
+          `ph_rlm.kernel.venv`), `importlib.metadata`, and `importlib`
+          (`ph_runtime.runner`);
+        - `time` (`ph_runtime.limits`);
+        - `subprocess` (`ph.seams.subprocess`, as `_sp`);
+        - `anyio` (`changes`, the builders);
+        - pydantic's `ValidationError` (`json_schema`).
+      - In-package:
+        - `ph.seams.changes`' `git` and `jj`;
+        - `code_runtime_stub`'s `CodeRunFailure`;
+        - `skills`' `json_schema` import, and `json_schema`'s `validation_errors`;
+        - `ph.testing`'s builders, backends and `FAKE_OPTIONS`;
+        - `ph_rlm.harness.service`'s `CodeRunRequest`.
+      - `croniter` moved at first and was moved back by the /simplify pass after it.
+        It is a declared dependency, but about 20ms to import, and `ph_app.cli` loads
+        `ph.seams.schedule`, so every `phern` start paid for it. `schedule`'s own
+        docstrings said so; nothing enforced it, and `test_app_layering.py` now lists it.
+    - **Stayed inside a function: 30**, each with its reason in a comment above it and
+      `# noqa: PLC0415` on it:
+      - not declared, and checked for before use: tree-sitter ×4, opentelemetry ×5,
+        tiktoken, sentence-transformers;
+      - heavy, and needed only where an index is built or searched: numpy ×4, turbovec;
+      - loaded on every `phern` start otherwise: `croniter` ×2;
+      - turso's native driver, `pwd`, and the CLI's eight late loads;
+      - `ph.testing`'s `pytest`, and `ph_runtime.snapshot`'s `dill`.
+      - `resource` was already a guarded module-top import.
+    - **The gate is ruff's `PLC0415`**, selected in `pyproject.toml` for shipped code
+      (a negated per-file ignore leaves the suites out). The first version was a
+      hand-built AST walk with an exceptions table keyed by module, function and
+      import. The /simplify pass replaced it: the rule finds exactly the same
+      imports, the reason sits beside each one, and `RUF100` flags a `noqa` that
+      stops suppressing anything, so both directions still hold.
+      `test_intent_kinds.py::test_the_resume_path_holds_no_function_level_import` is
+      retired with it; the rule covers the resume path along with everything else.
+    - **The cycle check changed from the plan.**
+      - Two orders were too weak. Importing every module first to last and then last to
+        first both passed a real cycle: with `changes` imported at the top of
+        `workspace_jj`, another module had always loaded `changes` first.
+      - `tests/test_import_cycles.py::test_every_module_imports_first` imports each
+        shipped module as the first one a process reaches, dropping every workspace
+        module from `sys.modules` before each. It runs in eight parallel processes over
+        `workspace_layout.parsed_modules()`'s names, in about 6s (25s serially).
+    - **Sabotaged:**
+      - an `import json` inside a function in `ph.seams.fs` fails `ruff check`
+        (`PLC0415`);
+      - `tiktoken` moved to the top of `token_meter` with its `noqa` left on fails it
+        too (`RUF100`, unused `PLC0415`);
+      - `croniter` at the top of `schedule` fails `test_app_layering.py`;
+      - the `workspace_jj` cycle above fails the probe, naming `ph.seams.workspace_jj`
+        and `ph.testing.jj`.

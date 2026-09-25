@@ -158,7 +158,6 @@ from ph.seams.schedule import Schedule
 from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
 from ph.testing import ReapedHost, log_event, stored_log
-from ph_app import kinds as app_kinds
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
@@ -1364,34 +1363,6 @@ async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
         log_event(root.session, "subagent/admitted", {"runId": "c"})
         log_event(root.session, "subagent/status", {"runId": "c", "status": "who-knows"})
         assert await supervisor.sweep(after=0) == [], "an unknown status released the parent"
-
-
-def test_every_type_this_package_writes_is_in_the_vocabulary() -> None:
-    """The writer's half of the deal `known_event_types` records.
-
-    That module states it: *"a producer in another package … owes the same proof
-    through its own bundle's tests"*. ph-core pays it and ph-rlm pays it; ph-app
-    now appends six types and paid nothing, so a record written here and not
-    declared in ph-core would produce a log this build writes and then refuses to
-    seed — found by whoever resumes the session rather than by whoever added it.
-
-    Against the constants rather than a source scan, because that is how this
-    package appends: ph-rlm's regex over `append("…")` literals would match none
-    of these.
-    """
-    from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
-
-    written = {
-        app_kinds.CLIENT_COMMAND.opened,
-        app_kinds.CLIENT_COMMAND.settled,
-        recovery.RETRY,
-        recovery.FAILED,
-        recovery.RECOVERED,
-        recovery.PASSIVATED,
-        recovery.UNREACHABLE,
-    }
-    undeclared = written - KNOWN_SESSION_EVENT_TYPES
-    assert not undeclared, f"ph-app writes types ph-core would refuse at seed: {undeclared}"
 
 
 # --- P5-06: the scheduler ----------------------------------------------------

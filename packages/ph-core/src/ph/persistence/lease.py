@@ -9,9 +9,11 @@ but unopenable by anything. The lease is what refuses the second writer first.
 else did, so `phern -p --session x` against a log a daemon held — or against a
 log another `phern -p` had just finished — appended anyway, and two one-shot runs
 on one id were enough to lose both. The writer is the store, so the claim is
-the store's: every host opens a session through `open_session`, which asks the
-store, and a host that forgets is a missing call rather than a missing
-mechanism. `ClaimingStore` is optional (`protocol.py`) because a backend with
+the store's: every session is opened through `ph.persistence.open_session`, which
+asks the store — a daemon's roots, the one-shot modes, and every sub-agent's log
+(which, opened below `ph_app` where that door used to live, were claimed by
+nothing until L2) — and a host that forgets is a missing call rather than a
+missing mechanism. `ClaimingStore` is optional (`protocol.py`) because a backend with
 no per-session file has nothing to lock and must say so rather than lock a
 path that protects nothing.
 

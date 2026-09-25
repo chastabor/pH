@@ -11,8 +11,8 @@ resume that goes wrong:
 * a leaf imports nothing a cycle could run through;
 * each leaf is imported, at module top, by the package that holds it — so any
   process that loaded any part of a package has its kinds;
-* no kinds module is imported anywhere except at module top, and the resume path
-  holds no function-level import at all;
+* no kinds module is imported anywhere except at module top (that no shipped
+  module imports anything inside a function is ruff's `PLC0415`, N3);
 * a resume whose log holds an open intent of a kind this process never declared is
   refused by name.
 
@@ -40,9 +40,6 @@ LEAF_MAY_IMPORT = frozenset(
 )
 """What a leaf may import beyond the standard library: nothing above `ph.session`'s
 declarations, so importing a leaf can never cycle back through a seam."""
-
-RESUME_PATH = ("ph.persistence.repair", "ph.persistence.jsonl")
-"""The modules a resume runs through, held to no function-level import at all (T4)."""
 
 
 SHIPPED = parsed_modules()
@@ -171,29 +168,6 @@ def test_no_kinds_module_is_imported_below_module_top_anywhere() -> None:
             if not top and any(n in LEAVES or n.startswith(tuple(LEAVES)) for n in names)
         ]
     assert not found, found
-
-
-def test_the_resume_path_holds_no_function_level_import() -> None:
-    """The ten T4 removed: repair's two, `_reconciled`'s four, `resume_session`'s two
-    and `isolated_intent_kinds`' two. A resume imports what it needs when its module
-    loads, so a missing or cyclic one fails every run, not the first resume."""
-    below = [
-        (module, line)
-        for module in RESUME_PATH
-        for _names, top, line in _imports(module, SHIPPED[module])
-        if not top
-    ]
-    (isolated,) = [
-        node
-        for node in ast.walk(SHIPPED["ph.testing.builders"].tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "isolated_intent_kinds"
-    ]
-    below += [
-        ("ph.testing.builders.isolated_intent_kinds", node.lineno)
-        for node in ast.walk(isolated)
-        if isinstance(node, ast.Import | ast.ImportFrom)
-    ]
-    assert not below, below
 
 
 # ----------------------------------------------------------- the refusal --

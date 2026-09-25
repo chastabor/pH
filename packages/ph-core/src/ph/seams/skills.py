@@ -54,6 +54,7 @@ from ..tools.definition import (
     define_tool,
     text_content,
 )
+from ..tools.json_schema import validate_json_schema_value
 from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
@@ -780,8 +781,6 @@ def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[
     name — an author writing `{{parameters.tag}}` never has to think about
     whether the caller passed one.
     """
-    from ..tools.json_schema import validate_json_schema_value
-
     declared = dict(skill.parameters.get("properties") or {})
     values = {
         name: spec["default"]

@@ -80,7 +80,8 @@ class _BoundedSink:
 
 def _dill() -> Any | None:  # noqa: ANN401
     try:
-        import dill  # type: ignore[import-untyped]
+        # Optional in the runtime venv: without it each value is reported unpicklable.
+        import dill  # type: ignore[import-untyped]  # noqa: PLC0415
     except ImportError:  # pragma: no cover — a venv without dill
         return None
     return dill

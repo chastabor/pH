@@ -203,7 +203,8 @@ def default(
         # because the logs worth auditing are the ones nobody can reopen (P3-25).
         if session_id is None:
             fail("[red]--mode trajectory needs --session <id|path>[/red]", code=2)
-        from .tui.trajectory_app import run_trajectory
+        # A late load: a command pays only for what it runs (`test_app_layering.py`).
+        from .tui.trajectory_app import run_trajectory  # noqa: PLC0415
 
         try:
             code = anyio.run(partial(run_trajectory, session_id))
@@ -228,7 +229,7 @@ def default(
         #
         # Imported here because the TUI pulls in Textual, and `phern -p` in a
         # script should not pay for a terminal UI it will never draw.
-        from .tui.app import run_tui
+        from .tui.app import run_tui  # noqa: PLC0415
 
         code = anyio.run(
             partial(
@@ -270,7 +271,7 @@ def default(
         # must not require aiohttp, and a person who asked for `--mode web`
         # without it gets the install line rather than a traceback.
         try:
-            from .web.serve import WebServer, run_web
+            from .web.serve import WebServer, run_web  # noqa: PLC0415
         except ImportError as error:
             fail(
                 "[red]--mode web needs the web extra:[/red] pip install 'phern\\[web]'",
@@ -325,7 +326,7 @@ def default(
     )
     # Here rather than at the top: `phern --help` must not pay for the persistence
     # layer, and `route` is about to import it anyway.
-    from ph.persistence import SessionBusy
+    from ph.persistence import SessionBusy  # noqa: PLC0415
 
     try:
         outcome = anyio.run(route)
@@ -442,7 +443,7 @@ def doctor(
     # Imported here rather than at module scope: `ph_app.daemon.supervisor`
     # pulls in the agent, the persistence layer and `filelock`, and `phern --print`
     # has no daemon in it. `daemon()` below reaches for `serve` the same way.
-    from .daemon.supervisor import NON_GUARANTEES
+    from .daemon.supervisor import NON_GUARANTEES  # noqa: PLC0415
 
     before_mount = [
         ("daemon socket lifetime", lifetime(roots=roots).describe()),
@@ -522,7 +523,8 @@ def _spawned_keep_alive(value: str | None, *, keep: bool) -> str:
             )
         return "0"
     if value is None:
-        from .tui.config import load_tui_settings
+        # A late load: a command pays only for what it runs (`test_app_layering.py`).
+        from .tui.config import load_tui_settings  # noqa: PLC0415
 
         value = load_tui_settings(resolve_roots().home).daemon_keep_alive
     return f"{keep_alive_seconds(value):g}"
@@ -632,7 +634,8 @@ def _children_cap(value: int | None) -> list[str]:
         return []
     if value < 1:
         raise typer.BadParameter(f"wants a positive number of children, not {value}")
-    from ph.seams.jobs import CHILDREN_KIND
+    # A late load: a command pays only for what it runs (`test_app_layering.py`).
+    from ph.seams.jobs import CHILDREN_KIND  # noqa: PLC0415
 
     return [f"{{id: jobs, config: {{concurrency: {{{CHILDREN_KIND}: {value}}}}}}}"]
 
@@ -680,7 +683,8 @@ def daemon(
     it. A parent's own fair share is `rlm-subagent-provider`'s `maxConcurrent`,
     and both apply. Neither refuses a delegation — the overflow queues.
     """
-    from .daemon.server import DaemonUnavailable, serve
+    # A late load: a command pays only for what it runs (`test_app_layering.py`).
+    from .daemon.server import DaemonUnavailable, serve  # noqa: PLC0415
 
     # Parsed before anything is composed or bound, so a mistyped duration is a
     # usage error rather than a daemon that got as far as printing a socket path.

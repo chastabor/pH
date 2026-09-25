@@ -32,6 +32,7 @@ than a degradation.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,9 @@ from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.types import text_of
-from ph.persistence import resume_session
+from ph.paths import resolve_roots
+from ph.persistence import SessionBusy, open_session, resume_session
+from ph.persistence.lease import LEASES
 from ph.seams.subagents import (
     STATUS,
     UNRECOVERABLE_DETAIL,
@@ -976,10 +979,9 @@ async def _persisted(ctx: Context, session: Session) -> None:
     """Put on disk what a restart will read, with the harness holding still.
 
     A flush and nothing else. The first harness is parked at the model for the
-    whole of these tests, so it appends nothing more to this log until the gate
-    opens at teardown — which is what lets a second one open the same file
-    without the two writers P5-03 refuses. Draining here instead would wait on
-    the very child that is meant to be caught mid-flight.
+    whole of these tests; draining here instead would wait on the very child that
+    is meant to be caught mid-flight. `_restart` reads a snapshot of what this
+    wrote, so nothing the first harness does afterwards reaches the second.
     """
     await ctx.require(SESSIONS).flush(session)
 
@@ -997,24 +999,56 @@ number would be asserting against a value it does not control — and coupling
 async def _restart(
     mount: MountProfile, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
 ) -> Any:  # noqa: ANN401
-    """A second harness over the same `$PH_HOME`, resuming one root from its log.
+    """A second harness resuming one root from its log, as a restarted process would.
 
     What a daemon restart *is* from the seam's side: a fresh mount, nothing in
     memory, and a session that has to come off disk. `resume_children` is the
     call `Supervisor` makes at the same point, against the same agent.
+
+    **Over a snapshot of the logs, not the live files.** The first harness is still
+    alive, parked, and holding its children's leases (I-5, L2) — a second harness
+    opening the same files would rightly be refused them. A process that died holds
+    nothing and leaves only what it wrote, and that is what the snapshot is: the
+    sessions directory as `_persisted` left it, under a root of its own, so what the
+    first harness writes as it unwinds at teardown never reaches it either.
 
     `skills` is what the *deployment* still provides. It is a parameter because
     a readmit re-derives the child's ceiling against what the parent holds now,
     not against what it held then — so a skill this deployment no longer mounts
     is a child refused rather than one quietly readmitted without it.
     """
-    ctx = await mount(dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}))
+    snapshot = resolve_roots().sessions_dir().parent / "sessions-after-restart"
+    shutil.copytree(resolve_roots().sessions_dir(), snapshot, ignore=shutil.ignore_patterns(LEASES))
+    ctx = await mount(
+        dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}),
+        {"id": "session-persistence", "config": {"root": str(snapshot)}},
+    )
     for name in skills:
         ctx.require(SKILLS).register(skill(name))
     session = await resume_session(ctx, session_id)
     parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=RETRIES)
     return ctx, session, parent
+
+
+async def test_a_live_childs_log_refuses_a_second_opener(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """L2. A child's log is a session of its own, openable by its id — `phern -p
+    --session <child>`, a daemon's `session/new` naming it — so while this harness
+    drives the child, a second opener is refused as it would be for a root (I-5),
+    rather than made a second writer on one log.
+
+    Sabotage: open the child with `resume_session` or `sessions.create` directly in
+    `_child_session`, and the second open is granted.
+    """
+    ctx, _session, parent = await delegating()
+    child = await _spawn(ctx, parent, "first")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    elsewhere = await mount()
+
+    with pytest.raises(SessionBusy):
+        await open_session(elsewhere, child.session_id)
 
 
 async def test_a_queued_child_is_re_driven_after_a_restart(

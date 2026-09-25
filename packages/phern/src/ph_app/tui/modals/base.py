@@ -41,9 +41,27 @@ class PhModal(ModalScreen[ResultT]):
     ]
 
     cancel_value: Any = None
+    _withdrawn = False
 
     def action_cancel(self) -> None:
         self.dismiss(self.cancel_value)
+
+    def withdraw(self) -> None:
+        """Take this modal down with `cancel_value`, wherever it is in the stack.
+
+        `dismiss` hands its result to this screen's waiter but pops whichever
+        screen is on top. With two asks up at once, withdrawing the lower one took
+        the upper one down instead, and the upper ask's waiter never heard back. A
+        modal that is not on top is taken down when it gets there.
+        """
+        if self.is_active:
+            self.dismiss(self.cancel_value)
+        else:
+            self._withdrawn = True
+
+    def on_screen_resume(self) -> None:
+        if self._withdrawn:
+            self.dismiss(self.cancel_value)
 
 
 @dataclass(frozen=True, slots=True)

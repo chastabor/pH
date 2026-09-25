@@ -5,8 +5,8 @@ caller. Two things follow from giving it one, and they are what this file holds.
 
 **A question that reached a person is durable.** Both halves are appended, the
 ask *before* the waterfall runs, so a crash while somebody was deciding leaves
-the question in the log rather than losing it — the shape `pending_approvals`
-already has, and `pending_questions` is the fold that reads it.
+the question in the log rather than losing it — `QUESTION_ASK` open, the shape an
+approval has, read by the one intent fold.
 
 **A question that reached nobody never happened.** The seam's own failure mode is
 "no answer" rather than a denial, so an unattended ask resolves instantly; if it
@@ -27,8 +27,9 @@ from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, TOOLS, USER_QUESTIONS
 from ph.llm.types import text_of
-from ph.seams.user_questions import AskResolution, UserQuestion, pending_questions
-from ph.session import Session
+from ph.seams.user_questions import AskResolution, UserQuestion
+from ph.session import Session, open_intents
+from ph.session.kinds import QUESTION_ASK
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph.tools.builtin.ask_user import DECLINED, FAILED, UNATTENDED, _rendered
 
@@ -215,7 +216,7 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
     assert text_of(result.content) == DECLINED
     answered = session.latest("question/answered")
     assert answered is not None and answered.data.get("declined") is True
-    assert pending_questions(session.events) == []
+    assert open_intents(session.events, QUESTION_ASK) == ()
 
 
 # ------------------------------------------------------------- the pending --
@@ -250,11 +251,14 @@ async def test_a_question_canceled_mid_answer_stays_pending(mount: MountProfile)
         await posed.wait()
         tasks.cancel_scope.cancel()
 
-    pending = pending_questions(session.events)
+    pending = [
+        UserQuestion.model_validate(one.opened.data)
+        for one in open_intents(session.events, QUESTION_ASK)
+    ]
 
-    assert [one.question.question for one in pending] == ["which port?"]
-    assert pending[0].question.options == ["8080"]
-    assert pending[0].question.header == "Port"
+    assert [one.question for one in pending] == ["which port?"]
+    assert pending[0].options == ["8080"]
+    assert pending[0].header == "Port"
     assert session.latest("question/answered") is None, "nobody answered, so nothing says they did"
 
 
@@ -324,7 +328,7 @@ async def test_a_canceled_ask_is_not_reported_as_somebody_declining(mount: Mount
     assert seen == [], "the question was put to an answerer anyway"
     # And nothing was written: an ask that never reached anybody never happened.
     assert session.latest("question/asked") is None
-    assert pending_questions(session.events) == []
+    assert open_intents(session.events, QUESTION_ASK) == ()
 
 
 def test_every_way_a_question_can_end_reads_as_itself() -> None:
@@ -381,4 +385,4 @@ async def test_an_answerer_that_raises_is_not_reported_as_nobody_there(
     # never shown the question.
     assert answered.data.get("resolution") == "failed"
     assert answered.data.get("declined") is True, "older readers still fold on this"
-    assert pending_questions(session.events) == [], "the pair still closes"
+    assert open_intents(session.events, QUESTION_ASK) == (), "the pair still closes"

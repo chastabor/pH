@@ -363,7 +363,7 @@ class DaemonSession:
             # before publishing this, so the modal here can only produce an
             # answer that would be discarded — and a person answering it would be
             # told nothing at all.
-            self.host.withdraw_ask(notice.ask_id)
+            self.host.withdraw_ask(notice.key)
         elif isinstance(notice, SessionStagedNotice):
             self._staged = Tray()
             for ref in notice.staged:
@@ -846,7 +846,7 @@ def _asking_approval(host: ModalHost) -> Callable[[ApprovalAsk], Awaitable[Appro
     """
 
     async def ask(asked: ApprovalAsk) -> ApprovalAskReply:
-        outcome, reason = await host.ask_approval(asked.request, ask_id=asked.ask_id)
+        outcome, reason = await host.ask_approval(asked.request, ask=asked.key)
         # Through the seam's own encoder: `Edited` and `Responded` are frozen
         # dataclasses, and putting one in a frame unencoded is a `TypeError`
         # inside the task group that answers the ask — which the desk reads as
@@ -860,6 +860,7 @@ def _asking_question(host: ModalHost) -> Callable[[QuestionAsk], Awaitable[Quest
     """`question/ask` → the ask-user modal, in a worker."""
 
     async def ask(asked: QuestionAsk) -> QuestionAskReply:
-        return QuestionAskReply(answer=await host.ask_question(asked.question, ask_id=asked.ask_id))
+        answer = await host.ask_question(asked.question, ask=asked.key)
+        return QuestionAskReply(answer=answer)
 
     return ask
