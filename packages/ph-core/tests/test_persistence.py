@@ -28,6 +28,7 @@ every pass.
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ import pytest
 
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ph.locks import LockBusy, acquire_file_lock
-from ph.persistence.jsonl import JsonlSessionStore, read_session
+from ph.persistence.jsonl import JsonlSessionStore, append_records, read_records, read_session
 from ph.persistence.lease import lease_path
 from ph.session import (
     SESSION_FORMAT_VERSION,
@@ -520,6 +521,44 @@ async def test_a_write_that_fails_part_way_takes_its_bytes_back(
     await store.flush(session)
     _header, events = read_session(path)
     assert [event.seq for event in events] == [0, 1, 2]
+
+
+def test_a_record_log_outside_the_store_is_synced_and_takes_a_failed_write_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L4. `append_records` is `read_records`' durable writer, for a log outside the
+    session store.
+
+    The Continual Harness's global log went through a plain append: nothing synced,
+    so a record every future session reads could be gone after a power loss, and a
+    write that failed part-way left half a line for the next one to land behind.
+
+    Sabotage: append through `write_text_under` instead, and nothing is synced and
+    the failed write's half line stays in the file.
+    """
+    from ph.persistence import jsonl
+
+    path = tmp_path / "harness" / "events.jsonl"
+    real_fsync = os.fsync
+    synced: list[int] = []
+
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    append_records(path, [{"n": 1}])
+    assert synced, "the record was not synced"
+
+    before = path.stat().st_size
+    with monkeypatch.context() as patch:
+        patch.setattr(jsonl, "_write_all", _half_then_full_disk)
+        with pytest.raises(OSError, match="No space left"):
+            append_records(path, [{"n": 2}])
+    assert path.stat().st_size == before, "the failed write left its partial bytes behind"
+
+    append_records(path, [{"n": 3}])
+    assert list(read_records(path)) == [{"n": 1}, {"n": 3}]
 
 
 async def test_a_retry_behind_a_write_nobody_took_back_still_appends_cleanly(

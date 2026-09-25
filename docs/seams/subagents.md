@@ -197,17 +197,33 @@ as one instruction given twice.
 
 **The ladder's whole state is folded, not carried.** The parent's log already
 records one `subagent/status running` per drive and one
-`subagent/usage-attributed` per model answer, so the roster derives two counters
+`subagent/usage-attributed` per model answer, so the roster derives its counters
 from facts that are already there rather than maintaining a number that could
 disagree with them:
 
 | on the row | what it counts | cleared by |
 |---|---|---|
 | `starts` | every time this child has been driven | nothing |
-| `attempts` | restarts that achieved nothing since | a model answer |
+| `resumes` | the drives that were restarts (`cause: resumed`) | nothing |
+| `resumesAtLastAnswer` | `resumes` as of the child's latest model answer | — |
 
-After `retry_limit` attempts the child is failed and the reason says which bound
-it hit. There are no delays, unlike the root's ladder, because this one only ever
+`restarts_since_progress(row)`, the difference of the last two, is the ladder's
+count: restarts that achieved nothing since the child last answered. After
+`retry_limit` of them the child is failed and the reason says which bound it hit.
+
+**Reconciled on resume, before the ladder reads it** (L5). The usage record goes into
+the parent's log in memory, while the child's own log reaches disk before each
+request, so a crash can drop answers the child's log still holds. Uncounted, the
+ladder would read those restarts as fruitless and a goal's token budget would miss
+what they spent. So `resume_children` first asks each interrupted child's provider
+(`AttributingProvider.reconcile_answers`) to append what the child's stored log has
+past `lastAnswerSeq`, marked `origin: "reconciled"`, and only then decides.
+
+**Every level** (L5b). A child's own children are in its log, so each readmitted child
+is swept the same way, with the same `retry_limit`, before it takes its first step:
+`SubagentRun.ready` is the gate its drive waits on, opened once the child is bounded
+and its children swept. `readmit_waiting` descends the same way when a credential
+arrives. There are no delays, unlike the root's ladder, because this one only ever
 runs while a harness is starting — which is already the wait.
 
 **The bound is the host's, and `resume_children` takes it with no default.** This
@@ -217,7 +233,7 @@ choosing one (P6-32's rule). The daemon states it beside the root's own ladder,
 in `ph_app.daemon.recovery`, which is where somebody tuning restart behavior is
 already looking.
 
-**Progress clears `attempts`**, so the ladder bounds *consecutive* interruptions
+**Progress clears the count**, so the ladder bounds *consecutive* interruptions
 rather than a lifetime's: a child stopped once, working for an hour, then stopped
 again met two separate incidents, and reading that as one child running out of
 attempts fails work that was going fine. Progress is a **model answer** and never
@@ -226,7 +242,7 @@ task somehow never reached the inbox ends a turn having done nothing, and counti
 turns would let exactly the broken case clear the count that bounds it.
 
 **The two counters are separate because they part company.** Which attempt a
-restart is comes from `starts`, never from `attempts`: progress clears the ladder,
+restart is comes from `starts`, never from the ladder's count: progress clears it,
 so a child that got somewhere and was stopped again would otherwise be readmitted
 as though it had never run, its restart go unrecorded as one, and the ladder never
 count it again.

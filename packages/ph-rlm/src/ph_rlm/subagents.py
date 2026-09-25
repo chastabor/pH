@@ -20,12 +20,13 @@ record of the child it describes.
 agent scope alive for the host's lifetime — and that scope owns the child's kernel
 subprocess, so every delegation leaked a CPython.
 
-**Usage is recorded upward, for readers.** Each child `assistant/message` appends
-`subagent/usage-attributed` to the *parent's* log. It is an **additive record, not
-an input to any measurement**: `TokenMeter.last_usage` folds the log it is *given*,
-and a child's messages are in the child's log, so the parent's context measurement
-never included them and there is nothing to subtract. Nothing reads this but the
-TUI panel.
+**Usage is recorded upward.** Each child `assistant/message` appends
+`subagent/usage-attributed` to the *parent's* log. It is **not an input to the
+context meter**: `TokenMeter.last_usage` folds the log it is *given*, and a child's
+messages are in the child's log, so the parent's context measurement never included
+them and there is nothing to subtract. It **is** read by a goal's token budget and by
+the child's retry ladder, which counts each record as an answer
+(`restarts_since_progress`), as well as by the TUI panel.
 
 **The child's workspace is taken here, not by the lifecycle row** (P4-08): its
 base is the parent's root and its access is the parent's decision, and the row
@@ -44,15 +45,15 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, Disposer, plugin
-from ph.json import as_str, thaw_json
-from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
+from ph.json import JsonObject, as_str, thaw_json
+from ph.keys import AGENTS, FS, JOBS, LLM, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
 from ph.persistence import open_session
@@ -142,6 +143,31 @@ def delegation_depth(session: Session) -> int:
     because a resumed child has no live parent to ask and the gate must hold.
     """
     return session.header.delegation_depth or 0
+
+
+def _answer_usage(event: SessionEvent) -> Mapping[str, object] | None:
+    """What an answer spent: a child's `assistant/message` that reports usage, or `None`.
+
+    The one test of "this is an answer", for the live mirror and the resume reconcile
+    both, so the two cannot count different things. `Mapping`, not `dict`: a committed
+    event's data is frozen into `MappingProxyType`, which is a Mapping and is *not* a
+    dict instance, so an `isinstance(..., dict)` guard silently attributed nothing.
+    """
+    if event.type != "assistant/message":
+        return None
+    usage = event.data.get("usage")
+    return usage if isinstance(usage, Mapping) else None
+
+
+def _attribution(
+    run_id: str,
+    seq: int,
+    usage: Mapping[str, object],
+    origin: Literal["spawn_task", "reconciled"] = "spawn_task",
+) -> JsonObject:
+    """One child answer charged to its parent: the `USAGE` payload, spelled once for
+    the live mirror and the resume reconcile."""
+    return {"runId": run_id, "targetSeq": seq, "childUsage": thaw_json(usage), "origin": origin}
 
 
 @dataclass(slots=True)
@@ -578,27 +604,45 @@ class RlmChildProvider:
         parent_session, run_id = child.parent_session, child.run.id
 
         def observer(_source: Session, event: SessionEvent) -> None:
-            if event.type != "assistant/message":
-                return
-            usage = event.data.get("usage")
-            # `Mapping`, not `dict`: a committed event's data is frozen into
-            # `MappingProxyType`, which is a Mapping and is *not* a dict
-            # instance — so an `isinstance(..., dict)` guard here silently
-            # attributed nothing at all.
-            if not isinstance(usage, Mapping):
-                return
-            _LOG.append(
-                parent_session,
-                USAGE,
-                {
-                    "runId": run_id,
-                    "targetSeq": event.seq,
-                    "childUsage": thaw_json(usage),
-                    "origin": "spawn_task",
-                },
-            )
+            usage = _answer_usage(event)
+            if usage is not None:
+                _LOG.append(parent_session, USAGE, _attribution(run_id, event.seq, usage))
 
         return observer
+
+    async def reconcile_answers(
+        self, parent: Session, run_id: str, *, session_id: str, through: int
+    ) -> int:
+        """Attribute the answers the child's stored log holds past `through` (L5).
+
+        `_mirror` attributes each answer as the child makes it, into the parent's log
+        in memory, while the child's own log reaches disk before each request. A
+        crash between the two left the answer on the child's disk and missing from
+        the parent's, so the goal budget did not count it and the ladder read the
+        restart as fruitless. The resume sweep asks this before it decides.
+
+        Read from the store, which is what the child's log holds after a crash, and
+        written in one batch, so the parent's account moves all at once or not at all.
+        Marked `origin: "reconciled"` so a reader can tell them from the live ones.
+        """
+        persistence = self.ctx.get(SESSION_PERSISTENCE)
+        if persistence is None:
+            return 0
+
+        def stored() -> list[SessionEvent]:
+            return persistence.read(session_id)[1] if persistence.exists(session_id) else []
+
+        events = await anyio.to_thread.run_sync(stored)
+        missing = [
+            (event.seq, usage)
+            for event in events
+            if event.seq > through and (usage := _answer_usage(event)) is not None
+        ]
+        if missing:
+            with parent.batch() as batch:
+                for seq, usage in missing:
+                    _LOG.append(batch, USAGE, _attribution(run_id, seq, usage, "reconciled"))
+        return len(missing)
 
     def _status(self, child: _Child, status: SubagentStatus, **extra: Any) -> None:  # noqa: ANN401
         # Only the event, and only from the child's own parent log. A copy on the
@@ -613,6 +657,10 @@ class RlmChildProvider:
         run = child.run
         parent_session = child.parent_session
         try:
+            # Not before the seam says so (`SubagentRun.ready`): bounded, and for a
+            # readmitted child its own children swept, so neither its ceiling nor
+            # the roster its first prompt shows is still being worked out.
+            await run.ready.wait()
             # `running` either way; `cause` says *why* it is running, because the
             # roster folds status last-write-wins and a woken child that is
             # working must not read as not-running.

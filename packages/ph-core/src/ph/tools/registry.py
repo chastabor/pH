@@ -1185,7 +1185,7 @@ class ToolRuntime:
     async def reconciled(
         self, record: SessionEvent, session: Session, *, scope: Boundary
     ) -> tuple[ContentBlock, ...] | NotDone | None:
-        """Ask the tool a `tool/call` record names whether that call happened.
+        """Ask the tool a call record names whether that call happened.
 
         For `resume_session` (P10-13), which has no run: the same answer the pipeline
         gets for a repeat of an unknown effect, looked up in `scope`'s view and bound
@@ -1193,6 +1193,10 @@ class ToolRuntime:
         and its arguments, parsed as the batch parses them — so the caller hands over
         the record it holds and needs nothing of this package but the types (T4).
         `None` is the tool's `Unknown`.
+
+        Either record a call leaves: a `tool/call`, whose arguments are the model's
+        string, or a Code Mode dispatch's `tool/code-dispatch-start` (L6b), whose
+        arguments are the object the program passed.
         """
         name = as_str(record.data.get("name"))
         view = self.view(scope)
@@ -1201,7 +1205,8 @@ class ToolRuntime:
             return None
         bound = boundary_of(scope, self.ctx)
         by = view.by.get(name) or Running(bound, bound)
-        arguments = parse_arguments(as_str(record.data.get("arguments")))
+        raw = record.data.get("arguments")
+        arguments = parse_arguments(raw) if isinstance(raw, str) else thaw_json(raw)
         return await self._answer(definition, by, bound, arguments, record, session)
 
     async def _answer(

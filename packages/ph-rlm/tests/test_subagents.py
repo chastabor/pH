@@ -32,22 +32,22 @@ than a degradation.
 
 from __future__ import annotations
 
-import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from rlm_fixtures import PROVIDER_ROW, MountedRuntime
+from rlm_fixtures import PROVIDER_ROW, MountedRuntime, logs_after_a_crash
 
 from ph.cordis import Context
 from ph.json import as_obj
-from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
+from ph.keys import AGENTS, CREDENTIALS, LLM, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
+from ph.llm.adapter import ResolvedModel
+from ph.llm.fake import FakeAdapter, text_script
 from ph.llm.types import text_of
-from ph.paths import resolve_roots
 from ph.persistence import SessionBusy, open_session, resume_session
-from ph.persistence.lease import LEASES
+from ph.seams.credentials import waiting_for
 from ph.seams.subagents import (
     STATUS,
     UNRECOVERABLE_DETAIL,
@@ -61,12 +61,14 @@ from ph.seams.subagents import (
     restarts_since_progress,
     subagent_roster,
 )
+from ph.seams.token_meter import reported_usage
 from ph.seams.workspace import workspace_survivors
-from ph.session import Session, derive_event_message
+from ph.session import Session, SessionEvent, SurfaceIntent, derive_event_message
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
     StubWorkspaceProvider,
+    assistant_payload,
     log_event,
     not_none,
     skill,
@@ -997,7 +999,12 @@ number would be asserting against a value it does not control — and coupling
 
 
 async def _restart(
-    mount: MountProfile, session_id: str, *, skills: tuple[str, ...] = (), concurrent: int = 1
+    mount: MountProfile,
+    session_id: str,
+    *,
+    skills: tuple[str, ...] = (),
+    concurrent: int = 1,
+    prepare: Callable[[Context], None] | None = None,
 ) -> Any:  # noqa: ANN401
     """A second harness resuming one root from its log, as a restarted process would.
 
@@ -1005,26 +1012,26 @@ async def _restart(
     memory, and a session that has to come off disk. `resume_children` is the
     call `Supervisor` makes at the same point, against the same agent.
 
-    **Over a snapshot of the logs, not the live files.** The first harness is still
-    alive, parked, and holding its children's leases (I-5, L2) — a second harness
-    opening the same files would rightly be refused them. A process that died holds
-    nothing and leaves only what it wrote, and that is what the snapshot is: the
-    sessions directory as `_persisted` left it, under a root of its own, so what the
-    first harness writes as it unwinds at teardown never reaches it either.
+    **Over a snapshot of the logs, not the live files** (`logs_after_a_crash`): the
+    sessions directory as `_persisted` left it, since the first harness is still
+    alive, parked, and holding its children's leases.
 
     `skills` is what the *deployment* still provides. It is a parameter because
     a readmit re-derives the child's ceiling against what the parent holds now,
     not against what it held then — so a skill this deployment no longer mounts
     is a child refused rather than one quietly readmitted without it.
+
+    `prepare` sets up the restarted deployment before anything is resumed, as a
+    daemon's profile would be: a route of its own, say.
     """
-    snapshot = resolve_roots().sessions_dir().parent / "sessions-after-restart"
-    shutil.copytree(resolve_roots().sessions_dir(), snapshot, ignore=shutil.ignore_patterns(LEASES))
     ctx = await mount(
         dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}),
-        {"id": "session-persistence", "config": {"root": str(snapshot)}},
+        {"id": "session-persistence", "config": {"root": str(logs_after_a_crash())}},
     )
     for name in skills:
         ctx.require(SKILLS).register(skill(name))
+    if prepare is not None:
+        prepare(ctx)
     session = await resume_session(ctx, session_id)
     parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=RETRIES)
@@ -1212,6 +1219,190 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
         lambda: restarts_since_progress(subagent_roster(revived)[moved.id]) == 1,
         "the restart to be counted from a cleared ladder",
     )
+
+
+CHILD_ANSWER_USAGE = {"inputTokens": 120, "outputTokens": 30}
+
+
+async def _answered_on_its_own_disk(ctx: Context, run: Any) -> SessionEvent:  # noqa: ANN401
+    """The child answers, and only the child's log is written.
+
+    What a crash between the two writes leaves behind: `_mirror` attributes the answer
+    to the parent at once, in memory, and the child's log reaches disk before its next
+    request, while a parent waiting on it makes no request and writes nothing.
+    """
+    child = not_none(ctx.require(SESSIONS).get(run.session_id))
+    payload = {**assistant_payload("found it", "a1"), "usage": CHILD_ANSWER_USAGE}
+    answer = log_event(child, "assistant/message", payload, SurfaceIntent("append", ()))
+    await ctx.require(SESSIONS).flush(child)
+    return answer
+
+
+def _attributed(session: Session, run_id: str) -> list[SessionEvent]:
+    return [
+        event for event in session.events if event.type == USAGE and event.data["runId"] == run_id
+    ]
+
+
+async def test_an_answer_only_the_childs_log_kept_is_counted_after_a_restart(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """L5. The resume reconciles the parent's account of a child's answers from the
+    child's own log before the ladder reads it.
+
+    Two decisions read that account. The ladder takes an answer as progress, so a
+    child that answered in a run whose attribution a crash dropped read as stuck, and
+    after `RETRIES` restarts was failed as exhausted while it was getting somewhere. A
+    goal's token budget counts the attribution's `childUsage`, so what the child spent
+    went uncounted.
+
+    Sabotage: skip the reconcile in `resume_children` and the child is failed as
+    exhausted, with no attribution in the revived parent's log.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
+    await _persisted(ctx, session)
+    answer = await _answered_on_its_own_disk(ctx, moved)
+    assert _attributed(session, moved.id), "the live mirror attributed it, in memory"
+    assert USAGE not in stored_types(ctx, session.id), "and the parent's disk never heard of it"
+
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    row = subagent_roster(revived)[moved.id]
+    assert row["status"] != "error", f"failed as {row.get('detail')!r} though it had answered"
+    assert moved.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
+    reconciled = _attributed(revived, moved.id)
+    assert [(event.data["targetSeq"], event.data["origin"]) for event in reconciled] == [
+        (answer.seq, "reconciled")
+    ]
+    assert not_none(reported_usage(reconciled[0], "childUsage")).total == 150, (
+        "the budget reads what the child's answer spent"
+    )
+
+
+async def test_a_restart_attributes_nothing_the_parent_already_counted(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """L5's other half: the reconcile adds only answers past the parent's last one.
+
+    When the parent's log reached disk after the answer, it already holds the live
+    attribution, and a second one would count the child's spend twice.
+
+    Sabotage: reconcile from the start of the child's log (`through=-1`) and the
+    revived parent holds the answer twice.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
+    await _answered_on_its_own_disk(ctx, moved)
+    await _persisted(ctx, session)
+
+    _revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    assert [event.data["origin"] for event in _attributed(revived, moved.id)] == ["spawn_task"]
+
+
+async def _grandchild(
+    ctx: Context,
+    parent: Any,  # noqa: ANN401
+    gate: _Gate,
+    **leaf: Any,  # noqa: ANN401
+) -> tuple[Any, Any]:
+    """A child and the child it delegated to, both at the model, both logs written."""
+    middle = await _spawn(ctx, parent, "delegate further")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    child = not_none(ctx.require(AGENTS).get(middle.session_id))
+    grandchild = await _spawn(ctx, child, "do the work", **leaf)
+    await _until(lambda: gate.arrived == 2, "the grandchild to reach the model")
+    await _persisted(ctx, not_none(parent.session))
+    await _persisted(ctx, not_none(child.session))
+    return middle, grandchild
+
+
+async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """L5b. A readmitted child's own children are swept the way the root's are.
+
+    `RLM_MAX_DEPTH` lets a child delegate, and its children are in *its* log. The
+    resume swept the root's roster alone, so a grandchild caught mid-turn kept a
+    `running` row nothing drove, readmitted or failed, and its parent's model was
+    told it was still working.
+
+    **Before the child's first step** (`SubagentRun.ready`): the sweep's record for
+    the grandchild lands ahead of the child's new turn, so the roster the child's
+    first request is built from is the swept one.
+
+    Sabotage: drop `_sweep_readmitted` from `_readmit_children` and the grandchild
+    is never readmitted; open a readmitted child's gate at admission and its new
+    turn starts ahead of the sweep.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    middle, leaf = await _grandchild(ctx, parent, gate)
+
+    revived_ctx, _revived, _parent = await _restart(mount, session.id)
+
+    assert leaf.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}, (
+        "the grandchild came back under its own id"
+    )
+    middle_log = not_none(revived_ctx.require(SESSIONS).get(middle.session_id))
+    await _until(
+        lambda: restarts_since_progress(subagent_roster(middle_log)[leaf.id]) == 1,
+        "the grandchild's restart to be counted in its own parent's log",
+    )
+    await _until(lambda: gate.arrived == 4, "both to reach the model again")
+    since = max(i for i, event in enumerate(middle_log.events) if event.type == "session/resumed")
+    after = [
+        "sweep" if event.type == STATUS and event.data.get("runId") == leaf.id else event.type
+        for event in middle_log.events[since:]
+        if event.type in {"turn/start", STATUS}
+    ]
+    assert after.index("sweep") < after.index("turn/start"), (
+        f"the child's new turn started before its children were swept: {after}"
+    )
+
+
+GRANDCHILD_KEY = "PH_L5B_GRANDCHILD_KEY"
+"""What the `keyed` route's adapter resolves at its edge, and the environment lacks."""
+
+
+def _keyed(ctx: Context) -> None:
+    """A route of its own, whose adapter names `GRANDCHILD_KEY`."""
+    ctx.require(LLM).register_adapter(
+        ("keyed",),
+        FakeAdapter(respond=text_script("done"), route=ResolvedModel(credential=GRANDCHILD_KEY)),
+    )
+
+
+async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L5b, the credential half. A grandchild waiting for a name is released by it.
+
+    The nested sweep holds a grandchild whose route names a credential the restarted
+    deployment lacks, in its own parent's log (T5). `readmit_waiting` asked only the
+    root's roster when the name arrived, so that hold was never released.
+
+    Sabotage: stop `readmit_waiting` descending into live children, and the grandchild
+    stays held with its key supplied.
+    """
+    monkeypatch.delenv(GRANDCHILD_KEY, raising=False)
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    _keyed(ctx)
+    middle, leaf = await _grandchild(ctx, parent, gate, provider="keyed", model="k1")
+
+    revived_ctx, _revived, revived_parent = await _restart(mount, session.id, prepare=_keyed)
+    middle_log = not_none(revived_ctx.require(SESSIONS).get(middle.session_id))
+    assert waiting_for(revived_ctx, middle_log) == {leaf.id: GRANDCHILD_KEY}, (
+        "held by name, in its own parent's log"
+    )
+
+    revived_ctx.require(CREDENTIALS).provide_value(GRANDCHILD_KEY, "supplied")
+    revived = await revived_ctx.require(SUBAGENTS).readmit_waiting(
+        revived_parent, retry_limit=RETRIES
+    )
+
+    assert leaf.id in revived, "the key arrived and the grandchild stayed held"
+    assert waiting_for(revived_ctx, middle_log) == {}
 
 
 async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(

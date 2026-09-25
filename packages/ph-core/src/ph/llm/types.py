@@ -386,15 +386,19 @@ def create_message(
     role: Literal["system", "user", "assistant"],
     content: MessageContent,
     source: object,
+    message_id: str | None = None,
 ) -> Message:
-    """Create one identified message."""
+    """Create one identified message: `message_id` when the caller derives one, else a
+    fresh id."""
     return Message.model_validate(
-        {"id": new_message_id(), "role": role, "content": content, "source": source}
+        {"id": message_id or new_message_id(), "role": role, "content": content, "source": source}
     )
 
 
-def create_user_message(*, content: MessageContent, source: object) -> Message:
-    return create_message(role="user", content=content, source=source)
+def create_user_message(
+    *, content: MessageContent, source: object, message_id: str | None = None
+) -> Message:
+    return create_message(role="user", content=content, source=source, message_id=message_id)
 
 
 def user_text(text: str) -> Message:

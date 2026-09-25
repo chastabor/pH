@@ -1550,6 +1550,9 @@ UNBOUND: dict[str, str] = {
     "IntentKind.opened_key": "a pure read of a record; folds call it with nothing mounted",
     "IntentKind.settled_key": "a pure read of a record; folds call it with nothing mounted",
     "IntentKind.failed": "a pure read of a settle; `outcome_of` calls it with nothing mounted",
+    "IntentKind.reconciled": "a pure payload from a record and an answer; repair calls it "
+    "with nothing mounted",
+    "IntentKind.within": "a pure read of a record; repair calls it with nothing mounted",
     # The egress proxy asks the seam per connection and reports a refusal back to
     # the row that mounted it. Both run on the proxy's own task, outside every
     # pipeline; the answer registers nothing and the report appends a record.

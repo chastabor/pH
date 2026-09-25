@@ -77,7 +77,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..json import JsonValue, as_int, as_obj, as_seq, as_str
+from ..json import JsonObject, JsonValue, as_int, as_obj, as_seq, as_str
+from ..llm.types import content_from_wire, text_of
 from ..session import (
     IntentError,
     IntentKind,
@@ -127,6 +128,12 @@ _OUTCOME_UNKNOWN_TEXT = (
 )
 
 
+_INSIDE_TEXT = (
+    "Inside this call, before it was interrupted, these tools have since checked their own calls:"
+)
+"""Heads the list of a call's dispatches whose tools answered on resume (L6b)."""
+
+
 class UndeclaredIntentError(IntentError):
     """A log holds open intents of a kind this process never declared (T4)."""
 
@@ -154,8 +161,11 @@ def _refuse_undeclared(counted: Mapping[str, int], missing: Mapping[str, IntentP
             )
 
 
-def _settled_intents(events: Sequence[SessionEvent]) -> list[dict[str, Any]]:
-    """The settles for every open intent of a kind repair is told to settle.
+def _settled_intents(
+    events: Sequence[SessionEvent], answers: Mapping[str, Mapping[str, CallOutcome]]
+) -> tuple[list[dict[str, Any]], dict[str, list[tuple[str, CallOutcome]]]]:
+    """The settles for every open intent of a kind repair is told to settle, and what
+    the answered ones inside a call were found to have done, by that call's id.
 
     Kind by kind **in type order**, then in opening order, so the same log repairs
     the same way in every process — declaration order is import order, which a
@@ -165,6 +175,12 @@ def _settled_intents(events: Sequence[SessionEvent]) -> list[dict[str, Any]]:
     that wrote a settle the fold does not pair would leave the intent open, and
     every resume after would write another — the log growing on each reopen, which
     is the one thing a repair must never do.
+
+    `answers` are what tools said on resume about open intents of their own, by the
+    kind's opening type and then the intent's key (L6b). For a kind that declares
+    `reconciled`, a done answer is settled by that builder and a not-done one by the
+    closer as `not-started`, both marked `reconciled`; a kind that declares `within`
+    also names the call it ran inside.
 
     :raises IntentError: when a kind's closer does not settle its own key.
     :raises UndeclaredIntentError: when the log holds an open intent of a type
@@ -189,19 +205,37 @@ def _settled_intents(events: Sequence[SessionEvent]) -> list[dict[str, Any]]:
     _refuse_undeclared(counted, missing)
 
     settled: list[dict[str, Any]] = []
+    inside: dict[str, list[tuple[str, CallOutcome]]] = {}
     for kind in kinds:
         why = kind.orphan
         if why == "owner-settles":  # filtered out above; this narrows `why` to `Unsettled`
             continue
+        told = answers.get(kind.opened, {})
         for intent in open_intents(indexes[kind], kind):
-            data = freeze_json_value(abandoned(kind, intent.opened, why, "repair"))
+            answer = told.get(intent.key)
+            built: JsonObject
+            if answer is not None and kind.reconciled is not None:
+                built = {
+                    **(
+                        kind.reconciled(intent.opened, answer.content)
+                        if answer.done
+                        else abandoned(kind, intent.opened, "not-started", "repair")
+                    ),
+                    "reconciled": True,
+                }
+                where = kind.within(intent.opened) if kind.within is not None else None
+                if where is not None:
+                    inside.setdefault(where[0], []).append((where[1], answer))
+            else:
+                built = abandoned(kind, intent.opened, why, "repair")
+            data = freeze_json_value(built)
             if key_of(kind.settled_key, kind.settled, data, intent.opened.seq) != intent.key:
                 raise IntentError(
                     f"the {kind.opened} closer declared by {kind.owner!r} does not settle "
                     f"{intent.key!r}; repair would reopen it on every resume"
                 )
             settled.append({"type": kind.settled, "data": data})
-    return settled
+    return settled, inside
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,7 +327,10 @@ def _tail(events: Sequence[SessionEvent]) -> _Tail:
 
 
 def interrupted_turn_closers(
-    events: Sequence[SessionEvent], answers: Mapping[str, CallOutcome] | None = None
+    events: Sequence[SessionEvent],
+    answers: Mapping[str, CallOutcome] | None = None,
+    *,
+    intents: Mapping[str, Mapping[str, CallOutcome]] | None = None,
 ) -> list[SessionEvent]:
     """The synthetic events that close an open tail turn and settle every open
     intent, in order.
@@ -302,14 +339,18 @@ def interrupted_turn_closers(
     clean resume appends nothing and reopening a session does not grow it.
 
     `answers` are what tools said about their started, unresolved calls, by call
-    id (`CallOutcome`); a call with none keeps `TOOL_OUTCOME_UNKNOWN`. Without
-    them this is the same pure fold it always was.
+    id (`CallOutcome`); a call with none keeps `TOOL_OUTCOME_UNKNOWN`. `intents` are
+    what tools said about open intents of their own, by opening type and key: a Code
+    Mode dispatch's tool, asked as a top-level call's is (L6b). A call left
+    `TOOL_OUTCOME_UNKNOWN` says what the answered dispatches inside it did, since
+    the model reads only the call's result. Without either this is the same pure
+    fold it always was.
     """
     tail = _tail(events)
     open_turn, open_step, pending = tail.turn, tail.step, tail.pending
     if not events:
         return []
-    orphans = _settled_intents(events)
+    orphans, inside = _settled_intents(events, intents or {})
     if open_turn is None and not orphans:
         return []
 
@@ -338,7 +379,8 @@ def interrupted_turn_closers(
     for call_id, entry in pending.items():
         started = entry.call_seq is not None
         answer = (answers or {}).get(call_id) if started else None
-        closers.append(_tool_result(call_id, entry, open_turn, next_seq, time, answer))
+        within = inside.get(call_id, [])
+        closers.append(_tool_result(call_id, entry, open_turn, next_seq, time, answer, within))
         next_seq += 1
 
     # An open step must close before its turn: `turn/end` while a step is open
@@ -369,7 +411,13 @@ _OUTCOME_UNKNOWN_ERROR = {"name": "ToolOutcomeUnknownError", "code": TOOL_OUTCOM
 
 
 def _tool_result(
-    call_id: str, entry: _Pending, turn: int, seq: int, time: int, answer: CallOutcome | None
+    call_id: str,
+    entry: _Pending,
+    turn: int,
+    seq: int,
+    time: int,
+    answer: CallOutcome | None,
+    inside: Sequence[tuple[str, CallOutcome]],
 ) -> SessionEvent:
     """The `tool/result` that closes one call the turn left without one.
 
@@ -378,6 +426,11 @@ def _tool_result(
     said (P10-13) — the result it vouched for, or the not-started closer it made
     true — marked `reconciled` in `meta`, so a reader can tell a result the tool
     produced from one it reported afterwards about a call it had not seen finish.
+
+    `inside` are the intents opened inside this call whose tools answered on resume,
+    by name (L6b). A call left `TOOL_OUTCOME_UNKNOWN` lists them, because the model reads
+    only this result: a program interrupted after a send the receiver's log holds
+    should not send it again.
     """
     started = entry.call_seq is not None
     error: dict[str, str] | None
@@ -386,7 +439,8 @@ def _tool_result(
     elif answer is not None:
         content, error = [{"type": "text", "text": _NOT_DONE_TEXT}], _NOT_STARTED_ERROR
     elif started:
-        content, error = [{"type": "text", "text": _OUTCOME_UNKNOWN_TEXT}], _OUTCOME_UNKNOWN_ERROR
+        text = f"{_OUTCOME_UNKNOWN_TEXT}\n\n{_inside(inside)}" if inside else _OUTCOME_UNKNOWN_TEXT
+        content, error = [{"type": "text", "text": text}], _OUTCOME_UNKNOWN_ERROR
     else:
         content, error = [{"type": "text", "text": _NOT_STARTED_TEXT}], _NOT_STARTED_ERROR
     prefix = "interrupted" if answer is None else "reconciled"
@@ -419,6 +473,18 @@ def _tool_result(
         surface_op="append",
         source_event_seqs=(entry.call_seq,) if entry.call_seq is not None else None,
     )
+
+
+def _inside(answered: Sequence[tuple[str, CallOutcome]]) -> str:
+    """What the tools inside an interrupted call said about their own calls."""
+    lines = [_INSIDE_TEXT]
+    for name, said in answered:
+        if said.done:
+            shown = text_of(content_from_wire(list(said.content)), separator=" ")
+            lines.append(f"- `{name}` happened" + (f": {shown}" if shown else "."))
+        else:
+            lines.append(f"- `{name}` did not happen.")
+    return "\n".join(lines)
 
 
 def repaired(events: Sequence[SessionEvent]) -> list[SessionEvent]:

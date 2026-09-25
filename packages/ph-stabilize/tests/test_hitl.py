@@ -35,7 +35,6 @@ from stabilize_helpers import (
     answer_approvals,
     bash_call,
     events_of,
-    result_text,
     row,
     run_tool_calls,
 )
@@ -44,7 +43,7 @@ from ph.json import as_obj, as_seq
 from ph.keys import SESSIONS, TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.seams.approval import Edited, Responded
-from ph.testing import MountProfile, simple_tool
+from ph.testing import MountProfile, result_text, simple_tool
 from ph_stabilize.destructive import findings
 from ph_stabilize.hitl import set_mode
 

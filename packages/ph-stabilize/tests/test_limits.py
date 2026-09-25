@@ -21,7 +21,7 @@ from typing import Any
 
 import anyio
 import pytest
-from stabilize_helpers import PROFILE, bash_call, events_of, result_text, row, run_tool_calls
+from stabilize_helpers import PROFILE, bash_call, events_of, row, run_tool_calls
 
 from ph.agent.types import AgentDriver, AgentOptions, RequestErrorAction, RequestFailure
 from ph.cordis import Context
@@ -37,6 +37,7 @@ from ph.testing import (
     StubSubagentProvider,
     assert_fold_laws,
     log_event,
+    result_text,
     session_of,
     simple_tool,
     tool_result_payload,

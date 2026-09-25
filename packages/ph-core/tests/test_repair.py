@@ -72,7 +72,9 @@ from ph.testing import (
     assistant_payload,
     isolated_intent_kinds,
     log_event,
+    log_interrupted_call,
     not_none,
+    result_text,
     tool_result_payload,
     user_payload,
 )
@@ -850,21 +852,7 @@ async def _crashed_write(
     """A turn that recorded a `write` as started and died before its result."""
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create(session_id)
-    log_event(session, "turn/start", {"turn": 1})
-    log_event(session, "step/start", {"turn": 1, "step": 1})
-    arguments = json.dumps({"path": "notes.md", "content": "the plan"})
-    call = {"type": "tool-call", "id": "c1", "name": tool, "arguments": arguments}
-    log_event(
-        session,
-        "assistant/message",
-        assistant_payload("", "m1", content=[call]),
-        SurfaceIntent("append", ()),
-    )
-    log_event(
-        session,
-        "tool/call",
-        {"turn": 1, "step": 1, "callId": "c1", "name": tool, "arguments": arguments},
-    )
+    log_interrupted_call(session, tool, json.dumps({"path": "notes.md", "content": "the plan"}))
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose(session_id)
     return ctx, ctx.require(FS).root / "notes.md"
@@ -928,6 +916,69 @@ async def test_a_tool_that_cannot_answer_keeps_the_unknown_text(
 
     assert as_obj(event.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN
     assert "meta" not in event.data
+
+
+async def _crashed_cell(mount: MountProfile, tmp_path: Path, session_id: str) -> tuple[Any, Path]:
+    """A `run_code` call that dispatched a `write` and died before either settled.
+
+    What a crash mid-cell leaves under Code Mode, where every call the model makes is
+    a dispatch: the cell's `tool/call`, and the dispatch's start with its arguments.
+    """
+    ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
+    session = ctx.require(SESSIONS).create(session_id)
+    code = json.dumps({"code": "await tools.write(path='notes.md', content='the plan')"})
+    written = {"path": "notes.md", "content": "the plan"}
+    log_interrupted_call(session, "run_code", code, dispatches=[("write", written)])
+    await ctx.require(SESSIONS).flush(session)
+    ctx.require(SESSIONS).dispose(session_id)
+    return ctx, ctx.require(FS).root / "notes.md"
+
+
+@pytest.mark.anyio
+async def test_a_crashed_cells_dispatch_is_asked_on_resume_and_named_in_its_result(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """L6b. A dispatch's tool is asked about it on resume, as a top-level call's is.
+
+    Under Code Mode every call the model makes is a dispatch, and resume asked only
+    about top-level calls, so a tool that could say what happened never was: the
+    dispatch was settled outcome unknown, and the model read only that its cell's
+    outcome was unknown. Now the dispatch settles on the tool's word, and the cell's
+    result, which is what the model reads, says what the tool found.
+
+    Sabotage: stop `_reconciled` asking open dispatches and the dispatch reads
+    `outcome-unknown`; stop repair naming them and the cell's result says nothing.
+    """
+    from ph.persistence import resume_session
+
+    ctx, target = await _crashed_cell(mount, tmp_path, "cell")
+    target.write_text("the plan", encoding="utf-8")
+
+    revived = await resume_session(ctx, "cell")
+
+    settle = not_none(revived.latest("tool/code-dispatch"))
+    assert outcome_of(TOOL_DISPATCH, settle) == "done"
+    assert settle.data["reconciled"] is True
+    event = not_none(revived.latest("tool/result"))
+    assert as_obj(event.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN, "the cell is still unknown"
+    assert "`write` happened: Wrote notes.md (8 bytes)" in result_text(revived, "c1")
+
+
+@pytest.mark.anyio
+async def test_a_dispatch_its_tool_says_never_happened_reads_not_started(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """L6b's other answer: the tool checked, and the dispatch did not happen."""
+    from ph.persistence import resume_session
+
+    ctx, target = await _crashed_cell(mount, tmp_path, "cell-missed")
+    assert not target.exists()
+
+    revived = await resume_session(ctx, "cell-missed")
+
+    settle = not_none(revived.latest("tool/code-dispatch"))
+    assert outcome_of(TOOL_DISPATCH, settle) == "not-started"
+    assert "`write` did not happen." in result_text(revived, "c1")
 
 
 @pytest.mark.anyio

@@ -34,6 +34,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
+import anyio
 from pydantic import Field
 
 from ..agent.types import AgentDriver, AgentHandle
@@ -69,6 +70,7 @@ __all__ = [
     "UNRECOVERABLE_DETAIL",
     "USAGE",
     "Access",
+    "AttributingProvider",
     "FamilyRole",
     "ReadmittingProvider",
     "RehydratableProvider",
@@ -97,6 +99,7 @@ __all__ = [
     "reachable_family",
     "restarts_since_progress",
     "roster_name",
+    "roster_of",
     "subagent_roster",
 ]
 
@@ -413,10 +416,10 @@ class SubagentRun(WireForm):
     """A live delegation. Returned at admission, before the child answers.
 
     `WireForm`, not `WireDataclass`: it serializes itself, but it cannot take the
-    alias-derived body. That body emits every non-`None` field, and five of these
+    alias-derived body. That body emits every non-`None` field, and six of these
     do not travel — `owner` (which defaults to `""`, so it would always ride),
-    plus `result`, `dispose`, `grant` and `scope`, the last two a `Grant` and a
-    `Context`. Only `id` → `runId` is a spelling the alias function would miss.
+    plus `result`, `dispose`, `grant`, `scope` and `ready`, a `Grant`, a `Context`
+    and an event among them. Only `id` → `runId` is a spelling the alias function would miss.
 
     The fields are the admission facts a parent can act on immediately: what to
     call it, where its log is, and which guarantees it actually got. `granted`
@@ -472,6 +475,16 @@ class SubagentRun(WireForm):
     settled child. Handing the scope back makes the enforcement the seam's, on both
     paths, rather than a rule a provider is trusted to remember.
     """
+    ready: anyio.Event = field(default_factory=anyio.Event, repr=False, compare=False)
+    """Set by the seam when the child may take its first step, and awaited by the
+    provider's drive before it does.
+
+    A provider starts the drive before it hands the run back, and only then can the
+    seam bound it (`_enforce` needs `scope`), so without this a child ran ahead of
+    its own ceiling. Set once the child is bounded; for a readmitted child, once its
+    own children have been swept as well (L5b), so the roster its first prompt
+    describes is the reconciled one. A child the seam refuses is released with the
+    event unset, and its drive is canceled without having run."""
 
     def to_wire(self) -> dict[str, JsonValue]:
         """The admission facts, for an event or a roster row.
@@ -547,6 +560,31 @@ class ReadmittingProvider(Protocol):
     async def readmit(
         self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
     ) -> SubagentRun | None: ...
+
+
+@runtime_checkable
+class AttributingProvider(Protocol):
+    """A provider that charges a child's answers to its parent's log, and can bring
+    that account level with the child's own log after a crash (L5).
+
+    Each answer is attributed in the parent's log (`USAGE`) as the child makes it,
+    in memory, while the child's log reaches disk before each of its requests. A
+    crash in between keeps answers in the child's log that the parent's never
+    counted, and two decisions read that count: a goal's token budget, and the
+    ladder, which treats an answer as progress (`restarts_since_progress`). So the
+    resume sweep asks the provider to append what is missing before it decides.
+
+    `through` is the child's seq of the latest answer the parent has on record
+    (`lastAnswerSeq`, `-1` for none); only answers past it are appended, so asking
+    twice appends nothing twice. Returns how many were appended.
+
+    Its own Protocol for `ReadmittingProvider`'s reason: not every way of running a
+    child attributes its usage upward.
+    """
+
+    async def reconcile_answers(
+        self, parent: Session, run_id: str, *, session_id: str, through: int
+    ) -> int: ...
 
 
 @runtime_checkable
@@ -915,6 +953,9 @@ class SubagentService:
 
         `session_id` because a readmitted child has a transcript somebody may
         want to read, and the ending is the only place left to name it.
+
+        The caller opens the child's gate (`SubagentRun.ready`) once this returns:
+        `start` at once, a readmission after its own children are swept.
         """
         # Stamped here rather than trusted from the provider: the service is what
         # knows which name the caller asked for, and `rehydrate` has to be able
@@ -1004,7 +1045,7 @@ class SubagentService:
         # `Grant`'s subject rather than this binding's.
         with running(entry.by):
             run = await entry.provider.start(request)
-        return await self._admit(
+        admitted = await self._admit(
             run,
             owner=name,
             grant=grant,
@@ -1012,6 +1053,8 @@ class SubagentService:
             boundary=boundary,
             session=request.parent.session,
         )
+        admitted.ready.set()
+        return admitted
 
     def roster(self, session: Session) -> dict[str, dict[str, Any]]:
         """`subagent_roster(session)`, folded at most once per appended event.
@@ -1107,7 +1150,11 @@ class SubagentService:
         # One fold for both halves. Read again after the appends below it would
         # be a guaranteed cache miss — `session.seq` has moved — so the whole log
         # would be folded twice on exactly the restarts that have work to do.
+        # The one exception is answers the reconcile adds, which the ladder must
+        # see: folded again only when there were some.
         roster = dict(self.roster(session))
+        if await self._reconcile_answers(session, roster):
+            roster = dict(self.roster(session))
         for run_id, row in roster.items():
             if row.get("deleted") or row.get("status") != "running":
                 continue
@@ -1135,23 +1182,73 @@ class SubagentService:
                 status="queued" if resumable else "error",
                 session_id=row.get("sessionId"),
             )
-        return await self._readmit_children(parent, roster)
+        return await self._readmit_children(parent, roster, retry_limit=retry_limit)
 
-    async def readmit_waiting(self, parent: AgentDriver) -> Sequence[str]:
+    async def _reconcile_answers(self, session: Session, roster: Mapping[str, Any]) -> int:
+        """Bring the parent's account of each interrupted child level with the child's
+        own log, before the ladder reads it (L5). Returns how many answers were added.
+
+        **Only `running` rows.** A child whose settled status is on disk has every
+        answer before it on disk too, since they are one log and a log is written in
+        order; a `queued` one was reconciled by the sweep that queued it.
+
+        **Before this sweep's own records**, and that order is what makes the ladder
+        exact. The answers are appended as of the restarts counted so far, and the
+        `resumed` record this restart writes comes after them. The parent's log is
+        written in order, so after another crash both are on disk or neither is,
+        and a child's answers are never credited to a restart that came after them.
+
+        A child whose log cannot be read is logged and left as it is: the sweep is
+        starting a root, and one unreadable log must not stop the rest.
+        """
+        added = 0
+        for run_id, row in roster.items():
+            if row.get("deleted") or row.get("status") != "running":
+                continue
+            entry = self._readmitter(row)
+            if entry is None or not isinstance(entry.provider, AttributingProvider):
+                continue
+            try:
+                with running(entry.by):
+                    added += await entry.provider.reconcile_answers(
+                        session,
+                        run_id,
+                        session_id=as_str(row.get("sessionId")),
+                        through=as_int(row.get("lastAnswerSeq"), -1),
+                    )
+            except Exception:
+                log.exception("ph.seams.subagents: %s's answers could not be reconciled", run_id)
+        return added
+
+    async def readmit_waiting(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
         """Put back to work the children of `parent` held for a credential that has
-        since arrived (T5). Returns the revived.
+        since arrived (T5), and theirs. Returns the revived.
 
         The same sweep a resume runs, asked again: a child still missing its
         credential stays held and appends nothing, and one whose name is here now has
         its hold settled and is readmitted. For whoever hands a deployment a
         credential — the daemon's `credentials/store`.
+
+        **Every level** (L5b): a child that is running may hold children of its own
+        waiting for the same name, and they are in its log, not in `parent`'s. So
+        each live child of `parent` is asked too. `retry_limit` is the host's, for
+        the sweep a readmitted child's own children get.
         """
         if parent.session is None:
             return []
-        return await self._readmit_children(parent, dict(self.roster(parent.session)))
+        revived = list(
+            await self._readmit_children(
+                parent, dict(self.roster(parent.session)), retry_limit=retry_limit
+            )
+        )
+        for run in self.list(parent_id=parent.id):
+            child = self.ctx.require(AGENTS).get(run.session_id)
+            if child is not None:
+                revived.extend(await self.readmit_waiting(child, retry_limit=retry_limit))
+        return revived
 
     async def _readmit_children(
-        self, parent: AgentDriver, roster: Mapping[str, Any]
+        self, parent: AgentDriver, roster: Mapping[str, Any], *, retry_limit: int
     ) -> Sequence[str]:
         """Put this parent's un-run children back to work. `resume_children`'s second half.
 
@@ -1185,6 +1282,12 @@ class SubagentService:
         is not released under it — no start is counted, and the parent's log says
         which name it waits for (`hold_for_credential`). `readmit_waiting` asks again when a
         credential arrives.
+
+        **Then each readmitted child's own children** (L5b), with the same
+        `retry_limit`, before the child takes its first step (`SubagentRun.ready`).
+        A child's roster is in its own log, so a sweep of the root's alone left a
+        grandchild the crash interrupted `running` with nothing to drive, readmit or
+        fail it, shown to its parent's model as still working.
 
         Returns the run ids that are running again. One child that cannot be
         rebuilt is logged and skipped rather than failing the sweep: a root
@@ -1235,8 +1338,26 @@ class SubagentService:
                     session_id=row.get("sessionId"),
                 )
                 continue
+            await self._sweep_readmitted(run, retry_limit=retry_limit)
             revived.append(run_id)
         return revived
+
+    async def _sweep_readmitted(self, run: SubagentRun, *, retry_limit: int) -> None:
+        """A readmitted child's own children, swept as its parent's were (L5b), and
+        then its gate opened (`SubagentRun.ready`).
+
+        Logged and left rather than raised: the child itself is readmitted, and one
+        level that cannot be swept must not undo the level above it. The gate opens
+        whatever happened, since the child was bounded before this ran.
+        """
+        try:
+            child = self.ctx.require(AGENTS).get(run.session_id)
+            if child is not None:
+                await self.resume_children(child, retry_limit=retry_limit)
+        except Exception:
+            log.exception("ph.seams.subagents: %s's own children could not be resumed", run.id)
+        finally:
+            run.ready.set()
 
     def _request_of(self, parent: AgentDriver, row: Mapping[str, Any]) -> SubagentRequest:
         """The request a child was admitted with, rebuilt from its roster row."""
@@ -1500,7 +1621,9 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     are already there. What the ladder *makes* of them is
     `restarts_since_progress`, beside the sweep that decides (P3). A counter
     written onto a payload would be a second account of the same events, free to
-    disagree with them.
+    disagree with them. `lastAnswerSeq`, the child's seq of the latest answer
+    attributed here, says where the parent's account stops, which is what a resume
+    reconciles from (`AttributingProvider`, L5).
 
     In the seam rather than in the bundle that produces the events, because the
     two consumers live in different packages — the model's roster tool in the
@@ -1508,8 +1631,14 @@ def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
     second copy is exactly the "two projections of one fold that disagree" that
     A11 exists to forbid.
     """
+    return roster_of(session.events)
+
+
+def roster_of(events: Iterable[SessionEvent]) -> dict[str, dict[str, Any]]:
+    """`subagent_roster` over events rather than a session: a log read from the
+    store, which a resume holds before any `Session` is built for it."""
     roster: dict[str, dict[str, Any]] = {}
-    for event in session.events:
+    for event in events:
         fold_subagent_event(roster, event)
     return roster
 
@@ -1545,6 +1674,11 @@ def fold_subagent_event(roster: dict[str, dict[str, Any]], event: SessionEvent) 
         # the restarts before it is `restarts_since_progress`'s rule, asked by
         # the sweep that decides (P3).
         row["resumesAtLastAnswer"] = as_int(row.get("resumes"))
+        # And where in the child's own log the parent's account stops, which is
+        # what a resume reconciles from (L5).
+        row["lastAnswerSeq"] = max(
+            as_int(row.get("lastAnswerSeq"), -1), as_int(event.data.get("targetSeq"), -1)
+        )
     elif event.type == STATUS:
         row.update({key: value for key, value in event.data.items() if key != "runId"})
         if event.data.get("status") == "running":

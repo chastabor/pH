@@ -710,7 +710,9 @@ class ToolDefinition:
     rendered as the call's result — `NotDone()` when it is not and running again is
     safe, and `Unknown()` whenever the check would be a guess. A raise is `Unknown`.
 
-    Asked in two places: on resume, of a `tool/call` a crash left unresolved, and in
+    Asked in two places: on resume, of a `tool/call` a crash left unresolved or of a
+    Code Mode dispatch left open, which is handed its `tool/code-dispatch-start`
+    record and whose arguments are then the object the program passed (L6b); and in
     the pipeline, of a repeat of an effect whose first attempt nobody saw finish
     (`idempotency_key`) — there it is handed the `tool/effect` record instead.
 

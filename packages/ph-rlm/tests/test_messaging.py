@@ -9,19 +9,33 @@ unroutable-around and the second survivable.
 
 from __future__ import annotations
 
+import itertools
+import json
 from collections.abc import Callable
 from typing import Any
 
 import pytest
-from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime
+from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime, logs_after_a_crash
 
 from ph.agent.types import AgentDriver
-from ph.cordis import Context
-from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
+from ph.cordis import DEPLOYMENT, Context
+from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS, TOOLS
+from ph.llm.types import text_of
+from ph.persistence import resume_session
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
-from ph.session import Session
-from ph.testing import FAKE_OPTIONS, MountProfile, not_none, run_tool
-from ph.tools import Allow
+from ph.session import Session, SessionEvent, outcome_of
+from ph.session.json import freeze_json_value
+from ph.session.kinds import TOOL_DISPATCH
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    log_interrupted_call,
+    not_none,
+    result_text,
+    run_tool,
+    stored_events,
+)
+from ph.tools import Allow, NotDone
 from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.messaging import (
     OBSERVE_GET_TOOL,
@@ -79,8 +93,14 @@ def _agent(ctx: Context, run: Any) -> AgentDriver:  # noqa: ANN401
     return agent
 
 
+_CALLS = itertools.count(1)
+
+
 async def _send(ctx: Context, sender: Any, session: Session, **arguments: Any) -> Any:  # noqa: ANN401
-    return await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=session)
+    """One send, as its own call: a relayed message's id is derived from the call
+    (`relay_message_id`), and a call is never made twice."""
+    call_id = f"send-{next(_CALLS)}"
+    return await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=session, call_id=call_id)
 
 
 # ------------------------------------------------------------------- reach --
@@ -166,6 +186,132 @@ async def test_the_message_reaches_the_target_verbatim(family_ctx: MountedRuntim
     assert body in delivered[0]
     assert "[from child:scout]" in delivered[0]
     assert f"From: {run.session_id}" in delivered[0]
+
+
+async def test_a_message_is_on_the_receivers_disk_before_the_sender_is_told(
+    family_ctx: MountedRuntime,
+) -> None:
+    """L6. The receiver's record of a message is written before `send` returns.
+
+    `steer` records the message in the receiver's log, in memory, and the sender's
+    receipt goes into the sender's log, and each used to reach disk at its own
+    agent's next flush. A receiver in the middle of a long tool call flushes last,
+    so a crash could leave the sender's log saying `delivered` and the receiver's
+    saying nothing: a message lost without anyone being told. With the receiver
+    written first, the worst a crash leaves is the sender's call unresolved, which
+    repair reports as outcome unknown.
+
+    Asked of the store as `send` returns, through the Protocol: what a resume of the
+    receiver would be handed. Siblings, so no child's completion flushes anything.
+
+    Sabotage: drop the write after `steer` and the receiver's stored log has no
+    splice when the sender holds its receipt.
+    """
+    ctx, session, sender, target = await _siblings(family_ctx)
+    body = "the fixture moved to tests/data"
+    receipt = await _send(ctx, sender, session, message=body, receiver_role="sibling")
+    assert receipt.is_error is False
+
+    stored = stored_events(ctx, not_none(target.session).id)
+    spliced = [event for event in stored if event.type == "agent/inbox/spliced"]
+    assert spliced, "the receiver's log on disk has no record of the message"
+    assert body in repr(spliced[-1].data)
+
+
+async def _reconciled(
+    ctx: Context, session: Session, call_id: str, arguments: dict[str, Any]
+) -> Any:  # noqa: ANN401
+    """What the send tool says, as a resume would ask it, about the call `call_id`."""
+    record = SessionEvent(
+        type="tool/call",
+        seq=0,
+        time=0,
+        data=freeze_json_value(
+            {"callId": call_id, "name": SEND_TOOL, "arguments": json.dumps(arguments)}
+        ),
+    )
+    return await ctx.require(TOOLS).reconciled(record, session, scope=DEPLOYMENT)
+
+
+async def test_a_send_is_found_in_its_receivers_log_or_ruled_out(
+    family_ctx: MountedRuntime,
+) -> None:
+    """L6b. The send answers for its own call from the receiver's log.
+
+    The message's id is derived from the call, so after a crash the tool can look for
+    it where it would be. Found, the model is shown a receipt instead of being told to
+    decide whether to send again. Absent from every log the send could have reached,
+    the send did not happen.
+
+    Sabotage: mint the message id with `new_message_id` again and the delivered
+    message is not found.
+    """
+    ctx, _session, parent = await family_ctx()
+    run = await _spawn(ctx, parent, "scout")
+    child = _agent(ctx, run)
+    child_session = not_none(ctx.require(SESSIONS).get(run.session_id))
+    arguments = {"message": "found it", "receiver_role": "parent"}
+    sent = await run_tool(ctx, SEND_TOOL, arguments, agent=child, session=child_session)
+    assert sent.is_error is False
+
+    found = await _reconciled(ctx, child_session, "call-1", arguments)
+    assert isinstance(found, tuple), "the delivered message was not found"
+    assert text_of(list(found)) == f"recorded to {parent.id} (parent)"
+
+    never = await _reconciled(ctx, child_session, "call-2", arguments)
+    assert isinstance(never, NotDone), "every log it could have reached lacks it"
+
+
+async def test_a_roots_send_to_a_sibling_can_be_found_but_not_ruled_out(
+    family_ctx: MountedRuntime,
+) -> None:
+    """L6b. A root's siblings are the other roots, which only the live ones stand for
+    after a restart, so a message missing from them may be in a root not yet resumed.
+
+    Sabotage: treat the live roots as every root and the absent send reads not done.
+    """
+    ctx, session, sender, _target = await _siblings(family_ctx)
+    arguments = {"message": "halves", "receiver_role": "sibling"}
+    await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=session)
+
+    assert isinstance(await _reconciled(ctx, session, "call-1", arguments), tuple)
+    unsure = await _reconciled(ctx, session, "call-2", arguments)
+    assert unsure is None, "an absent send to a root's sibling is unknown, not ruled out"
+
+
+async def test_a_send_a_crashed_cell_made_is_reported_delivered_after_a_restart(
+    family_ctx: MountedRuntime, mount: MountProfile
+) -> None:
+    """L6b, end to end: a program that sent a message and was then interrupted.
+
+    Under Code Mode the send is a dispatch inside the cell, so the model reads only
+    the cell's result, which used to say its outcome was unknown. The receiver's log
+    holds the message (L6), so on resume the cell's result says the send happened,
+    and the model need not send it twice.
+
+    Resumed by a fresh deployment over a snapshot of the logs, as a restarted daemon
+    would resume it: the first one still holds the leases.
+    """
+    ctx, session, parent = await family_ctx()
+    run = await _spawn(ctx, parent, "scout")
+    arguments = {"message": "look in tests/data", "receiver_role": "child"}
+    sent = await run_tool(
+        ctx, SEND_TOOL, arguments, agent=parent, session=session, call_id="c1:code:0"
+    )
+    assert sent.is_error is False
+    code = json.dumps({"code": "await agent_message.send('look in tests/data', 'child')"})
+    log_interrupted_call(session, "run_code", code, dispatches=[(SEND_TOOL, arguments)])
+    await ctx.require(SESSIONS).flush(session)
+    snapshot = str(logs_after_a_crash())
+    fresh = await mount(*ROWS, {"id": "session-persistence", "config": {"root": snapshot}})
+
+    revived = await resume_session(fresh, session.id)
+
+    settle = not_none(revived.latest("tool/code-dispatch"))
+    assert outcome_of(TOOL_DISPATCH, settle) == "done"
+    assert f"`{SEND_TOOL}` happened: recorded to {run.session_id} (child)" in result_text(
+        revived, "c1"
+    )
 
 
 async def test_siblings_reach_each_other(family_ctx: MountedRuntime) -> None:

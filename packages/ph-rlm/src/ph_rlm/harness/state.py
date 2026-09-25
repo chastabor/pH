@@ -177,6 +177,10 @@ class RefinementRecord(WireModel):
     rejected: list[str] = Field(default_factory=list)
     """Edits refused by validation, with the reason — recorded on the event so a
     rejection is auditable rather than a silent no-op (H1)."""
+    approved_in: str | None = None
+    """For a global refinement, the session whose log holds the approval that
+    allowed it: its `approval/decided` carries this record's `refine_id` as
+    `callId` (L4). `None` for a local one, whose record is in its session."""
 
 
 class HarnessState(WireModel):

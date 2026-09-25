@@ -16,6 +16,7 @@ prove something about the harness's imports rather than the model's.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -24,12 +25,14 @@ from rlm_fixtures import Harnessed, note_edit
 
 from ph.cordis import Context
 from ph.keys import APPROVAL, COMMANDS, SESSIONS, SYSTEM_PROMPT
+from ph.paths import write_atomic
+from ph.persistence import append_records
 from ph.system_prompt import (
     join_context_sections,
     render_context_sections,
     render_prompt,
 )
-from ph.testing import assert_fold_laws
+from ph.testing import assert_fold_laws, not_none, stored_events
 from ph_rlm.harness import (
     GLOBAL_LOG_NAME,
     PROJECTION_NAME,
@@ -422,6 +425,102 @@ async def test_a_global_refinement_folds_from_its_own_log(harnessed: Harnessed) 
     assert world is not None and world.scope == "global"
     # And the model is shown local layered over global.
     assert ctx.require(HARNESS).state(session).entry("note", "house-style") is not None
+
+
+async def test_a_global_edit_is_written_only_after_the_approval_that_allowed_it(
+    harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L4. The approving session's log is on disk before the global log is appended,
+    and the global record names the approval.
+
+    Every future session reads the global log. Its record used to be appended while
+    the session's `approval/decided` was still in memory, so a crash in between left
+    a deployment-wide edit in force whose approval repair settled as outcome unknown:
+    an edit nothing said anyone allowed.
+
+    Asked of the store the moment the global log is appended, through the durable
+    writer that append goes through.
+
+    Sabotage: drop the session write in `_commit` and the stored session has no
+    decision when the edit is written; drop `call_id` from the ask and the decision
+    no longer names the record.
+    """
+    ctx, session, agent = await harnessed()
+    _allow(ctx)
+    approving = not_none(agent.session)
+    decided_then: list[Any] = []
+
+    def probe(path: Path, records: list[Any]) -> None:
+        decided_then.extend(
+            event.data.get("callId")
+            for event in stored_events(ctx, approving.id)
+            if event.type == "approval/decided"
+        )
+        append_records(path, records)
+
+    monkeypatch.setattr("ph_rlm.harness.service.append_records", probe)
+    record = await ctx.require(HARNESS).apply(
+        RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
+        scope="global",
+        session=session,
+        agent=agent,
+    )
+
+    assert decided_then == [record.refine_id], (
+        "the approval that allowed this edit was not on disk when the edit was"
+    )
+    assert read_global_events(ctx.require(HARNESS).directory)[-1]["approvedIn"] == approving.id
+
+
+async def test_a_global_edit_whose_approval_cannot_be_written_is_refused(
+    harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L4, failing closed. With its approval unwritten, the edit is not made.
+
+    Written anyway, it would be the same edit in force with no record of who
+    allowed it, which is the gap the ordering closes.
+    """
+    ctx, session, agent = await harnessed()
+    _allow(ctx)
+
+    async def unwritten(_ctx: Context, _session: Any) -> bool:  # noqa: ANN401
+        return False
+
+    monkeypatch.setattr("ph_rlm.harness.service.session_written", unwritten)
+    with pytest.raises(RefinementRefused, match="could not be written"):
+        await ctx.require(HARNESS).apply(
+            RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
+            scope="global",
+            session=session,
+            agent=agent,
+        )
+    assert read_global_events(ctx.require(HARNESS).directory) == []
+
+
+async def test_a_local_refinement_is_on_disk_before_its_projection(
+    harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L4's local half. The session's `harness/refined` is written before the
+    projection that restates it, so the file on disk never runs ahead of the log.
+
+    Sabotage: drop the session write in `_commit` and the projection is written
+    while the stored log has no record of the refinement.
+    """
+    ctx, session, agent = await harnessed()
+    refined_then: list[bool] = []
+
+    def probe(path: Path, payload: str) -> None:
+        refined_then.append(any(event.type == REFINED for event in stored_events(ctx, session.id)))
+        write_atomic(path, payload)
+
+    monkeypatch.setattr("ph_rlm.harness.service.write_atomic", probe)
+    await ctx.require(HARNESS).apply(
+        RefinementProposal(summary="learned", edits=[note_edit("local")]),
+        session=session,
+        agent=agent,
+    )
+
+    assert refined_then == [True], "the projection was written ahead of the log"
 
 
 async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:

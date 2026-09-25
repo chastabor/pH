@@ -15,6 +15,7 @@ different things while appearing to test one.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS
 from ph.orphans import OrphanJournal
+from ph.paths import resolve_roots
+from ph.persistence.lease import LEASES
 from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile
 from ph_rlm import BUNDLE
@@ -92,6 +95,21 @@ INVARIANT_ROW: dict[str, Any] = {"id": "rlm-harness-invariant", "name": "rlm-har
 """I6's harness half (P6-01). Mounted only by the module that asserts on it."""
 
 Harnessed = Callable[..., Any]
+
+
+def logs_after_a_crash() -> Path:
+    """The sessions directory as a process that died would leave it, under a root of
+    its own, for a second harness to resume from.
+
+    A snapshot rather than the live files. The first harness is still alive and holds
+    its sessions' leases (I-5, L2), and a second harness opening the same files would
+    rightly be refused them. A process that died holds nothing and leaves only what it
+    wrote, so the leases are not copied, and what the first harness writes as it
+    unwinds at teardown never reaches the snapshot.
+    """
+    snapshot = resolve_roots().sessions_dir().parent / "sessions-after-restart"
+    shutil.copytree(resolve_roots().sessions_dir(), snapshot, ignore=shutil.ignore_patterns(LEASES))
+    return snapshot
 
 
 @pytest.fixture

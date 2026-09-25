@@ -33,19 +33,38 @@ different facts and the sender can act on the difference.
 from __future__ import annotations
 
 import logging
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
+from pydantic import ValidationError
 
 from ph.cordis import Context, plugin
-from ph.json import JsonObject, thaw_json
-from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
-from ph.llm.types import ContentBlock, PluginSource, create_user_message, new_message_id, text_of
+from ph.json import JsonObject, as_obj, as_seq, as_str, thaw_json
+from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, TOOLS
+from ph.llm.types import ContentBlock, PluginSource, create_user_message, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
-from ph.seams.subagents import FamilyRole, reachable_family
-from ph.session import Session, derive_event_message
-from ph.tools import ToolExecution, ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
+from ph.seams.subagents import (
+    FamilyRole,
+    reachable_family,
+    roster_of,
+    subagent_roster,
+)
+from ph.session import Session, SessionEvent, derive_event_message, session_written
+from ph.tools import (
+    Done,
+    NotDone,
+    Reconciled,
+    ToolExecution,
+    ToolModel,
+    ToolOutput,
+    ToolRunContext,
+    Unknown,
+    define_tool,
+    text_content,
+)
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
 
@@ -119,13 +138,14 @@ class Receipt(WireModel):
 
     delivery_status: str
     """`delivered` — in the target's next request — or `queued` behind work it
-    has not finished."""
+    has not finished. `recorded` on a receipt a resume rebuilt from the receiver's
+    log (L6b), which is all a log can say about a message sent before a crash."""
     receiver_id: str
     receiver_role: str
     message_id: str
-    pending: int
+    pending: int | None = None
     """How much unclaimed input the target now holds, so a sender can slow down
-    before it hits the cap."""
+    before it hits the cap. `None` on a rebuilt receipt."""
 
 
 @dataclass(slots=True)
@@ -321,7 +341,7 @@ async def apply(ctx: Context, config: Config) -> None:
 
         role = family(sender_id).get(target_id, "sibling")
         sender_role = family(target_id).get(sender_id, "sibling")
-        message_id = new_message_id()
+        message_id = relay_message_id(run.idempotency_key)
         target.steer(
             create_user_message(
                 content=[
@@ -337,8 +357,22 @@ async def apply(ctx: Context, config: Config) -> None:
                     }
                 ],
                 source=PluginSource(plugin="ph_rlm.messaging", form="relay"),
+                # The id the receipt names and the text shows, so the receiver's log
+                # can be searched for it (`reconcile_send`, L6b).
+                message_id=message_id,
             )
         )
+        # **On the receiver's disk before the sender is told** (L6). `steer` records
+        # the message in the receiver's log, and that record used to wait for the
+        # receiver's next flush, which for an agent in a long tool call comes after
+        # the sender's own. A crash in between left the sender's log saying
+        # `delivered` and the receiver's saying nothing. Written first, the worst a
+        # crash leaves is the sender's call unresolved, which repair reports as
+        # outcome unknown. `written`, not `flush`, for `_mutate`'s reason: the
+        # message is in the receiver's inbox already, so a write that fails must
+        # not tell the sender it was not sent.
+        if target.session is not None:
+            await session_written(ctx, target.session)
         # A child answering its parent is a reply, which is what decides whether
         # the parent gets a "finished without replying" notice.
         children = ctx.get(RLM_CHILDREN)
@@ -387,6 +421,93 @@ async def apply(ctx: Context, config: Config) -> None:
         limit = max(1, min(args.limit, config.observe_max_messages))
         return {"agentId": args.agent_id, "role": role, "messages": _transcript(session, limit)}
 
+    def stored_log(session_id: str) -> Sequence[SessionEvent] | None:
+        """A log from the store, `()` when it has none, `None` when it could not be
+        read. Blocking: a whole log is read and parsed."""
+        persistence = ctx.get(SESSION_PERSISTENCE)
+        if persistence is None:
+            return None
+        try:
+            if not persistence.exists(session_id):
+                return ()
+            return persistence.read(session_id)[1]
+        except Exception:
+            log.warning("ph_rlm.messaging: could not read %s to reconcile a send", session_id)
+            return None
+
+    async def log_of(session_id: str) -> Sequence[SessionEvent] | None:
+        """A log as a resume finds it: live, else stored, else empty. The stored read
+        runs off the event loop, since a daemon resumes its roots concurrently."""
+        live = ctx.require(SESSIONS).get(session_id)
+        if live is not None:
+            return live.events
+        return await anyio.to_thread.run_sync(stored_log, session_id)
+
+    async def candidates(sender: Session, role: str) -> tuple[list[str], bool] | None:
+        """Every session a send in `role` could have reached, and whether that is all
+        of them. `None` when the list itself could not be read.
+
+        Not the send's own resolution: that reads the live family, and after a
+        restart most of it is not live yet. A parent is named in the sender's header,
+        children in its own roster, and a child's siblings in its parent's. A root's
+        siblings are the other roots, which only the live ones stand for, so a root's
+        sibling send can be found but never ruled out.
+        """
+        parent_id = sender.header.parent_session
+        if role == "parent":
+            return ([parent_id] if parent_id else []), True
+        if role == "child":
+            children = subagent_roster(sender).values()
+            return [as_str(row.get("sessionId")) for row in children], True
+        if parent_id is None:
+            live = ctx.require(SESSIONS).list()
+            return [one.id for one in live if one.header.parent_session is None], False
+        parent_log = await log_of(parent_id)
+        if parent_log is None:
+            return None
+        siblings = roster_of(parent_log).values()
+        return [as_str(row.get("sessionId")) for row in siblings], True
+
+    async def reconcile_send(
+        arguments: Any,  # noqa: ANN401
+        opened: SessionEvent,
+        session: Session,
+    ) -> Reconciled:
+        """Did this send reach its receiver's log? Asked on resume (L6b).
+
+        The message's id is derived from the call (`relay_message_id`), and the
+        receiver's log is written before the sender is told (L6), so the message is
+        in a receiver's log exactly when the send happened. Found, the send is done,
+        and the model is shown a receipt rather than told to decide whether to send
+        again. Looked for in every session the send could have reached and absent
+        from all of them, it did not happen. Any log that could not be read, or a
+        list of receivers that is not everyone, leaves it unknown.
+        """
+        call_id = as_str(opened.data.get("subCallId")) or as_str(opened.data.get("callId"))
+        try:
+            asked = SendArgs.model_validate(arguments)
+        except ValidationError:
+            return Unknown()
+        found = await candidates(session, asked.receiver_role) if call_id else None
+        if found is None:
+            return Unknown()
+        wanted = relay_message_id(f"{session.id}/{call_id}")
+        targets, complete = found
+        for target_id in targets:
+            events = await log_of(target_id)
+            if events is None:
+                complete = False
+            elif any(_carries(event, wanted) for event in events):
+                return Done(
+                    Receipt(
+                        delivery_status="recorded",
+                        receiver_id=target_id,
+                        receiver_role=asked.receiver_role,
+                        message_id=wanted,
+                    ).to_wire()
+                )
+        return NotDone() if complete else Unknown()
+
     tools.register(
         define_tool(
             SEND_TOOL,
@@ -395,6 +516,7 @@ async def apply(ctx: Context, config: Config) -> None:
             parameters=SendArgs,
             output=ToolOutput(schema=Receipt, render=_render_receipt),
             execute=send,
+            reconcile=reconcile_send,
         )
     )
     tools.register(
@@ -506,9 +628,31 @@ def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:
 
 
 def _render_receipt(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
+    pending = value.get("pending")
     return text_content(
-        f"{value['deliveryStatus']} to {value['receiverId']} "
-        f"({value['receiverRole']}); {value['pending']} pending"
+        f"{value['deliveryStatus']} to {value['receiverId']} ({value['receiverRole']})"
+        + ("" if pending is None else f"; {pending} pending")
+    )
+
+
+_RELAY_IDS = uuid.uuid5(uuid.NAMESPACE_URL, "ph_rlm.messaging")
+
+
+def relay_message_id(call_key: str) -> str:
+    """The id of the message a send relays, derived from the call that sent it (L6b).
+
+    `ToolRunContext.idempotency_key` — `{session}/{call id}`, a Code Mode dispatch's
+    sub-call id included — is unique to one call and can be rebuilt from the call's
+    record, so the send's `reconcile` can look for the message in the receiver's
+    log after a crash. A UUID, the shape `new_message_id` mints.
+    """
+    return str(uuid.uuid5(_RELAY_IDS, call_key))
+
+
+def _carries(event: SessionEvent, message_id: str) -> bool:
+    """Whether a record put this message in its session's inbox."""
+    return event.type == "agent/inbox/spliced" and any(
+        as_obj(message).get("id") == message_id for message in as_seq(event.data.get("inserted"))
     )
 
 

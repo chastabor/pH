@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Literal, TypeAlias
 
-from ..json import JsonObject, as_obj, as_str
+from ..json import JsonObject, JsonValue, as_obj, as_str
 from ..wire import literal_lookup
 from .events import SessionEvent, is_surface_eligible_type
 from .known_event_types import is_known
@@ -178,6 +178,18 @@ class IntentKind:
     another attempt; one that was done is answered from the log; one whose outcome
     is unknown is its caller's to decide (`reconcile` first). Empty — the default —
     answers every prior."""
+    reconciled: Callable[[SessionEvent, tuple[JsonValue, ...]], JsonObject] | None = None
+    """The settle for an intent whose tool said, after a crash, that it happened
+    (L6b): given the opening record and the content the tool rendered. Declaring it is
+    what makes a kind's open intents worth asking its tool about on resume. It must
+    carry the key where `settled_key` reads it, as the closer's does. A tool that says
+    the act did *not* happen gets the closer, as `not-started`. `None` for a kind no
+    tool is asked about."""
+    within: Callable[[SessionEvent], tuple[str, str] | None] | None = None
+    """The top-level call an intent was opened inside, and what to call it there: a
+    Code Mode dispatch's `rootCallId` and tool name (L6b). The call's own repaired
+    result names what the intents inside it were found to have done, since that
+    result is what the model reads. `None` for a kind no call contains."""
     _: KW_ONLY
     writer: LogWriter
 

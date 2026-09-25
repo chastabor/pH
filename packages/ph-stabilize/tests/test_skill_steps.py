@@ -26,7 +26,7 @@ from typing import Any
 import anyio
 import anyio.lowlevel
 import pytest
-from stabilize_helpers import PROFILE, result_text, row, run_tool_calls, todo_call
+from stabilize_helpers import PROFILE, row, run_tool_calls, todo_call
 
 from ph.agent.types import AgentOptions
 from ph.keys import AGENTS, LLM, SESSIONS
@@ -34,7 +34,7 @@ from ph.llm.replay import tool_call_chunks
 from ph.llm.types import GenerateOptions, text_of
 from ph.seams.skills import discover_skills, rendered_skill
 from ph.session import Session, SurfaceIntent
-from ph.testing import FAKE_OPTIONS, MountProfile, log_event, run_tool, write_skill
+from ph.testing import FAKE_OPTIONS, MountProfile, log_event, result_text, run_tool, write_skill
 from ph_stabilize.skill_steps import (
     MAX_NAMED,
     MAX_NUDGES,

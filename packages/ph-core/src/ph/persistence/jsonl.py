@@ -39,10 +39,17 @@ import anyio
 from pydantic import ValidationError
 
 from ..cordis import DEPLOYMENT, Context, plugin
-from ..json import as_str, dumps
+from ..json import JsonObject, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ..paths import resolve_roots
-from ..session import BatchRef, Session, SessionEvent, SessionHeader
+from ..session import (
+    BatchRef,
+    Session,
+    SessionEvent,
+    SessionHeader,
+    declared_intents,
+    open_intents,
+)
 from ..session.writers import log_writer
 from ..wire import WireModel
 from .families import locate_under, logs_under, path_under
@@ -631,6 +638,20 @@ def _take_back(fd: int, length: int, path: Path) -> None:
         )
 
 
+def append_records(path: Path, records: Sequence[JsonObject]) -> None:
+    """Append records to an **append-only** log and make them durable: `read_records`'
+    writer, for a log outside the session store (L4).
+
+    `_append_and_sync`'s guarantees: whole lines, `fsync`ed, a write that fails
+    part-way taken back so the next one does not land behind half a line, and the
+    directory synced on the write that creates the file. A log whose records other
+    sessions act on, such as the Continual Harness's global log, needs all of them.
+    Blocking; call it through `anyio.to_thread.run_sync` from async code.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _append_and_sync(path, [dict(record) for record in records], fresh=not path.exists())
+
+
 def read_records(path: Path) -> Iterator[dict[str, Any]]:
     """Every JSON object in an **append-only** log, tolerating a torn tail.
 
@@ -794,7 +815,8 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     # keeps sessions in a database has no path to build, and `resume_session` is
     # the one function every host calls to pick work back up.
     header, events = ctx.require(SESSION_PERSISTENCE).read(session_id)
-    closers = interrupted_turn_closers(events, await _reconciled(ctx, session_id, header, events))
+    calls, intents = await _reconciled(ctx, session_id, header, events)
+    closers = interrupted_turn_closers(events, calls, intents=intents)
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))
     # `durable=len(events)`: **what the store already holds is `events`, and
     # nothing else.** The closers
@@ -825,8 +847,15 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
 
 async def _reconciled(
     ctx: Context, session_id: str, header: SessionHeader | None, events: list[SessionEvent]
-) -> dict[str, CallOutcome]:
-    """Ask each tool about its own started, unresolved call (P10-13).
+) -> tuple[dict[str, CallOutcome], dict[str, dict[str, CallOutcome]]]:
+    """Ask each tool about its own started, unresolved call (P10-13), and about each
+    open intent of a kind that declares `reconciled` (L6b).
+
+    The intents because under Code Mode every call the model makes is a dispatch
+    (`TOOL_DISPATCH` declares `reconciled`): a `send` a program made before it was
+    interrupted is one, and asked only about top-level calls, no tool that could
+    check ever was. Answers come back by call id, and for intents by the kind's
+    opening type and the intent's key, which is how repair looks them up.
 
     Here, mounted, and not in repair — which stays a pure fold a stored log can
     be put through with nothing mounted; only the answers are handed to it. At
@@ -843,23 +872,34 @@ async def _reconciled(
     """
     tools = ctx.get(TOOLS)
     if tools is None:
-        return {}
-    answers: dict[str, CallOutcome] = {}
+        return {}, {}
     view: Session | None = None
-    for call in unresolved_calls(events):
-        definition = tools.get(as_str(call.data.get("name")), scope=DEPLOYMENT)
+
+    async def ask(record: SessionEvent) -> CallOutcome | None:
+        nonlocal view
+        definition = tools.get(as_str(record.data.get("name")), scope=DEPLOYMENT)
         if definition is None or definition.reconcile is None:
-            continue
+            return None
         view = view or Session(session_id, seed=events, header=header)
-        said = await tools.reconciled(call, view, scope=DEPLOYMENT)
+        said = await tools.reconciled(record, view, scope=DEPLOYMENT)
         if said is None:
+            return None
+        if isinstance(said, tuple):
+            return CallOutcome(done=True, content=tuple(block.to_wire() for block in said))
+        return CallOutcome(done=False)
+
+    calls: dict[str, CallOutcome] = {}
+    for call in unresolved_calls(events):
+        if (outcome := await ask(call)) is not None:
+            calls[as_str(call.data.get("callId"))] = outcome
+    intents: dict[str, dict[str, CallOutcome]] = {}
+    for kind in declared_intents():
+        if kind.reconciled is None:
             continue
-        answers[as_str(call.data.get("callId"))] = (
-            CallOutcome(done=True, content=tuple(block.to_wire() for block in said))
-            if isinstance(said, tuple)
-            else CallOutcome(done=False)
-        )
-    return answers
+        for intent in open_intents(events, kind):
+            if (outcome := await ask(intent.opened)) is not None:
+                intents.setdefault(kind.opened, {})[intent.key] = outcome
+    return calls, intents
 
 
 class Config(WireModel):

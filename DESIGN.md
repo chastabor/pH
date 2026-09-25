@@ -1060,13 +1060,18 @@ session, and bodies at 16 KiB.
 **Usage is attributed upward.** Each child `assistant/message` appends
 `subagent/usage-attributed` to the **parent's** log.
 
-> It is an **additive record for readers**, not an input to any measurement: the
-> meter does not read this event — `TokenMeter.last_usage` folds only
-> `assistant/message` in the log it is given (`seams/token_meter.py`), and
-> a child's messages are in the *child's* log, so the parent's measurement is
-> already correct without it. Its only consumer today is the TUI panel. The
-> producing module claimed the meter "can subtract" a child's tokens; that wording
-> is now corrected at the source.
+> It is **not an input to the context meter**: `TokenMeter.last_usage` folds only
+> `assistant/message` in the log it is given (`seams/token_meter.py`), and a
+> child's messages are in the *child's* log, so the parent's context measurement is
+> correct without it. It **is** an input to two decisions, besides the TUI panel:
+> a goal's `max_tokens` budget (`goals._TOKEN_RECORDS`, as `children`), and the
+> child's own retry ladder, where each record is an answer that forgives the
+> restarts before it (`restarts_since_progress`). So its durability matters. It is
+> written to the parent's log in memory while the child's log reaches disk before
+> each request, so a crash can drop answers the parent's log never counted. The
+> resume sweep counts them back in from the child's log before the ladder reads
+> them (`AttributingProvider`, L5), and sweeps each readmitted child's own children
+> the same way before that child takes a step (`SubagentRun.ready`, L5b).
 
 **`descendants()` is deliberately not `reachable_family`.** Descent is transitive
 and covers grandchildren; the messaging family is one hop and includes siblings.
@@ -1284,16 +1289,25 @@ state. What the harness offers a tool since Phase 10:
   the log (`TOOL_EFFECT`) instead of repeated; one whose first attempt nobody saw
   finish runs with a note that it may already have happened;
 - **say whether it happened** (`ToolDefinition.reconcile`) — asked on resume of a
-  call a crash left unresolved, and in the pipeline of such a repeat, so the model
-  reads done or not done instead of "outcome unknown". `write` answers exactly;
+  call a crash left unresolved, a Code Mode dispatch included, and in the pipeline
+  of such a repeat, so the model reads done or not done instead of "outcome
+  unknown". A dispatch's answer settles the dispatch and is named in its cell's
+  result, which is what the model reads (L6b). `write` answers exactly, and
+  `agent_message_send` from the receiver's log;
 - **key its own retries** against a far side that accepts a key
   (`ToolRunContext.idempotency_key`, stable for one call).
 
 What it does not offer: a tool with neither a key nor a `reconcile` — every MCP
 tool today — still leaves the model an unknown after a crash; and a fact that
 spans two logs (a child's and its parent's roster, a send and its receipt) is
-eventual, not atomic. Within one log, `Session.batch()` lands records whole or not
-at all, including across a torn write (format 2). Both are `NON_GUARANTEES` rows.
+eventual, not atomic. Across two logs only the order holds: a message is on its
+receiver's disk before its sender is told, so a crash never leaves a send falsely
+delivered, and on resume the send is checked against that log;
+a global harness edit is written after the approval that allowed it; and a child's
+usage, which its parent's log can lag, is counted back in from the child's log when
+its parent resumes, at every level (`plans/Two_Log_Facts_Todo.md`, L4–L6b). Within one log,
+`Session.batch()` lands records whole or not at all, including across a torn write
+(format 2). Both are `NON_GUARANTEES` rows.
 
 ### I3 — Model-visible means logged
 
@@ -1574,7 +1588,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | **A staged attachment is not durable.** `session/stage` puts a reference on the root's shared tray so an upload becomes a chip in every attached composer — composer state, shared but transient, deliberately not in the log. A daemon restart loses the tray with the blob still in the store, so a person who dropped a file and then reopened has to drop it again | by decision, P7-06 |
 | **No chunked upload.** `attachment/put` carries the whole file in one frame, capped at 5 MiB; a larger one is refused by name rather than truncated. Both doors say so — the browser gets a sentence, `/attach` gets `attachment_too_large` | P7-06, stated |
 | **A screen a third-party row contributes is invisible to a remote front end.** `ScreenDefinition.build()` cannot travel, so `screens/list` is intersected with what the client can draw and everything else is silently not offered. Every screen pH ships is drawable; a row's own is not | P5-15, gated by `test_a_screen_this_build_cannot_draw_is_not_offered`; P7-07 closes it |
-| **`repaired()` closes a turn parked on a human as interrupted.** The ask is in the log (`approval/asked` with no decision) and `pending_approvals`/`pending_questions` fold it, but nothing reads that fold on *resume* — only `AskDesk.join` re-poses, across an attach. Leaving the turn open is unsafe until something does, because the model's `tool_use` block is still unanswered — it rides the *assistant message*, and a message carrying one with no matching `tool_result` is a log several providers reject (`tool/call` is not surface-eligible and no provider sees it; since P7-15 it is written after the gate, so a parked turn has none and repairs as `TOOL_NOT_STARTED`) | P5-13, deferred; gated by `test_a_turn_parked_on_a_human_is_closed_as_interrupted` so it cannot go quietly false |
+| **A turn parked on a human is closed as interrupted on resume, and its ask is not re-posed.** Repair settles the open `approval/asked` or `question/asked` (P10-09) and closes the turn, because the model's `tool_use` block is still unanswered — it rides the *assistant message*, and a message carrying one with no matching `tool_result` is a log several providers reject (`tool/call` is not surface-eligible and no provider sees it; since P7-15 it is written after the gate, so a parked turn has none and repairs as `TOOL_NOT_STARTED`). The model reads "not started" and asks again, to whoever is attached then. Within one daemon's life `AskDesk.join` re-poses an open ask to a front end that attaches | P5-13, by decision; gated by `test_repair.py::test_a_turn_parked_on_a_human_settles_the_question_it_was_parked_on` |
 | **`freeze_json_value` re-copies an already-frozen tree, and the fast path is refused on purpose.** Every container is rebuilt on every pass, so a re-admitted tree pays a second structural copy — 0.95 µs for a streamed chunk, **232 µs for a 500-node tool result**, scaling with node count rather than bytes. Four paths pay it: `Session.admit` per wire event on a remote front end, `Session(seed=…)`, `resume_session` on every rehydrate, and `SessionStore.fork`. A validation-only pre-walk that returns the input when it is already frozen measured at about half the cost. It is **not built**, because this function is where A1 is enforced: a second route through the gate is correct only insofar as its "already frozen?" predicate is, nothing in the type system tells a `MappingProxyType` over a frozen tree from one over a live dict, and a predicate like that can only be validated by enumerating hostile shapes in tests — the wrong kind of guarantee for a gate. Waiting on a design that is **structurally** safe: a frozen tree that carries its own proof (a distinct wrapper the walker recognizes by identity), or a freeze idempotent by construction | deferred by decision; measured and documented in `session/json.py`, P6-44 |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
 | **Per-service isolation is implemented** (`isolate:` on a row, §2.7 — dsh's `isolate.fs`), but a realm's provider cannot be **swapped mid-session**: dsh's example — "we start processing sensitive data, so we swap the filesystem to read-only and the agent still sees the same filesystem" — has no pH spelling. `fs.rebase` is a `claim_slot`, so the *root* can change under a stable `ctx.fs`; read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. The mechanism a swap needs (`claim_slot` releasing to a new claimant) exists; no row drives it and nothing has asked for it. **Deferred by decision, not by omission**: it will be built when a use case shows up, and the use case will decide whether the answer is a provider swap, a rule, or a new realm | deferred until a use case |

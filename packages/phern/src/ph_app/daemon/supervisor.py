@@ -255,8 +255,9 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "unknown unless the tool can say. A call the daemon died during reads as outcome "
         "unknown after a resume, and the model is told to check before retrying — unless "
         "its tool names its effect (`idempotency_key`, so a repeat is answered from the "
-        "log) or can check it (`reconcile`, which `write` does). A tool with neither — "
-        "every MCP tool today — keeps the unknown (P10-12, P10-13)",
+        "log) or can check it (`reconcile`, which `write` and `agent_message_send` do), "
+        "asked of a Code Mode dispatch as of a top-level call. A tool with neither — "
+        "every MCP tool today — keeps the unknown (P10-12, P10-13, L6b)",
     ),
     (
         "credentials across a restart",
@@ -268,11 +269,15 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
     ),
     (
         "facts across two logs",
-        "eventual, not atomic. A child's log and its parent's roster, a message sent and "
-        "its receipt, are separate writes: a crash between them leaves one said and the "
-        "other not, until the next open reconciles what it can. Within one log a "
-        "`Session.batch()` lands whole or not at all (P10-14, P10-15); across two logs "
-        "there is no batch",
+        "eventual, not atomic. Each log is written on its own schedule, so the order "
+        "is what a crash can keep. A message reaches its receiver's log on disk before "
+        "its sender is told (L6), and on resume the send is checked against that log: "
+        "found, it reads as done, and missing from every log it could have reached, as "
+        "not done (L6b). Only a root's send to a sibling root not yet resumed can stay "
+        "unknown. A child's usage in its parent's log can lag the child's own, and a "
+        "resume counts it back in from the child's log before the retry ladder reads "
+        "it, at every level of delegation (L5, L5b). Within one log a `Session.batch()` "
+        "lands whole or not at all (P10-14, P10-15); across two logs there is no batch",
     ),
     (
         "per user",
@@ -1148,7 +1153,7 @@ class Supervisor:
             root.ring()
         subagents = root.ctx.get(SUBAGENTS)
         if subagents is not None:
-            revived = await subagents.readmit_waiting(root.agent)
+            revived = await subagents.readmit_waiting(root.agent, retry_limit=CHILD_RETRY_LIMIT)
             if revived:
                 log.info(
                     "ph_app.daemon: root %s put %d child(ren) back to work once their "

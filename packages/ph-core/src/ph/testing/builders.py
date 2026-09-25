@@ -11,7 +11,7 @@ the fake-provider options. Each was being re-declared per test module.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +24,14 @@ from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..json import JsonValue, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
-from ..llm.types import ContextForm, PluginSource, ReasoningBlock, TextBlock
+from ..llm.types import (
+    ContextForm,
+    PluginSource,
+    ReasoningBlock,
+    TextBlock,
+    ToolResultBlock,
+    text_of,
+)
 from ..locks import file_lock
 from ..persistence.jsonl import HEADER_LINE_TYPE, JsonlSessionStore, locate_session, session_path
 from ..persistence.lease import lease_path
@@ -44,6 +51,7 @@ from ..session import (
     SessionHeader,
     SessionKind,
     SurfaceIntent,
+    derive_event_message,
     intents,
 )
 from ..session import kinds as core_kinds
@@ -709,14 +717,83 @@ def noting[I, T](bucket: list[I], item: I, answer: Callable[[], T]) -> T:
     return answer()
 
 
-def stored_types(ctx: Context, session_id: str) -> list[str]:
-    """The event types a session's store holds right now, read through the Protocol.
+def stored_events(ctx: Context, session_id: str) -> list[SessionEvent]:
+    """The events a session's store holds right now, read through the Protocol, and
+    none when it holds no such session.
 
     What a durability test asks — not what is in memory, but what a resume would
-    be handed. Seven tests spelled the read and the comprehension out before this.
+    be handed. Seven tests spelled the read out before `stored_types` did, and two
+    more its tolerant form before this.
     """
-    _header, events = ctx.require(SESSION_PERSISTENCE).read(session_id)
-    return [event.type for event in events]
+    persistence = ctx.require(SESSION_PERSISTENCE)
+    return persistence.read(session_id)[1] if persistence.exists(session_id) else []
+
+
+def stored_types(ctx: Context, session_id: str) -> list[str]:
+    """The event types `stored_events` reads."""
+    return [event.type for event in stored_events(ctx, session_id)]
+
+
+def log_interrupted_call(
+    session: Session,
+    name: str,
+    arguments: str,
+    *,
+    call_id: str = "c1",
+    dispatches: Sequence[tuple[str, Mapping[str, JsonValue]]] = (),
+) -> None:
+    """A turn that recorded a tool call as started and died before its result.
+
+    What a crash mid-call leaves: the assistant's request and its `tool/call`, with
+    nothing after them. `dispatches` are the Code Mode dispatches the call had
+    started, each `(tool, arguments)`, under the sub-call ids a cell gives them
+    (`{call}:code:{n}`) and never settled.
+    """
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    call = {"type": "tool-call", "id": call_id, "name": name, "arguments": arguments}
+    log_event(
+        session,
+        "assistant/message",
+        assistant_payload("", "m1", content=[call]),
+        SurfaceIntent("append", ()),
+    )
+    log_event(
+        session,
+        "tool/call",
+        {"turn": 1, "step": 1, "callId": call_id, "name": name, "arguments": arguments},
+    )
+    for index, (tool, tool_arguments) in enumerate(dispatches):
+        log_event(
+            session,
+            "tool/code-dispatch-start",
+            {
+                "rootCallId": call_id,
+                "parentCallId": call_id,
+                "subCallId": f"{call_id}:code:{index}",
+                "name": tool,
+                "arguments": tool_arguments,
+            },
+        )
+
+
+def result_text(session: Session, call_id: str) -> str:
+    """What the model reads back from one call.
+
+    Through `derive_event_message` — THE projection — rather than by indexing
+    `event.data["message"]["content"][0]`, for the reason `limits._result_facts`
+    gives: a second route to that shape is one that keeps passing after the
+    shape moves, and a test that reads the log by hand stops testing what the
+    model sees.
+    """
+    for event in session.events:
+        if event.type != "tool/result":
+            continue
+        message = derive_event_message(event)
+        for block in message.content if message else ():
+            if isinstance(block, ToolResultBlock) and block.tool_call_id == call_id:
+                return text_of(block.content)
+    return ""
 
 
 def code_mode_stub() -> dict[str, Any]:

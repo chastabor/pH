@@ -44,9 +44,10 @@ from ph.cordis import Context
 from ph.json import dumps
 from ph.keys import APPROVAL, CODE_RUNTIME, SESSIONS, TOOLS
 from ph.locks import file_lock
-from ph.paths import write_atomic, write_text_under
+from ph.paths import write_atomic
+from ph.persistence import append_records
 from ph.seams.code_runtime import CodeRunRequest
-from ph.session import Session, SessionFoldCache
+from ph.session import Session, SessionFoldCache, session_written
 from ph.session.writers import log_writer
 
 from .state import (
@@ -263,11 +264,12 @@ class HarnessService:
         :raises RefinementRefused: a global edit the human declined, or nothing
             valid left to apply.
         """
-        if scope == "global" and not await self._approved(agent):
-            raise RefinementRefused(
-                "a global refinement edits every future session, including other "
-                "projects, and was not approved"
-            )
+        refine_id, approving = await self._authorize(
+            scope,
+            agent,
+            "a global refinement edits every future session, including other projects, and "
+            "was not approved",
+        )
         accepted, rejected = await self.validate(proposal, scope=scope, session=session)
         if not accepted:
             raise RefinementRefused(
@@ -297,15 +299,16 @@ class HarnessService:
             )
 
         record = RefinementRecord(
-            refine_id=f"refine-{secrets.token_hex(4)}",
+            refine_id=refine_id,
             scope=scope,
             summary=proposal.summary,
             rationale=proposal.rationale,
             expected_outcome=proposal.expected_outcome,
             applied_edits=applied,
             rejected=rejected,
+            approved_in=approving.id if approving is not None else None,
         )
-        await self._commit(record, scope=scope, session=session)
+        await self._commit(record, scope=scope, session=session, approving=approving)
         return record
 
     def _entry(
@@ -324,8 +327,31 @@ class HarnessService:
             metadata=edit.metadata or (before.metadata if before else {}),
         )
 
-    async def _approved(self, agent: AgentHandle | None) -> bool:
-        """H3: a global edit asks. A local one never reaches here."""
+    async def _authorize(
+        self, scope: HarnessScope, agent: AgentHandle | None, refused: str
+    ) -> tuple[str, Session | None]:
+        """A new refinement's id, and for a global one the session whose log holds the
+        approval that allowed it (H3, L4). Both writers go through here.
+
+        The id is made first so the ask can carry it, and the approval's `callId`
+        names the record it allowed.
+
+        :raises RefinementRefused: `refused`, for a global edit that was not approved.
+        """
+        refine_id = f"refine-{secrets.token_hex(4)}"
+        if scope != "global":
+            return refine_id, None
+        if not await self._approved(agent, refine_id):
+            raise RefinementRefused(refused)
+        return refine_id, agent.session if agent is not None else None
+
+    async def _approved(self, agent: AgentHandle | None, refine_id: str) -> bool:
+        """H3: a global edit asks. A local one never reaches here.
+
+        The ask carries the refinement's id as its `callId`, so the `approval/decided`
+        in the approving session's log names the record it allowed, and the global
+        record names that session (`approved_in`, L4).
+        """
         approval = self.ctx.get(APPROVAL)
         if approval is None or agent is None:
             # Fail closed (B3): a global edit with nowhere to ask is not approved.
@@ -333,6 +359,7 @@ class HarnessService:
         outcome = await approval.request(
             agent=agent,
             tool_name="refine",
+            call_id=refine_id,
             reason="a global refinement is injected into every future session, "
             "including other projects",
         )
@@ -342,18 +369,40 @@ class HarnessService:
         return bool(outcome == "allowed-once")
 
     async def _commit(
-        self, record: RefinementRecord, *, scope: HarnessScope, session: Session | None
+        self,
+        record: RefinementRecord,
+        *,
+        scope: HarnessScope,
+        session: Session | None,
+        approving: Session | None,
     ) -> None:
         """The one durable write, to whichever log owns this scope, then project.
 
         Both callers go through here so a rollback and an apply cannot come to
         differ in what they leave behind.
+
+        **The session reaches disk before anything outside it does** (L4). For a
+        global edit that is the approving agent's session, whose `approval/decided`
+        allowed the edit. Every future session reads the global log, and an edit
+        written there first could outlive a crash that took its approval: an edit in
+        force that nothing says anyone allowed. So a global edit whose approval cannot
+        be written is refused. For a local edit it is the session holding
+        `harness/refined`, ahead of the projection that restates it.
         """
         if scope == "local":
             if session is None:
                 raise RefinementRefused("a local refinement needs a session to record it in")
             _LOG.append(session, REFINED, record.to_wire())
+            # The record is the state, in memory already; a write that fails here is
+            # the session's own flushes failing next, and the projection is only
+            # a restatement.
+            await session_written(self.ctx, session)
         else:
+            if approving is not None and not await session_written(self.ctx, approving):
+                raise RefinementRefused(
+                    "the approval of this global refinement could not be written, so the "
+                    "refinement was not applied"
+                )
             await anyio.to_thread.run_sync(self._append_global, record)
         await self.write_projection(session)
 
@@ -363,11 +412,15 @@ class HarnessService:
         Concurrent sessions share this log, so the lock is what makes two
         refinements at once two records rather than one torn line. Held for the
         append alone — a reader folds whatever complete lines it finds.
+
+        **`fsync`ed, and a failed write taken back** (`append_records`, L4). Every
+        future session reads this log, so a record left in the page cache could be
+        gone after a power loss while the sessions that acted on it are not.
         """
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / GLOBAL_LOG_NAME
         with file_lock(path.with_suffix(".lock"), timeout=30, what="the harness log"):
-            write_text_under(path, f"{dumps(record.to_wire())}\n", append=True)
+            append_records(path, [record.to_wire()])
         self._global_cache = None
 
     # ------------------------------------------------------------- rollback --
@@ -398,19 +451,21 @@ class HarnessService:
             raise RefinementRefused(f'no refinement "{refine_id}" in this harness')
         if any(one.rollback_of == refine_id for one in state.refinements):
             raise RefinementRefused(f'"{refine_id}" has already been rolled back')
-        if target.scope == "global" and not await self._approved(agent):
-            raise RefinementRefused(
-                f'rolling back "{refine_id}" changes every future session and was not approved'
-            )
+        rollback_id, approving = await self._authorize(
+            target.scope,
+            agent,
+            f'rolling back "{refine_id}" changes every future session and was not approved',
+        )
 
         record = RefinementRecord(
-            refine_id=f"refine-{secrets.token_hex(4)}",
+            refine_id=rollback_id,
             scope=target.scope,
             summary=f"rollback of {refine_id}",
             applied_edits=[_invert(edit) for edit in reversed(target.applied_edits)],
             rollback_of=refine_id,
+            approved_in=approving.id if approving is not None else None,
         )
-        await self._commit(record, scope=target.scope, session=session)
+        await self._commit(record, scope=target.scope, session=session, approving=approving)
         return record
 
     # ---------------------------------------------------------- projection --

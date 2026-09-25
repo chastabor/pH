@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .jsonl import (
     JsonlSessionStore,
+    append_records,
     read_records,
     read_session,
     resume_session,
@@ -32,6 +33,7 @@ __all__ = [
     "ReadOne",
     "SessionBusy",
     "UndeclaredIntentError",
+    "append_records",
     "claim_session",
     "interrupted_turn_closers",
     "lineage_faults",

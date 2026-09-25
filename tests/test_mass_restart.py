@@ -237,7 +237,7 @@ async def test_a_sub_agent_whose_key_a_restart_lost_is_held_then_released(
     )
 
     ctx.require(CREDENTIALS).provide_value(KEY, "supplied")
-    revived = await ctx.require(SUBAGENTS).readmit_waiting(parent)
+    revived = await ctx.require(SUBAGENTS).readmit_waiting(parent, retry_limit=RETRIES)
     await _until_settled(root, running, queued)
 
     assert sorted(revived) == sorted([running, queued])

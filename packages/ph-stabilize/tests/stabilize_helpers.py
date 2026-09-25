@@ -21,7 +21,7 @@ import pytest
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, APPROVAL, SESSIONS, WORKSPACE
-from ph.llm.types import ToolCallBlock, ToolResultBlock, text_of
+from ph.llm.types import ToolCallBlock, ToolResultBlock
 from ph.seams.spill import SpillStore
 from ph.session import Session, derive_event_message
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, log_event
@@ -35,7 +35,6 @@ __all__ = [
     "break_spill",
     "events_of",
     "result_block",
-    "result_text",
     "row",
     "run_tool_calls",
     "scoped_agent",
@@ -130,19 +129,6 @@ def todo_call(call_id: str, todos: list[dict[str, Any]]) -> ToolCallBlock:
     from ph_stabilize.todo import TOOL_NAME
 
     return ToolCallBlock(id=call_id, name=TOOL_NAME, arguments=json.dumps({"todos": todos}))
-
-
-def result_text(session: Session, call_id: str) -> str:
-    """What the model reads back from one call.
-
-    Through `derive_event_message` — THE projection — rather than by indexing
-    `event.data["message"]["content"][0]`, for the reason `limits._result_facts`
-    gives: a second route to that shape is one that keeps passing after the
-    shape moves, and a test that reads the log by hand stops testing what the
-    model sees.
-    """
-    block = result_block(session, call_id)
-    return "" if block is None else text_of(block.content)
 
 
 def answer_approvals(ctx: Context, answer: Any) -> list[Any]:  # noqa: ANN401

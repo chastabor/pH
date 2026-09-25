@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from stabilize_helpers import PROFILE, bash_call, result_text, run_tool_calls, todo_call
+from stabilize_helpers import PROFILE, bash_call, run_tool_calls, todo_call
 
 from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
 from ph.json import as_obj, as_seq, as_str
@@ -31,7 +31,7 @@ from ph.system_prompt.assembly import (
     render_context_sections,
     render_prompt,
 )
-from ph.testing import MountProfile, StubAgent, assistant_payload, log_event
+from ph.testing import MountProfile, StubAgent, assistant_payload, log_event, result_text
 from ph.tools.code_mode import CodeDispatchRef
 from ph_stabilize import BUNDLE
 from ph_stabilize.todo import (

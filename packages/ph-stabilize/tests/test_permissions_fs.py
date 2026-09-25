@@ -49,7 +49,6 @@ from stabilize_helpers import (
     answer_approvals,
     events_of,
     result_block,
-    result_text,
     row,
     run_tool_calls,
     scoped_agent,
@@ -68,6 +67,7 @@ from ph.testing import (
     StubWorkspaceProvider,
     noted,
     report_section,
+    result_text,
     run_tool,
 )
 from ph_stabilize.permissions_fs import (

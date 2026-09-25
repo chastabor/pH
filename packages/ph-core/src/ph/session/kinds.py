@@ -49,6 +49,7 @@ __all__ = [
     "APPROVAL_ASK",
     "CREDENTIAL_WAIT",
     "DISPATCH_INTERRUPTED",
+    "DISPATCH_NOT_DONE",
     "DISPATCH_REF_KEYS",
     "INTERRUPTED",
     "KINDS",
@@ -294,6 +295,15 @@ DISPATCH_INTERRUPTED = (
 )
 """The body of a dispatch settled by repair — what its card shows (P10-11)."""
 
+DISPATCH_NOT_DONE = (
+    "The harness stopped while this call was running, and the tool has since "
+    "checked: it did not happen."
+)
+"""The body of a dispatch settled `not-started`. Only its tool's check writes one: a
+dispatch's barrier is the checkpoint policy's, so the journal never settles one
+not-started (L6b)."""
+
+
 DISPATCH_REF_KEYS: tuple[str, ...] = ("rootCallId", "parentCallId", "subCallId", "name")
 """The wire keys of `ph.tools.code_mode.CodeDispatchRef` — the identity a dispatch's
 two records share, and the only fields its readers pair them by.
@@ -321,11 +331,23 @@ def _dispatch_interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
     is known rides on repair's `unsettled` marker. The parent call's own
     `tool/result` is the turn repair's, `TOOL_OUTCOME_UNKNOWN`.
     """
+    text = DISPATCH_NOT_DONE if why == "not-started" else DISPATCH_INTERRUPTED
     return {
         **_dispatch_identity(opened.data),
         "isError": True,
-        "content": [{"type": "text", "text": DISPATCH_INTERRUPTED}],
+        "content": [{"type": "text", "text": text}],
     }
+
+
+def _dispatch_done(opened: SessionEvent, content: tuple[JsonValue, ...]) -> JsonObject:
+    """The settle for a dispatch its tool said, on resume, happened (L6b): the content
+    the tool rendered, as the dispatch's own settle would have carried."""
+    return {**_dispatch_identity(opened.data), "isError": False, "content": list(content)}
+
+
+def _dispatch_within(opened: SessionEvent) -> tuple[str, str]:
+    """The top-level call a dispatch ran inside, and its tool's name."""
+    return as_str(opened.data.get("rootCallId")), as_str(opened.data.get("name"))
 
 
 TOOL_DISPATCH = declare_intent(
@@ -341,6 +363,10 @@ TOOL_DISPATCH = declare_intent(
         # after every pre-execute gate and skips where a restore covers the tool.
         barrier="tools-execute",
         closer=_dispatch_interrupted,
+        # A dispatched tool that can check its own effect is asked on resume, as a
+        # top-level call's is, and the cell it ran in says what it found (L6b).
+        reconciled=_dispatch_done,
+        within=_dispatch_within,
         writer=_LOG,
     )
 )

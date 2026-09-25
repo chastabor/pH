@@ -5,11 +5,16 @@ and its own failure. This is where that spelling lives once, so a component that
 must record before an effect gets it right by calling one method:
 
 ```python
-async with ctx.intents.claim(session, SHELL, {"commandId": id, "command": text}) as held:
+async with ctx.intents.claim_once(session, CLIENT_COMMAND, {"command": key}) as held:
     if isinstance(held, Prior):
-        return held.settled  # this key already ran; say what happened, do not rerun
-    ctx.intents.settle(session, held, {"commandId": id, "exitCode": await run(text)})
+        return repeated(held.outcome)  # this key already ran; say what became of it
+    reply = await act()
+    ctx.intents.settle(session, held, command_settled(key))
 ```
+
+`claim_once` is for a key that names one act for the life of the log, as a daemon
+verb's does. A kind whose every act is its own (an ask, a `!!` command) opens with
+`claim`, which always opens a new intent and never hands back a `Prior`.
 
 **The log is the journal.** Nothing here stores anything: an intent is its opening
 record, its outcome is its settle, and what is open is `ph.session.intents`' fold of
