@@ -1,9 +1,22 @@
 # Contained log writes — the redesigns Phase 10's cleanup skipped
 
-*2026-09-24. Follows `plans/Intent_Journal_And_Durable_Actions_Plan.md` (Phase 10, landed,
-uncommitted) and the `/simplify` pass over it, which skipped five redesigns as "changes to
-approved behavior". This document weighs each against the goal below and turns them into
-an ordered todo list. Nothing here is built yet.*
+*2026-09-24. Follows `plans/Intent_Journal_And_Durable_Actions_Plan.md` (Phase 10,
+committed in `ccbdcd9`) and the `/simplify` pass over it, which skipped five redesigns as
+"changes to approved behavior". This document weighs each against the goal below and turns
+them into an ordered todo list.*
+
+**Status, 2026-09-25. Closed.** Every row has landed and is committed: T0–T6 in `69d6a81`,
+and L2's fix, N1–N3 and the fixes after them in `0b604fd`. They ship in 0.4.0 with daemon
+protocol 4 and session log format 2. Left open on purpose, each stated where it applies:
+- **A settled child's lease is held until its root unwinds**, so
+  `phern -p --session <child>` is refused while the root is mounted. Releasing it earlier
+  would mean disposing the child's session when it settles (T1's L2 note).
+- **Credentials a tool needs are not checked on resume**, only the provider route's
+  (`NON_GUARANTEES`, "credentials across a restart").
+- **Keeping a credential across a restart is left to a future secure plugin.**
+  `CredentialRef.source` is the slot; nothing is stored (item 4).
+- **Two cleanups the last `/simplify` pass skipped:** probing only the modules that sit
+  in an import cycle, and the older hand-written wait loops in `test_daemon_asks.py`.
 
 ## The goal every item is weighed against
 

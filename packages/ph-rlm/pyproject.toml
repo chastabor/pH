@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-rlm"
-version = "0.3.0"
+version = "0.4.0"
 description = "pH RLM bundle: the CPython fd-3 code runtime, bindings, subagents and the Continual Harness."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,7 +29,7 @@ classifiers = [
 # would be a claim the gate contradicts. The suite's direct use is declared in
 # the root dev group, which is the half an earlier version of this comment
 # conflated with this one.
-dependencies = ["ph-core==0.3.0", "ph-runtime-guest==0.3.0", "dill>=0.3.8"]
+dependencies = ["ph-core==0.4.0", "ph-runtime-guest==0.4.0", "dill>=0.3.8"]
 
 [project.urls]
 Homepage = "https://github.com/chastabor/pH"
