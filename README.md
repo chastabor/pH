@@ -144,10 +144,14 @@ which is the one place a profile's behavior depends on what is installed, and
 
 ```bash
 export LLAMA_API_KEY=local
-phern --profile llama --provider llama --model "$(the model llama-server loaded)" \
-   -p "what is in this repo?"
+export LLAMA_MODEL="$(the model llama-server loaded)"   # the llama profile's `main`
+phern --profile llama -p "what is in this repo?"
 ```
 
+- Each profile lists the models it runs on (`phern config --row models`), and a
+  root runs on the default. `--model fast` picks another listed one by key;
+  `--provider P --model M` runs a route the list does not hold. A route no
+  adapter in the profile serves is refused before anything runs.
 - `-a/--attach FILE` sends a file with the prompt; repeatable.
 - `--session <id>` continues (or resumes from disk) instead of starting fresh.
 - `--mode json` and `--mode transcript` change the shape of what is printed;
@@ -164,12 +168,15 @@ phern --mode tui --keep-daemon                                        # the daem
 
 The front end talks to a daemon and starts an ephemeral one if nothing is
 listening, so closing the TUI does not end the turn — the root keeps working and
-`phern agents attach` will show it to you again.
+`phern agents attach` will show it to you again. `/model` (`ctrl+p`) moves the
+session to another model the profile lists, or to a `provider/model` you type,
+from its next request; `--model` on the command line asks the same for the
+session this terminal opens, and leaves the daemon's other sessions alone.
 
 ## The browser UI, on localhost
 
 ```bash
-phern --mode web --provider llama --model <model>            # 127.0.0.1:8000
+phern --mode web --profile llama                              # 127.0.0.1:8000
 phern --mode web --port 8080 --open
 ```
 
@@ -193,7 +200,7 @@ Three things that line says, spelled out:
 ## The daemon
 
 ```bash
-phern daemon --profile tui --provider llama --model <model>
+phern daemon --profile llama                  # every root on the profile's default model
 phern daemon --max-concurrent-children 6      # across every root; the rest queue
 phern daemon --passivate-after 30             # minutes of quiet before a root is released, or `off`
 phern daemon --ephemeral                      # exit once no client, root or appointment needs it
@@ -221,13 +228,36 @@ which reports what this invocation's flags and environment would produce.
 
 ## Configuring
 
-Three layers, applied in this order:
+Every row says what its settings shape, and each kind has one owner:
+
+| kind | what it shapes | where a person sets it |
+|---|---|---|
+| environment | the model, tools, skills, sandbox, workspace | a session profile, `$PH_HOME/profiles/<name>.yaml` |
+| deployment | persistence, telemetry, the job bound, invariants | the daemon's `$PH_HOME/daemon.yaml` |
+| presentation | screens and footer readings | the TUI's `$PH_HOME/tui.json` (hide a screen, remap its key) |
+
+`phern config` shows each row's kind. A row set in the wrong place is refused by
+name, with the file it belongs in. The layers, applied in this order:
 
 1. the shipped bundle documents — `ph-core/src/ph/bundles/*.yaml` and
-   `packages/phern/src/ph_app/profiles/*.yaml`;
-2. **your overlay**, `$PH_HOME/profiles/<name>.yaml`, which patches a row by id
-   without forking a bundle;
-3. `--patch`, this run only, same grammar as a profile document.
+   `packages/phern/src/ph_app/profiles/*.yaml`, which may set any kind;
+2. `rows:` in `$PH_HOME/daemon.yaml` (deployment), then the daemon's own flags
+   such as `--max-concurrent-children`;
+3. **your overlay**, `$PH_HOME/profiles/<name>.yaml`, which patches a row by id
+   without forking a bundle (environment);
+4. `--patch`, this run only, same grammar as a profile document (environment).
+
+`daemon.yaml` can also move where sessions and profiles are kept. It is read
+when a process starts:
+
+```yaml
+paths:
+  sessions: ~/work/ph-sessions   # relative paths are under $PH_HOME
+rows:
+  - id: jobs
+    config:
+      concurrency: {subagent: 8}
+```
 
 ```bash
 phern config --profile llama                            # every knob every row accepts
@@ -244,7 +274,7 @@ rather than merged — an overlay that restates one field of a route must restat
 the whole route entry, or it inherits that field's default.
 
 Three roots, each overridable by its variable: `PH_HOME` (`~/.ph` — sessions,
-attachments, your profile overlays), `PH_CACHE` (`~/.cache/ph` — safe to delete
+attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` — safe to delete
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
