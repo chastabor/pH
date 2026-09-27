@@ -45,9 +45,19 @@ from ph.cordis.plugin import Affects
 from ph.documents import decode_document
 from ph.host import host_config_path, load_host_config
 from ph.paths import PathRoots, resolve_roots, write_atomic
+from ph.session_profile import (
+    LoggedEnvironment,
+    ProfileBase,
+    ProfileChange,
+    base_of,
+    profile_change,
+    rebuilt,
+)
+from ph.text import count_of
 
 from .console import detail, fail
 from .named_profiles import NamedProfile, parse_named_profile, render_named_profile
+from .sessions import recorded_environment
 
 __all__ = [
     "DEFAULT_PROFILE",
@@ -59,9 +69,14 @@ __all__ = [
     "ProfileOption",
     "ProfilePlan",
     "ProviderOption",
+    "StartingProfile",
     "available_profiles",
     "base_documents",
     "compose_profile",
+    "composed_like",
+    "kept_note",
+    "log_host",
+    "named_version",
     "person_profiles",
     "profile_documents",
     "profile_file",
@@ -71,7 +86,9 @@ __all__ = [
     "read_named_profile",
     "resolve_profile",
     "save_named_profile",
+    "session_profile",
     "sparse_text",
+    "start_documents",
     "unfolded_profiles",
 ]
 
@@ -559,12 +576,113 @@ def sparse_text(profile: Profile, *, extends: str, comment: str) -> str:
     return render_named_profile(extends, entries, comment=comment)
 
 
-def compose_profile(name: str) -> Profile:
-    """A shipped profile, composed and ready to mount — for a test or a bench.
+def start_documents(profile: Profile) -> list[ProfileDocument]:
+    """The command-line start options `profile` was composed with — `--patch`, and the
+    daemon's own flags — which a session's rebuilt profile takes last too."""
+    return [document for document in profile.documents if document.override]
+
+
+def composed_like(name: str, profile: Profile) -> Profile:
+    """The named profile `name` with `profile`'s start options after it — `profile`
+    itself when it is that one. Raising, not exiting, for a caller that answers with
+    a refusal of its own (the daemon's `session/new`)."""
+    if name == profile.name:
+        return profile
+    return compose_profile(name, then=start_documents(profile))
+
+
+@dataclass(frozen=True, slots=True)
+class StartingProfile:
+    """What a session mounts, and how its named profile has moved since (S6)."""
+
+    profile: Profile
+    change: ProfileChange | None = None
+    """The named profile as it composes now, against the version the session starts
+    on — `None` when it has not moved, or when there is nothing to compare: a new
+    session, a `--profile` path, a named profile that no longer composes."""
+
+
+def session_profile(
+    session_id: str | None, requested: Profile, *, recorded: LoggedEnvironment | None = None
+) -> StartingProfile:
+    """The profile a session mounts in (S5): its own log's environment when it has one.
+
+    A session whose log records a base is mounted from it — that base, or a version
+    adopted since (S6), then its overrides in order, then `requested`'s start options
+    — over the deployment and presentation rows of the profile it was recorded on,
+    composed as it is now. That is what makes a session's profile its own: a daemon
+    whose default moved, or a root that went idle and came back, still runs it where
+    it was. The profile the base names is composed for its host rows, and to say how
+    it has moved (`change`); when it no longer composes — renamed, removed —
+    `requested`'s rows serve instead: the environment is the log's either way.
+
+    A session with no base — new, or from before S3 — mounts `requested`, and
+    records its base from it as it opens. So does one whose store is not a file this
+    can read before mounting (`recorded_environment`). `recorded` is that reading,
+    for a caller that already has it (the supervisor, with the cwd beside it).
+    """
+    if not session_id:
+        return StartingProfile(requested)
+    env = (
+        recorded
+        if recorded is not None
+        else recorded_environment(resolve_roots().sessions_dir(), session_id)
+    )
+    starts_on = env.starts_on
+    if env.base is None or starts_on is None:
+        return StartingProfile(requested)
+    named: Profile | None = None
+    if env.base.name:
+        try:
+            named = composed_like(env.base.name, requested)
+        except (LoaderError, OSError, ValueError):
+            named = None
+    start = start_documents(requested)
+    profile = rebuilt(starts_on, named or requested, env.overrides, then=start)
+    change = profile_change(env, base_of(named)) if named is not None else None
+    return StartingProfile(profile, change)
+
+
+def kept_note(change: ProfileChange, session_id: str) -> str:
+    """One line for a start that kept a session's version over a named profile that
+    moved — the one-shot path, and a root nobody was there to ask (S6)."""
+    name, count, yours = change.now.name, len(change.differences), change.yours
+    if yours == count:
+        whose = "yours"
+    elif yours:
+        whose = f"{yours} yours, {count - yours} pH's"
+    else:
+        whose = change.ph_moved
+    return (
+        f"{name} has changed since {session_id} started ({count_of(count, 'setting')}, "
+        f"{whose}); it runs on the version it started on. `phern profiles diff {name} "
+        f"--session {session_id}` lists them; `phern profiles adopt` takes them."
+    )
+
+
+def named_version(name: str) -> ProfileBase:
+    """The named profile `name` as a session's base would record it now (S6)."""
+    return base_of(compose_profile(name))
+
+
+def log_host(name: str) -> Profile:
+    """Only the host's rows of `name`'s composition — what opening a stored log needs.
+
+    The deployment rows (`affects`): the session store, where it keeps its logs,
+    and the rest of the host, with no tool, workspace or model mounted — so a log
+    can be written to (`phern profiles adopt`) without starting what runs in it.
+    """
+    rows = [row.to_entry() for row in compose_profile(name).rows_of({"deployment"})]
+    return Profile.from_documents([ProfileDocument("host", rows)], name=profile_name(name))
+
+
+def compose_profile(name: str, *, then: Sequence[ProfileDocument] = ()) -> Profile:
+    """A shipped profile, composed and ready to mount — for a test or a bench — with
+    `then`, start options, after it.
 
     A command goes through `profile_or_exit`, which is this plus the exit code.
     """
-    return Profile.from_documents(profile_documents(name), name=profile_name(name))
+    return Profile.from_documents([*profile_documents(name), *then], name=profile_name(name))
 
 
 def profile_or_exit(

@@ -13,12 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from daemon_helpers import running
+from daemon_helpers import allowed_hosts, running
 from typer.testing import CliRunner
 
 from ph.cordis.loader import Mount
 from ph.json import JsonObject, as_obj
-from ph.keys import COMMANDS, MOUNT, SANDBOX
+from ph.keys import COMMANDS, MOUNT
 from ph.paths import resolve_roots
 from ph.session import now_ms
 from ph.session_profile import OVERRIDE, Override, overrides, rebuilt, saved_base
@@ -43,11 +43,6 @@ async def _sandbox(root: Root, line: str) -> str:
     shown = await root.ctx.require(COMMANDS).dispatch(line, session=root.session)
     assert isinstance(shown, str)
     return shown
-
-
-def _hosts(root: Root) -> list[str]:
-    allowances = not_none(root.ctx.require(SANDBOX).allowances)
-    return list(not_none(allowances.network).hosts)
 
 
 async def test_a_sandbox_change_is_recorded_before_it_is_made(
@@ -77,7 +72,7 @@ async def test_a_sandbox_change_is_recorded_before_it_is_made(
             "command",
             "/sandbox allow host example.com",
         )
-        assert "example.com" in _hosts(root)
+        assert "example.com" in allowed_hosts(root)
         assert not resolve_roots().profile_dropins("headless").exists(), "no drop-in any more"
 
 
@@ -108,7 +103,7 @@ async def test_a_change_whose_record_cannot_be_written_is_not_made(
         shown = await _sandbox(root, "/sandbox allow host example.com")
 
         assert "was not changed" in shown
-        assert "example.com" not in _hosts(root)
+        assert "example.com" not in allowed_hosts(root)
 
 
 async def test_the_log_alone_rebuilds_the_allowances_in_force(tmp_path: Path) -> None:
@@ -127,13 +122,12 @@ async def test_the_log_alone_rebuilds_the_allowances_in_force(tmp_path: Path) ->
 
         rows = {as_obj(row).get("id"): as_obj(row) for row in again.resolved({"environment"})}
         config: JsonObject = as_obj(rows["sandbox-allow"]["config"])
-        assert as_obj(config["network"])["hosts"] == _hosts(root)
+        assert as_obj(config["network"])["hosts"] == allowed_hosts(root)
 
 
 async def test_a_session_s_next_start_puts_its_overrides_back(tmp_path: Path) -> None:
-    """A root released and started again is on the daemon's composition, which
-    knows nothing of the session — and holds the allowance anyway, from its log.
-    Sabotage: drop `reapply_overrides` from `open_session`, and the host is gone."""
+    """A root released and started again holds the allowance, from its log — mounted
+    from it since S5, where S4 set it on the daemon's composition after opening."""
     async with running(tmp_path) as daemon:
         supervisor = daemon.running.supervisor
         root = await daemon.root("returning")
@@ -142,9 +136,9 @@ async def test_a_session_s_next_start_puts_its_overrides_back(tmp_path: Path) ->
 
         back = await supervisor.start("returning")
 
-        assert "example.com" in _hosts(back)
+        assert "example.com" in allowed_hosts(back)
         assert len(_logged("returning")) == 1, "put back, not recorded again"
-        assert "sandbox-allow" in back.ctx.require(MOUNT).reconfigured
+        assert "sandbox-allow" not in back.ctx.require(MOUNT).reconfigured, "mounted, not patched"
 
 
 def test_a_start_option_is_logged_where_it_differs_and_once() -> None:

@@ -59,7 +59,7 @@ from ph.session import new_session_id
 
 from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
-from ..payloads import AskKey
+from ..payloads import AskKey, ProfileDecision
 from ..protocol import DaemonError
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
@@ -79,6 +79,7 @@ from .modals.pickers import (
     session_choices,
     theme_choices,
 )
+from .modals.profile import decision_of, profile_changed_modal
 from .modals.trust import project_trust_modal
 from .remote import attach_session, browse_on
 from .screens import Revealing, RevealSeq
@@ -171,8 +172,12 @@ class PHTuiApp(App[str | None]):
         spawn: bool = True,
         offer_sessions: bool = True,
         model_choice: ModelChoice = ModelChoice(),
+        profile: str = "",
     ) -> None:
         super().__init__()
+        self.profile = profile
+        """The profile a session this terminal *creates* runs on (S5); empty is the
+        daemon's own. A session it resumes runs on what that session's log records."""
         self.model_choice = model_choice
         """`--provider`/`--model`, carried by `session/new` for the session this opens.
 
@@ -396,6 +401,7 @@ class PHTuiApp(App[str | None]):
                 trust=trust,
                 hidden_screens=self.settings.hidden_screens,
                 choice=self.model_choice,
+                profile=self.profile,
             )
         except Exception as error:
             log.exception("ph_app.tui: could not attach to a daemon")
@@ -748,6 +754,11 @@ class PHTuiApp(App[str | None]):
     ) -> str | None:
         answer = await self._ask(ask, AskUserModal(question))
         return answer if isinstance(answer, str) else None
+
+    async def ask_profile(
+        self, name: str, listing: str, *, ask: AskKey | None = None
+    ) -> ProfileDecision:
+        return decision_of(await self._ask(ask, profile_changed_modal(name, listing)))
 
     async def _ask[T](self, ask: AskKey | None, modal: PhModal[T]) -> T:
         """Push one ask modal and wait, findable by `ask` while it is up."""
@@ -1186,6 +1197,7 @@ async def run_tui(
     spawn: bool = True,
     offer_sessions: bool = True,
     model_choice: ModelChoice = ModelChoice(),
+    profile: str = "",
 ) -> int:
     """Entry point for `--mode tui`. Answers the exit code, `0` when clean (M4).
 
@@ -1213,6 +1225,7 @@ async def run_tui(
             spawn=spawn,
             offer_sessions=offer_sessions,
             model_choice=model_choice,
+            profile=profile,
         )
         chosen = await app.run_async()
         if app.return_code:

@@ -28,20 +28,36 @@ thing this module exists to avoid.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from ph.json import as_obj
-from ph.persistence import MAX_DEPTH
-from ph.persistence.jsonl import HEADER_LINE_TYPE, family_log, locate_session, session_logs
+from ph.json import JsonObject, as_obj
+from ph.persistence import MAX_DEPTH, LineageError, materialize
+from ph.persistence.jsonl import (
+    HEADER_LINE_TYPE,
+    family_log,
+    locate_session,
+    read_stored,
+    session_logs,
+)
 from ph.session import SessionHeader, cwd_tag
+from ph.session_profile import LoggedEnvironment, fold_environment
 from ph.wire import WireModel
 
 from .wire import text_of_wire
 
-__all__ = ["SessionSummary", "recorded_cwd", "session_summaries"]
+__all__ = [
+    "RecordedStart",
+    "SessionSummary",
+    "recorded_environment",
+    "recorded_start",
+    "session_summaries",
+    "stored_on",
+]
 
 TITLE_SCAN_LIMIT = 40
 """Events to look through for a title before giving up. A session that opens
@@ -263,24 +279,101 @@ def _header(raw: object) -> SessionHeader | None:
         return None
 
 
-def recorded_cwd(sessions_dir: Path, session_id: str) -> str:
-    """Where a stored session says it was worked in, or `""`.
+@dataclass(frozen=True, slots=True)
+class RecordedStart:
+    """What a stored session's log says before anything is mounted for it: where it
+    was worked in, and the environment it runs in (S5, S6)."""
+
+    cwd: str = ""
+    environment: LoggedEnvironment = field(default_factory=LoggedEnvironment)
+
+
+def recorded_start(sessions_dir: Path, session_id: str) -> RecordedStart:
+    """Where a stored session was worked in, and its environment — one locate, for a
+    root's start.
 
     **Read without mounting anything**, which is the whole reason it exists: a
     root's profile has to be mounted *with* its working directory — the fs seam
     fixes its root at row-apply time and `workspace-lifecycle` reads it there to
-    discover provisioning — so the answer is needed before there is a `Context`
-    to ask a store for it. One `locate` and one header line.
+    discover provisioning — and mounted *from* its log's environment, so both are
+    needed before there is a `Context` to ask a store for them.
 
     Filesystem-shaped, like `session_summaries` above and for the same reason
-    stated there: a backend that keeps sessions elsewhere answers `""` and the
-    root mounts where the deployment's profile says, which is today's behavior.
+    stated there: a backend that keeps sessions elsewhere answers empty, the root
+    mounts where the deployment's profile says, and it is brought to its log after
+    it opens (`opened`).
     """
     path = locate_session(sessions_dir, session_id)
     if path is None or not path.is_file():
-        return ""
+        return RecordedStart()
     header = _header_line(path)
-    return "" if header is None else (header.cwd or "")
+    return RecordedStart(
+        cwd=(header.cwd or "") if header is not None else "",
+        environment=_environment_at(sessions_dir, path, header),
+    )
+
+
+def recorded_environment(sessions_dir: Path, session_id: str) -> LoggedEnvironment:
+    """What a stored session's log says about its environment: its base, the
+    overrides in force, and a version adopted or declined since — or an empty
+    `LoggedEnvironment` for one with no log here."""
+    return recorded_start(sessions_dir, session_id).environment
+
+
+def _environment_at(
+    sessions_dir: Path, path: Path, header: SessionHeader | None
+) -> LoggedEnvironment:
+    """The log at `path`, folded by `ph.session_profile`'s own rule.
+
+    A line scan of the one file, decoding only the lines that name a profile record,
+    because the resume that follows parses every envelope anyway — for a log that
+    holds its own history, which is every root. A fork's file continues its root's
+    from `seed_length`, and the base is in that prefix, so a fork is read through
+    the store's own lineage walk (`materialize`). An unfinished last line is
+    skipped, as the reader does; a torn last batch costs nothing here, since the
+    only batch of these records is a base with the clears of overrides that no
+    longer change anything.
+    """
+    if header is not None and header.seed_length:
+        try:
+            _header, events = materialize(partial(read_stored, sessions_dir), header.id)
+        except (LineageError, OSError, ValueError):
+            return LoggedEnvironment()
+        return fold_environment((event.type, event.data) for event in events)
+    records: list[tuple[str, JsonObject]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if '"profile/' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                kind, data = record.get("type"), record.get("data")
+                if isinstance(kind, str) and isinstance(data, dict):
+                    records.append((kind, data))
+    except OSError:
+        return LoggedEnvironment()
+    return fold_environment(records)
+
+
+def stored_on(sessions_dir: Path, name: str) -> list[tuple[str, LoggedEnvironment]]:
+    """Every stored session whose base is the named profile `name`, newest first (S6).
+
+    A root, a fork or a segment: a fork continues its root's base with the prefix,
+    and is a session of its own to start. A sub-agent's log is passed over at its
+    header (`origin`), since a child runs on its root's and has no base of its own.
+    """
+    found: list[tuple[str, LoggedEnvironment]] = []
+    for path, _stat in session_logs(sessions_dir):
+        header = _header_line(path)
+        if header is None or header.origin == "subagent":
+            continue
+        env = _environment_at(sessions_dir, path, header)
+        if env.base is not None and env.base.name == name:
+            found.append((header.id, env))
+    return found
 
 
 def _header_line(path: Path) -> SessionHeader | None:

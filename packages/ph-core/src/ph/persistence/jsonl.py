@@ -67,6 +67,7 @@ __all__ = [
     "locate_session",
     "read_records",
     "read_session",
+    "read_stored",
     "resumption_of",
     "session_logs",
     "session_path",
@@ -106,6 +107,21 @@ def session_path(root: Path, session_id: str, family: str) -> Path:
 def session_logs(root: Path, *, tag: str = "") -> list[tuple[Path, os.stat_result]]:
     """Every stored log under `root`, newest first; `tag` narrows it to one cwd."""
     return logs_under(root, SUFFIX, tag=tag)
+
+
+def read_stored(
+    root: Path, session_id: str, upto: int | None = None, family: str | None = None
+) -> tuple[SessionHeader, list[SessionEvent]]:
+    """One stored log's own file under `root` — `ReadOne` for `materialize`, with no
+    store and no mount behind it, for a reader that needs a log before either."""
+    path = (
+        session_path(root, session_id, family)
+        if family is not None
+        else locate_session(root, session_id)
+    )
+    if path is None or not path.is_file():
+        raise FileNotFoundError(f"no stored session {session_id!r}")
+    return read_session(path, upto=upto)
 
 
 def locate_session(root: Path, session_id: str) -> Path | None:
@@ -502,14 +518,7 @@ class JsonlSessionStore:
         self, session_id: str, upto: int | None = None, family: str | None = None
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This file and nothing else — the unchained read `materialize` walks with."""
-        path = (
-            session_path(self.root, session_id, family)
-            if family is not None
-            else locate_session(self.root, session_id)
-        )
-        if path is None or not path.is_file():
-            raise FileNotFoundError(f"no stored session {session_id!r}")
-        return read_session(path, upto=upto)
+        return read_stored(self.root, session_id, upto, family)
 
     def directory(self) -> Path | None:
         return self.root

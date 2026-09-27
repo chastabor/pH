@@ -44,7 +44,7 @@ from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session
 
-from ..payloads import AskKey, RootDescription
+from ..payloads import AskKey, ProfileDecision, RootDescription
 from ..sessions import SessionSummary
 from .screens import AppSurface
 from .state import Surface, TuiState
@@ -69,6 +69,13 @@ class ModalHost(Protocol):
         self, question: UserQuestion, *, ask: AskKey | None = None
     ) -> str | None:
         """Put the ask-user modal up and wait. Must be called from a worker."""
+        ...
+
+    async def ask_profile(
+        self, name: str, listing: str, *, ask: AskKey | None = None
+    ) -> ProfileDecision:
+        """Show how a session's named profile moved, and ask which version it runs on
+        (S6). Must be called from a worker."""
         ...
 
     def withdraw_ask(self, ask: AskKey, *, reason: str = "") -> None:

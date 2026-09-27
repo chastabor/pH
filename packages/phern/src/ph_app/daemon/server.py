@@ -48,12 +48,14 @@ from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.schedule import Schedule
 from ph.seams.shell import ShellService
 from ph.session import Prior, intents_of, now_ms, session_written
+from ph.session_profile import ProfileBase
 from ph.text import duration
 from ph.wire import WireModel
 
 from .. import verbs
 from ..kinds import CLIENT_COMMAND, command_settled
 from ..params import (
+    AdoptParams,
     BrowseParams,
     CancelScheduleParams,
     CommandParams,
@@ -585,7 +587,15 @@ class _Connection:
         # not a new decision about a new directory.
         self._check_trust(cwd, params.trust)
         supervisor = self.server.supervisor
-        root = await supervisor.start(params.session_id, cwd=cwd, choice=params.choice)
+        # `asks`: a front end that can answer for a person asked for this start, so a
+        # root whose person's own named profile moved is held for them (S6).
+        root = await supervisor.start(
+            params.session_id,
+            cwd=cwd,
+            choice=params.choice,
+            profile=params.profile,
+            asks="asks" in self.declared,
+        )
         if not params.choice.is_default:
             # A root that was already running — another terminal's — is on its
             # own route, so the choice moves it. One that just mounted on it is
@@ -913,6 +923,19 @@ class _Connection:
         if not store.trusted(project):
             raise UntrustedProject(f"{cwd} has not been trusted; ask, then send trust")
 
+    async def _adopt(self, params: AdoptParams) -> RootDescription:
+        """Accept a named profile's version for a root this daemon holds (S6).
+
+        `phern profiles adopt` writes a stored session's log itself, under its lease;
+        a session a daemon holds is held by the lease, so the daemon writes it. Not
+        through `start`: a root that is not mounted here is the caller's to write,
+        and mounting it to record a version would start what the record says to
+        start later. The version is the one the person was shown, carried whole.
+        """
+        root = self._root(params.session_id)
+        await self.server.supervisor.adopt(root, ProfileBase.of(params.version))
+        return root.describe()
+
     def _root(self, session_id: str) -> Root:
         root = self.server.supervisor.roots.get(session_id)
         if root is None:
@@ -938,7 +961,7 @@ class _Connection:
         # rehydration one mechanism instead of two. There is no cursor to read:
         # attach does not replay, so it does not take one — `SnapshotParams`
         # says why the field was removed rather than accepted and ignored.
-        root = await self.server.supervisor.start(params.session_id)
+        root = await self.server.supervisor.start(params.session_id, asks="asks" in self.declared)
         self._join(root)
         # The footer, with the status it belongs to — the same pairing
         # `session.status` makes, so a client that has just attached draws a
@@ -1173,6 +1196,7 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.ATTACHMENT_PUT, _Connection._put),
         _unkeyed(verbs.CREDENTIALS_HELD, _Connection._credentials_held),
         _unkeyed(verbs.CREDENTIALS_STORE, _Connection._credentials_store),
+        _unkeyed(verbs.SESSION_ADOPT, _Connection._adopt),
         # The read-only projections (P5-14). What a front end used to read straight
         # off `ctx`; each is a fold computed now, so a reconnecting client gets
         # today's answer rather than one cached when somebody last wrote it down.
@@ -1375,6 +1399,9 @@ class DaemonServer:
             # What is held for a credential, by name (T5) — the question a person
             # asks when a child resumed after a restart and is not moving.
             ("credentials awaited", self.supervisor.awaited() or [("held", "nothing")]),
+            # Roots whose named profile moved since they started, and which of them
+            # wait on a person (S6) — `sessions/list` gives the same count per root.
+            ("session profiles", self.supervisor.behind() or [("behind", "nothing")]),
             # The daemon's own non-guarantees (N5, I-2), printed by the command a
             # person runs to ask what this daemon is. Rule 6 wants them beside
             # where they would be assumed, and this reply *is* that place: it

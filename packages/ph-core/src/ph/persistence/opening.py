@@ -16,9 +16,9 @@ from ..session import Session, SessionForkError, new_session_id, valid_session_i
 from ..session_profile import opened
 from .jsonl import resume_session
 from .lease import SessionBusy
-from .protocol import ClaimingStore
+from .protocol import ClaimingStore, SessionPersistence
 
-__all__ = ["open_session"]
+__all__ = ["open_session", "stored_session"]
 
 log = logging.getLogger("ph.persistence.opening")
 
@@ -65,43 +65,7 @@ async def open_session(
     process's own working directory, which is not the caller's.
     """
     resolved = session_id or new_session_id()
-    # **Before anything builds a path from it** (K9). `SessionStore.create` and
-    # `.adopt` check this too, and by then it is too late here: `claim` below
-    # creates `<root>/.leases/<id>.lock`, `exists` locates `<root>/<id>/<id>.jsonl`,
-    # and `resume_session` *opens and parses* that file — all from the raw id, and
-    # all before a `Session` object exists for the store to refuse. Every session
-    # is opened through here, so it is where the id stops being arbitrary.
-    if not valid_session_id(resolved):
-        raise SessionForkError(
-            f'session id "{resolved}" is not usable as a path component', "SESSION_ID_INVALID"
-        )
-    store = ctx.get(SESSION_PERSISTENCE)
-    if isinstance(store, ClaimingStore):
-        try:
-            await store.claim(resolved, scope=ctx.root)
-        except SessionBusy:
-            # An `ops` fact, not a session one: the session it concerns is the
-            # one this process was just refused, so its log is not ours to write.
-            await ops_record(
-                ctx,
-                "session refused: already active in another process",
-                severity="warn",
-                session_id=resolved,
-            )
-            raise
-    elif store is not None:
-        log.warning(
-            "ph.persistence: %s cannot claim a session; I-5 is not enforced for %s",
-            type(store).__name__,
-            resolved,
-        )
-        await ops_record(
-            ctx,
-            "I-5 is not enforced: this session store cannot claim a session",
-            severity="warn",
-            session_id=resolved,
-            store=type(store).__name__,
-        )
+    store = await _claimed(ctx, resolved)
     if store is not None and store.exists(resolved):
         session = await resume_session(ctx, resolved)
     else:
@@ -113,3 +77,74 @@ async def open_session(
     # to what the log says (S4) — `opened` is the whole of it, in that order.
     await opened(ctx, session)
     return session
+
+
+async def stored_session(ctx: Context, session_id: str) -> Session:
+    """A stored session, claimed and loaded but **not resumed**: for adding a record
+    to while nothing runs it — `phern profiles adopt` (session profiles, S6).
+
+    Claimed as `open_session` claims, for as long as `ctx`'s mount, so a daemon or
+    a print run starting it meanwhile is refused rather than interleaved. Not
+    resumed, because nothing runs: no tail is repaired, no call reconciled, and no
+    `session/resumed` recorded — a crashed tail stays the next start's to close,
+    with the tools that can answer for it mounted. What is appended is written by
+    the caller, or when the mount unwinds.
+
+    :raises SessionBusy: when another process holds it.
+    :raises LookupError: when there is no stored session by that id.
+    """
+    store = ctx.require(SESSION_PERSISTENCE)
+    await _claimed(ctx, session_id)
+    if not store.exists(session_id):
+        raise LookupError(f"no stored session {session_id!r}")
+    header, events = store.read(session_id)
+    loaded = Session(session_id, seed=events, header=header, durable=len(events))
+    return ctx.require(SESSIONS).adopt(loaded)
+
+
+async def _claimed(ctx: Context, session_id: str) -> SessionPersistence | None:
+    """Refuse an id no path may be built from, then claim it from `ctx`'s store (I-5).
+
+    The half of opening a session that `open_session` and `stored_session` share.
+    **Before anything builds a path from it** (K9). `SessionStore.create` and
+    `.adopt` check the id too, and by then it is too late: `claim` creates
+    `<root>/.leases/<id>.lock`, `exists` locates `<root>/<id>/<id>.jsonl`, and a
+    read *opens and parses* that file — all from the raw id, and all before a
+    `Session` object exists for the store to refuse.
+
+    The lease lasts as long as `ctx`'s mount. A store that cannot claim is said out
+    loud rather than skipped; a refusal is an `ops` fact, not a session one, since
+    the session it concerns is the one this process was just refused.
+
+    :raises SessionBusy: when another process holds it.
+    """
+    if not valid_session_id(session_id):
+        raise SessionForkError(
+            f'session id "{session_id}" is not usable as a path component', "SESSION_ID_INVALID"
+        )
+    store = ctx.get(SESSION_PERSISTENCE)
+    if isinstance(store, ClaimingStore):
+        try:
+            await store.claim(session_id, scope=ctx.root)
+        except SessionBusy:
+            await ops_record(
+                ctx,
+                "session refused: already active in another process",
+                severity="warn",
+                session_id=session_id,
+            )
+            raise
+    elif store is not None:
+        log.warning(
+            "ph.persistence: %s cannot claim a session; I-5 is not enforced for %s",
+            type(store).__name__,
+            session_id,
+        )
+        await ops_record(
+            ctx,
+            "I-5 is not enforced: this session store cannot claim a session",
+            severity="warn",
+            session_id=session_id,
+            store=type(store).__name__,
+        )
+    return store

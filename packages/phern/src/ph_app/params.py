@@ -49,7 +49,7 @@ gets pydantic's nested validation for free: a malformed reference is refused as
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import Field
 
@@ -62,6 +62,7 @@ from ph.wire import WireModel
 from .protocol import Cursor, SessionParams
 
 __all__ = [
+    "AdoptParams",
     "CancelScheduleParams",
     "CommandParams",
     "CreateScheduleParams",
@@ -123,6 +124,10 @@ class NewSessionParams(SessionParams):
     """What this session runs on. Empty is the daemon's own `--model`, else the
     profile's default. A fresh root mounts on it; one already running is moved to
     it, as `session/model` would move it."""
+    profile: str = ""
+    """The named profile a *new* session is created on (S5); empty is the daemon's own
+    `--profile`. A session that already has a log runs on what its log records —
+    switching that is `/profile use`'s, not this."""
 
 
 class SnapshotParams(SessionParams):
@@ -209,6 +214,16 @@ class StoreCredentialParams(SessionParams):
 
     name: str
     value: str
+
+
+class AdoptParams(SessionParams):
+    """`session/adopt` — a named profile's version, for this session's next start (S6).
+
+    `version` is a `profile/base` record's shape, the whole version the person was
+    shown: somebody else's shape, so a `dict` (`payloads.py` says why not
+    `JsonObject`). A running root keeps its base; its next start makes this one it."""
+
+    version: dict[str, Any]
 
 
 class PutAttachmentParams(SessionParams):

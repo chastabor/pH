@@ -20,6 +20,8 @@ from ph.seams.models import ModelChoice, choose, start_on
 from ph.session import Session
 
 from .attach import ingest, prompt_message
+from .console import err
+from .profiles import kept_note, session_profile
 
 __all__ = ["mounted", "prompted"]
 
@@ -77,8 +79,16 @@ async def prompted(
     The turn is opened with a message this builds rather than with
     `agent.prompt`, uniformly: with nothing attached the two are identical, so
     the alternative would be a branch whose two halves have to stay in step.
+
+    **A resumed session mounts in its own log's environment** (S5): `profile` is what
+    a new one is created on, and one that already has a base comes back as its log
+    says (`session_profile`), whatever `--profile` this run was given. A named profile
+    that moved since is kept, and said on stderr (S6): nobody is here to ask.
     """
-    async with mounted(profile) as ctx:
+    starting = session_profile(session_id, profile)
+    if starting.change is not None and session_id:
+        err.print(kept_note(starting.change, session_id), style="yellow", markup=False)
+    async with mounted(starting.profile) as ctx:
         # Resolved inside the mount, which is the only place that knows which
         # providers an adapter serves — and before the session opens, so a route
         # nothing can run leaves the command as its refusal with nothing on disk.

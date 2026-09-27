@@ -13,7 +13,7 @@ from .jsonl import (
 )
 from .lease import SessionBusy, claim_session
 from .lineage import MAX_DEPTH, LineageError, ReadOne, lineage_faults, materialize
-from .opening import open_session
+from .opening import open_session, stored_session
 from .protocol import ClaimingStore
 from .repair import (
     TOOL_NOT_STARTED,
@@ -45,4 +45,5 @@ __all__ = [
     "resume_session",
     "resumption_of",
     "session_path",
+    "stored_session",
 ]

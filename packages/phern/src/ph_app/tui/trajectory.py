@@ -418,6 +418,10 @@ HANDLERS: Mapping[str, Handler] = {
     "profile/base": _on_harness_event,
     # And each deviation from it (S4): what asked, and what changed.
     "profile/override": _on_harness_event,
+    # And what a person decided about a named profile that moved (S6).
+    "profile/adopted": _on_harness_event,
+    "profile/declined": _on_harness_event,
+    "profile/override-cleared": _on_harness_event,
     "sandbox/mode": _on_harness_event,
     "sandbox/denied": _on_harness_event,
     "command/run": _on_harness_event,

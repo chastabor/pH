@@ -99,6 +99,8 @@ from ..payloads import (
     CommandShown,
     DaemonLifetime,
     MutationRepeated,
+    ProfileAsk,
+    ProfileAskReply,
     QuestionAsk,
     QuestionAskReply,
     RootDescription,
@@ -671,6 +673,7 @@ async def attach_session(
     trust: TrustAnswer = "",
     hidden_screens: Collection[str] = (),
     choice: ModelChoice = ModelChoice(),
+    profile: str = "",
 ) -> DaemonSession:
     """Start or resume a session on the daemon and catch this client up on it.
 
@@ -690,6 +693,7 @@ async def attach_session(
     state = TuiState()
     client.handlers[ApprovalAsk.METHOD] = answering(ApprovalAsk, _asking_approval(host))
     client.handlers[QuestionAsk.METHOD] = answering(QuestionAsk, _asking_question(host))
+    client.handlers[ProfileAsk.METHOD] = answering(ProfileAsk, _asking_profile(host))
     # `asks` **before** the attach: the desk joins a front end as it attaches, and
     # a client that declared nothing is never asked.
     await client.initialize("asks")
@@ -707,6 +711,7 @@ async def attach_session(
             cwd=str(cwd) if cwd else None,
             trust=trust,
             choice=choice,
+            profile=profile,
         ),
     )
     generation = created.cursor.generation
@@ -904,5 +909,15 @@ def _asking_question(host: ModalHost) -> Callable[[QuestionAsk], Awaitable[Quest
     async def ask(asked: QuestionAsk) -> QuestionAskReply:
         answer = await host.ask_question(asked.question, ask=asked.key)
         return QuestionAskReply(answer=answer)
+
+    return ask
+
+
+def _asking_profile(host: ModalHost) -> Callable[[ProfileAsk], Awaitable[ProfileAskReply]]:
+    """`profile/ask` → the profile-changed modal, in a worker (S6)."""
+
+    async def ask(asked: ProfileAsk) -> ProfileAskReply:
+        decision = await host.ask_profile(asked.name, asked.listing, ask=asked.key)
+        return ProfileAskReply(decision=decision)
 
     return ask

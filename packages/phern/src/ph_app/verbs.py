@@ -37,6 +37,7 @@ from typing import Any
 from ph.seams.schedule import Schedule
 
 from .params import (
+    AdoptParams,
     BrowseParams,
     CancelScheduleParams,
     CommandParams,
@@ -101,6 +102,7 @@ __all__ = [
     "SCREENS_LIST",
     "SESSIONS_BROWSE",
     "SESSIONS_LIST",
+    "SESSION_ADOPT",
     "SESSION_ATTACH",
     "SESSION_CANCEL",
     "SESSION_COMMAND",
@@ -198,6 +200,7 @@ SESSION_SHELL = Verb("session/shell", ShellParams, ShellReply)
 SESSION_PRESET = Verb("session/preset", PresetParams, PresetApplied)
 SESSION_MODEL = Verb("session/model", ModelParams, RootDescription)
 CREDENTIALS_STORE = Verb("credentials/store", StoreCredentialParams, CredentialStored)
+SESSION_ADOPT = Verb("session/adopt", AdoptParams, RootDescription)
 
 MUTATING = (
     SESSION_PROMPT,
@@ -216,7 +219,8 @@ absent, and `MUTATIONS` says why: `attachment/put` (content-addressed, so a
 retry is already a no-op), `session/new` (`start` is idempotent by id) and
 `credentials/store` (storing one value twice stores it once, and a key would
 outlive the value it named: the value lives in this process's memory, and after a
-restart a re-send is the only way it comes back — T5).
+restart a re-send is the only way it comes back — T5), and `session/adopt` (one
+version accepted twice is one adoption — the latest is what the next start reads).
 """
 
 VOCABULARY_VERBS: tuple[Verb[Any, Any] | Notify[Any], ...] = tuple(

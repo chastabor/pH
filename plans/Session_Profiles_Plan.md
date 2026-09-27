@@ -7,8 +7,9 @@ user's, taken after the options review of 2026-09-25.*
 
 **Status, 2026-09-26.** S1–S4 are done: the `affects` declaration, the layers by kind
 (decisions 23 and 24), the `models` row, the named profile format with `phern profiles
-show|fold`, each root's `profile/base` in its log, and overrides through one door. S5
-is next.
+show|fold`, each root's `profile/base` in its log, overrides through one door, each
+root mounted from its own log (S5), and a changed named profile held, listed and
+adopted on purpose (S6). S7 is next.
 
 ## The goal
 
@@ -514,14 +515,39 @@ nothing committed by Claude.
       less than was asked.
     - `profile/override-cleared` is left for S7, which has the first writer of it
       (`/profile clear`).
-- [ ] **S5 — Profiles per session in the daemon.**
+- [x] **S5 — Profiles per session in the daemon.** Done 2026-09-26.
   - `session/new` takes a profile, and the supervisor mounts each root from its log.
   - rpc mode too: it mounts once and serves many sessions, so today one session's
     overrides, brought back by `opened`, are live for the next session on that mount.
     Each session gets a mount of its own, as each daemon root does.
   - *Gate:* two roots on two profiles in one daemon; a root that goes idle and comes back
     keeps its overrides, which fixes the frozen-profile problem.
-- [ ] **S6 — A changed named profile on restart, and adopting on purpose.**
+  - Built: `ph_app.sessions.recorded_environment` reads a stored log's latest base and
+    the overrides since, before anything mounts — a line scan that decodes only the
+    lines naming a profile record, beside the recorded cwd (`recorded_start` since). `ph_app.profiles
+    .session_profile(session_id, requested)` is what every host mounts: the log's
+    environment (`rebuilt(base, host, overrides, then=start options)`) when there is
+    one, `requested` otherwise. The supervisor composes `requested` from `session/new`'s
+    new `profile` (the daemon's `--profile` when empty, refused by name when it does not
+    compose), with the daemon's own start options; `RootDescription.profile` says which
+    a root runs on; the TUI passes its `--profile` for the sessions it creates. `phern -p
+    --session` mounts the same way, and rpc gives each session a mount of its own.
+    Settled in the building:
+    - **A session's profile is its log's.** `session/new`'s `profile` names the profile a
+      *new* session is created on; for one with a base it is not consulted — switching is
+      `/profile use` (S7).
+    - **Host rows come from the profile the base names, as it composes now**, and from
+      `requested` when that one no longer composes: the environment is the log's either
+      way, so a renamed or removed named profile costs a session nothing but its host rows.
+    - **The daemon's start options reach every root**, whatever profile it was created
+      on: they are appended after the log's overrides, and logged where they differ.
+    - **`opened`'s bring-to-the-log step stays**, as the fallback for a store the host
+      cannot read before mounting (a non-file backend); for a JSONL log it finds nothing
+      to do.
+    - Still one composition per start, not per root, for the rows the base does not
+      hold: a changed named profile's *environment* is S6's question, and until then a
+      root mounts its saved base unasked — decision 7's "no" as the default.
+- [x] **S6 — A changed named profile on restart, and adopting on purpose.** Done 2026-09-27.
   - The difference, listed and attributed; hold and ask with a person there when the
     person's file changed; report a pH-only change; keep when unattended;
     `phern profiles diff` and `adopt`.
@@ -531,6 +557,58 @@ nothing committed by Claude.
     saves the new version, logs the switch and re-applies the overrides, then the
     command-line options. `adopt` moves every session on the profile and each keeps its
     overrides.
+  - Built: in `ph.session_profile`, `profile/adopted` and `profile/declined` (ignorable)
+    and `profile/override-cleared` (required); `fold_environment`, the one reading of a
+    log's profile records, live (`logged_environment`) or off disk
+    (`ph_app.sessions.recorded_environment`); `switch_base`, the new base and its
+    clears in one batch, which `opened` runs first when a version was adopted;
+    `profile_change` and `listing` (decision 13's list). `session_profile` returns
+    what to mount and the change it found. The supervisor holds a root whose person's
+    file moved when the start was asked by a client that declared `asks`
+    (`needs-profile-decision`), asks through its desk (`profile/ask`), and on "adopt"
+    records the version and starts the root again, its watchers carried over.
+    `RootDescription.profileChanges`, a "session profiles" section in `phern agents
+    doctor`, and a line in the daemon's log say which roots are behind. `phern
+    profiles diff|adopt`; `ph.persistence.stored_session` claims a stored log without
+    resuming it, and `session/adopt` records a version in one a daemon holds. The
+    TUI's `profile/ask` is a `ConfirmModal`. Settled in the building:
+    - **Overrides apply across a base switch until cleared**, where S4's fold read
+      only those since the latest base — which had only ever been one base.
+      `switch_base` clears the rows whose overrides the new base already says,
+      compared through each row's model, so an override written sparse is cleared by
+      a base that states every default.
+    - **"Asked for by a person" is the client's `asks` capability** on `session/new`
+      or `session/attach`. Every other start — a prompt verb, a stored credential, a
+      schedule, `phern -p`, rpc — keeps the saved version; `phern -p` says so on
+      stderr.
+    - **Three answers.** `adopt`; `keep`, recorded, so that version is not asked
+      about again (though still listed); and `later` — also Esc — which records
+      nothing and asks at the next start.
+    - **"Yes" and `adopt` are one mechanism**: both record `profile/adopted`, and the
+      next start makes it the base. For a held root that start is at once: it is
+      released and mounted again from its log, because a live mount cannot add,
+      remove or disable rows. While held, nothing is driven and its children are not
+      resumed, since the restart would cut them short.
+    - **An override is a whole row's setting**, the loader's rule, so over a row the
+      new version changed it still wins, and the new version's change to that row
+      does not apply. The listing names each such override ("Still applied over it").
+    - **`adopt` writes a stored session under its lease, not resumed**: no repair, no
+      reconcile, no `session/resumed`, on a mount of the host's rows alone
+      (`log_host`), since nothing runs. A session a daemon holds is written through
+      it; one another process holds (a running `phern -p`) is reported not adopted.
+    - **A fork's environment is read through its lineage** (found in review): its file
+      continues its root's from `seed_length`, and the base is in that prefix, so the
+      one-file scan found none and a fork mounted what was asked. `read_stored` is the
+      store's one-file read with no mount behind it, which `materialize` walks.
+    - Not done: a TUI attaching to a root that kept a changed version (pH's alone, or
+      declined) says nothing in the terminal; `phern profiles diff` and `phern agents
+      doctor` list it. `phern doctor` does not scan stored sessions.
+    - Not done, found in review: a fork's header names its parent (`parent_session`)
+      as a child's does, so `record_base` and `opened` pass it over — a fork started
+      as a root mounts its inherited environment but logs no start options and never
+      switches to a version adopted for it. The two want telling apart by `origin`,
+      as `stored_on` now does. And `session/adopt` on a root held for a decision
+      records the version but leaves the hold and its modal up.
 - [ ] **S7 — `/profile show | diff | save | use | clear`.**
   - *Gate:* tune in a session, save, start a headless run on the saved profile, and the two
     environments match.

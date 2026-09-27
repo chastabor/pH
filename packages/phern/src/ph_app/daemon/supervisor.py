@@ -39,11 +39,12 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from ph.agent.types import AgentDriver
-from ph.cordis import Context, Profile
+from ph.cordis import Context, LoaderError, Profile
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     INVARIANTS,
+    MOUNT,
     SCHEDULE,
     SESSION_PERSISTENCE,
     SESSIONS,
@@ -78,7 +79,15 @@ from ph.session import (
 )
 from ph.session.kinds import SESSION_HOLDER
 from ph.session.writers import log_writer
-from ph.session_profile import OverrideSource
+from ph.session_profile import (
+    LoggedEnvironment,
+    OverrideSource,
+    ProfileBase,
+    ProfileChange,
+    record_adopted,
+    record_declined,
+)
+from ph.text import count_of
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
@@ -93,9 +102,15 @@ from ..payloads import (
     SessionStatusNotice,
     ShellReply,
 )
+from ..profiles import (
+    StartingProfile,
+    composed_like,
+    kept_note,
+    session_profile,
+)
 from ..protocol import Refusal, cursor_of
 from ..runtime import mounted
-from ..sessions import recorded_cwd
+from ..sessions import recorded_start
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
@@ -378,6 +393,15 @@ class Root:
     On the root rather than on a connection because the *question* outlives any
     client: nobody attached means the ask waits, and the log holds it either
     way."""
+    change: ProfileChange | None = None
+    """How this root's named profile had moved when it started, against the version
+    it runs on (S6) — `None` when it had not. It runs on its own version until one
+    is adopted; `describe` says how many settings differ."""
+    held_on_profile: bool = False
+    """Whether this root waits on a person's decision about `change` (S6): the
+    person's own profile moved, and the root was started for a front end that can
+    be asked. Held like a missing credential — nothing is driven, and a prompt
+    waits in the inbox — and `status` says `needs-profile-decision`."""
 
     @property
     def needs_credential(self) -> str | None:
@@ -444,6 +468,11 @@ class Root:
         # Parked on a person outranks what the agent says: it reports `running`
         # while an approval is open, which is true and not useful. See
         # `test_a_root_parked_on_a_person_may_be_released`.
+        # A root held on its profile is also parked on a person, and the ask it
+        # waits on is the desk's — so this answer comes first, being the one a
+        # person can act on.
+        if self.held_on_profile:
+            return "needs-profile-decision"
         if self.desk is not None and self.desk.waiting:
             return "waiting"
         live = str(self.agent.status)
@@ -643,6 +672,17 @@ class Root:
             provider=options.provider or "",
             model=options.model or "",
             model_key=options.model_key,
+            profile=self.ctx.require(MOUNT).profile.name,
+            profile_changes=len(self.change.differences) if self.change is not None else 0,
+        )
+
+    def status_notice(self) -> SessionStatusNotice:
+        """The whole of `session.status` for this root — its description's facts and its
+        footer, as attach seeds them — for a watcher told the root moved under it."""
+        facts = self.describe().facts()
+        return SessionStatusNotice(
+            session_id=self.id,
+            **facts.model_copy(update={"readings": readings_of(self)}).model_dump(),
         )
 
     def detail(self) -> RootDetail:
@@ -692,7 +732,13 @@ def _recorded_violations(session: Session) -> set[str]:
     return {as_str(as_obj(one).get("invariant")) for one in as_seq(event.data.get("violations"))}
 
 
-QUIET: tuple[str, ...] = ("idle", "waiting", "failed", "needs-credential")
+QUIET: tuple[str, ...] = (
+    "idle",
+    "waiting",
+    "failed",
+    "needs-credential",
+    "needs-profile-decision",
+)
 """The statuses that are not work in hand — read by `passivatable` and `busy`.
 
 `waiting` joins `idle`, which is the whole reason that status exists: a root
@@ -710,7 +756,8 @@ The person is not waiting on it, which is what this tuple is asking.
 
 **`needs-credential` for `waiting`'s reason** (T5): the root cannot move until a
 person supplies a key, and its hold is in its log, so releasing it loses nothing —
-the next start asks again.
+the next start asks again. **`needs-profile-decision` for the same one** (S6): a
+root released before anybody answered is asked again when it is next started.
 
 Named rather than spelled twice, because the two readers answer *different*
 questions from the same rule — "may this root be released" and "may this process
@@ -736,6 +783,24 @@ def _say_what_waits(root: Root) -> None:
             name,
             holders,
         )
+
+
+def _say_profile_moved(root: Root) -> None:
+    """One line when a root starts with its named profile moved since it began (S6):
+    held for a person, or kept — the account a daemon's log owes either way."""
+    change = root.change
+    if change is None:
+        return
+    if root.held_on_profile:
+        log.warning(
+            "ph_app.daemon: root %s is held: %s has changed since it started (%s); "
+            "waiting for a person to decide",
+            root.id,
+            change.now.name,
+            count_of(len(change.differences), "setting"),
+        )
+        return
+    log.info("ph_app.daemon: %s", kept_note(change, root.id))
 
 
 def _waiting_on(roots: Iterable[Root]) -> list[tuple[str, str]]:
@@ -808,7 +873,13 @@ class Supervisor:
     """The appointment index, built on first use. See `_index`."""
 
     async def start(
-        self, root_id: str, *, cwd: str | None = None, choice: ModelChoice = ModelChoice()
+        self,
+        root_id: str,
+        *,
+        cwd: str | None = None,
+        choice: ModelChoice = ModelChoice(),
+        profile: str = "",
+        asks: bool = False,
     ) -> Root:
         """Take the lease for this root, then mount it (I-5).
 
@@ -848,7 +919,12 @@ class Supervisor:
 
         `choice` is what a fresh root mounts on — `session/new`'s — and the
         daemon's own when absent or empty. A root already mounted keeps its
-        route here; moving it is `set_model`'s.
+        route here; moving it is `set_model`'s. `profile` is the named profile a
+        *new* session is created on (S5), the daemon's own `--profile` when empty; a
+        session with a log runs on what its log records, whatever is asked here.
+        `asks` says a front end that can answer for a person asked for this start
+        (S6): a root whose person's own named profile moved since it began is held
+        for them to decide, where one started for a schedule keeps its version.
         """
         root = self.roots.get(root_id)
         if root is not None:
@@ -865,7 +941,7 @@ class Supervisor:
         if pending is None:
             pending = self._mounting[root_id] = _Mounting()
             wanted = self.choice if choice.is_default else choice
-            self.tasks.start_soon(self._mount, root_id, cwd, wanted, pending)
+            self.tasks.start_soon(self._mount, root_id, cwd, wanted, profile, asks, pending)
         await pending.done.wait()
         if pending.error is not None:
             raise pending.error
@@ -877,7 +953,13 @@ class Supervisor:
         return pending.root
 
     async def _mount(
-        self, root_id: str, cwd: str | None, choice: ModelChoice, pending: _Mounting
+        self,
+        root_id: str,
+        cwd: str | None,
+        choice: ModelChoice,
+        profile: str,
+        asks: bool,
+        pending: _Mounting,
     ) -> None:
         """Build one root on the supervisor's own task, and publish the answer.
 
@@ -892,14 +974,24 @@ class Supervisor:
         """
         try:
             async with self._starting:
-                pending.root = await self._start(root_id, cwd=cwd, choice=choice)
+                pending.root = await self._start(
+                    root_id, cwd=cwd, choice=choice, profile=profile, asks=asks
+                )
         except Exception as error:
             pending.error = error
         finally:
             self._mounting.pop(root_id, None)
             pending.done.set()
 
-    async def _start(self, root_id: str, *, cwd: str | None, choice: ModelChoice) -> Root:
+    async def _start(
+        self,
+        root_id: str,
+        *,
+        cwd: str | None,
+        choice: ModelChoice,
+        profile: str = "",
+        asks: bool = False,
+    ) -> Root:
         """Mount a profile, create its agent, and give it its own task.
 
         Through `runtime.mounted`, so a mode cannot drift from the profile semantics —
@@ -910,8 +1002,12 @@ class Supervisor:
 
         The mount is **per root and not shared**: two roots are two deployments as far as
         every seam is concerned, and sharing one `Context` would make a row's
-        `ctx.provide` visible to a root that never asked for it. The *composition* is shared:
-        `profile` arrives composed, and each root mounts it.
+        `ctx.provide` visible to a root that never asked for it. **So is the profile**
+        (S5): a root is mounted from its own log's environment when it has one
+        (`session_profile`), and a new one from the profile it was asked for — so two
+        roots on two profiles share a daemon, and one that went idle comes back as it
+        was. A named profile that moved since it began is kept, or put to a person
+        (`asks`, S6) before anything runs.
         """
         if root_id in self.roots:
             return self.roots[root_id]
@@ -923,9 +1019,11 @@ class Supervisor:
             # from the wrong tree. A new session's directory is the client's; a
             # resumed one's is what its own header recorded, read off disk
             # because there is no store to ask until this mount exists.
-            where = cwd or recorded_cwd(resolve_roots().sessions_dir(), root_id)
+            recorded = recorded_start(resolve_roots().sessions_dir(), root_id)
+            where = cwd or recorded.cwd
+            starting = self._profile_for(root_id, profile, recorded.environment)
             ctx = await exits.enter_async_context(
-                mounted(self.profile, project=Path(where) if where else None)
+                mounted(starting.profile, project=Path(where) if where else None)
             )
             session = await self._session_for(ctx, root_id, cwd=cwd)
             # The session's own model first — the base, and any `/model` it logged,
@@ -979,6 +1077,14 @@ class Supervisor:
 
             exits.callback(forget)
             self.roots[root_id] = root
+            # **A named profile that moved since this root began** (S6): kept,
+            # unless the person's own file moved and a person is here to ask — then
+            # held, and asked, before anything runs on either version.
+            root.change = starting.change
+            root.held_on_profile = (
+                asks and starting.change is not None and starting.change.worth_asking
+            )
+            _say_profile_moved(root)
             # **Nothing starts without its credentials** (T5): asked before the
             # root can be driven and before its children are readmitted, so a key
             # a restart lost holds the work that needs it, by name, rather than
@@ -990,16 +1096,10 @@ class Supervisor:
             # and running nowhere: the queued ones are re-driven, and the ones
             # caught mid-turn are settled rather than re-run — see
             # `resume_children`. In the table first, because a readmitted child
-            # starts a drive job owned by this root's scope.
-            subagents = ctx.get(SUBAGENTS)
-            if subagents is not None:
-                revived = await subagents.resume_children(agent, retry_limit=CHILD_RETRY_LIMIT)
-                if revived:
-                    log.info(
-                        "ph_app.daemon: root %s put %d admitted child(ren) back to work",
-                        root_id,
-                        len(revived),
-                    )
+            # starts a drive job owned by this root's scope. Not while held on its
+            # profile: a "yes" starts the root again, which would cut them short.
+            if not root.held_on_profile:
+                await self._resume_children(root)
             _say_what_waits(root)
 
             def relay(source: Session, event: SessionEvent) -> None:
@@ -1105,6 +1205,12 @@ class Supervisor:
             ctx.on("commands/change", verbs)
             ctx.on("screens/change", drew)
             self.tasks.start_soon(self._run, root)
+            if root.held_on_profile:
+                # The ask ends with the root: released first, it is asked again at
+                # the next start, where the hold is found again.
+                asking = anyio.CancelScope()
+                exits.callback(asking.cancel)
+                self.tasks.start_soon(self._decide_profile, root, asking)
             # Ours now: the `async with` unwinds a stack that has been emptied,
             # so a failure anywhere above disposes everything it entered and a
             # success hands the whole stack to the root. The hand-rolled
@@ -1161,9 +1267,13 @@ class Supervisor:
         """
         async with root.waiting:
             async for _ in root.waiting:
-                # Held for a credential (T5): the message stays in the inbox, and
-                # `credential_supplied` rings again once the name arrives.
-                if root.agent.status != "idle" or root.needs_credential is not None:
+                # Held for a credential (T5) or a profile decision (S6): the message
+                # stays in the inbox, and whatever releases the hold rings again.
+                if (
+                    root.agent.status != "idle"
+                    or root.needs_credential is not None
+                    or root.held_on_profile
+                ):
                     continue
                 await self._drive(root)
 
@@ -1197,6 +1307,18 @@ class Supervisor:
                 )
             )
 
+    def _profile_for(self, root_id: str, name: str, recorded: LoggedEnvironment) -> StartingProfile:
+        """The profile `root_id` mounts in: its log's, else `name` (or the daemon's own).
+
+        `name` is composed with the daemon's own start options, so a `--patch` given
+        to `phern daemon` reaches every root whatever profile it was asked for.
+        """
+        try:
+            requested = composed_like(name, self.profile) if name else self.profile
+        except (LoaderError, OSError, ValueError) as error:
+            raise Refusal(f'profile "{name}" does not compose: {error}') from error
+        return session_profile(root_id, requested, recorded=recorded)
+
     def starts_on(self) -> ModelEntry | None:
         """What a new root runs on, read off the composed profile without a mount.
 
@@ -1208,6 +1330,119 @@ class Supervisor:
             return ModelList.of(self.profile).resolve(self.choice)
         except ModelChoiceError:
             return None
+
+    async def _resume_children(self, root: Root) -> None:
+        """Put back to work what this root's children are owed (P5-04)."""
+        subagents = root.ctx.get(SUBAGENTS)
+        if subagents is None:
+            return
+        revived = await subagents.resume_children(root.agent, retry_limit=CHILD_RETRY_LIMIT)
+        if revived:
+            log.info(
+                "ph_app.daemon: root %s put %d admitted child(ren) back to work",
+                root.id,
+                len(revived),
+            )
+
+    async def _decide_profile(self, root: Root, asking: anyio.CancelScope) -> None:
+        """Put a root's moved named profile to a person, and act on the answer (S6).
+
+        Through the root's desk, so whoever attaches is asked, and within `asking`,
+        which the root's release cancels: a root released first is asked again at
+        its next start. **Adopt** records the version and starts the root again
+        from its log, which then makes it the base with the overrides kept, then
+        this daemon's start options. **Keep** records the no, so that version is
+        not asked about again; **later** records nothing. Either way the root then
+        runs on the version it has.
+
+        Its own task in the supervisor's group, so nothing raised here may escape:
+        a failure lets the root go on its own version, which is what it had.
+        """
+        change = root.change
+        if change is None or root.desk is None:
+            return
+        try:
+            with asking:
+                decision = await root.desk.decide_profile(change)
+            if asking.cancelled_caught:
+                return
+            if decision == "adopt":
+                if not await record_adopted(root.ctx, root.session, change.now):
+                    log.warning("ph_app.daemon: root %s: the adoption did not reach disk", root.id)
+                await self._remount(root)
+                return
+            if decision == "keep":
+                await record_declined(root.ctx, root.session, change.now)
+        except Exception:
+            log.exception("ph_app.daemon: root %s: the profile decision failed", root.id)
+        if self.roots.get(root.id) is not root:
+            return
+        root.held_on_profile = False
+        await self._resume_children(root)
+        root.publish(root.status_notice())
+        root.ring()
+
+    async def _remount(self, root: Root) -> None:
+        """Release `root` and start it again from its log, keeping who watches it (S6).
+
+        What a "yes" to a moved profile does: the version is in the log, and a start
+        is where a base changes, so the root is unmounted as a passivation would —
+        without the passivation's record, since it did not go quiet — and mounted
+        again. Its watchers and answerers move to the new root, which a
+        connection finds by id, and are told what changed: the route, the verbs
+        and the screens are the new mount's. A prompt still in the inbox is rung.
+        """
+        async with self._starting:
+            if self.roots.get(root.id) is not root:
+                return
+            await self._unmount(root)
+            try:
+                back = await self._start(root.id, cwd=None, choice=ModelChoice())
+            except Exception:
+                log.exception(
+                    "ph_app.daemon: root %s did not start again on its new profile", root.id
+                )
+                # Its watchers are still on it, so the old root can say so.
+                root.publish(SessionStatusNotice(session_id=root.id, status="failed"))
+                return
+        for watcher in root.subscribers:
+            back.subscribe(watcher)
+        # The composer's tray and the desk's count go with the root: a chip dropped
+        # while it was held is still staged, and an ask numbered again from 1 could
+        # meet a front end still filing one under that name (`AskDesk.asked`).
+        back.staged = root.staged
+        if back.desk is not None and root.desk is not None:
+            back.desk.asked = root.desk.asked
+            for who in root.desk.front_ends:
+                back.desk.join(who)
+        back.publish(back.status_notice())
+        back.publish(SessionCommandsNotice(session_id=back.id, commands=commands_of(back)))
+        back.publish(SessionScreensNotice(session_id=back.id, screens=screens_of(back)))
+        if back.agent.inbox.has_pending:
+            back.ring()
+
+    async def adopt(self, root: Root, version: ProfileBase) -> None:
+        """Accept `version` for `root`'s next start — `phern profiles adopt` (S6).
+
+        A running root is not interrupted (decision 18): it keeps its base, and the
+        start after its release makes this the base, overrides kept.
+        """
+        if not await record_adopted(root.ctx, root.session, version):
+            raise Refusal(f"{root.id}: the adoption could not be written to its log")
+
+    def behind(self) -> list[tuple[str, str]]:
+        """`(root, what)` for every mounted root whose named profile moved since it
+        started (S6) — `phern agents doctor`'s rows, beside the credentials awaited."""
+        rows: list[tuple[str, str]] = []
+        for root_id, root in sorted(self.roots.items()):
+            change = root.change
+            if change is None:
+                continue
+            what = f"{change.now.name}: {count_of(len(change.differences), 'setting')} differ"
+            rows.append(
+                (root_id, f"{what} — held for a decision" if root.held_on_profile else what)
+            )
+        return rows
 
     async def _check_credential(self, root: Root) -> None:
         """Hold or release `root` on its own route's credential, and say so in its log."""
@@ -1949,6 +2184,10 @@ class Supervisor:
         log.info(
             "ph_app.daemon: passivating root %s after %d minutes idle", root.id, idle_ms // 60_000
         )
+        await self._unmount(root)
+
+    async def _unmount(self, root: Root) -> None:
+        """Take a root out of the table and unwind it: a passivation's, and a remount's."""
         self.roots.pop(root.id, None)
         subagents = root.ctx.get(SUBAGENTS)
         if subagents is not None:

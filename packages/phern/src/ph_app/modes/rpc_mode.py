@@ -15,17 +15,19 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 import anyio
 
+from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.persistence import open_session
 from ph.seams.models import ModelChoice, start_on
-from ph.session import Session, SessionEvent
+from ph.session import Session, SessionEvent, SessionForkError, new_session_id
 from ph.wire import WireModel
 
 from .. import verbs
@@ -34,6 +36,7 @@ from ..payloads import (
     SessionNotice,
     SessionStatusNotice,
 )
+from ..profiles import session_profile
 from ..protocol import (
     Frame,
     MethodResult,
@@ -75,14 +78,48 @@ class _PromptParams(WireModel):
 
 
 @dataclass(slots=True)
-class RpcServer:
-    """One stdio JSON-RPC endpoint over a mounted pH."""
+class _Served:
+    """One session this server serves: its own mount, and its agent once prompted."""
 
     ctx: Context
+    agent: AgentDriver | None = None
+
+
+@dataclass(slots=True)
+class RpcServer:
+    """One stdio JSON-RPC endpoint, each session it serves on a mount of its own (S5).
+
+    One mount per session, as the daemon has one per root: a session's overrides are
+    realized on its mount, so a shared one made one session's `/model` or allowance
+    the next session's too, with nothing in the second's log to say so. Each is
+    mounted from its own log's environment (`session_profile`), `profile` being what a
+    new one starts on; all of them unwind with `exits`.
+    """
+
+    profile: Profile
+    exits: AsyncExitStack
     out: TextIO
     choice: ModelChoice = field(default_factory=ModelChoice)
     """What `phern --mode rpc --provider/--model` asked for; empty is the profile default."""
-    _agents: dict[str, Any] = field(default_factory=dict)
+    _served: dict[str, _Served] = field(default_factory=dict)
+    _deployment: Context | None = None
+
+    async def _mount(self, session_id: str, *, fresh: bool = False) -> _Served:
+        """The session's own mount, mounted the first time it is asked for. `fresh` is
+        an id this server just made, which has no log to read an environment from."""
+        served = self._served.get(session_id)
+        if served is None:
+            starting = session_profile(None if fresh else session_id, self.profile)
+            ctx = await self.exits.enter_async_context(mounted(starting.profile))
+            served = self._served[session_id] = _Served(ctx)
+        return served
+
+    async def _listing(self) -> Context:
+        """The profile itself, mounted once, for what the deployment offers before any
+        session exists — `tools/list`."""
+        if self._deployment is None:
+            self._deployment = await self.exits.enter_async_context(mounted(self.profile))
+        return self._deployment
 
     def _write(self, payload: Frame) -> None:
         self.out.write(f"{dumps(payload)}\n")
@@ -125,20 +162,29 @@ class RpcServer:
             # Open, not create: a peer naming a stored id resumes it, and one
             # another process holds is refused by name (P5-03).
             opened = parse_params(method, _NewParams, params)
-            session = await open_session(self.ctx, opened.session_id)
-            self._attach(session)
+            session_id = opened.session_id or new_session_id()
+            ctx = (await self._mount(session_id, fresh=not opened.session_id)).ctx
+            session = await open_session(ctx, session_id)
+            self._attach(ctx, session)
             return {"sessionId": session.id}
         if method == "session/prompt":
             return await self._prompt(parse_params(method, _PromptParams, params))
         if method == "session/events":
             asked = parse_params(method, SessionParams, params)
-            session = self.ctx.require(SESSIONS).require(asked.session_id)
+            # A session is only ever opened on its own mount, so one without one
+            # here is one this server never opened.
+            served = self._served.get(asked.session_id)
+            if served is None:
+                raise SessionForkError(
+                    f'session "{asked.session_id}" not found', "SESSION_NOT_FOUND"
+                )
+            session = served.ctx.require(SESSIONS).require(asked.session_id)
             return {"events": [event.to_wire() for event in session.events]}
         if method == "tools/list":
             # `DEPLOYMENT` (P6-32): RPC mode advertises what the deployment
             # offers, before any agent exists to narrow it.
             parse_params(method, NoParams, params)
-            schemas = self.ctx.require(TOOLS).schemas(scope=DEPLOYMENT)
+            schemas = (await self._listing()).require(TOOLS).schemas(scope=DEPLOYMENT)
             return {"tools": [schema.to_wire() for schema in schemas]}
         if method == "shutdown":
             verbs.SHUTDOWN.parse(params)
@@ -149,21 +195,23 @@ class RpcServer:
             return None
         raise UnknownMethod(f'unknown method "{method}"')
 
-    def _attach(self, session: Session) -> None:
+    def _attach(self, ctx: Context, session: Session) -> None:
         def emit(source: Session, event: SessionEvent) -> None:
             if source.id != session.id:
                 return
             self._notify(SessionEventNotice(session_id=source.id, event=event.to_wire()))
 
-        self.ctx.on("session/event", emit)
+        ctx.on("session/event", emit)
 
     async def _prompt(self, params: _PromptParams) -> dict[str, Any]:
-        session_id = params.session_id
-        session = self.ctx.require(SESSIONS).get(session_id) if session_id else None
+        session_id = params.session_id or new_session_id()
+        served = await self._mount(session_id, fresh=not params.session_id)
+        ctx = served.ctx
+        session = ctx.require(SESSIONS).get(session_id)
         if session is None:
-            session = await open_session(self.ctx, session_id)
-            self._attach(session)
-        agent = self._agents.get(session.id)
+            session = await open_session(ctx, session_id)
+            self._attach(ctx, session)
+        agent = served.agent
         if agent is None:
             # A prompt that names a route asks for it the way the flags do, and
             # one that names neither takes the server's — through the one rule.
@@ -172,17 +220,16 @@ class RpcServer:
             # An override of the session's model where it differs (S4): the prompt's
             # own route is a verb's, the server's flags a start option.
             entry = await start_on(
-                self.ctx,
+                ctx,
                 session,
                 asked,
                 source="verb" if named else "cli",
                 command=f"session/prompt {asked.spelled}" if named else asked.flags,
             )
-            agent = self.ctx.require(AGENTS).create(session, entry.options())
-            self._agents[session.id] = agent
+            agent = served.agent = ctx.require(AGENTS).create(session, entry.options())
         self._notify(SessionStatusNotice(session_id=session.id, status="running"))
         await agent.prompt(params.prompt)
-        await self.ctx.require(SESSIONS).flush(session)
+        await ctx.require(SESSIONS).flush(session)
         self._notify(SessionStatusNotice(session_id=session.id, status="idle"))
         return {"sessionId": session.id, "events": len(session.events)}
 
@@ -197,8 +244,8 @@ async def run_rpc(
     """Serve JSON-RPC until stdin closes."""
     source = stdin if stdin is not None else sys.stdin
     sink = out if out is not None else sys.stdout
-    async with mounted(profile) as ctx:
-        server = RpcServer(ctx=ctx, out=sink, choice=choice)
+    async with AsyncExitStack() as exits:
+        server = RpcServer(profile=profile, exits=exits, out=sink, choice=choice)
         while True:
             line = await anyio.to_thread.run_sync(source.readline)
             if not line:

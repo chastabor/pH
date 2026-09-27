@@ -20,7 +20,7 @@ from textual.pilot import Pilot
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph_app.daemon.supervisor import Root
-from ph_app.payloads import AskKey
+from ph_app.payloads import AskKey, ProfileDecision
 from ph_app.tui.app import PHTuiApp
 from ph_app.tui.state import Surface
 
@@ -149,6 +149,8 @@ class StubHost:
     def __init__(self) -> None:
         self.approvals: list[ApprovalRequest] = []
         self.questions: list[UserQuestion] = []
+        self.profiles: list[tuple[str, str]] = []
+        self.profile_decision: ProfileDecision = "later"
         self.withdrawn: list[AskKey] = []
         self.redraws = 0
         self.redrawn = Surface.NOTHING
@@ -167,6 +169,12 @@ class StubHost:
     ) -> str | None:
         self.questions.append(question)
         return "42"
+
+    async def ask_profile(
+        self, name: str, listing: str, *, ask: AskKey | None = None
+    ) -> ProfileDecision:
+        self.profiles.append((name, listing))
+        return self.profile_decision
 
     def withdraw_ask(self, ask: AskKey, *, reason: str = "") -> None:
         self.withdrawn.append(ask)

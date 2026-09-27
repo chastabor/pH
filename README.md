@@ -200,7 +200,7 @@ Three things that line says, spelled out:
 ## The daemon
 
 ```bash
-phern daemon --profile llama                  # every root on the profile's default model
+phern daemon --profile llama                  # the profile new sessions start on
 phern daemon --max-concurrent-children 6      # across every root; the rest queue
 phern daemon --passivate-after 30             # minutes of quiet before a root is released, or `off`
 phern daemon --ephemeral                      # exit once no client, root or appointment needs it
@@ -260,6 +260,8 @@ phern profiles show work            # what the file sets
 phern profiles show work --full     # every setting a session on it runs with, defaults included
 phern profiles fold                 # fold drop-ins and old list-format files into one file each
 phern profiles session <id>         # the profile a session started in, from its log
+phern profiles diff work            # what each session on it would change, to take its current version
+phern profiles adopt work           # take it, at each session's next start (--session <id>, --yes)
 ```
 
 A file that is still a bare list of rows (the format before named profiles), and
@@ -268,8 +270,19 @@ fold` folds them into the named file; `phern doctor` names each one until then.
 
 What a session changes while it runs — `/sandbox allow`, `/model`, and each
 `--patch` or `--model` that differs from its profile — is an override in the
-session's log, written before the change takes effect, and put back whenever that
-session starts again.
+session's log, written before the change takes effect. A session is mounted from
+its own log whenever it starts again — its profile as it was when it began, then
+its overrides — so a daemon's `--profile` is only the one *new* sessions start on,
+and one daemon holds sessions on as many profiles as were asked for.
+
+A session keeps the version of its named profile it started on. If you edit the file
+while it is not running, its next start from the TUI stops and shows each changed
+setting, old and new: use the new version, keep the session's (and not be asked about
+that version again), or decide next time. The session's overrides still apply over the
+new version. A start nobody is there to answer — a schedule's, or `phern -p` — keeps
+the session's version and says so, and so does a change that is only pH's own defaults
+moving under a file you did not edit. `phern profiles adopt` takes a new version on
+purpose, for every session on the profile, without starting any of them.
 
 `daemon.yaml` can also move where sessions and profiles are kept. It is read
 when a process starts:

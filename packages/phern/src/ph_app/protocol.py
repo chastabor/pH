@@ -128,13 +128,18 @@ route comes from the profile's `models` row rather than from the daemon's
 `--provider`/`--model` alone. `RootDescription` and `StatusFacts` gain
 `modelKey`, the profile's name for the route in force; `daemon/status` replaces
 its `provider`/`model` with `startsOn`, the entry a new root runs on;
-`session/new` takes a `choice`, so a terminal's `--model` is its session's and
-not the daemon it spawns; and two verbs are new — `session/model` (a mutation:
-run this root on a listed key or a whole route from its next request, answered
-with the root's description) and `models/list` (the listed models, default
-first). A 0.4.x client reading a 5 daemon refuses the `modelKey` it does not
-know, since every model is `extra="forbid"`; restarting the daemon on the same
-release fixes that.
+`session/new` takes a `choice` and a `profile`, so a terminal's `--model` and
+`--profile` are its sessions' and not the daemon's; `RootDescription` gains
+`profile`, the one a root runs on — its log's, once it has one; and two verbs
+are new — `session/model` (a mutation: run this root on a listed key or a whole
+route from its next request, answered with the root's description) and
+`models/list` (the listed models, default first). Then S6: a root whose named
+profile moved since it started says how far behind it is (`profileChanges`), one
+held on a person's decision about it reports `needs-profile-decision`, the daemon
+asks that decision with `profile/ask` (answered `adopt`, `keep` or `later`), and
+`session/adopt` records a version for a held root's next start. A 0.4.x client
+reading a 5 daemon refuses the `modelKey` it does not know, since every model is
+`extra="forbid"`; restarting the daemon on the same release fixes that.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by
@@ -675,7 +680,7 @@ class SessionParams(WireModel):
     `session/*` method on both transports takes: a handler cannot forget a check
     the wire type already made. An id becomes a directory name in the spill
     store, the archive and the workspace scratch root, and several of the
-    daemon's own reads — `recorded_cwd`, the lease, `locate_session` — build a
+    daemon's own reads — `recorded_start`, the lease, `locate_session` — build a
     path from it before any `Session` exists to refuse it.
     """
 

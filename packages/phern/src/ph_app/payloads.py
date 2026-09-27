@@ -79,6 +79,9 @@ __all__ = [
     "Hold",
     "MutationRepeated",
     "PresetApplied",
+    "ProfileAsk",
+    "ProfileAskReply",
+    "ProfileDecision",
     "QuestionAsk",
     "QuestionAskReply",
     "RepeatOutcome",
@@ -214,6 +217,12 @@ class RootDescription(SessionScoped):
     model_key: str = ""
     """Which of the session's models this is — a route a person named is listed under a
     name made from it (S4) — or `""` on a profile with no `models` row."""
+    profile: str = ""
+    """The named profile this root runs on — its log's (S5) — or `""` for a profile file."""
+    profile_changes: int = 0
+    """How many settings that named profile, as it composes now, differs by from the
+    version this root started on (S6) — `0` when it has not moved. A root runs on its
+    own version until one is adopted; `phern profiles diff` lists them."""
 
     def facts(self) -> StatusFacts:
         """This description as the status half of it.
@@ -862,6 +871,31 @@ class QuestionAsk(SessionAsk):
 
     METHOD: ClassVar[str] = "question/ask"
     question: UserQuestion
+
+
+ProfileDecision: TypeAlias = Literal["adopt", "keep", "later"]
+"""What a person says about a named profile that moved since the session started (S6):
+start on the new version, keep this session's and do not ask about that version
+again, or keep it for now and ask at the next start."""
+
+
+class ProfileAsk(SessionAsk):
+    """`profile/ask` — the session's named profile changed since it started (S6).
+
+    `listing` is the change as the person reads it (`ph.session_profile.listing`):
+    each setting with its old and new value and whose it is, then the session's
+    overrides that still apply over a changed row. Rendered on the daemon, so every
+    front end shows the one account of it."""
+
+    METHOD: ClassVar[str] = "profile/ask"
+    name: str
+    listing: str
+
+
+class ProfileAskReply(WireModel):
+    """What a front end answers a `profile/ask` with."""
+
+    decision: ProfileDecision = "later"
 
 
 class QuestionAskReply(WireModel):

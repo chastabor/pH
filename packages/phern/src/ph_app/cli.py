@@ -258,6 +258,10 @@ def default(
                 # rides `session/new`, so a daemon already serving other sessions
                 # keeps them on their own.
                 model_choice=choice,
+                # And the profile a session it creates runs on: the spawned daemon's
+                # default is this too, and a daemon already running with another
+                # default creates this terminal's sessions on it all the same (S5).
+                profile=profile,
                 session_id=wanted,
                 spawn=not no_spawn,
                 # `--session`/`--resume` already name one, so they skip the offer

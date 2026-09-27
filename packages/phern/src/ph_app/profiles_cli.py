@@ -5,6 +5,10 @@ person's file sets — sparse, the rows that differ — and, with `--full`, ever
 setting a session on it runs with, defaults included. The second is for debugging
 and for a first session, deciding what to change.
 
+`diff` and `adopt` are S6's: a named profile that moved since a session started is
+kept by that session until a person takes the new version on purpose — ahead of
+its next start, for one session or every one on the profile (decisions 10, 18).
+
 `fold` is item 0 of `plans/Session_Profiles_Plan.md`, run on purpose: a profile's
 drop-ins, and a file still in the list format before S2, become the one named
 profile file. It composes the profile before and after and keeps the change only
@@ -15,34 +19,54 @@ when the two agree, so a session that starts on it next notices nothing.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 
+import anyio
 import typer
 import yaml
 from pydantic import ValidationError
 
-from ph.cordis import LoaderError, sparse_entries
+from ph.cordis import LoaderError, Profile, sparse_entries
 from ph.documents import decode_document
 from ph.json import as_seq, as_str, thaw_json
-from ph.paths import resolve_roots, write_atomic
-from ph.persistence import read_session
+from ph.paths import RuntimeDirError, resolve_roots, write_atomic
+from ph.persistence import SessionBusy, read_session, stored_session
 from ph.persistence.jsonl import locate_session
-from ph.session_profile import BASE
+from ph.session_profile import (
+    BASE,
+    LoggedEnvironment,
+    ProfileBase,
+    ProfileChange,
+    base_of,
+    listing,
+    profile_change,
+    record_adopted,
+)
+from ph.text import count_of
 from ph.wire import validation_errors
 
+from . import verbs
 from .console import detail, emit, fail
+from .daemon.client import DaemonClient, connected
 from .named_profiles import append_rows, render_named_profile
+from .params import AdoptParams
 from .profiles import (
     compose_profile,
+    log_host,
     profile_or_exit,
     profile_plan,
     sparse_text,
     unfolded_profiles,
 )
+from .protocol import DaemonError, DaemonGone
+from .runtime import mounted
+from .sessions import recorded_environment, stored_on
 
-__all__ = ["FoldRefused", "fold_profile", "profiles_app"]
+__all__ = ["FoldRefused", "adopt_version", "fold_profile", "profiles_app"]
 
 profiles_app = typer.Typer(
     help="Named profiles: what they set, and folding the older layers into them.",
@@ -50,6 +74,10 @@ profiles_app = typer.Typer(
 )
 
 ProfileName = Annotated[str, typer.Argument(help="A profile name, or a path to a .yaml.")]
+SessionChoice = Annotated[
+    str,
+    typer.Option("--session", help="One stored session; every one on the profile when left out."),
+]
 
 
 @profiles_app.command()
@@ -68,13 +96,9 @@ def show(
     `phern config` and `--dump-config` show those.
     """
     if full:
-        composed = profile_or_exit(name)
-        try:
-            rows = composed.resolved({"environment"})
-        except ValidationError as error:
-            fail(f"[red]{'; '.join(validation_errors(error, root='config'))}[/red]", code=2)
-        except LoaderError as error:
-            fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
+        rows = _resolved_or_exit(
+            profile_or_exit(name), lambda composed: composed.resolved({"environment"})
+        )
         emit(yaml.safe_dump(thaw_json(rows), sort_keys=False, default_flow_style=False).rstrip())
         return
     try:
@@ -123,6 +147,168 @@ def session(
         )
     shown = yaml.safe_dump(thaw_json(recorded[-1].data), sort_keys=False, default_flow_style=False)
     emit(shown.rstrip())
+
+
+@profiles_app.command()
+def diff(name: ProfileName, session: SessionChoice = "") -> None:
+    """List what taking a named profile's current version would change (S6).
+
+    For each stored session on `name` — or the one `--session` names — every
+    setting that differs between the version it runs on and `name` as it composes
+    now, with its old and new value and whose it is: the person's file, or pH's.
+    Sessions with the same account are listed together.
+    """
+    now = _version_or_exit(name)
+    emit("\n".join(_report(name, _changes(name, session, now))))
+
+
+@profiles_app.command()
+def adopt(
+    name: ProfileName,
+    session: SessionChoice = "",
+    yes: Annotated[bool, typer.Option("--yes", help="Adopt without asking.")] = False,
+) -> None:
+    """Take a named profile's current version for its sessions' next start (S6).
+
+    Shows what it changes (`diff`), asks, and records the version in each session
+    that differs: its next start makes it the base, and the session's overrides
+    still apply over it. A running session is not interrupted. A stored session is
+    written under its lease; one a daemon holds, through that daemon.
+    """
+    now = _version_or_exit(name)
+    changes = _changes(name, session, now)
+    moving = [session_id for session_id, change in changes if change is not None]
+    if not moving:
+        emit(f"{name}: every session on it runs on its current version")
+        return
+    emit("\n".join(_report(name, changes)))
+    asking = f"Adopt this version of {name} for {count_of(len(moving), 'session')}?"
+    if not yes and not typer.confirm(asking):
+        fail("[yellow]nothing adopted[/yellow]", code=1)
+    lines, missed = anyio.run(partial(adopt_version, name, moving, now))
+    emit("\n".join(lines))
+    if missed:
+        raise typer.Exit(code=1)
+
+
+def _version_or_exit(name: str) -> ProfileBase:
+    """`name` as a session's base would record it now, or exit 2 saying why not."""
+    return _resolved_or_exit(profile_or_exit(name), base_of)
+
+
+def _resolved_or_exit[T](composed: Profile, resolve: Callable[[Profile], T]) -> T:
+    """Every row of `composed` through its model, or exit 2 naming what refused —
+    `show --full`'s listing and `diff`'s version both resolve, and both refuse alike."""
+    try:
+        return resolve(composed)
+    except ValidationError as error:
+        fail(f"[red]{'; '.join(validation_errors(error, root='config'))}[/red]", code=2)
+    except LoaderError as error:
+        fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
+
+
+def _changes(name: str, session: str, now: ProfileBase) -> list[tuple[str, ProfileChange | None]]:
+    """Each session on `name`, or the one named, with how `now` differs from it."""
+    sessions_dir = resolve_roots().sessions_dir()
+    targets: list[tuple[str, LoggedEnvironment]]
+    if session:
+        env = recorded_environment(sessions_dir, session)
+        if env.base is None:
+            fail(f"[red]{session} has no recorded base under {sessions_dir}[/red]", code=2)
+        if env.base.name != name:
+            started = env.base.name or "a profile file"
+            fail(f"[red]{session} started on {started}, not {name}[/red]", code=2)
+        targets = [(session, env)]
+    else:
+        targets = stored_on(sessions_dir, name)
+    return [(session_id, profile_change(env, now)) for session_id, env in targets]
+
+
+def _report(name: str, changes: Sequence[tuple[str, ProfileChange | None]]) -> list[str]:
+    """The accounts, one per distinct change, each under the sessions it is theirs."""
+    if not changes:
+        return [f"no stored session runs on {name}"]
+    grouped: dict[tuple[str, ...], list[str]] = {}
+    current: list[str] = []
+    for session_id, change in changes:
+        if change is None:
+            current.append(session_id)
+        else:
+            grouped.setdefault(tuple(listing(change)), []).append(session_id)
+    lines: list[str] = []
+    for account, ids in grouped.items():
+        lines.append(f"{', '.join(ids)}:")
+        lines += [f"  {line}" for line in account]
+    if current:
+        lines.append(f"on the current version: {', '.join(current)}")
+    return lines
+
+
+async def adopt_version(
+    name: str, session_ids: Sequence[str], version: ProfileBase
+) -> tuple[list[str], bool]:
+    """Record `version` in each session for its next start. `(lines, any missed)`.
+
+    Each under its own lease, on a mount of the host's rows alone — the store and
+    nothing that runs (`log_host`) — so nothing is started to write it, and the
+    lease is given back before the next. One another process holds is asked of the
+    daemon, which holds it if anything does.
+    """
+    host = log_host(name)
+    lines: list[str] = []
+    busy: list[str] = []
+    missed = False
+    for session_id in session_ids:
+        try:
+            async with mounted(host) as ctx:
+                session = await stored_session(ctx, session_id)
+                written = await record_adopted(ctx, session, version)
+        except SessionBusy:
+            busy.append(session_id)
+            continue
+        missed = missed or not written
+        lines.append(
+            f"{session_id}: adopted; its next start runs on it"
+            if written
+            else f"{session_id}: not adopted — its log could not be written"
+        )
+    if busy:
+        through, refused = await _through_daemon(busy, version)
+        lines += through
+        missed = missed or refused
+    return lines, missed
+
+
+async def _through_daemon(
+    session_ids: Sequence[str], version: ProfileBase
+) -> tuple[list[str], bool]:
+    """Ask the running daemon to record `version` in the sessions it holds."""
+
+    def held_elsewhere(session_id: str, why: str) -> str:
+        return f"{session_id}: not adopted — held by another process ({why})"
+
+    async def work(client: DaemonClient) -> tuple[list[str], bool]:
+        lines: list[str] = []
+        refused = False
+        for session_id in session_ids:
+            try:
+                await client.call(
+                    verbs.SESSION_ADOPT,
+                    AdoptParams(session_id=session_id, version=dict(version.to_wire())),
+                )
+            except DaemonError as error:
+                lines.append(held_elsewhere(session_id, detail(error)))
+                refused = True
+                continue
+            lines.append(f"{session_id}: adopted through the daemon; its next start runs on it")
+        return lines, refused
+
+    try:
+        return await connected(resolve_roots().daemon_socket(), work)
+    except (RuntimeDirError, DaemonGone, OSError) as error:
+        return [
+            held_elsewhere(one, f"no daemon to ask: {detail(error)}") for one in session_ids
+        ], True
 
 
 @profiles_app.command()

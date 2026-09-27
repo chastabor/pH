@@ -743,14 +743,16 @@ class Profile:
         """The composed row list, for `--dump-config`."""
         return [row.to_dump() for row in self.rows]
 
+    def rows_of(self, kinds: Collection[Affects]) -> list[Row]:
+        """The rows whose plugin declares one of `kinds` (`affects`), in order."""
+        return [
+            row for row in self.rows if normalize_plugin(resolve_plugin(row.name)).affects in kinds
+        ]
+
     def resolved(self, kinds: Collection[Affects] | None = None) -> list[dict[str, JsonValue]]:
         """Every row as it would mount (`resolve_row`), narrowed to the rows of `kinds` —
         `{"environment"}` is a session's profile. Decision 8's "full" profile."""
-        return [
-            resolve_row(row)
-            for row in self.rows
-            if kinds is None or normalize_plugin(resolve_plugin(row.name)).affects in kinds
-        ]
+        return [resolve_row(row) for row in (self.rows if kinds is None else self.rows_of(kinds))]
 
     async def mount(self, ctx: Context, *, project: Path | None = None) -> Mount:
         """Mount every enabled row onto `ctx`, settle the tree, and return the mount.

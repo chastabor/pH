@@ -33,6 +33,7 @@ bundles it deliberately does not depend on; see *Profiles* below.
 | `phern --dump-config` | the composed rows in order, before anything runs |
 | `phern daemon` | run the supervisor |
 | `phern agents …` | the client that talks to it: bare (list roots), `status`, `attach`, `send`, `schedule`, `doctor`, `shutdown` |
+| `phern profiles …` | named profiles: `show [--full]`, `session <id>`, `fold`, and `diff` / `adopt` — what taking a profile's current version would change in each session on it, and taking it at their next start |
 | `phern workspaces gc` | the git trees agents left behind, across every stored session. Reports by default; collects with `--remove` |
 | `phern attachments gc` | media no stored session references. Same rule |
 
@@ -133,7 +134,7 @@ the install line rather than an `ImportError`.
 ## The daemon
 
 ```bash
-phern daemon --profile llama                  # every root on the profile's default model
+phern daemon --profile llama                  # the profile new sessions start on
 phern daemon --max-concurrent-children 6      # across every root; the rest queue
 phern daemon --passivate-after 30             # minutes of quiet before a root is released, or `off`
 phern daemon --ephemeral                      # exit once no client, root or appointment needs it

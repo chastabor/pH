@@ -121,6 +121,11 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # conversation has no row for it.
         "profile/base",
         "profile/override",
+        # S6: what a person decided about a named profile that moved — a modal,
+        # which the conversation has no row for either.
+        "profile/adopted",
+        "profile/declined",
+        "profile/override-cleared",
         "fs/observed",
         "session/end-seed",
         "compaction/summarized",

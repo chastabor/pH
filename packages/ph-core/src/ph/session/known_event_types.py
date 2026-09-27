@@ -182,6 +182,14 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # a reader that skipped one would rebuild a session without an allowance it
         # ran with.
         "profile/override",
+        # A named profile that moved since the session started (S6): a version
+        # accepted for the next start, and one a person said no to — and an
+        # override that stops applying. The first two are ignorable: a reader that
+        # skipped them would start on the base it already has, or ask once more.
+        # The clear is required: skipping it rebuilds an override no longer in force.
+        "profile/adopted",
+        "profile/declined",
+        "profile/override-cleared",
         "permission/preset",
         "sandbox/mode",
         # A confined command refused something (P6-38): a host the egress proxy
@@ -421,6 +429,10 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "workspace/disposed",
         "workspace/retained",
         "workspace/provisioned",
+        # A version accepted for the next start, or declined when one asked (S6):
+        # skipped, the session starts on the base it has, or is asked once more.
+        "profile/adopted",
+        "profile/declined",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.
@@ -537,7 +549,15 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
             }
         ),
         "ph.session.session": frozenset({"session/end-seed"}),
-        "ph.session_profile": frozenset({"profile/base", "profile/override"}),
+        "ph.session_profile": frozenset(
+            {
+                "profile/adopted",
+                "profile/base",
+                "profile/declined",
+                "profile/override",
+                "profile/override-cleared",
+            }
+        ),
         "ph.session.store": frozenset({"session/segmented"}),
         "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
         "ph_app.daemon.supervisor": frozenset(

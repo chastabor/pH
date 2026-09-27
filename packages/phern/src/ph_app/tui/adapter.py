@@ -1257,6 +1257,11 @@ RECORDLESS: frozenset[str] = frozenset(
         # A deviation from it (S4): the command that asked already has its own row,
         # and the posture it moved is a reading.
         "profile/override",
+        # A named profile that moved (S6): a version accepted or declined, and an
+        # override that stops applying — the decision was a modal, not a message.
+        "profile/adopted",
+        "profile/declined",
+        "profile/override-cleared",
         "step/start",
         "step/end",
         # A model call made again (P1). The transcript shows the answer, and

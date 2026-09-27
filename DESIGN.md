@@ -164,6 +164,31 @@ be written is not made. `/sandbox`, `/model` and the command line's start option
 (logged where they differ) all come through it, so the log's environment is always
 its base composed with its overrides, in order.
 
+**Each root is mounted from its own log.** Before a root mounts, the supervisor reads
+its log's base and overrides off disk (`recorded_start`, with its working directory,
+before anything mounts) and mounts `rebuilt(base, host, overrides, then=start options)`,
+where the host rows are the profile the base names, composed as it is now. A new
+session is created on `session/new`'s `profile`, the daemon's `--profile` when none
+is named. `phern -p --session` and rpc mount the same way, rpc once per session.
+
+**A named profile that moved is found at a start, and taken on purpose.** The start
+composes the base's named profile as it is now and compares it with the version the
+session starts on (`profile_change`): each setting attributed to the person or to pH,
+and the overrides that still apply over a changed row. A person's own edit, when a
+front end that can answer asked for the start (`session/new` or `session/attach` from
+a client that declared `asks`), holds the root — `needs-profile-decision`, nothing
+driven — and puts the listing to it through the root's `AskDesk` (`profile/ask`).
+Anything else keeps the saved version and says so. A version is taken by recording it,
+`profile/adopted`, whether by a "yes" there or by `phern profiles adopt`; the next
+start makes it the base — `switch_base`, one batch of `profile/base` and a
+`profile/override-cleared` for each override the new base already says — and the
+supervisor starts a held root again at once, its watchers carried over. Overrides
+apply across a base switch until cleared; `fold_environment` is that rule, for a live
+log and for one read off disk. A "no" is `profile/declined`, so the same version is
+not asked about again. `adopt` writes a stored session under its lease without
+resuming it (`stored_session`, on a mount of the host's rows alone), and one a daemon
+holds through that daemon (`session/adopt`).
+
 **Three layers, and the third is reachable from the command line.** dsh's notes
 name them — bundle, profile, patch — and for six phases pH had the third only as
 a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `phern`, `phern doctor` and

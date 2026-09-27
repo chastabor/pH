@@ -53,6 +53,7 @@ from ph.keys import APPROVAL, USER_QUESTIONS
 from ph.llm.types import user_text
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, answer_from_wire
 from ph.seams.user_questions import UserQuestion
+from ph.session_profile import ProfileChange, listing
 
 if TYPE_CHECKING:
     # `supervisor` imports this module for `AskDesk`, so the edge only runs the
@@ -63,6 +64,9 @@ from ..payloads import (
     ApprovalAsk,
     ApprovalAskReply,
     AskSettledNotice,
+    ProfileAsk,
+    ProfileAskReply,
+    ProfileDecision,
     QuestionAsk,
     QuestionAskReply,
 )
@@ -226,13 +230,33 @@ class AskDesk:
         )
         return result.answer
 
+    async def decide_profile(self, change: ProfileChange) -> ProfileDecision:
+        """Ask whether this root takes its named profile's new version (S6).
+
+        Not a seam's answerer, like the two above: nothing in the session asked.
+        The root was held at its start because a person's own profile moved since
+        it began, so it waits here — for whoever attaches, as every ask does —
+        before anything runs, and the supervisor records what was said.
+        """
+        result = ProfileAskReply.model_validate(
+            await self._ask(
+                ProfileAsk(
+                    session_id=self.root.id,
+                    ask_id=self._name(),
+                    name=change.now.name,
+                    listing="\n".join(listing(change)),
+                )
+            )
+        )
+        return result.decision
+
     # ------------------------------------------------------------ the ask --
 
     def _name(self) -> str:
         self.asked += 1
         return f"ask-{self.asked}"
 
-    async def _ask(self, ask: ApprovalAsk | QuestionAsk) -> dict[str, Any]:
+    async def _ask(self, ask: ApprovalAsk | QuestionAsk | ProfileAsk) -> dict[str, Any]:
         """Put one question to every front end and wait for the first answer.
 
         The fan-out has a task group of its own rather than borrowing the root's:

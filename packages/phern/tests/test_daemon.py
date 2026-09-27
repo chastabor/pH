@@ -730,10 +730,16 @@ async def test_two_clients_naming_one_new_root_share_it(
         parked, release = anyio.Event(), anyio.Event()
 
         async def counted(
-            self: Supervisor, root_id: str, *, cwd: str | None, choice: ModelChoice
+            self: Supervisor,
+            root_id: str,
+            *,
+            cwd: str | None,
+            choice: ModelChoice,
+            profile: str,
+            asks: bool,
         ) -> Root:
             builds.append(root_id)
-            return await build(self, root_id, cwd=cwd, choice=choice)
+            return await build(self, root_id, cwd=cwd, choice=choice, profile=profile, asks=asks)
 
         # On the class: `Supervisor` is a `slots=True` dataclass, so an instance
         # attribute cannot be shadowed.
