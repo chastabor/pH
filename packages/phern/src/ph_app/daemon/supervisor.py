@@ -56,7 +56,15 @@ from ph.paths import resolve_roots
 from ph.persistence import open_session, resumption_of
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
-from ph.seams.models import ModelChoice, ModelChoiceError, ModelEntry, ModelList, choose
+from ph.seams.models import (
+    ModelChoice,
+    ModelChoiceError,
+    ModelEntry,
+    ModelList,
+    choose,
+    move_to,
+    start_on,
+)
 from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
@@ -70,6 +78,7 @@ from ph.session import (
 )
 from ph.session.kinds import SESSION_HOLDER
 from ph.session.writers import log_writer
+from ph.session_profile import OverrideSource
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
@@ -919,8 +928,14 @@ class Supervisor:
                 mounted(self.profile, project=Path(where) if where else None)
             )
             session = await self._session_for(ctx, root_id, cwd=cwd)
-            route = model_for(ctx, choice).options()
-            agent = ctx.require(AGENTS).create(session, route)
+            # The session's own model first — the base, and any `/model` it logged,
+            # which opening it put back — then this start's choice, an override
+            # where it differs (S4).
+            try:
+                entry = await start_on(ctx, session, choice, source="cli", command=choice.flags)
+            except ModelChoiceError as error:
+                raise Refusal(str(error)) from error
+            agent = ctx.require(AGENTS).create(session, entry.options())
             wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
             root = Root(
                 id=root_id,
@@ -1152,29 +1167,33 @@ class Supervisor:
                     continue
                 await self._drive(root)
 
-    async def set_model(self, root: Root, chosen: ModelEntry) -> None:
+    async def set_model(
+        self, root: Root, chosen: ModelEntry, *, source: OverrideSource, command: str
+    ) -> None:
         """Run `root` on `chosen` from its next request — `/model` (S1, item 8).
 
         Takes the entry already resolved (`model_for`), so the refusal of a key
         the profile does not list happens before the daemon's idempotence key is
-        claimed. From the next request, because a request in flight is already
-        on the wire; the header that request logs is the log's record of the
-        change. Not yet an override that survives a restart: that is S4's.
+        claimed. **An override of the session's `models` row** (S4, `move_to`):
+        recorded before it is made, so the session's next start runs on it too,
+        and an unlisted route joins the session's list under a name of its own.
+        From the next request, because a request in flight is already on the wire.
 
         The credential is asked again, because the new route may name another
         one, and every watcher is told the route now rather than at the next
         request — a footer that kept the old model until then would be wrong for
         exactly as long as somebody is reading it.
         """
-        root.agent.reroute(chosen.options())
+        entry = await move_to(root.ctx, root.session, chosen, source=source, command=command)
+        root.agent.reroute(entry.options())
         await self._check_credential(root)
         if root.subscribers:
             root.publish(
                 SessionStatusNotice(
                     session_id=root.id,
-                    provider=chosen.route.provider,
-                    model=chosen.route.model,
-                    model_key=chosen.key,
+                    provider=entry.route.provider,
+                    model=entry.route.model,
+                    model_key=entry.key,
                 )
             )
 

@@ -5,15 +5,15 @@ The human half of `sandbox-allow`. A refused boundary lands in the transcript as
 is where that line goes. It shows the posture in force — backend, network mode,
 hosts, extra directories, the refusals this session — and edits the allowances.
 
-**An edit is two things, in this order: applied, then kept.** `Mount.reconfigure`
-re-applies the `sandbox-allow` row with the new config, which releases one slot on
-the seam and fills it again — no provider swapped, no probe rerun, no proxy
-restarted, and the agent whose command is running notices nothing until its next
-command is bounded by the new statement. Then the row is written to a **drop-in**
-under the profile's directory, `$PH_HOME/profiles/<name>.d/sandbox.yaml`, which the
-next start composes after the hand-written overlay. A drop-in rather than an edit
-of `<name>.yaml`, because that file is the user's and a YAML rewrite drops every
-comment in it; this one is pH's, says so at the top, and holds one row.
+**An edit is an override of this session's environment** (session profiles, S4),
+made through the one door, `ph.session_profile.override`: a `profile/override`
+record is written to the session's log and the log written, and only then is the
+`sandbox-allow` row re-applied with the new config — which releases one slot on the
+seam and fills it again: no provider swapped, no probe rerun, no proxy restarted,
+and the agent whose command is running notices nothing until its next command is
+bounded by the new statement. A change whose record cannot be written is not made.
+The next start of this session puts it back from the log; it used to be a drop-in
+beside the profile, which applied to every session on that profile at once.
 
 **Refuses `/`**, and only that. Allowing the root directory is `danger-full-access`
 spelled to look like an allowlist. Everything narrower is the user's call — the
@@ -30,13 +30,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import anyio
-import yaml
-
 from ..cordis import Context, Row, plugin
-from ..json import JsonObject, thaw_json
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
-from ..paths import resolve_roots, write_atomic
 from ..seams._registry import contribute_item
 from ..seams.commands import CommandContext, CommandDefinition
 from ..seams.invariants import contribute_fold_cache
@@ -44,6 +39,7 @@ from ..seams.sandbox import DENIED, NETWORK_MODES, Allowances, NetworkAllowance
 from ..seams.sandbox_allow import describe
 from ..seams.tui_status import StatusField, StatusReading
 from ..session import Session, SessionEvent, SessionFoldCache
+from ..session_profile import OverrideNotRecorded, override
 from ..text import count_of
 
 __all__ = ["apply"]
@@ -54,23 +50,11 @@ ROW_NAME = "sandbox-allow"
 """The row this command edits — found by *name*, because a profile addresses rows
 by id and the id is the profile's to choose."""
 
-DROPIN = "sandbox.yaml"
-"""The file under `<profile>.d/` this command owns."""
-
 USAGE = (
     "usage: /sandbox [allow host <host[:port]> | allow path <dir> | "
     "revoke host <host> | revoke path <dir> | network off|allowlist|full]"
 )
 HINT = USAGE.removeprefix("usage: /sandbox ")
-
-HEADER = (
-    "# Written by /sandbox. pH rewrites this file whenever the allowlists change from\n"
-    "# the TUI; hand edits belong in the profile's own .yaml, which this layers over.\n"
-    "#\n"
-    "# A row's config is replaced whole rather than merged, so the `hosts` list below\n"
-    "# is now the entire allowlist for this profile: hosts added to pH's own defaults\n"
-    "# in a later release will not appear until this file is deleted or edited.\n"
-)
 
 _HOST = re.compile(r"^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:\d{1,5})?$")
 """What `allow host` accepts: a host, optionally `*.`-prefixed, optionally `:port`.
@@ -112,6 +96,8 @@ class _Sandbox:
 
     ctx: Context
     session: Session | None
+    line: str
+    """The command as it was typed — what an override record says asked."""
 
     # -------------------------------------------------------------- reading --
 
@@ -182,16 +168,27 @@ class _Sandbox:
     async def _change(
         self, mutate: Callable[[Allowances], Allowances], said: str, unchanged: str
     ) -> str:
-        """Apply an edit live, then keep it — and say which of the two happened."""
+        """Make an edit an override of this session — recorded, then applied."""
         row = self._row()
         current = self.ctx.require(SANDBOX).allowances or Allowances()
         updated = mutate(current)
         if updated == current:
             return unchanged
-        config = updated.to_wire()
-        await self.ctx.require(MOUNT).reconfigure(row.id, config)
-        kept = await self._persist(row.id, config)
-        return f"{said}; {self.ctx.require(SANDBOX).network_posture()}. {kept}"
+        if self.session is None:
+            return "Not changed: there is no session here to record the change in."
+        try:
+            await override(
+                self.ctx,
+                self.session,
+                row.id,
+                updated.to_wire(),
+                source="command",
+                command=self.line,
+            )
+        except OverrideNotRecorded as error:
+            return str(error)
+        posture = self.ctx.require(SANDBOX).network_posture()
+        return f"{said}; {posture}. Kept in this session's log, so it holds whenever it starts."
 
     def _row(self) -> Row:
         rows = [
@@ -205,25 +202,6 @@ class _Sandbox:
                 f"add `- id: {ROW_NAME}` / `  name: {ROW_NAME}` to the profile"
             )
         return rows[0]
-
-    async def _persist(self, row_id: str, config: JsonObject) -> str:
-        """Write the drop-in, or say why the change lives only in this process.
-
-        Thaws because `yaml.safe_dump` refuses a `MappingProxyType` or a tuple, and
-        `to_wire` may hand back either — `_CarriesJson` re-attaches log-frozen
-        fields by reference. A `PlainJsonValue` parameter only asserted otherwise.
-        """
-        name = self.ctx.require(MOUNT).profile.name
-        if not name:
-            return (
-                "Not saved: this deployment runs a profile file rather than a named profile; "
-                "add the row to that file to keep the change."
-            )
-        path = resolve_roots().profile_dropins(name) / DROPIN
-        row = {"id": row_id, "config": thaw_json(config)}
-        text = HEADER + yaml.safe_dump([row], sort_keys=False)
-        await anyio.to_thread.run_sync(write_atomic, path, text)
-        return f"Saved to {path}; it applies now and on the next start."
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +304,9 @@ async def apply(ctx: Context, config: None) -> None:
 
     async def sandbox(argument: str, invocation: CommandContext) -> str:
         verb, _, rest = argument.strip().partition(" ")
-        view = _Sandbox(ctx=ctx, session=invocation.session)
+        view = _Sandbox(
+            ctx=ctx, session=invocation.session, line=f"/sandbox {argument.strip()}".rstrip()
+        )
         try:
             if verb in ("", "show", "list"):
                 return view.show()

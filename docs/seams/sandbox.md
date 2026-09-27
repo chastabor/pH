@@ -156,20 +156,19 @@ refusals; `/sandbox` lists them.
 /sandbox network off|allowlist|full
 ```
 
-An edit is **applied, then kept**. `Mount.reconfigure` re-applies the
-`sandbox-allow` row with the new config — one slot released and refilled, no
-provider swapped, no probe rerun, no proxy restarted, and an agent mid-command
-notices only when its next command is bounded by the new statement. Then the row
-is written to `$PH_HOME/profiles/<name>.d/sandbox.yaml`, a drop-in the next start
-composes after the profile's own overlay. A drop-in rather than an edit of
-`<name>.yaml`, because that file is the person's and a YAML rewrite drops every
-comment in it. A deployment run from a profile *file* is applied and told the
-change was not saved.
+An edit is an **override of the session** (session profiles, S4): recorded, then
+applied. A `profile/override` record is written to the session's log and the log
+written, and only then does `Mount.reconfigure` re-apply the `sandbox-allow` row with
+the new config — one slot released and refilled, no provider swapped, no probe
+rerun, no proxy restarted, and an agent mid-command notices only when its next
+command is bounded by the new statement. A change whose record cannot be written is
+not made. The session's next start puts it back from its log; `/profile save` (S7)
+is how one session's allowances become a named profile's.
 
 Because a row's config is replaced whole rather than merged, the first edit
-freezes the whole host list for that profile — hosts added to pH's defaults in a
-later release will not appear until the drop-in is deleted or edited. The file pH
-writes says so at the top.
+freezes the whole host list for that session — hosts added to pH's defaults in a
+later release will not appear in it. The drop-ins `/sandbox` wrote before S4 are
+still read until `phern profiles fold` folds them.
 
 ## The surface
 

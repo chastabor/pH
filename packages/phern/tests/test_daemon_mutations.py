@@ -30,6 +30,7 @@ from ph.llm.types import AttachmentRef
 from ph.persistence import interrupted_turn_closers
 from ph.seams.commands import CommandDefinition
 from ph.session import Session, now_ms, outcome_of, unsettled_why
+from ph.session_profile import OverrideSource
 from ph.testing import log_event, stored_types
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.server import METHODS, MUTATIONS
@@ -401,8 +402,12 @@ async def test_session_model_runs_the_next_request_on_the_new_route(tmp_path: Pa
             commandId="1",
         )
 
-        assert (reply["modelKey"], reply["model"]) == ("", "fake-9"), "the root, described"
-        assert root.agent.options.model_key == "", "an unlisted route has no key"
+        # A route the list did not hold joins the session's list under its own name
+        # (S4), so the footer and the next start can say which it is.
+        assert (reply["modelKey"], reply["model"]) == ("fake-fake-9", "fake-9"), (
+            "the root, described"
+        )
+        assert root.agent.options.model_key == "fake-fake-9"
         await client.call(
             "session/prompt", sessionId=root.id, prompt="hi", clientId="c", commandId="2"
         )
@@ -466,9 +471,16 @@ async def test_session_new_mounts_a_root_on_the_choice_it_carries(
     moves: list[str] = []
     set_model = Supervisor.set_model
 
-    async def counted(self: Supervisor, root: Root, chosen: Any) -> None:  # noqa: ANN401
+    async def counted(
+        self: Supervisor,
+        root: Root,
+        chosen: Any,  # noqa: ANN401
+        *,
+        source: OverrideSource,
+        command: str,
+    ) -> None:
         moves.append(root.id)
-        await set_model(self, root, chosen)
+        await set_model(self, root, chosen, source=source, command=command)
 
     # On the class: `Supervisor` is a `slots=True` dataclass.
     monkeypatch.setattr(Supervisor, "set_model", counted)
@@ -477,7 +489,7 @@ async def test_session_new_mounts_a_root_on_the_choice_it_carries(
         route = {"provider": "fake", "model": "fake-3"}
 
         fresh = await client.call("session/new", sessionId="chosen", choice=route)
-        assert (fresh["modelKey"], fresh["model"]) == ("", "fake-3")
+        assert (fresh["modelKey"], fresh["model"]) == ("fake-fake-3", "fake-3")
         assert moves == [], "a fresh root was mounted on the default and then moved"
 
         already = await daemon.root("already")

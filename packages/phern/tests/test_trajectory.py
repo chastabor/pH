@@ -117,6 +117,10 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # it.
         "sandbox/mode",
         "permission/preset",
+        # S3: which environment the run was in is where an audit starts, and the
+        # conversation has no row for it.
+        "profile/base",
+        "profile/override",
         "fs/observed",
         "session/end-seed",
         "compaction/summarized",

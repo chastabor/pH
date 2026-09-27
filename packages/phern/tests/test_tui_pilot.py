@@ -472,7 +472,7 @@ async def test_the_model_picker_lists_the_profile_s_models_and_moves_the_root(
         root = root_of(tui_daemon)
         await until(pilot, lambda: root.agent.options.model == "fake-9")
         await until(pilot, lambda: front.state.model == "fake-9")
-        assert front.state.model_key == "", "an unlisted route has no key"
+        assert front.state.model_key == "fake-fake-9", "an unlisted route joins the list by name"
 
 
 async def test_the_terminal_s_own_route_rides_its_session_new(

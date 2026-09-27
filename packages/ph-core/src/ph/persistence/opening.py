@@ -13,6 +13,7 @@ from ..cordis import Context
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.telemetry import ops_record
 from ..session import Session, SessionForkError, new_session_id, valid_session_id
+from ..session_profile import opened
 from .jsonl import resume_session
 from .lease import SessionBusy
 from .protocol import ClaimingStore
@@ -102,5 +103,13 @@ async def open_session(
             store=type(store).__name__,
         )
     if store is not None and store.exists(resolved):
-        return await resume_session(ctx, resolved)
-    return ctx.require(SESSIONS).create(resolved, meta=dict(meta) if meta else None)
+        session = await resume_session(ctx, resolved)
+    else:
+        session = ctx.require(SESSIONS).create(resolved, meta=dict(meta) if meta else None)
+    # The environment it starts in, before anything runs in it (S3): here, because
+    # this is the door every root comes through, and a root from before the record
+    # gets its first on the way in.
+    # Then this start's own options, logged where they differ, and the mount brought
+    # to what the log says (S4) — `opened` is the whole of it, in that order.
+    await opened(ctx, session)
+    return session

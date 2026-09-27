@@ -29,7 +29,7 @@ import os
 from base64 import b64decode
 from binascii import Error as BinasciiError
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -591,8 +591,11 @@ class _Connection:
             # own route, so the choice moves it. One that just mounted on it is
             # left alone.
             chosen = model_for(root.ctx, params.choice)
-            if chosen.options() != root.agent.options:
-                await supervisor.set_model(root, chosen)
+            # The route and its call settings, and not the key: a route the list did
+            # not hold is keyed only once it is chosen (`route_key`).
+            running_on = replace(root.agent.options, model_key=chosen.key)
+            if chosen.options() != running_on:
+                await supervisor.set_model(root, chosen, source="cli", command=params.choice.flags)
         if params.trust == "always" and cwd is not None:
             # After the mount, not before: a directory is only worth
             # recording once its profile has actually composed.
@@ -830,7 +833,9 @@ class _Connection:
         self, root: Root, params: ModelParams, chosen: ModelEntry
     ) -> RootDescription:
         """The root as it now stands — the reply a repeat of this key gets too."""
-        await self.server.supervisor.set_model(root, chosen)
+        await self.server.supervisor.set_model(
+            root, chosen, source="verb", command=f"/model {params.choice.spelled}"
+        )
         return root.describe()
 
     async def _credentials_store(self, params: StoreCredentialParams) -> CredentialStored:

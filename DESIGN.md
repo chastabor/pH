@@ -138,6 +138,32 @@ of another kind, naming its owner. Shipped layers set any kind. The reason is th
 session audit (`plans/Session_Profiles_Plan.md`): a session's profile can only be
 compared and rebuilt on restart if it holds the environment and nothing else.
 
+**A person's named profile is sparse.** `$PH_HOME/profiles/<name>.yaml` is
+`extends:` a shipped profile and `rows:` — only those that differ from it, since the
+shipped layers and each plugin's model supply every default. Saving is
+`sparse_entries(base, rows)`: the fewest entries that recompose the same rows, so a
+saved profile reloads into exactly what it was saved from. `phern profiles show
+--full` is the other direction, every row through its model (`Profile.resolved`).
+The format before it — a bare list of rows, with `/sandbox`'s drop-ins beside it —
+is read until `phern profiles fold` folds it, which composes before and after and
+keeps the change only when the two agree.
+
+**A session's log holds the environment it started in.** Opening a root records
+`profile/base` (`ph.session_profile`) before its agent's first step: every
+environment row through its model, the person's layers it came from, and the pH
+version. It is the named profile as it composes, without the command line's start
+options. Comparing it with the profile as it composes now lists each changed setting
+and owes it to the person when their own layers changed, and to pH otherwise; and the
+record alone rebuilds the environment over any host's other rows.
+
+**A session deviates from its base through one door.** `ph.session_profile.override`
+records a `profile/override` — a profile entry, and what asked — writes the log, and
+only then calls `Mount.reconfigure`; nothing else in shipped code may call it. A
+value the session already runs with records nothing, and a change whose record cannot
+be written is not made. `/sandbox`, `/model` and the command line's start options
+(logged where they differ) all come through it, so the log's environment is always
+its base composed with its overrides, in order.
+
 **Three layers, and the third is reachable from the command line.** dsh's notes
 name them — bundle, profile, patch — and for six phases pH had the third only as
 a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `phern`, `phern doctor` and

@@ -1,8 +1,10 @@
 """Profile resolution: which bundle documents compose a run.
 
 A profile is an ordered list of YAML documents. The shipped ones live in
-`ph.bundles`; a user profile is a file under `$PH_HOME/profiles/<name>.yaml`
-layered on top, so a deployment overrides a row by id without forking a bundle.
+`ph.bundles` and this package; a person's named profile is a file under
+`$PH_HOME/profiles/<name>.yaml` that `extends` one of them and holds only the rows
+that differ (`ph_app.named_profiles`), so a deployment changes a row by id without
+forking a bundle.
 
 **Three owners, one kind each** (decision 23). Every row declares what its
 settings shape (`Affects`), and each layer a person writes may set one kind:
@@ -11,7 +13,7 @@ settings shape (`Affects`), and each layer a person writes may set one kind:
 |---|---|
 | pH's shipped documents, `presentation.yaml` included | any |
 | `$PH_HOME/daemon.yaml`'s `rows:`, and the daemon's own flags | `deployment` |
-| `$PH_HOME/profiles/<name>.yaml`, its drop-ins, `--patch` | `environment` |
+| `$PH_HOME/profiles/<name>.yaml`'s rows, its drop-ins, `--patch` | `environment` |
 
 Presentation has no layer a person writes here: those rows ship in every
 profile, and hiding a screen is the TUI's `tui.json`. A row set in the wrong
@@ -22,21 +24,30 @@ layer is refused by `compose_rows`, naming the configuration it belongs in.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, TypeAlias
 
 import typer
 
 from ph.bundles import BASE, HEADLESS, resolve_bundle
-from ph.cordis import LoaderError, Profile, ProfileDocument, load_profile_documents
+from ph.cordis import (
+    LoaderError,
+    Profile,
+    ProfileDocument,
+    compose_rows,
+    load_profile_documents,
+    sparse_entries,
+)
 from ph.cordis.loader import safe_yaml_load
 from ph.cordis.plugin import Affects
+from ph.documents import decode_document
 from ph.host import host_config_path, load_host_config
-from ph.paths import PathRoots, resolve_roots
+from ph.paths import PathRoots, resolve_roots, write_atomic
 
 from .console import detail, fail
+from .named_profiles import NamedProfile, parse_named_profile, render_named_profile
 
 __all__ = [
     "DEFAULT_PROFILE",
@@ -46,14 +57,22 @@ __all__ = [
     "Bundle",
     "ModelOption",
     "ProfileOption",
+    "ProfilePlan",
     "ProviderOption",
     "available_profiles",
+    "base_documents",
     "compose_profile",
+    "person_profiles",
     "profile_documents",
     "profile_file",
     "profile_name",
     "profile_or_exit",
+    "profile_plan",
+    "read_named_profile",
     "resolve_profile",
+    "save_named_profile",
+    "sparse_text",
+    "unfolded_profiles",
 ]
 
 PROFILE_DIR = Path(__file__).parent / "profiles"
@@ -249,13 +268,52 @@ def _missing_required(layers: Sequence[Layer]) -> str:
 
 
 def available_profiles() -> list[str]:
-    """Every profile this install can actually compose.
+    """Every profile this install can actually compose: the shipped ones, and the
+    person's named profiles over them.
 
     Answered by the same resolution `resolve_profile` performs, so a profile is
     never offered and then refused: two predicates for one question is how a
-    `--help` line and a command line come to disagree.
+    `--help` line and a command line come to disagree. A person's file that does
+    not read is not offered either; naming it gets the sentence for why.
     """
-    return sorted(name for name, layers in PROFILES.items() if not _missing_required(layers))
+    shipped = {name for name, layers in PROFILES.items() if not _missing_required(layers)}
+    return sorted(shipped | {one.name for one in person_profiles() if one.extends in shipped})
+
+
+def person_profiles() -> list[NamedProfile]:
+    """Every named profile a person wrote under `$PH_HOME/profiles/` that reads.
+
+    A file that does not is skipped here, and refused by name when it is asked for.
+    """
+    found: list[NamedProfile] = []
+    directory = resolve_roots().profiles_dir()
+    for path in sorted(directory.glob("*.yaml")) if directory.is_dir() else []:
+        try:
+            found.append(read_named_profile(path, path.stem))
+        except (LoaderError, OSError, ValueError):
+            continue
+    return found
+
+
+def read_named_profile(path: Path, name: str) -> NamedProfile:
+    """The named profile at `path`, run as `name`, against the shipped table."""
+    return parse_named_profile(decode_document(path), path, name, shipped=PROFILES)
+
+
+def unfolded_profiles() -> list[str]:
+    """Profiles with a layer `phern profiles fold` has not folded yet (item 0).
+
+    A `<name>.d/` of drop-ins, or a file still in the list format before S2. Both
+    are read until then, so nothing is dropped, and `phern doctor` names them so
+    nothing is read silently either.
+    """
+    roots = resolve_roots()
+    directory = roots.profiles_dir()
+    if not directory.is_dir():
+        return []
+    names = {path.name.removesuffix(".d") for path in directory.glob("*.d") if path.is_dir()}
+    names |= {one.name for one in person_profiles() if one.legacy}
+    return sorted(names)
 
 
 def profile_file(name: str) -> Path | None:
@@ -272,7 +330,7 @@ def profile_file(name: str) -> Path | None:
 
 
 def resolve_profile(name: str) -> list[Path]:
-    """The documents for `name`, built-in layers first then the user's overlay.
+    """The documents for `name`, built-in layers first then the person's.
 
     A name that is a path is used directly, which is what makes a scenario test
     or a one-off deployment a single file rather than an install step.
@@ -280,23 +338,51 @@ def resolve_profile(name: str) -> list[Path]:
     Paths only, so what each layer may set is not here: `profile_documents` is the
     door that reads them with it.
     """
-    shipped, person = _layers(name, resolve_roots())
-    return [*shipped, *person]
+    plan = _plan(name, resolve_roots())
+    return [*plan.shipped, *([plan.named.path] if plan.named else []), *plan.dropins]
 
 
-def _layers(name: str, roots: PathRoots) -> tuple[list[Path], list[Path]]:
-    """pH's layers for `name`, and the person's over them — file or named, decided once.
+@dataclass(frozen=True, slots=True)
+class ProfilePlan:
+    """What composes a name: pH's layers, the person's file over them, and drop-ins."""
 
-    A file profile is a whole composition, deployment rows and all, which is the
-    point of it: one file is the scenario. So it is one layer of pH's kind — it may
-    set any row — with nothing layered over it, `presentation.yaml` included: a
-    file that wants the trajectory screen inserts it. `extends` (S2) is what lets
-    it become sparse, and so a layer of one kind.
+    shipped: list[Path]
+    named: NamedProfile | None = None
+    dropins: list[Path] = field(default_factory=list)
+    whole: ProfileDocument | None = None
+    """A `--profile` path in the list format, already read: it is the whole composition,
+    and `shipped` names it only so `resolve_profile` can list it."""
+
+
+def profile_plan(name: str) -> ProfilePlan:
+    """The layers `name` composes from — the one answer to "file or named", and to
+    which of them is the person's."""
+    return _plan(name, resolve_roots())
+
+
+def _plan(name: str, roots: PathRoots) -> ProfilePlan:
+    """The layers for `name` — file or named, decided once.
+
+    A path whose file is a list is a whole composition, deployment rows and all,
+    which is the point of it: one file is the scenario. So it is one layer of pH's
+    kind, with nothing over it — `presentation.yaml` included: a file that wants
+    the trajectory screen inserts it. A path whose file is `extends:` and `rows:`
+    is a named profile that lives somewhere else, and composes as one.
+
+    A name is a shipped profile, the person's named profile over one, or both — a
+    person's `tui.yaml` over the shipped `tui`.
     """
     candidate = profile_file(name)
     if candidate is not None:
-        return [candidate], []
-    return _shipped_layers(name), _person_layers(name, roots)
+        raw = decode_document(candidate)
+        if not isinstance(raw, Mapping):
+            return ProfilePlan(shipped=[candidate], whole=ProfileDocument(str(candidate), raw))
+        elsewhere = parse_named_profile(raw, candidate, "", shipped=PROFILES)
+        return ProfilePlan(shipped=_shipped_layers(elsewhere.extends), named=elsewhere)
+    overlay = roots.profile_overlay(name)
+    named = read_named_profile(overlay, name) if overlay.is_file() else None
+    extends = named.extends if named is not None else name
+    return ProfilePlan(shipped=_shipped_layers(extends), named=named, dropins=_dropins(name, roots))
 
 
 def _shipped_layers(name: str) -> list[Path]:
@@ -329,32 +415,24 @@ def _shipped_layers(name: str) -> list[Path]:
     return layers
 
 
-def _person_layers(name: str, roots: PathRoots) -> list[Path]:
-    """What a person wrote over the named profile `name`, and what pH wrote for them."""
-    layers: list[Path] = []
-    overlay = roots.profile_overlay(name)
-    if overlay.exists():
-        layers.append(overlay)
-    # Then whatever pH wrote on the person's behalf — `/sandbox`'s allowlists — in
-    # name order, after the overlay, so a change made from the TUI outlives the
-    # process without touching the file the person edits. See
-    # `PathRoots.profile_dropins`.
-    dropins = roots.profile_dropins(name)
-    if dropins.is_dir():
-        layers.extend(
-            sorted(
-                path
-                for path in dropins.iterdir()
-                if path.suffix in (".yaml", ".yml") and path.is_file()
-            )
-        )
-    return layers
+def _dropins(name: str, roots: PathRoots) -> list[Path]:
+    """The drop-ins `/sandbox` wrote over `name` before S4 made its changes overrides.
+
+    In name order, after the person's file, as they always composed; read until
+    `phern profiles fold` folds them into that file. Nothing writes one now.
+    """
+    directory = roots.profile_dropins(name)
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path for path in directory.iterdir() if path.suffix in (".yaml", ".yml") and path.is_file()
+    )
 
 
 def profile_name(profile: str) -> str:
     """The name a `--profile` value names, or `""` for a path to a `.yaml`.
 
-    What `Profile.name` records, so a command that writes a drop-in knows where to —
+    What `Profile.name` records, so a caller writing under a profile's name knows where to —
     and knows *not to* for a file profile, whose one document is the person's own.
     Asked through `profile_file`, so it cannot disagree with what actually resolved.
     """
@@ -429,18 +507,56 @@ def profile_documents(name: str) -> list[ProfileDocument]:
     a session profile names.
     """
     roots = resolve_roots()
-    shipped, person = _layers(name, roots)
-    host = load_host_config(roots.home)
-    deployment = (
-        [ProfileDocument(str(host_config_path(roots.home)), host.rows, sets="deployment")]
-        if host.rows is not None
+    plan = _plan(name, roots)
+    named = (
+        [ProfileDocument(str(plan.named.path), plan.named.rows, sets="environment")]
+        if plan.named is not None
         else []
     )
+    shipped = [plan.whole] if plan.whole is not None else load_profile_documents(plan.shipped)
     return [
-        *load_profile_documents(shipped),
-        *deployment,
-        *load_profile_documents(person, sets="environment"),
+        *shipped,
+        *_host_documents(roots),
+        *named,
+        *load_profile_documents(plan.dropins, sets="environment"),
     ]
+
+
+def _host_documents(roots: PathRoots) -> list[ProfileDocument]:
+    """`daemon.yaml`'s rows, as the deployment layer every composition carries."""
+    host = load_host_config(roots.home)
+    if host.rows is None:
+        return []
+    return [ProfileDocument(str(host_config_path(roots.home)), host.rows, sets="deployment")]
+
+
+def base_documents(extends: str) -> list[ProfileDocument]:
+    """What a named profile over the shipped `extends` composes over.
+
+    pH's layers and the host's rows, and none of the person's: a saved profile is
+    the difference from exactly this, so the host's rows — in both — cancel, and
+    what is left is the environment the person chose.
+    """
+    return [*load_profile_documents(_shipped_layers(extends)), *_host_documents(resolve_roots())]
+
+
+def save_named_profile(name: str, profile: Profile, *, extends: str, comment: str) -> Path:
+    """Write `profile` as the sparse named profile `name` over `extends` (S2).
+
+    Only the rows that differ (`sparse_entries`), so composing `name` gives back
+    `profile`'s rows — the round trip decision 8 rests on. Written whole and
+    atomically; the comment says who wrote it, since a person will read it.
+    """
+    path = resolve_roots().profile_overlay(name)
+    write_atomic(path, sparse_text(profile, extends=extends, comment=comment))
+    return path
+
+
+def sparse_text(profile: Profile, *, extends: str, comment: str) -> str:
+    """`profile` as the text of a sparse named profile over `extends`: only the rows
+    that differ from it (`sparse_entries`)."""
+    entries = sparse_entries(compose_rows(base_documents(extends)), profile.rows)
+    return render_named_profile(extends, entries, comment=comment)
 
 
 def compose_profile(name: str) -> Profile:
@@ -485,7 +601,7 @@ def profile_or_exit(
     for texts, sets in layered:
         if texts:
             entries = [entry for text in texts for entry in _patch_entries(text)]
-            documents.append(ProfileDocument(CLI_LAYER, entries, sets=sets))
+            documents.append(ProfileDocument(CLI_LAYER, entries, sets=sets, override=True))
     try:
         return Profile.from_documents(documents, name=profile_name(profile))
     except LoaderError as error:

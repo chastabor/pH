@@ -22,18 +22,11 @@ import yaml
 from typer.testing import CliRunner
 
 from ph.paths import resolve_roots
-from ph.testing import write_host_config
+from ph.testing import write_host_config, write_profile
 from ph_app.cli import app
 from ph_app.profiles import available_profiles, profile_or_exit
 
 runner = CliRunner()
-
-
-def _overlay(name: str, text: str) -> Path:
-    path = resolve_roots().profile_overlay(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
 
 
 def _dump(*args: str) -> dict[str, Any]:
@@ -90,7 +83,7 @@ def test_daemon_yaml_may_not_set_the_environment(tmp_path: Path) -> None:
 
 
 def test_a_session_profile_sets_the_environment(tmp_path: Path) -> None:
-    _overlay("headless", "- id: tool-bash\n  disabled: true\n")
+    write_profile("headless", "- id: tool-bash\n  disabled: true\n")
 
     assert _dump("--profile", "headless")["tool-bash"]["disabled"] is True
 
@@ -103,7 +96,7 @@ def test_a_session_profile_may_not_set_the_host(tmp_path: Path, where: str) -> N
     not about who happened to write it."""
     patch = "- id: session-persistence\n  config: {root: /tmp/elsewhere}\n"
     if where == "overlay":
-        written = _overlay("headless", patch)
+        written = write_profile("headless", patch)
     else:
         dropins = resolve_roots().profile_dropins("headless")
         dropins.mkdir(parents=True)
@@ -133,7 +126,7 @@ def test_every_named_profile_mounts_the_screens_pH_ships() -> None:
 def test_a_session_profile_may_not_remove_a_screen(tmp_path: Path) -> None:
     """The refusal names `tui.json`, which is where the person's intent — not
     seeing the screen — can actually be said."""
-    _overlay("tui", "- id: tui-screen-trajectory\n  remove: true\n")
+    write_profile("tui", "- id: tui-screen-trajectory\n  remove: true\n")
 
     result = runner.invoke(app, ["--dump-config", "--profile", "tui"])
 

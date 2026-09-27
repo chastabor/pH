@@ -30,7 +30,7 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import running, until
+from daemon_helpers import logged, running, until
 
 from ph.keys import APPROVAL
 from ph.paths import resolve_roots
@@ -449,7 +449,9 @@ async def test_a_session_created_and_never_used_does_not_pin_the_daemon(
     """
     async with running(tmp_path, ephemeral=True) as daemon:
         root = await daemon.running.supervisor.start("never-used")
-        assert root.session.last_event is None, "the case under test: nothing has happened"
+        # Its base is recorded as it opens (S3), at the moment it was created —
+        # which is where quiet is counted from.
+        assert logged(root.session) == [], "the case under test: nothing has happened"
 
         assert root.idle_for(now_ms() + 3_600_000) >= 3_600_000
         assert daemon.running.spent(now=now_ms() + 3_600_000)

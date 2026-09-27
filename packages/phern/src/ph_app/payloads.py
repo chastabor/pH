@@ -169,7 +169,7 @@ class StatusFacts(WireModel):
     provider: str | None = None
     model: str | None = None
     model_key: str | None = None
-    """The profile's name for the route, or `""` for one it does not list."""
+    """The session's name for the route, or `""` for one its list does not hold."""
 
 
 # ----------------------------------------------------------------- replies --
@@ -212,7 +212,8 @@ class RootDescription(SessionScoped):
     provider: str = ""
     model: str = ""
     model_key: str = ""
-    """Which of the profile's models this is, `""` when a person named an unlisted route."""
+    """Which of the session's models this is — a route a person named is listed under a
+    name made from it (S4) — or `""` on a profile with no `models` row."""
 
     def facts(self) -> StatusFacts:
         """This description as the status half of it.

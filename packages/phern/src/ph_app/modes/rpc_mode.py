@@ -24,7 +24,7 @@ from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.persistence import open_session
-from ph.seams.models import ModelChoice, choose
+from ph.seams.models import ModelChoice, start_on
 from ph.session import Session, SessionEvent
 from ph.wire import WireModel
 
@@ -167,12 +167,18 @@ class RpcServer:
         if agent is None:
             # A prompt that names a route asks for it the way the flags do, and
             # one that names neither takes the server's — through the one rule.
-            asked = (
-                ModelChoice.from_flags(params.provider, params.model)
-                if params.provider or params.model
-                else self.choice
+            named = bool(params.provider or params.model)
+            asked = ModelChoice.from_flags(params.provider, params.model) if named else self.choice
+            # An override of the session's model where it differs (S4): the prompt's
+            # own route is a verb's, the server's flags a start option.
+            entry = await start_on(
+                self.ctx,
+                session,
+                asked,
+                source="verb" if named else "cli",
+                command=f"session/prompt {asked.spelled}" if named else asked.flags,
             )
-            agent = self.ctx.require(AGENTS).create(session, choose(self.ctx, asked).options())
+            agent = self.ctx.require(AGENTS).create(session, entry.options())
             self._agents[session.id] = agent
         self._notify(SessionStatusNotice(session_id=session.id, status="running"))
         await agent.prompt(params.prompt)

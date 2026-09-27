@@ -29,7 +29,7 @@ nothing to list.
 |---|---|
 | nothing | the default |
 | a key (`--model fast`, `/model fast`) | that entry — a key the profile does not list is refused, naming the ones it does |
-| a whole route (`--provider p --model m`, `/model p/m`) | the entry it matches, else the route as given, with no key |
+| a whole route (`--provider p --model m`, `/model p/m`) | the entry it matches, else the route as given — which joins the session's list under its own name when chosen |
 
 A person's own choice is not bounded by the list. What the list bounds is what an
 *agent* may pick when it starts one (session profiles, S7b). `choose(ctx, choice)`
@@ -67,6 +67,9 @@ refusal does not burn the retry. `session/new` takes a choice too, which is how 
 TUI's `--provider`/`--model` reach its own session — a fresh root mounts on it, and
 the daemon it spawns is started with no route.
 
-**Not yet an override that survives a restart.** A resumed root starts on its
-profile's default again. Logging the choice as an override, and rebuilding it on
-restart, is S4 of `plans/Session_Profiles_Plan.md`.
+**A choice is an override of the session's `models` row** (S4, `move_to`):
+`/model`, `session/model` and each start's `--provider`/`--model` that differs make
+the chosen entry the row's `default` through `ph.session_profile.override`, recorded
+before it is made. A route the list did not hold joins it under a key made from its
+own name (`route_key`, `fake/fake-9` → `fake-fake-9`), so the footer can name it and
+the session's next start runs on it again.

@@ -243,9 +243,33 @@ name, with the file it belongs in. The layers, applied in this order:
    `packages/phern/src/ph_app/profiles/*.yaml`, which may set any kind;
 2. `rows:` in `$PH_HOME/daemon.yaml` (deployment), then the daemon's own flags
    such as `--max-concurrent-children`;
-3. **your overlay**, `$PH_HOME/profiles/<name>.yaml`, which patches a row by id
-   without forking a bundle (environment);
-4. `--patch`, this run only, same grammar as a profile document (environment).
+3. **your named profile**, `$PH_HOME/profiles/<name>.yaml`: the shipped profile it
+   `extends` and only the rows that differ (environment);
+4. `--patch`, this run only, same grammar as a profile's rows (environment).
+
+```yaml
+# $PH_HOME/profiles/work.yaml — run it with `--profile work`
+extends: tui                     # a shipped profile; left out of a file named after one
+rows:
+  - id: tool-bash
+    disabled: true
+```
+
+```bash
+phern profiles show work            # what the file sets
+phern profiles show work --full     # every setting a session on it runs with, defaults included
+phern profiles fold                 # fold drop-ins and old list-format files into one file each
+phern profiles session <id>         # the profile a session started in, from its log
+```
+
+A file that is still a bare list of rows (the format before named profiles), and
+the `<name>.d/` drop-ins `/sandbox` used to write, are read until `phern profiles
+fold` folds them into the named file; `phern doctor` names each one until then.
+
+What a session changes while it runs — `/sandbox allow`, `/model`, and each
+`--patch` or `--model` that differs from its profile — is an override in the
+session's log, written before the change takes effect, and put back whenever that
+session starts again.
 
 `daemon.yaml` can also move where sessions and profiles are kept. It is read
 when a process starts:

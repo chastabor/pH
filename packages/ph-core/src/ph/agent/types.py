@@ -243,7 +243,7 @@ class AgentOptions:
     temperature: float | None = None
     reasoning_effort: str | None = None
     model_key: str = ""
-    """The profile's name for this route (`ph.seams.models`), `""` for one it does not
+    """The session's name for this route (`ph.seams.models`), `""` for one it does not
     list. Carried with the route rather than beside it, so whoever moves the agent
     moves both — and never on the wire to a provider: `seed_config` leaves it out."""
 

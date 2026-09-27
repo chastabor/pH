@@ -101,16 +101,14 @@ class PathRoots:
         return self.profiles or self.home / "profiles"
 
     def profile_overlay(self, name: str) -> Path:
-        """The person's own layer over a shipped profile: `$PH_HOME/profiles/<name>.yaml`."""
+        """The person's named profile `name`: `$PH_HOME/profiles/<name>.yaml`."""
         return self.profiles_dir() / f"{name}.yaml"
 
     def profile_dropins(self, name: str) -> Path:
-        """Where pH writes rows on the person's behalf: `$PH_HOME/profiles/<name>.d/`.
+        """Where `/sandbox` wrote rows over `name` before S4: `$PH_HOME/profiles/<name>.d/`.
 
-        Beside the overlay rather than inside it, because the overlay is a file a
-        person edits and comments, and a tool that rewrites YAML drops every comment
-        in it. Each drop-in holds what one command owns, says so at the top, and
-        composes *after* the overlay, in name order — the most recent decision wins.
+        Read until `phern profiles fold` folds them into the named profile; nothing
+        writes one now — a session's change is an override in its own log.
         """
         return self.profiles_dir() / f"{name}.d"
 

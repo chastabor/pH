@@ -73,7 +73,9 @@ from .profiles import (
     ProviderOption,
     available_profiles,
     profile_or_exit,
+    unfolded_profiles,
 )
+from .profiles_cli import profiles_app
 from .runtime import mounted
 from .web import DEFAULT_HOST, DEFAULT_PORT
 from .workspaces import workspaces_app
@@ -104,6 +106,10 @@ app.add_typer(workspaces_app, name="workspaces")
 # attachment is content a session cannot open without — and a person reading
 # `--help` should not have to infer which rule applies from a shared verb.
 app.add_typer(attachments_app, name="attachments")
+# What a named profile sets, and folding the older layers into it (session
+# profiles, S2). A group because a profile is a thing on disk a person manages
+# between sessions, not a question about the session they are in.
+app.add_typer(profiles_app, name="profiles")
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "web", "trajectory"]
 
@@ -463,6 +469,14 @@ def doctor(
     # What this install can actually compose — a bundle profile whose
     # distribution is missing is not offered (P3-20).
     console.print(f"[dim]profiles: {', '.join(available_profiles())}[/dim]")
+    # Read until folded, so nothing is dropped; named here, so nothing is read
+    # silently either (session profiles, item 0).
+    unfolded = unfolded_profiles()
+    if unfolded:
+        console.print(
+            f"[yellow]not folded: {', '.join(unfolded)} — "
+            "`phern profiles fold` makes each one file[/yellow]"
+        )
 
     # Resolved *outside* the catch below, and it matters: `typer.Exit` subclasses
     # `RuntimeError`, so an unknown profile raised inside it would be caught,

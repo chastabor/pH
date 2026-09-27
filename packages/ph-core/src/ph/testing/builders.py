@@ -35,7 +35,13 @@ from ..llm.types import (
 )
 from ..locks import file_lock
 from ..paths import resolve_roots
-from ..persistence.jsonl import HEADER_LINE_TYPE, JsonlSessionStore, locate_session, session_path
+from ..persistence.jsonl import (
+    HEADER_LINE_TYPE,
+    JsonlSessionStore,
+    locate_session,
+    read_session,
+    session_path,
+)
 from ..persistence.lease import lease_path
 from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
@@ -79,6 +85,7 @@ __all__ = [
     "code_mode_stub",
     "external_tool",
     "isolated_intent_kinds",
+    "logged_events",
     "parked_gate",
     "plugin_payload",
     "raising",
@@ -96,6 +103,7 @@ __all__ = [
     "workspace_retained",
     "workspace_seam",
     "write_host_config",
+    "write_profile",
     "write_reference_fork",
 ]
 
@@ -864,3 +872,21 @@ def write_host_config(text: str, *, home: Path | None = None) -> Path:
     path.write_text(text, encoding="utf-8")
     load_host_config.cache_clear()
     return path
+
+
+def write_profile(name: str, text: str) -> Path:
+    """Write the person's named profile `name` under this test's `$PH_HOME`, and answer its path."""
+    path = resolve_roots().profile_overlay(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def logged_events(session_id: str) -> list[SessionEvent]:
+    """The events a session's log holds on disk under this test's `$PH_HOME`.
+
+    What a durability assertion reads when no `Context` is at hand — a command run
+    through `CliRunner` — where `stored_events` reads through a mounted store.
+    """
+    _header, events = read_session(stored_log(resolve_roots().sessions_dir(), session_id))
+    return events

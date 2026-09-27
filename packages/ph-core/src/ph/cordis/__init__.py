@@ -60,6 +60,7 @@ from .loader import (
     load_profile_documents,
     resolve_plugin,
     safe_yaml_load,
+    sparse_entries,
 )
 from .plugin import PluginSpec, normalize_plugin, plugin
 
@@ -117,4 +118,5 @@ __all__ = [
     "service_name",
     "settled",
     "settled_or_none",
+    "sparse_entries",
 ]

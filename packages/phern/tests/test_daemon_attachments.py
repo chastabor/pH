@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import running, until
+from daemon_helpers import logged, running, until
 
 from ph.json import as_seq
 from ph.keys import ATTACHMENTS
@@ -305,7 +305,7 @@ async def test_the_tray_is_not_in_the_log(tmp_path: Path) -> None:
         await client.call("session/stage", sessionId=root.id, attachment=wire)
 
         assert root.staged, "it really is staged"
-        assert [one.type for one in root.session.events] == [], "and the log says nothing"
+        assert logged(root.session) == [], "and the log says nothing"
 
 
 async def test_staging_the_same_file_twice_is_one_chip(tmp_path: Path) -> None:

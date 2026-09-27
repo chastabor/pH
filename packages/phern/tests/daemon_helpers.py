@@ -30,6 +30,8 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.llm.types import StreamChunk
 from ph.paths import resolve_roots
+from ph.session import Session
+from ph.session_profile import BASE as PROFILE_BASE
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
@@ -408,3 +410,13 @@ def break_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         yield  # pragma: no cover
 
     monkeypatch.setattr(FakeAdapter, "stream", exploding)
+
+
+def logged(session: Session) -> list[str]:
+    """The types a root logged, its base aside.
+
+    Opening a root records the profile it started in (`profile/base`, S3), so every
+    root's log begins with one — a fact about the environment, not about what a
+    verb under test wrote, which is what these lists assert.
+    """
+    return [event.type for event in session.events if event.type != PROFILE_BASE]

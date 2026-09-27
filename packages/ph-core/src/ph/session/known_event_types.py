@@ -172,6 +172,16 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "approval/mode",
         "command/done",
         "command/run",
+        # The environment a session started in, in full (session profiles, S3):
+        # every environment row through its model, and the person's layers it came
+        # from. Required: a reader that skipped it would rebuild a session in an
+        # environment it never ran in.
+        "profile/base",
+        # One deviation from that base, as a profile entry (S4): a start option, a
+        # slash command or a verb. Required, and written before the change is made:
+        # a reader that skipped one would rebuild a session without an allowance it
+        # ran with.
+        "profile/override",
         "permission/preset",
         "sandbox/mode",
         # A confined command refused something (P6-38): a host the egress proxy
@@ -527,6 +537,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
             }
         ),
         "ph.session.session": frozenset({"session/end-seed"}),
+        "ph.session_profile": frozenset({"profile/base", "profile/override"}),
         "ph.session.store": frozenset({"session/segmented"}),
         "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
         "ph_app.daemon.supervisor": frozenset(

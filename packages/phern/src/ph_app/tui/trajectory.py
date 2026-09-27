@@ -413,6 +413,11 @@ HANDLERS: Mapping[str, Handler] = {
     "workspace/provisioned": _on_harness_event,
     "workspace/checkpoint": _on_harness_event,
     "permission/preset": _on_harness_event,
+    # The environment the session started in (session profiles, S3) — the first
+    # thing an audit of a run asks, and nothing a conversation shows.
+    "profile/base": _on_harness_event,
+    # And each deviation from it (S4): what asked, and what changed.
+    "profile/override": _on_harness_event,
     "sandbox/mode": _on_harness_event,
     "sandbox/denied": _on_harness_event,
     "command/run": _on_harness_event,

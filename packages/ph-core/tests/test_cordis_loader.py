@@ -16,17 +16,22 @@ from pathlib import Path
 
 import pytest
 
+from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Disposer, LoaderError, events, plugin
 from ph.cordis.loader import (
     PROJECT_ROOT,
     Profile,
     ProfileDocument,
+    Row,
     _state,
     compose_rows,
+    entry_ids,
     evaluate_predicate,
     interpolate,
     safe_yaml_load,
+    sparse_entries,
 )
+from ph.json import JsonValue, as_obj
 from ph.keys import MOUNT, SANDBOX
 from ph.testing import MountProfile, not_none
 from ph.wire import WireModel
@@ -855,3 +860,86 @@ def test_an_interpolated_default_may_contain_braces() -> None:
     # The plain defaults still work, including the empty one.
     assert interpolate("${env:PH_TEST_MISSING:-}", {}) == ""
     assert interpolate("${env:PH_TEST_MISSING:-small}", {}) == "small"
+
+
+# ----------------------------------------------------------- sparse and full --
+
+
+def _entries(rows: list[Row]) -> list[dict[str, JsonValue]]:
+    return [row.to_entry() for row in rows]
+
+
+def test_a_sparse_profile_composes_back_into_what_it_was_saved_from() -> None:
+    """The gate a saved named profile rests on (session profiles, S2): the entries
+    `sparse_entries` writes, composed over the same base, give back the same rows
+    — a patched config, a row switched on, a removal, an addition, an isolate, and
+    a row whose plugin changed under its id. And only those differ."""
+    base = _doc(
+        "base",
+        "- id: a\n  name: mod.a\n- id: b\n  name: mod.b\n  config: {depth: 1}\n"
+        "- id: c\n  name: mod.c\n  disabled: true\n- id: d\n  name: mod.d\n"
+        "- id: e\n  name: mod.e\n",
+    )
+    person = _doc(
+        "person",
+        "- id: b\n  config: {depth: 2}\n- id: c\n  disabled: false\n"
+        "- id: d\n  remove: true\n- insert:\n    - id: f\n      name: mod.f\n"
+        "- id: a\n  isolate: [b]\n- id: e\n  remove: true\n- insert:\n"
+        "    - id: e\n      name: mod.other\n",
+    )
+    shipped = compose_rows([base])
+    composed = compose_rows([base, person])
+
+    saved = sparse_entries(shipped, composed)
+    reloaded = compose_rows([base, ProfileDocument("saved", saved)])
+
+    assert _entries(reloaded) == _entries(composed)
+    assert {entry["id"] for entry in saved} == {"a", "b", "c", "d", "e", "f"}
+    assert {"id": "b", "config": {"depth": 2}} in saved, "a patch carries the whole config"
+    assert sparse_entries(shipped, shipped) == [], "a profile that differs in nothing saves nothing"
+
+
+def test_a_dump_is_not_a_document_and_an_entry_is() -> None:
+    """`to_dump` says where a row came from, which the loader refuses from a document;
+    `to_entry` is what a saved profile is made of."""
+    (row,) = compose_rows([_doc("base", "- id: a\n  name: mod.a\n  config: {x: 1}\n")])
+
+    assert row.to_dump() == {**row.to_entry(), "layer": "base"}
+    with pytest.raises(LoaderError, match="unknown keys"):
+        compose_rows([ProfileDocument("dumped", [row.to_dump()])])
+
+
+def test_the_full_profile_resolves_every_row_through_its_model() -> None:
+    """Decision 8's "full": every setting in force, defaults included, narrowed to the
+    kinds asked for. A row that set nothing still says everything its plugin would
+    run with; a row whose plugin takes no config says so with `null`."""
+    profile = Profile.from_paths([BASE, HEADLESS])
+
+    everything = {entry["id"]: entry for entry in profile.resolved()}
+    environment = {entry["id"]: entry for entry in profile.resolved({"environment"})}
+
+    assert "session-persistence" in everything and "session-persistence" not in environment
+    models = as_obj(environment["models"]["config"])
+    assert models["default"] == "main"
+    assert as_obj(as_obj(models["models"])["main"]) == {
+        "provider": "fake",
+        "model": "fake-1",
+        "reasoningEffort": None,
+        "temperature": None,
+        "maxTokens": None,
+    }, "the defaults the profile never wrote are in it"
+    assert "config" in environment["tool-bash"], "every row states its config, if only as null"
+
+
+def test_entry_ids_reads_the_grammar_compose_rows_reads() -> None:
+    """The one answer to "which rows does this entry address" for a caller that is
+    not composing — attribution, an override's label. A bare row's id is its name,
+    which the hand parse this replaced missed."""
+    assert entry_ids({"id": "a", "config": {}}) == ["a"]
+    assert entry_ids({"id": "a", "remove": True}) == ["a"]
+    assert entry_ids({"name": "mod.a"}) == ["mod.a"]
+    assert entry_ids({"id": "b", "name": "mod.a"}) == ["b"]
+    assert entry_ids({"insert": [{"name": "mod.a"}, {"id": "c", "name": "mod.c"}]}) == [
+        "mod.a",
+        "c",
+    ]

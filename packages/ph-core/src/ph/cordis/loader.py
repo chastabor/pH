@@ -22,7 +22,7 @@ import importlib
 import os
 import re
 import sys
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cache
 from importlib.metadata import entry_points
@@ -31,8 +31,9 @@ from types import ModuleType
 from typing import NoReturn, assert_never
 
 import yaml
+from pydantic import ValidationError
 
-from ..json import JsonObject, JsonValue
+from ..json import JsonObject, JsonValue, as_str
 from .context import Context, ForkScope
 from .errors import LoaderError
 from .events import events
@@ -46,13 +47,16 @@ __all__ = [
     "ProfileDocument",
     "Row",
     "compose_rows",
+    "entry_ids",
     "entry_point_targets",
     "import_plugin_modules",
     "interpolate",
     "load_profile_documents",
     "resolve_entry_point",
     "resolve_plugin",
+    "resolve_row",
     "safe_yaml_load",
+    "sparse_entries",
 ]
 
 ENTRY_POINT_GROUP = "ph.plugins"
@@ -192,18 +196,27 @@ class Row:
     and not a service key, which is also the half that can be checked at compose
     time."""
 
-    def to_dump(self) -> dict[str, JsonValue]:
-        dump: dict[str, JsonValue] = {"id": self.id, "name": self.name}
+    def to_entry(self) -> dict[str, JsonValue]:
+        """This row as a profile document declares it — what the loader reads back.
+
+        `to_dump` without its provenance: `layer` is where a row came from, which a
+        document cannot say about itself, so a saved profile made of dumps would be
+        one the loader refuses.
+        """
+        entry: dict[str, JsonValue] = {"id": self.id, "name": self.name}
         if self.config is not None:
-            dump["config"] = self.config
+            entry["config"] = self.config
         if self.disabled:
-            dump["disabled"] = True
+            entry["disabled"] = True
         if self.isolate is not None:
             # Always the mapping: `isolate: [fs]` dumps as `{fs: null}`, which
             # `_as_isolate` reads back to the same thing. One dump shape.
-            dump["isolate"] = dict(self.isolate)
-        dump["layer"] = self.layer
-        return dump
+            entry["isolate"] = dict(self.isolate)
+        return entry
+
+    def to_dump(self) -> dict[str, JsonValue]:
+        """`to_entry` and the layer it came from, for `--dump-config`."""
+        return {**self.to_entry(), "layer": self.layer}
 
 
 # ------------------------------------------------------------ interpolation --
@@ -428,6 +441,11 @@ class ProfileDocument:
     tool, would be a setting kept where the configuration that owns it cannot see
     it — and a restart that compares the session's environment would compare
     something it does not own."""
+    override: bool = False
+    """A start option — `--patch` — rather than part of the profile a session starts
+    on. Composed like any layer, and left out of a session's saved base
+    (`ph.session_profile`), which is the named profile as it composes: a start
+    option is what the session deviates from it by, and S4 logs it as such."""
 
 
 def _check_kind(document: ProfileDocument, touched: Sequence[Row]) -> None:
@@ -466,7 +484,7 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
         for entry in entries:
             if not isinstance(entry, dict):
                 raise LoaderError(f"{layer}: entry must be a mapping, got {entry!r}")
-            if {"insert", "remove"} & set(entry) or ("id" in entry and "name" not in entry):
+            if _is_patch(entry):
                 touched = _apply_patch(rows, entry, layer)
             else:
                 touched = _as_rows([entry], layer)
@@ -475,6 +493,86 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
     _check_unique_ids(rows)
     _check_isolation(rows)
     return rows
+
+
+def resolve_row(row: Row) -> dict[str, JsonValue]:
+    """One row as it would mount: its config through its plugin's model, defaults
+    included, and every field stated — the ones a document may leave out too.
+
+    Interpolated as a mount interpolates, so a `${env:...}` setting reads as the value
+    it would run with. A row whose plugin takes no config says `config: null`, which
+    is its whole state. A *disabled* row whose config its model refuses keeps the
+    config as written: it does not mount, so nothing ever checked it, and a listing of
+    a profile must not fail over a row that is off.
+    """
+    spec = normalize_plugin(resolve_plugin(row.name))
+    config: JsonValue
+    try:
+        model = spec.resolve_config(interpolate(row.config))
+        config = None if model is None else model.model_dump(mode="json", by_alias=True)
+    except (LoaderError, ValidationError):
+        if not row.disabled:
+            raise
+        config = row.config
+    entry = replace(row, config=config).to_entry()
+    entry.setdefault("config", None)
+    entry.setdefault("disabled", False)
+    return entry
+
+
+def _is_patch(entry: JsonObject) -> bool:
+    """Whether an entry addresses rows already composed, rather than declaring one."""
+    return bool({"insert", "remove"} & set(entry)) or ("id" in entry and "name" not in entry)
+
+
+def entry_ids(entry: JsonObject) -> list[str]:
+    """The row ids one profile entry adds, patches or removes — the grammar
+    `compose_rows` reads, stated for a caller that needs it without composing."""
+    if "insert" in entry:
+        inserted = entry["insert"]
+        return [row.id for row in _as_rows(inserted if isinstance(inserted, list) else [], "entry")]
+    if _is_patch(entry):
+        row_id = as_str(entry.get("id"))
+        return [row_id] if row_id else []
+    return [row.id for row in _as_rows([entry], "entry")]
+
+
+def sparse_entries(base: Sequence[Row], rows: Sequence[Row]) -> list[JsonObject]:
+    """The fewest entries that, composed over `base`, give `rows` (session profiles, S2).
+
+    What a saved named profile holds: only the rows that differ from the profile
+    it extends. A row `base` has and `rows` does not is removed; one `rows` adds
+    is declared whole; one in both is patched by the fields that differ, and a
+    patch replaces a row's *whole* config, so the config it carries is the row's
+    entire config and never a delta of it. A row whose plugin changed under the
+    same id is removed and declared again, since no patch changes a `name`.
+
+    `compose_rows([*base_documents, (layer, sparse_entries(base, rows))])` gives
+    back `rows`, in order, for every `rows` a composition over `base` can
+    produce: added rows land at the end, which is where a later layer put them.
+    """
+    kept = {row.id for row in rows}
+    before = {row.id: row for row in base}
+    entries: list[JsonObject] = [
+        {"id": row.id, "remove": True} for row in base if row.id not in kept
+    ]
+    for row in rows:
+        was = before.get(row.id)
+        if was is None or was.name != row.name:
+            if was is not None:
+                entries.append({"id": row.id, "remove": True})
+            entries.append(row.to_entry())
+            continue
+        patch: dict[str, JsonValue] = {}
+        if row.config != was.config:
+            patch["config"] = row.config
+        if row.disabled != was.disabled:
+            patch["disabled"] = row.disabled
+        if row.isolate != was.isolate:
+            patch["isolate"] = dict(row.isolate) if row.isolate is not None else None
+        if patch:
+            entries.append({"id": row.id, **patch})
+    return entries
 
 
 def load_profile_documents(
@@ -645,6 +743,15 @@ class Profile:
         """The composed row list, for `--dump-config`."""
         return [row.to_dump() for row in self.rows]
 
+    def resolved(self, kinds: Collection[Affects] | None = None) -> list[dict[str, JsonValue]]:
+        """Every row as it would mount (`resolve_row`), narrowed to the rows of `kinds` —
+        `{"environment"}` is a session's profile. Decision 8's "full" profile."""
+        return [
+            resolve_row(row)
+            for row in self.rows
+            if kinds is None or normalize_plugin(resolve_plugin(row.name)).affects in kinds
+        ]
+
     async def mount(self, ctx: Context, *, project: Path | None = None) -> Mount:
         """Mount every enabled row onto `ctx`, settle the tree, and return the mount.
 
@@ -804,8 +911,10 @@ class Mount:
 
         Per *mount*, not per profile: a daemon mounts one `Profile` once per root
         and `Row` is frozen, so the new config is recorded here and `topology`
-        marks the row `reconfigured live`. Whoever wants the change to survive
-        this process writes it to the profile — `/sandbox` does, as a drop-in.
+        marks the row `reconfigured live`. Called only from `ph.session_profile` —
+        its `override`, which records the change in the session's log before this
+        runs, and `opened`, which brings a mount to what that log already says (S4).
+        `test_session_profile` holds every caller to it.
 
         Refused for a row that is disabled (there is no fork to replace; enable it
         in the profile), that isolates others (its realm holds private copies this

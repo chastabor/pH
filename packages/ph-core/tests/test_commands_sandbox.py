@@ -1,10 +1,10 @@
 """P6-38 — `/sandbox`: the posture in force, changed without a restart.
 
-An edit is applied first — `Mount.reconfigure` re-applies `sandbox-allow` with the
-new config, releasing and refilling one slot on the seam — and kept second, as a
-drop-in under `$PH_HOME/profiles/<name>.d/`. Both halves are asserted, and so is
-the seam between them: the agent's next command is bounded by the new statement
-while nothing else in the mount was touched.
+An edit is an override of the session (session profiles, S4): recorded in the
+session's log first, then applied — `Mount.reconfigure` re-applies `sandbox-allow`
+with the new config, releasing and refilling one slot on the seam. Both halves are
+asserted, and so is the seam between them: the agent's next command is bounded by
+the new statement while nothing else in the mount was touched.
 """
 
 from __future__ import annotations
@@ -13,22 +13,27 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, COMMANDS, MOUNT, SANDBOX, SESSIONS, TUI_STATUS
 from ph.paths import resolve_roots
 from ph.seams.sandbox import DEFAULT_HOSTS, Denial
 from ph.seams.tui_status import StatusReading
 from ph.session import Session
+from ph.session_profile import overrides
 from ph.testing import MountProfile, not_none
 
 pytestmark = pytest.mark.anyio
 
 
 async def _run(ctx: Context, line: str, session: Session | None = None) -> str:
-    shown = await ctx.require(COMMANDS).dispatch(line, session=session)
+    """Dispatch `line` in a session — the one the daemon always passes — so an edit
+    has a log to be recorded in."""
+    sessions = ctx.require(SESSIONS)
+    here = session or sessions.get("sandboxed") or sessions.create("sandboxed")
+    shown = await ctx.require(COMMANDS).dispatch(line, session=here)
     assert isinstance(shown, str)
     return shown
 
@@ -57,30 +62,30 @@ async def test_allow_host_is_live_before_it_is_kept(mount: MountProfile) -> None
         *DEFAULT_HOSTS,
         "example.com",
     ]
-    assert "Not saved" in shown, "a test composition has no profile name to save under"
+    assert "Kept in this session's log" in shown
     assert dict(ctx.require(MOUNT).topology())["sandbox-allow"].endswith(", reconfigured live")
 
 
-async def test_the_change_is_kept_as_a_drop_in_under_the_profile(mount: MountProfile) -> None:
-    """The file pH owns, beside the one the person edits."""
+async def test_the_change_is_kept_as_an_override_in_the_session_s_log(mount: MountProfile) -> None:
+    """Kept where the session's other facts are, rather than beside the profile where
+    every session on it would share it — and no drop-in is written any more."""
     ctx = await mount()
-    # A composition a person would run is named; the fixture's is not, so name it.
     ctx.require(MOUNT).profile.name = "headless"
+    session = ctx.require(SESSIONS).create("kept")
 
-    shown = await _run(ctx, "/sandbox allow host example.com")
+    await _run(ctx, "/sandbox allow host example.com", session)
+    await _run(ctx, "/sandbox revoke host example.com", session)
 
-    path = resolve_roots().profile_dropins("headless") / "sandbox.yaml"
-    assert f"Saved to {path}" in shown
-    text = path.read_text(encoding="utf-8")
-    assert text.startswith("# Written by /sandbox.")
-    (patch,) = yaml.safe_load(text)
-    assert patch["id"] == "sandbox-allow"
-    assert patch["config"]["network"]["hosts"][-1] == "example.com"
-    assert patch["config"]["paths"] == []
-
-    await _run(ctx, "/sandbox revoke host example.com")
-    (patch,) = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert "example.com" not in patch["config"]["network"]["hosts"], "rewritten, not appended"
+    changes = overrides(session)
+    assert [change.command for change in changes] == [
+        "/sandbox allow host example.com",
+        "/sandbox revoke host example.com",
+    ]
+    last = changes[-1].entry
+    assert last["id"] == "sandbox-allow"
+    hosts = as_seq(as_obj(as_obj(last["config"])["network"])["hosts"])
+    assert "example.com" not in hosts, "the whole config, each time"
+    assert not resolve_roots().profile_dropins("headless").exists()
 
 
 async def test_a_host_is_normalized_the_same_way_in_both_directions(mount: MountProfile) -> None:

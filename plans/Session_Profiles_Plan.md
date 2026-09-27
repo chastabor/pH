@@ -5,8 +5,10 @@ profile drop-in, not the session log"), which widened, on review, from an audit 
 allowances into an audit of the whole working environment. The decisions below are the
 user's, taken after the options review of 2026-09-25.*
 
-**Status, 2026-09-26.** S1 is done: the `affects` declaration, the layers by kind
-(decisions 23 and 24), and the `models` row. S2 is next.
+**Status, 2026-09-26.** S1–S4 are done: the `affects` declaration, the layers by kind
+(decisions 23 and 24), the `models` row, the named profile format with `phern profiles
+show|fold`, each root's `profile/base` in its log, and overrides through one door. S5
+is next.
 
 ## The goal
 
@@ -240,7 +242,7 @@ every row resolved through its model (decision 8). A required
 state and `sources` names the person's files it was composed from.
 - **Saved in the log itself** (decision 17). About 7–9 KiB, durable with the log and ordered
   with the overrides. Forks and children inherit it, and there is no separate file to lose or
-  keep in step. `phern sessions profile <id>` writes it out as YAML for a person to read.
+  keep in step. `phern profiles session <id>` writes it out as YAML for a person to read.
 - **On disk before the agent's first step.** The record is written, then the session is
   written (`session_written`), then the mount acts on it. A crash before that point leaves a
   session with no base, which is one that never ran: its first start composes the named
@@ -373,7 +375,7 @@ task and never makes a restart ask; the base records only the skill directories
 (`skills-progressive.paths`).
 
 **11. Reading the audit.** "The environment at seq N" is a fold: the base at N plus the
-overrides up to N. It is shown by `phern sessions profile <id> [--at seq]` and by the
+overrides up to N. It is shown by `phern profiles session <id> [--at seq]` and by the
 trajectory view.
 
 ## Todo list
@@ -422,27 +424,101 @@ nothing committed by Claude.
     - The choice does not yet survive a restart: a resumed root starts on its default.
       That is S4's override record.
   - *Gate:* every shipped row declares; a presentation row in a session profile is refused.
-- [ ] **S2 — The named profile format.**
+- [x] **S2 — The named profile format.** Done 2026-09-26.
   - `extends` plus sparse rows; `Profile.dump()` round-trips.
   - `phern profiles show <name> [--full]`.
   - `phern profiles fold`, as item 0; the loader reads a `.d/` directory only until its
     profile is folded, and the doctor names one that is not.
   - *Gate:* compose, save, reload and compose again give the same rows; a saved profile
     holds only rows that differ.
-- [ ] **S3 — The session's base, recorded.**
+  - Built: `ph_app.named_profiles` (the format), `sparse_entries` and `Row.to_entry` in
+    the loader (the round trip: a dump keeps its `layer`, an entry is what a document
+    declares), `Profile.resolved(kinds)` (every row through its model — what `--full`
+    prints and S3's `profile/base` will hold), `save_named_profile`, and `phern profiles
+    show|fold`. Settled in the building:
+    - `extends` names a shipped profile only, one level, and defaults to the file's own
+      name when that is a shipped profile; a person-only name is offered by
+      `available_profiles` like a shipped one.
+    - A `--profile ./x.yaml` in this format is a named profile living elsewhere; a list
+      there is still a whole composition, which is what scenario files are.
+    - The list format before S2 is read until folded, like the drop-ins, and the doctor
+      names both; fold converts it by indenting it under `rows:`, comments kept.
+    - Fold uses the one composing door before and after (the drop-ins moved aside
+      first), puts everything back on any difference, and carries each drop-in's header
+      — `/sandbox`'s pinned-hosts warning — into the folded block.
+    - `show --full` lists the session's environment rows; the host's are `phern config`'s.
+    - Not yet: `/sandbox` still writes a drop-in until S4 makes it an override, so a
+      folded profile can gain one again, and the doctor names it again.
+- [x] **S3 — The session's base, recorded.** Done 2026-09-26.
   - The resolved composition (every row through its model) in `profile/base`.
   - No behavior change yet: the audit only.
   - *Gate:* a new root's log holds its full profile, and mounting from that alone gives the
     same rows; a changed plugin default under an unchanged person's file is found by the
     comparison and attributed to pH.
-- [ ] **S4 — Overrides, through one door.**
+  - Built: `ph.session_profile` — `base_of` (the environment rows through their models,
+    the person's source layers, `ph.__version__`), `record_base` (through its own
+    `_LOG`, then `session_written`, before the agent's first step), `saved_base`,
+    `differences` (setting by setting, dotted paths, `by: person | pH`) and `rebuilt`
+    (the base's rows over a host's rows of every other kind). `profile/base` is in the
+    known vocabulary as a required type. `open_session` records it, the one door every
+    root opens through. `phern profiles session <id>` reads it back from the file on
+    disk; the plan's `phern sessions profile` is spelled under `profiles`, since there
+    is no `sessions` group. Settled in the building:
+    - The base is the named profile *without* its command-line start options:
+      `ProfileDocument.override` marks a `--patch`, which S4 logs as an override.
+    - Roots only: a child (`parent_session` set) runs on its root's mount, and a fork
+      inherits its root's base with the prefix it continues.
+    - Once: a session resumed with a base keeps it (S6 decides a changed profile); one
+      from before this record gets its first on its next start.
+    - Attribution compares the person's own layers as recorded then and as they are
+      now, per row, so pH moving a default beneath an unedited file is pH's even when
+      the file sets that row.
+    - A full row states every field, `disabled` and `config` included; a disabled row
+      whose config its model refuses keeps the config as written, since it never mounts.
+    - `--mode json` streams what the open itself committed before the stream attached —
+      a new log's base — so the stream is still the log from `seq` 0.
+    - Values are recorded as they run, `${env:...}` interpolated; a row's config names
+      a credential and never holds one, so the record carries no secret.
+- [x] **S4 — Overrides, through one door.** Done 2026-09-26.
   - `Mount.reconfigure` writes `profile/override`; `/sandbox` becomes an override.
   - Command-line start options are logged where they differ; nothing is logged for a change
     that matches.
   - *Gate:* every reconfigure leaves a record; an unchanged value leaves none; the log alone
     rebuilds the allowances in force.
+  - Built: `ph.session_profile.override` is the one door — it compares through the row's
+    model (so `{}` and its defaults are one setting), appends `profile/override`, writes
+    the session, and only then calls `Mount.reconfigure`; a record that did not reach disk
+    refuses the change (`OverrideNotRecorded`). A gate holds every shipped caller of
+    `Mount.reconfigure` to that module. `/sandbox` goes through it and writes no drop-in.
+    `open_session` makes one call, `opened`: it records the base, logs this start's
+    `--patch` entries that differ (source `cli`), and brings the mount to what the log
+    says — each row an override names set once, to its last word, rather than every
+    override replayed in turn.
+    `rebuilt(base, host, overrides)` composes the base and the overrides in log order.
+    `/model`, `session/model`, `--model` and rpc's route are overrides of the session's
+    `models` row (`ph.seams.models.move_to`). Settled in the building:
+    - **An override is a profile entry** (`{row, entry, source, command}`), not a bare
+      config or flag, so the log's environment is the base composed with its overrides —
+      a start option that disables or adds a row fits the same record.
+    - **Re-applied live until S5.** The daemon still mounts one composition, so without
+      putting a session's overrides back at open a `/sandbox allow` would be lost on the
+      next start now that it writes no drop-in. Only config patches can be applied to a
+      live mount; a start option that disabled or added a row is logged, and applies from
+      the log once S5 mounts each root from it.
+    - **A route a person names joins the session's list** under a key made from it
+      (`route_key`: `fake/fake-9` → `fake-fake-9`), where S1c left it keyless: the
+      override has to say what the list now holds, and the footer can name it.
+    - **A record that failed to reach disk stays in the session's memory**, as the
+      uploads seam's does, and may be written by a later flush — so a later start could
+      apply a change this one refused. The direction chosen is that the log never says
+      less than was asked.
+    - `profile/override-cleared` is left for S7, which has the first writer of it
+      (`/profile clear`).
 - [ ] **S5 — Profiles per session in the daemon.**
   - `session/new` takes a profile, and the supervisor mounts each root from its log.
+  - rpc mode too: it mounts once and serves many sessions, so today one session's
+    overrides, brought back by `opened`, are live for the next session on that mount.
+    Each session gets a mount of its own, as each daemon root does.
   - *Gate:* two roots on two profiles in one daemon; a root that goes idle and comes back
     keeps its overrides, which fixes the frozen-profile problem.
 - [ ] **S6 — A changed named profile on restart, and adopting on purpose.**

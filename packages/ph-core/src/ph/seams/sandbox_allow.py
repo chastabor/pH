@@ -7,8 +7,9 @@ this row registers the value and describes it and enforces nothing itself. That
 split is what makes the row **re-applicable while an agent runs**: unmounting it
 releases one slot and mounting it again fills the slot, with no provider swapped,
 no probe rerun and no proxy restarted, and the next confined command is bounded by
-the new statement. `/sandbox` is what does that re-apply (`Mount.reconfigure`), and
-the profile drop-in it writes is what makes the change survive a restart.
+the new statement. `/sandbox` is what does that re-apply, as an override of the
+session (`ph.session_profile.override`), and the record it writes is what makes the
+change survive a restart.
 
 **Ships enabled, with the seam's defaults.** No network and no extra directory is
 the closed answer and the wrong default for a harness whose agents install

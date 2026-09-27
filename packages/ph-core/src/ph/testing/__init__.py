@@ -53,6 +53,7 @@ from .builders import (
     isolated_intent_kinds,
     log_event,
     log_interrupted_call,
+    logged_events,
     not_none,
     noted,
     noting,
@@ -79,6 +80,7 @@ from .builders import (
     workspace_retained,
     workspace_seam,
     write_host_config,
+    write_profile,
     write_reference_fork,
 )
 from .diagnostics import report_section
@@ -146,6 +148,7 @@ __all__ = [
     "isolated_intent_kinds",
     "log_event",
     "log_interrupted_call",
+    "logged_events",
     "not_none",
     "noted",
     "noting",
@@ -180,6 +183,7 @@ __all__ = [
     "workspace_retained",
     "workspace_seam",
     "write_host_config",
+    "write_profile",
     "write_reference_fork",
     "write_skill",
 ]

@@ -1251,6 +1251,12 @@ RECORDLESS: frozenset[str] = frozenset(
         # here, and the rule's surfaces are what say the footer must redraw.
         "permission/preset",
         "sandbox/mode",
+        # The session's base profile (S3): the environment, recorded for the audit
+        # and a rebuild, not a moment in the conversation.
+        "profile/base",
+        # A deviation from it (S4): the command that asked already has its own row,
+        # and the posture it moved is a reading.
+        "profile/override",
         "step/start",
         "step/end",
         # A model call made again (P1). The transcript shows the answer, and

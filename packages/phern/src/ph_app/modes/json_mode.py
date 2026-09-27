@@ -48,8 +48,14 @@ async def run_json(
             stream.write(f"{dumps(event.to_wire())}\n")
             stream.flush()
 
-        ctx.on("session/event", emit)
         stream.write(f"{dumps({'type': 'session/header', 'header': session.header.to_wire()})}\n")
+        # What this run committed before there was a stream to write it to: opening
+        # a session records its base first (S3), so a new session's log begins
+        # before this listener does. Everything after the last `session/resumed`
+        # — all of a new log — is this run's, and the stream is the log.
+        for event in _opened_here(session):
+            emit(session, event)
+        ctx.on("session/event", emit)
 
     async with prompted(
         profile,
@@ -65,3 +71,9 @@ async def run_json(
     # any other event, so a count taken one line earlier would report fewer
     # events than the reader just saw.
     return JsonResult(session_id=session.id, events=len(session.events))
+
+
+def _opened_here(session: Session) -> tuple[SessionEvent, ...]:
+    """The events this run's open committed: after the history it resumed, if any."""
+    resumed = session.last_event_of("session/resumed")
+    return session.events_from(resumed.seq + 1 if resumed is not None else 0)

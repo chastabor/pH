@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["SLUG_CHARACTERS", "require_slug", "slug_pattern"]
+__all__ = ["SLUG_CHARACTERS", "require_slug", "slug_pattern", "slugify"]
 
 SLUG_CHARACTERS = "a-z0-9-"
 """Lowercase, digits, hyphen. Named so the rule and the sentence that reports a
@@ -49,3 +49,13 @@ def require_slug(value: str, *, maximum: int, kind: str) -> None:
         raise ValueError(
             f'"{value}" is not a {kind}: 1..{maximum} of lowercase [{SLUG_CHARACTERS}]'
         )
+
+
+def slugify(value: str, *, maximum: int) -> str:
+    """`value` made a slug of at most `maximum` characters, or `""` when nothing is left.
+
+    Runs of anything outside `SLUG_CHARACTERS` become one hyphen, and no hyphen
+    leads or trails — so the result passes `require_slug` whenever it is not empty.
+    """
+    slug = re.sub(rf"[^{SLUG_CHARACTERS}]+", "-", value.lower()).strip("-")
+    return slug[:maximum].rstrip("-")

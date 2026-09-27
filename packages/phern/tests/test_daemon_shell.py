@@ -28,7 +28,7 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import running, until
+from daemon_helpers import logged, running, until
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, ProfileDocument, load_profile_documents
@@ -71,7 +71,7 @@ async def test_a_shell_command_is_logged_and_never_reaches_the_model(tmp_path: P
         await _run(client, root, "echo hello-from-the-person")
 
         assert [one.to_wire() for one in root.session.derive_messages()] == before
-        types = [one.type for one in root.session.events]
+        types = logged(root.session)
         assert types == ["shell/command", "shell/result"], "logged, in full, in order"
 
 
@@ -97,7 +97,7 @@ async def test_a_surfaced_command_reaches_the_model_as_a_user_message(tmp_path: 
         # Still logged in full, exactly as `!!` is — plus the splice itself, which
         # is what makes the pending output survive a restart rather than living
         # only in a process's inbox.
-        types = [one.type for one in root.session.events]
+        types = logged(root.session)
         assert types == ["shell/command", "shell/result", "agent/inbox/spliced"]
         assert [one.to_wire() for one in root.session.derive_messages()] == before, (
             "the inbox holds it until the next step; the log is not rewritten"
@@ -290,7 +290,7 @@ async def test_an_empty_command_is_refused_rather_than_run(tmp_path: Path) -> No
         with pytest.raises(DaemonError):
             await client.call("session/shell", sessionId=root.id, command="   ")
 
-        assert [one.type for one in root.session.events] == []
+        assert logged(root.session) == []
 
 
 async def test_a_result_cites_the_command_it_settles(tmp_path: Path) -> None:
@@ -345,4 +345,4 @@ async def test_a_deployment_with_no_shell_refuses_before_claiming_the_key(
                 await client.call("session/shell", **keyed)
             assert refused.value.reason == "seam_absent"
 
-        assert [one.type for one in root.session.events] == [], "nothing was recorded"
+        assert logged(root.session) == [], "nothing was recorded"

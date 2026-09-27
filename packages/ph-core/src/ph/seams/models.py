@@ -43,10 +43,12 @@ from dataclasses import dataclass, field
 from pydantic import Field, ValidationError, model_validator
 
 from ..agent.types import AgentOptions
-from ..cordis import Context, Profile, interpolate, plugin
-from ..keys import LLM, MODELS
+from ..cordis import Context, Profile, Row, interpolate, plugin
+from ..keys import LLM, MODELS, MOUNT
+from ..session import Session
+from ..session_profile import OverrideSource, override
 from ..wire import WireModel
-from ._names import require_slug
+from ._names import require_slug, slugify
 
 __all__ = [
     "KEY_MAX",
@@ -58,6 +60,10 @@ __all__ = [
     "ModelRoute",
     "apply",
     "choose",
+    "models_row",
+    "move_to",
+    "route_key",
+    "start_on",
 ]
 
 KEY_MAX = 32
@@ -93,6 +99,25 @@ class Config(WireModel):
     models: dict[str, ModelRoute] = Field(default_factory=dict)
     """Every route this profile means, under the key a person, a skill or a spawn
     names it by. Replaced whole by a patch, like any row's config."""
+
+    def choosing(self, chosen: ModelEntry) -> Config:
+        """This list with `chosen` as its default — what `/model` makes an override of.
+
+        A route the list does not hold joins it under a key made from its own name
+        (`route_key`), so the session's list says what it runs on, and choosing the
+        same route again finds the same entry.
+        """
+        key = chosen.key or route_key(chosen.route)
+        if not chosen.key:
+            # A made-up key that a listed model already holds for another route gets a
+            # number, rather than quietly naming that other route.
+            count = 2
+            while key in self.models and self.models[key] != chosen.route:
+                key = f"{route_key(chosen.route)[: KEY_MAX - 3]}-{count}"
+                count += 1
+        models = dict(self.models)
+        models.setdefault(key, chosen.route)
+        return Config(default=key, models=models)
 
     @model_validator(mode="after")
     def _default_is_listed(self) -> Config:
@@ -133,6 +158,20 @@ class ModelChoice(WireModel):
         """Whether this asks for nothing, so whoever holds a default decides."""
         return not (self.key or self.provider)
 
+    @property
+    def spelled(self) -> str:
+        """As `/model` takes it: the key, or `provider/model`."""
+        return self.key or f"{self.provider}/{self.model}"
+
+    @property
+    def flags(self) -> str:
+        """As the command line takes it: `--model KEY`, or both flags."""
+        return (
+            f"--model {self.key}"
+            if self.key
+            else f"--provider {self.provider} --model {self.model}"
+        )
+
     @classmethod
     def from_flags(cls, provider: str | None, model: str | None) -> ModelChoice:
         """`--provider`/`--model` as a person types them.
@@ -166,7 +205,8 @@ class ModelChoice(WireModel):
 
 
 class ModelEntry(WireModel):
-    """A route under the key the profile lists it by — `""` for one it does not.
+    """A route under the key the profile lists it by — `""` for one it does not, until a
+    person chooses it and it joins the session's list under its own name (`route_key`).
 
     What `/model` offers, what a choice resolves to, and what a daemon starts a root
     on: one shape for the one fact, so nothing converts between copies of it.
@@ -205,7 +245,7 @@ class ModelList:
         a mount without the row provides. Interpolated as a mount interpolates,
         so `${env:LLAMA_MODEL:-default}` is the model it names here too.
         """
-        row = next((row for row in profile.enabled_rows() if row.name == "models"), None)
+        row = models_row(profile)
         if row is None:
             return cls()
         return cls(Config.model_validate(interpolate(row.config) or {}))
@@ -276,6 +316,55 @@ def choose(ctx: Context, choice: ModelChoice) -> ModelEntry:
             f"(this profile serves {', '.join(served) or 'nothing'})"
         )
     return chosen
+
+
+def route_key(route: ModelRoute) -> str:
+    """A key for a route a person chose that no list held: its own name, as a slug."""
+    return slugify(f"{route.provider}-{route.model}", maximum=KEY_MAX) or "chosen"
+
+
+def models_row(profile: Profile) -> Row | None:
+    """The row that lists `profile`'s models — found by its plugin's name, the way
+    `/sandbox` finds its row, since the id is the profile's to choose."""
+    return next((row for row in profile.enabled_rows() if row.name == "models"), None)
+
+
+async def move_to(
+    ctx: Context, session: Session, chosen: ModelEntry, *, source: OverrideSource, command: str
+) -> ModelEntry:
+    """Make `chosen` this session's model — an override of the `models` row (S4).
+
+    Through the one door, so the log holds the choice before it is made and a restart
+    runs on it again. Answers the entry under the key the session's list now gives
+    it, which is how an unlisted route comes back with a name. A mount with no
+    `models` row has no list to change: the route is the agent's alone, and is
+    answered as chosen.
+    """
+    mount = ctx.get(MOUNT)
+    row = models_row(mount.profile) if mount is not None else None
+    listed = ctx.get(MODELS)
+    if row is None or listed is None:
+        return chosen
+    config = listed.config.choosing(chosen)
+    wire = config.model_dump(mode="json", by_alias=True)
+    await override(ctx, session, row.id, wire, source=source, command=command)
+    return ModelList(config).resolve(ModelChoice(key=config.default))
+
+
+async def start_on(
+    ctx: Context, session: Session, choice: ModelChoice, *, source: OverrideSource, command: str
+) -> ModelEntry:
+    """The entry a starting agent runs on: this start's `choice`, made the session's
+    where it differs (`move_to`), else the session's own default.
+
+    The one spelling for every host that starts an agent — the daemon's roots,
+    `phern -p` and rpc — so what a start option means cannot differ between them.
+
+    :raises ModelChoiceError: for a choice nothing here can run.
+    """
+    if choice.is_default:
+        return choose(ctx, choice)
+    return await move_to(ctx, session, choose(ctx, choice), source=source, command=command)
 
 
 @plugin("models", affects="environment", config=Config)

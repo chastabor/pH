@@ -186,8 +186,9 @@ deployment one file rather than an install step.
 
 ## Adjusting it
 
-The same three layers every pH row uses — the shipped documents, your overlay at
-`$PH_HOME/profiles/<name>.yaml`, then `--patch` for one run. What is specific to
+The same three layers every pH row uses — the shipped documents, your named
+profile at `$PH_HOME/profiles/<name>.yaml` (`extends` plus the rows that differ),
+then `--patch` for one run. What is specific to
 this package is the rows it registers:
 
 | row | config | default |
@@ -199,13 +200,15 @@ this package is the rows it registers:
 
 ```yaml
 # $PH_HOME/profiles/anthropic.yaml — a different model ceiling, caching off
-- id: llm-anthropic
-  config:
-    provider: anthropic
-    apiKeyEnv: ANTHROPIC_API_KEY
-    contextWindow: 200000
-    defaultMaxTokens: 16384
-    cacheControl: false
+extends: anthropic
+rows:
+  - id: llm-anthropic
+    config:
+      provider: anthropic
+      apiKeyEnv: ANTHROPIC_API_KEY
+      contextWindow: 200000
+      defaultMaxTokens: 16384
+      cacheControl: false
 ```
 
 **A list is replaced, not merged**, and on these rows that is the trap worth

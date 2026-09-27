@@ -90,9 +90,11 @@ always one layer's and readable in one place:
 
 1. the shipped documents — `ph-base`, then whatever the profile layers;
 2. the host's rows, `rows:` in `$PH_HOME/daemon.yaml`, and the daemon's own flags;
-3. your overlay, `$PH_HOME/profiles/<name>.yaml`;
-4. drop-ins pH wrote on your behalf, `$PH_HOME/profiles/<name>.d/*.yaml`, in
-   name order (this is where `/sandbox allow …` keeps its decisions);
+3. your named profile, `$PH_HOME/profiles/<name>.yaml` — `extends:` a shipped
+   profile and `rows:` that differ from it;
+4. drop-ins `/sandbox` wrote before S4, `$PH_HOME/profiles/<name>.d/*.yaml`, read
+   until `phern profiles fold` folds them — `/sandbox` now records an override in
+   the session's log instead;
 5. `--patch`, this run only, same grammar as a profile document.
 
 Each row declares what it `affects` — `environment`, `deployment` or
@@ -139,12 +141,13 @@ is a removal and an insertion, not a rename; consumers never learn which one
 answered either way (I5):
 
 ```yaml
-# $PH_HOME/profiles/tui.yaml — keep the log in Turso instead of JSONL
-- id: session-persistence
-  remove: true
-- insert:
-    - id: session-persistence
-      name: session-persistence-turso
+# $PH_HOME/daemon.yaml — keep the log in Turso instead of JSONL (a host row)
+rows:
+  - id: session-persistence
+    remove: true
+  - insert:
+      - id: session-persistence
+        name: session-persistence-turso
 ```
 
 Giving the existing id a new `name:` in place looks like it should work and does
