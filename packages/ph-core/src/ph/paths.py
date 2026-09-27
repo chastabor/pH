@@ -9,7 +9,7 @@ machine's PIDs. That does not merely waste space: it makes the orphan journal
 
 | root | default | holds |
 |---|---|---|
-| `$PH_HOME` | `~/.ph` | sessions, harness state, profiles, credentials, AGENTS.md |
+| `$PH_HOME` | `~/.ph` | sessions, harness state, profiles, credentials, AGENTS.md, `daemon.yaml` |
 | `$PH_CACHE` | `$XDG_CACHE_HOME/ph` | the runtime venv, bootstrap markers |
 | `$PH_RUNTIME` | `$XDG_RUNTIME_DIR/ph` | `daemon.sock`, `processes.jsonl` |
 
@@ -44,6 +44,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from .host import load_host_config
 
 __all__ = [
     "PathRoots",
@@ -84,14 +86,19 @@ class PathRoots:
     drift, and can `KeyError` on a tier added here and not there.
     """
 
+    sessions: Path | None = None
+    """`daemon.yaml`'s `paths.sessions`, resolved; `None` is `$PH_HOME/sessions`."""
+    profiles: Path | None = None
+    """`daemon.yaml`'s `paths.profiles`, resolved; `None` is `$PH_HOME/profiles`."""
+
     def sessions_dir(self) -> Path:
-        return self.home / "sessions"
+        return self.sessions or self.home / "sessions"
 
     def harness_dir(self) -> Path:
         return self.home / "harness"
 
     def profiles_dir(self) -> Path:
-        return self.home / "profiles"
+        return self.profiles or self.home / "profiles"
 
     def profile_overlay(self, name: str) -> Path:
         """The person's own layer over a shipped profile: `$PH_HOME/profiles/<name>.yaml`."""
@@ -136,8 +143,14 @@ class PathRoots:
 
     def describe(self) -> list[tuple[str, str]]:
         """The rows `phern doctor` prints."""
+        moved = [
+            (name, f"{where}  (daemon.yaml)")
+            for name, where in (("sessions", self.sessions), ("profiles", self.profiles))
+            if where is not None
+        ]
         return [
             ("PH_HOME", str(self.home)),
+            *moved,
             ("PH_CACHE", str(self.cache)),
             ("PH_RUNTIME", f"{self.runtime}  (tier: {self.runtime_tier})"),
         ]
@@ -283,18 +296,32 @@ def resolve_roots(*, create: bool = False) -> PathRoots:
     Canonical (`canonical`) so that everything minted under them — scratch,
     worktrees, the daemon and egress sockets — carries one spelling.
 
+    `$PH_HOME/daemon.yaml` may move the sessions and profiles directories
+    (`ph.host`); it is read once per process, so every caller here agrees.
+
     :raises RuntimeDirError: when the tier-3 `/tmp` fallback fails its check —
         pH refuses to start rather than adopt a directory it cannot vouch for.
+    :raises LoaderError: when `daemon.yaml` is malformed — refused whole, for the
+        reason `load_host_config` gives.
     """
     runtime, tier, source = _resolve_runtime()
+    home = canonical(_env_path("PH_HOME") or _default_home())
+    moved = load_host_config(home).paths
     roots = PathRoots(
-        home=canonical(_env_path("PH_HOME") or _default_home()),
+        home=home,
         cache=canonical(_env_path("PH_CACHE") or _default_cache()),
         runtime=canonical(runtime),
         runtime_tier=tier,
         runtime_source=source,
+        sessions=_under_home(home, moved.sessions),
+        profiles=_under_home(home, moved.profiles),
     )
     return roots.ensure() if create else roots
+
+
+def _under_home(home: Path, configured: str | None) -> Path | None:
+    """A `daemon.yaml` path, `~`-expanded, relative ones under `home`, canonical."""
+    return canonical(home / Path(configured).expanduser()) if configured else None
 
 
 def default_home_path(configured: str | None, name: str) -> Path:

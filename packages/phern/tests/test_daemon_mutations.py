@@ -14,6 +14,7 @@ attachment and re-sent under the same key with a known one must act.
 
 from __future__ import annotations
 
+import re
 from base64 import b64encode
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -32,7 +33,7 @@ from ph.session import Session, now_ms, outcome_of, unsettled_why
 from ph.testing import log_event, stored_types
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.server import METHODS, MUTATIONS
-from ph_app.daemon.supervisor import Root
+from ph_app.daemon.supervisor import Root, Supervisor
 from ph_app.kinds import CLIENT_COMMAND
 from ph_app.protocol import DaemonError
 
@@ -80,6 +81,10 @@ async def _preset(client: DaemonClient, root: Root) -> dict[str, Any]:
     return {"preset": "workspace-write"}
 
 
+async def _model(client: DaemonClient, root: Root) -> dict[str, Any]:
+    return {"choice": {"key": "main"}}
+
+
 def _events(kind: str) -> Callable[[Any], int]:
     return lambda root: sum(1 for one in root.session.events if one.type == kind)
 
@@ -90,6 +95,10 @@ CASES: dict[str, Case] = {
     "session/stage": (_stage, lambda root: len(root.staged)),
     "session/shell": (_shell, _events("shell/command")),
     "session/preset": (_preset, _events("permission/preset")),
+    # Nothing is logged until the next request, whose `request/header` is the
+    # record — so the reply's shape is the claim here, and the tests below
+    # drive a request to read the route back.
+    "session/model": (_model, None),
 }
 
 
@@ -369,3 +378,110 @@ async def test_a_root_whose_key_is_missing_is_held_and_the_key_releases_it(
         assert _awaited(daemon) == {"held": "nothing"}
         types = [one.type for one in root.session.events if one.type.startswith("credential/")]
         assert types == ["credential/needed", "credential/supplied"]
+
+
+async def test_session_model_runs_the_next_request_on_the_new_route(tmp_path: Path) -> None:
+    """`/model`, made real (session profiles, S1).
+
+    A whole route the profile does not list runs as given, with an empty key; the
+    root describes it at once, and the next request's logged context names it.
+    Sabotage: skip `reroute` in `Supervisor.set_model` and the request stays on
+    `fake-1` while the reply says `fake-9`.
+    """
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("rerouted")
+        client = await daemon.client()
+        assert (root.agent.options.model_key, root.agent.options.model) == ("main", "fake-1")
+
+        reply = await client.call(
+            "session/model",
+            sessionId=root.id,
+            choice={"provider": "fake", "model": "fake-9"},
+            clientId="c",
+            commandId="1",
+        )
+
+        assert (reply["modelKey"], reply["model"]) == ("", "fake-9"), "the root, described"
+        assert root.agent.options.model_key == "", "an unlisted route has no key"
+        await client.call(
+            "session/prompt", sessionId=root.id, prompt="hi", clientId="c", commandId="2"
+        )
+        await until(
+            lambda: (
+                (context := root.session.request_context()) is not None
+                and context.model == "fake-9"
+            ),
+            what="the next request to run on the new route",
+        )
+
+
+@pytest.mark.parametrize(
+    ("choice", "said"),
+    [
+        ({"key": "slow"}, "is not a model this profile lists (it lists main)"),
+        ({"provider": "nope", "model": "m"}, 'no adapter here serves "nope"'),
+    ],
+)
+async def test_a_model_nothing_can_run_is_refused_before_the_key(
+    tmp_path: Path, choice: dict[str, str], said: str
+) -> None:
+    """Resolved in `prepare`, so the refusal names why and does not burn the key:
+    the same key with a listed choice then acts. Sabotage: resolve in `act`
+    instead and the retry comes back `repeated` on a route that never moved."""
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("refused-model")
+        client = await daemon.client()
+        keyed = {"sessionId": root.id, "clientId": "c", "commandId": "1"}
+
+        with pytest.raises(DaemonError, match=re.escape(said)):
+            await client.call("session/model", **keyed, choice=choice)
+        reply = await client.call("session/model", **keyed, choice={"key": "main"})
+
+        assert reply.get("repeated") is not True and reply["modelKey"] == "main"
+
+
+async def test_models_list_is_the_profile_s_list_default_first(tmp_path: Path) -> None:
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("listed")
+        client = await daemon.client()
+
+        reply = await client.call("models/list", sessionId=root.id)
+
+        assert [(one["key"], one["default"]) for one in reply["models"]] == [("main", True)]
+        assert reply["models"][0]["route"] == {"provider": "fake", "model": "fake-1"}
+
+
+async def test_session_new_mounts_a_root_on_the_choice_it_carries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal's `--model` rides `session/new`, so a fresh root *mounts* on it —
+    no default route first, with its credential check (and, for a real provider,
+    a logged wait) for a model nobody chose. A root already running is moved to
+    it; one already on it is left alone.
+
+    The moves are counted, because the end state alone cannot tell the two paths
+    apart: the move repairs a root that mounted on the wrong route. Sabotage: drop
+    `choice` from `Supervisor.start` and the fresh root is moved, not mounted.
+    """
+    moves: list[str] = []
+    set_model = Supervisor.set_model
+
+    async def counted(self: Supervisor, root: Root, chosen: Any) -> None:  # noqa: ANN401
+        moves.append(root.id)
+        await set_model(self, root, chosen)
+
+    # On the class: `Supervisor` is a `slots=True` dataclass.
+    monkeypatch.setattr(Supervisor, "set_model", counted)
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        route = {"provider": "fake", "model": "fake-3"}
+
+        fresh = await client.call("session/new", sessionId="chosen", choice=route)
+        assert (fresh["modelKey"], fresh["model"]) == ("", "fake-3")
+        assert moves == [], "a fresh root was mounted on the default and then moved"
+
+        already = await daemon.root("already")
+        again = await client.call("session/new", sessionId=already.id, choice={"key": "main"})
+        assert again["model"] == "fake-1" and moves == [], "one already on it is left alone"
+        moved = await client.call("session/new", sessionId=already.id, choice=route)
+        assert moved["model"] == "fake-3" and moves == [already.id]

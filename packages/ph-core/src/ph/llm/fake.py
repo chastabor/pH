@@ -113,7 +113,7 @@ class Config(WireModel):
     replies: tuple[str, ...] = ()
 
 
-@plugin("llm-fake", inject=[LLM], config=Config)
+@plugin("llm-fake", affects="environment", inject=[LLM], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the fake adapter for the routes a profile names."""
     adapter = FakeAdapter(

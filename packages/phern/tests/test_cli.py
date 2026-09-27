@@ -25,11 +25,13 @@ from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.json import as_obj
 from ph.paths import resolve_roots
 from ph.persistence.jsonl import read_session
+from ph.seams.models import ModelChoice
 from ph.session import SESSION_FORMAT_VERSION
 from ph.testing import ReapedHost, hold_session, not_none, stored_log
 from ph_app import profiles
 from ph_app.cli import app
 from ph_app.profiles import (
+    PRESENTATION,
     PROFILE_DIR,
     available_profiles,
     compose_profile,
@@ -313,6 +315,8 @@ def test_two_patches_compose_in_order_and_reach_the_live_topology() -> None:
     `isolate:` and `disabled:` are both patch verbs, so both are reachable from
     the flag; and `doctor` names `cli` as the layer that flipped a row, which is
     the answer to "why isn't X running" when the reason was typed a moment ago.
+    Two tool rows, because a `--patch` sets what a session profile sets: the
+    environment, and not the host's invariants (the next test).
     """
     result = runner.invoke(
         app,
@@ -321,14 +325,39 @@ def test_two_patches_compose_in_order_and_reach_the_live_topology() -> None:
             "--profile",
             "headless",
             "--patch",
-            "{id: skills-invariant, disabled: true}",
+            "{id: tool-bash, disabled: true}",
             "--patch",
-            "{id: tools-invariant, disabled: true}",
+            "{id: tool-fs, disabled: true}",
         ],
+        env={"COLUMNS": "220"},
     )
     assert result.exit_code == 0, result.output
-    assert "skills-invariant" in result.stdout and "disabled · by cli" in result.stdout
-    assert "skill-reach-cache" not in result.stdout, "a disabled row's invariant was still reported"
+    disabled = [line for line in result.stdout.splitlines() if "disabled · by cli" in line]
+    assert any("tool-bash" in line for line in disabled), result.stdout
+    assert any("tool-fs" in line for line in disabled), result.stdout
+
+
+@pytest.mark.parametrize(
+    ("patch", "kind", "owner"),
+    [
+        ("{id: skills-invariant, disabled: true}", "deployment", "daemon.yaml"),
+        ("{id: session-persistence, remove: true}", "deployment", "daemon.yaml"),
+        ("{id: tui-screen-trajectory, remove: true}", "presentation", "tui.json"),
+        ("{insert: [{id: extra, name: session-telemetry}]}", "deployment", "daemon.yaml"),
+    ],
+)
+def test_a_patch_may_set_only_what_a_session_profile_sets(
+    patch: str, kind: str, owner: str
+) -> None:
+    """`--patch` is a person's layer over the environment, and a row of another
+    kind is refused by name, with the file it belongs in — whether the patch sets
+    it, removes it, or inserts a second copy. Refused at composition, so
+    `--dump-config` says no before anything mounts."""
+    result = runner.invoke(app, ["--dump-config", "--profile", "headless", "--patch", patch])
+
+    assert result.exit_code == 2, result.output
+    assert f"is {kind}, and this layer sets environment rows only" in result.output
+    assert owner in result.output
 
 
 def test_a_malformed_patch_is_refused_with_the_command_s_exit_code() -> None:
@@ -486,6 +515,8 @@ def test_the_config_catalog_is_generated_from_each_row_s_own_model() -> None:
     assert not [entry for entry in catalog if "error" in entry], "a row failed to resolve"
     worktree = by_name["workspace-git-worktree"]
     assert worktree["injects"] == ["workspace", "subprocess"]
+    assert worktree["affects"] == "environment"
+    assert by_name["tui-status"]["affects"] == "presentation"
     ((option,),) = (worktree["config"],)
     assert (option["name"], option["type"], option["default"]) == ("root", "str | null", "None")
     assert "outside the repository on purpose" in option["doc"], (
@@ -599,7 +630,7 @@ def test_the_catalog_refuses_an_unknown_row_rather_than_printing_nothing() -> No
 
 def resolve_profile_config(patches: list[str]) -> Any:  # noqa: ANN401
     """The `jobs` row's config as the headless profile composes it, patches and all."""
-    rows = profile_or_exit("headless", patches).dump()
+    rows = profile_or_exit("headless", deployment=patches).dump()
     return next(row for row in rows if row.get("id") == "jobs").get("config")
 
 
@@ -707,20 +738,56 @@ def test_print_mode_exits_nonzero_on_an_error_turn(
     the only way to tell an answer from a failure was to parse the log the run
     had just written.
 
-    An unknown provider is the cheapest error turn there is, and the one a person
-    hits by typo. The message is asserted too: an exit code that says "something
-    went wrong" and nothing else is barely better than the zero.
+    A route whose credential is not set is the cheapest error turn there is now —
+    a misspelled provider is refused before any turn starts (the next test). The
+    message is asserted too: an exit code that says "something went wrong" and
+    nothing else is barely better than the zero.
     """
     monkeypatch.setenv("PH_HOME", str(tmp_path))
-    result = runner.invoke(app, ["-p", "hello", "--provider", "nope", "--session", "failed"])
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = runner.invoke(app, ["-p", "hello", "--profile", "anthropic", "--session", "failed"])
 
     assert result.exit_code == 1, result.output
-    assert 'no adapter is registered for provider "nope"' in result.output
+    assert "ANTHROPIC_API_KEY is not set" in result.output
     assert "Traceback" not in result.output
 
     _header, events = read_session(stored_log(tmp_path / "sessions", "failed"))
     ended = [event for event in events if event.type == "turn/end"]
     assert as_obj(ended[-1].data["reason"])["kind"] == "error", "and the log says so too"
+
+
+@pytest.mark.parametrize(
+    ("flags", "said"),
+    [
+        (["--provider", "nope", "--model", "x"], 'no adapter here serves "nope"'),
+        (["--model", "nope"], '"nope" is not a model this profile lists (it lists main)'),
+        (["--provider", "fake"], "--provider names a route, and needs --model"),
+    ],
+)
+def test_a_route_nothing_can_run_is_refused_before_a_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], said: str
+) -> None:
+    """Refused where it is chosen, with exit 2 and nothing logged — not a turn
+    that fails at its first request and leaves a session behind to explain it."""
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+
+    result = runner.invoke(app, ["-p", "hello", *flags, "--session", "refused"])
+
+    assert result.exit_code == 2, result.output
+    assert said in result.output
+    assert not (tmp_path / "sessions" / "refused").exists(), "a refusal wrote a session"
+
+
+def test_a_listed_key_and_its_whole_route_are_one_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--model main` and `--provider fake --model fake-1` run the same entry, and
+    neither flag runs the profile's default — `headless` lists one route."""
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+    for flags in ([], ["--model", "main"], ["--provider", "fake", "--model", "fake-1"]):
+        result = runner.invoke(app, ["-p", "hello", *flags])
+        assert result.exit_code == 0, result.output
+        assert "ok" in result.stdout
 
 
 def test_each_mode_is_reachable_from_the_command_line(
@@ -760,7 +827,7 @@ def test_profiles_resolve_to_bundle_documents() -> None:
     documents = resolve_profile("headless")
     # By resolved path, not by basename: two bundles in this workspace are both
     # called `bundle.yaml`, so a name comparison would pass for either.
-    assert documents == [BASE, HEADLESS, resolve_bundle("stabilize")]
+    assert documents == [BASE, HEADLESS, resolve_bundle("stabilize"), PRESENTATION]
     with pytest.raises(ValueError):
         resolve_profile("nope")
 
@@ -813,7 +880,7 @@ def test_an_optional_bundle_that_is_absent_costs_the_profile_nothing(
 
     assert "tui" in available_profiles(), "the profile survives its absence"
     assert "llama" in available_profiles()
-    assert resolve_profile("tui") == [BASE, HEADLESS, PROFILE_DIR / "tui.yaml"]
+    assert resolve_profile("tui") == [BASE, HEADLESS, PROFILE_DIR / "tui.yaml", PRESENTATION]
 
     # The same bundle, named *required* one profile over, is still refused and
     # still names the distribution to install — which is the whole distinction
@@ -839,7 +906,7 @@ def test_an_unknown_profile_names_what_is_available() -> None:
 def test_the_tui_profile_layers_onto_headless() -> None:
     documents = resolve_profile("tui")
     stabilize = not_none(resolve_bundle("stabilize"))
-    assert documents == [BASE, HEADLESS, stabilize, PROFILE_DIR / "tui.yaml"]
+    assert documents == [BASE, HEADLESS, stabilize, PROFILE_DIR / "tui.yaml", PRESENTATION]
     # The bundle before the profile's own document, so `tui.yaml` — and a user
     # overlay after it — can address a stabilize row by id.
     assert documents.index(stabilize) < documents.index(PROFILE_DIR / "tui.yaml")
@@ -1003,7 +1070,7 @@ def test_pH_reinvokes_itself_one_way() -> None:
     from ph_app.cli import spawn_command, tab_command
 
     tab = tab_command(session="s1", profile="tui", provider="p", model="m", spawn=False)
-    daemon = spawn_command(profile="tui", provider="p", model="m", patch=["{id: x}"])
+    daemon = spawn_command(profile="tui", patch=["{id: x}"])
 
     assert tab[:3] == [sys.executable, "-m", "ph_app"]
     assert daemon[:3] == tab[:3], "one prefix, one rule"
@@ -1013,8 +1080,26 @@ def test_pH_reinvokes_itself_one_way() -> None:
     assert daemon[3:5] == ["daemon", "--ephemeral"]
     for argv in (tab, daemon):
         assert argv[argv.index("--profile") + 1] == "tui"
-        assert argv[argv.index("--provider") + 1] == "p"
+    # The route is the terminal's session's: a tab carries it to its terminal,
+    # which asks for it after attaching, and the daemon is started without one.
+    assert tab[tab.index("--provider") + 1] == "p" and tab[tab.index("--model") + 1] == "m"
+    assert "--provider" not in daemon and "--model" not in daemon
     assert daemon[-2:] == ["--patch", "{id: x}"], "a patch reaches whoever composes"
+    # And the daemon takes what it is handed. The argv was pinned while
+    # `phern daemon` had no `--patch`, so a `phern --mode tui --patch …` spawned a
+    # daemon that refused its own command line.
+    parsed = runner.invoke(app, [*daemon[3:], "--help"])
+    assert parsed.exit_code == 0, parsed.output
+
+
+def test_an_unset_route_is_not_spelled_into_a_command_line() -> None:
+    """Unset is the profile's default, so a default spelled into the argv would be
+    a choice nobody made — and would override a profile that lists another."""
+    from ph_app.cli import tab_command
+
+    tab = tab_command(session="s1", profile="anthropic")
+
+    assert "--provider" not in tab and "--model" not in tab
 
 
 def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
@@ -1079,6 +1164,29 @@ def _records_serve(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
 
     monkeypatch.setattr("ph_app.daemon.server.serve", recording)
     return served
+
+
+def test_the_daemon_refuses_a_model_its_profile_does_not_list_before_it_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every root would otherwise refuse it one `session/new` at a time, which a
+    person reading a daemon's log finds long after the typo. Listed, it reaches
+    `serve` as the choice it spells — and unset reaches it as the default."""
+    monkeypatch.setenv("PH_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PH_RUNTIME", str(tmp_path / "run"))
+    served = _records_serve(monkeypatch)
+
+    refused = runner.invoke(app, ["daemon", "--profile", "headless", "--model", "nope"])
+    assert refused.exit_code == 2, refused.output
+    assert "not a model this profile lists" in refused.output and served == {}
+
+    listed = runner.invoke(app, ["daemon", "--profile", "headless", "--model", "main"])
+    assert listed.exit_code == 0, listed.output
+    assert served["choice"] == ModelChoice(key="main")
+
+    unset = runner.invoke(app, ["daemon", "--profile", "headless"])
+    assert unset.exit_code == 0, unset.output
+    assert served["choice"] == ModelChoice()
 
 
 def test_a_keep_alive_says_which_lifetime_it_means(
@@ -1196,6 +1304,7 @@ def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
         BASE,
         HEADLESS,
         not_none(resolve_bundle("stabilize")),
+        PRESENTATION,
         # The person's own overlay, which shares a basename with the bundle it
         # layers over — the reason this compares resolved paths.
         profiles_dir / "headless.yaml",

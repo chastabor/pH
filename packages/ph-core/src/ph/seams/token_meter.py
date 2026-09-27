@@ -329,7 +329,7 @@ def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None
         return None
 
 
-@plugin("token-meter")
+@plugin("token-meter", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the token meter, and the one reading it can answer for a footer."""
     meter = TokenMeter(ctx=ctx)

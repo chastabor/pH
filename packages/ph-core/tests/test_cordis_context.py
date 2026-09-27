@@ -109,7 +109,7 @@ async def test_disposed_scope_loses_services_and_refuses_registration() -> None:
 async def test_disposing_a_provider_removes_the_service() -> None:
     root = Context()
 
-    @plugin("provider")
+    @plugin("provider", affects="environment")
     async def provider(ctx: Context, config: None) -> None:
         ctx.provide("thing", "value")
 
@@ -125,7 +125,7 @@ async def test_plugin_waits_for_its_injected_services() -> None:
     root = Context()
     applied: list[str] = []
 
-    @plugin("dependent", inject=["base"])
+    @plugin("dependent", affects="environment", inject=["base"])
     async def dependent(ctx: Context, config: None) -> None:
         applied.append("dependent")
 
@@ -149,11 +149,11 @@ async def test_plugin_waits_for_its_injected_services() -> None:
 async def test_plugin_provides_into_the_realm_it_was_mounted_in() -> None:
     root = Context()
 
-    @plugin("provider")
+    @plugin("provider", affects="environment")
     async def provider(ctx: Context, config: None) -> None:
         ctx.provide("shared", "yes")
 
-    @plugin("consumer", inject=["shared"])
+    @plugin("consumer", affects="environment", inject=["shared"])
     async def consumer(ctx: Context, config: None) -> None:
         ctx.provide("saw", ctx.require("shared"))
 
@@ -167,7 +167,7 @@ async def test_plugin_provides_into_the_realm_it_was_mounted_in() -> None:
 async def test_failed_activation_unwinds_its_own_scope() -> None:
     root = Context()
 
-    @plugin("broken")
+    @plugin("broken", affects="environment")
     async def broken(ctx: Context, config: None) -> None:
         ctx.provide("half", 1)
         raise RuntimeError("boom")
@@ -181,7 +181,7 @@ async def test_failed_activation_unwinds_its_own_scope() -> None:
 async def test_activation_scopes_are_transparent_and_agent_scopes_isolate() -> None:
     root = Context()
 
-    @plugin("row")
+    @plugin("row", affects="environment")
     async def row(ctx: Context, config: None) -> None:
         ctx.provide("row_scope", ctx)
 
@@ -696,12 +696,12 @@ async def test_a_row_that_failed_to_apply_does_not_block_the_rest() -> None:
     root = Context()
     applied: list[str] = []
 
-    @plugin("broken")
+    @plugin("broken", affects="environment")
     async def broken(ctx: Context, config: None) -> None:
         applied.append("broken")
         raise RuntimeError("boom")
 
-    @plugin("sound")
+    @plugin("sound", affects="environment")
     async def sound(ctx: Context, config: None) -> None:
         applied.append("sound")
         ctx.provide("sound", True)

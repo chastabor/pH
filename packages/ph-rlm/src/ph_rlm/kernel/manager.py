@@ -1701,7 +1701,7 @@ class Config(KernelLimits):
     that sets it still loads; see `apply`."""
 
 
-@plugin("code-runtime-python", config=Config, inject=[CODE_RUNTIME])
+@plugin("code-runtime-python", affects="environment", config=Config, inject=[CODE_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the runtime. The journal is shared; `subprocess-local` sweeps it.
 

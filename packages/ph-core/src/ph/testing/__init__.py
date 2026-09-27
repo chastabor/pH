@@ -78,6 +78,7 @@ from .builders import (
     workspace_log,
     workspace_retained,
     workspace_seam,
+    write_host_config,
     write_reference_fork,
 )
 from .diagnostics import report_section
@@ -178,6 +179,7 @@ __all__ = [
     "workspace_log",
     "workspace_retained",
     "workspace_seam",
+    "write_host_config",
     "write_reference_fork",
     "write_skill",
 ]

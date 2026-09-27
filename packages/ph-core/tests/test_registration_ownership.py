@@ -541,7 +541,7 @@ async def test_a_registration_is_an_effect_of_the_row_that_made_it(
     assert service is not None, f"{key} is not mounted by base + headless"
     seam_effects = len(service.ctx._effects)
 
-    @plugin(f"p612-{key}", inject=[key])
+    @plugin(f"p612-{key}", affects="environment", inject=[key])
     async def row(ctx: Context, config: None) -> None:
         register(ctx.get(key))
 
@@ -591,7 +591,7 @@ async def test_an_explicit_scope_still_wins(mount: MountProfile) -> None:
     commands = root.require(COMMANDS)
     agent = root.scope("agent")
 
-    @plugin("p612-scoped", inject=["commands"])
+    @plugin("p612-scoped", affects="environment", inject=["commands"])
     async def row(ctx: Context, config: None) -> None:
         ctx.require(COMMANDS).register(_definition("scoped"), scope=agent)
 
@@ -898,11 +898,11 @@ async def test_a_listener_registers_on_its_own_scope_not_the_emitters(mount: Mou
     root = await mount()
     commands = root.require(COMMANDS)
 
-    @plugin("p625-b", inject=["commands"])
+    @plugin("p625-b", affects="environment", inject=["commands"])
     async def row_b(ctx: Context, config: None) -> None:
         ctx.on(event, lambda: ctx.require(COMMANDS).register(_definition("from-b")))
 
-    @plugin("p625-a", inject=["commands"])
+    @plugin("p625-a", affects="environment", inject=["commands"])
     async def row_a(ctx: Context, config: None) -> None:
         ctx.emit(event)
 
@@ -942,7 +942,7 @@ async def test_a_registration_made_after_apply_returns_still_belongs_to_its_row(
     root = await mount()
     commands = root.require(COMMANDS)
 
-    @plugin("p625-late", inject=["commands"])
+    @plugin("p625-late", affects="environment", inject=["commands"])
     async def late(ctx: Context, config: None) -> None:
         ctx.on(event, lambda: ctx.require(COMMANDS).register(_definition("deferred")))
 
@@ -967,7 +967,7 @@ async def test_register_when_composed_needs_no_explicit_scope(mount: MountProfil
     root = await mount()
     tools = root.require(TOOLS)
 
-    @plugin("p625-composed", inject=["tools"])
+    @plugin("p625-composed", affects="environment", inject=["tools"])
     async def row(ctx: Context, config: None) -> None:
         from ph.testing import simple_tool
 
@@ -1009,7 +1009,7 @@ async def test_every_dispatch_mode_runs_a_listener_as_its_own_scope(
     root = await mount()
     seen: list[Context | None] = []
 
-    @plugin(f"p625-{mode}-{shape}", inject=["commands"])
+    @plugin(f"p625-{mode}-{shape}", affects="environment", inject=["commands"])
     async def row(ctx: Context, config: None) -> None:
         if shape == "sync":
 
@@ -1107,7 +1107,7 @@ async def test_a_row_registering_at_mount_still_lands_globally(mount: MountProfi
     ctx = await mount()
     agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p626-plain"), FAKE_OPTIONS)
 
-    @plugin("p626-row", inject=["tools"])
+    @plugin("p626-row", affects="environment", inject=["tools"])
     async def row(scope: Context, config: None) -> None:
         scope.require(TOOLS).register(simple_tool("p626_global"))
 
@@ -1143,7 +1143,7 @@ async def test_a_command_body_runs_as_its_row_for_the_agent_that_typed_it(
     agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-cmd"), FAKE_OPTIONS)
     seen: list[tuple[Context | None, Context | None]] = []
 
-    @plugin("p629-row", inject=["commands"])
+    @plugin("p629-row", affects="environment", inject=["commands"])
     async def row(scope: Context, config: None) -> None:
         scope.require(COMMANDS).register(
             _definition(
@@ -1199,7 +1199,7 @@ async def test_a_tool_body_registers_as_its_row_and_for_its_agent(mount: MountPr
             run.scope.require(TOOLS).register(simple_tool("p629_made"))
             return "done"
 
-        @plugin("p629-tool-row", inject=["tools"])
+        @plugin("p629-tool-row", affects="environment", inject=["tools"])
         async def row(scope: Context, config: None) -> None:
             scope.require(TOOLS).register(simple_tool("p629_carrier", execute=smuggle))
 
@@ -1253,7 +1253,7 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
     agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("p629-prompt"), FAKE_OPTIONS)
     seen: dict[str, tuple[Context | None, Context | None]] = {}
 
-    @plugin("p629-prompt-row", inject=["system_prompt"])
+    @plugin("p629-prompt-row", affects="environment", inject=["system_prompt"])
     async def row(scope: Context, config: None) -> None:
         def variable() -> str:
             seen["variable"] = (Context.current_owner(), Context.current_layer())

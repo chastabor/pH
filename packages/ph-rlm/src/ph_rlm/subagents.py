@@ -998,6 +998,7 @@ def _last_assistant_text(session: Session | None) -> str:
 
 @plugin(
     "rlm-subagent-provider",
+    affects="environment",
     config=Config,
     inject=[SUBAGENTS, AGENTS, SESSIONS, JOBS, LLM],
 )

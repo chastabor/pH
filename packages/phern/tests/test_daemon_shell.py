@@ -31,7 +31,7 @@ import pytest
 from daemon_helpers import running, until
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Profile, load_profile_documents
+from ph.cordis import Profile, ProfileDocument, load_profile_documents
 from ph.json import as_str
 from ph.llm.types import text_of
 from ph.testing import not_none, stored_types
@@ -330,7 +330,10 @@ async def test_a_deployment_with_no_shell_refuses_before_claiming_the_key(
     back `repeated` instead of refusing again.
     """
     bare = Profile.from_documents(
-        [*load_profile_documents([BASE, HEADLESS]), ("test", [{"id": "shell", "remove": True}])]
+        [
+            *load_profile_documents([BASE, HEADLESS]),
+            ProfileDocument("test", [{"id": "shell", "remove": True}]),
+        ]
     )
     async with running(tmp_path, profile=bare) as daemon:
         root = await daemon.root("shell-less")

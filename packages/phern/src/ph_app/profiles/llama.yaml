@@ -116,3 +116,12 @@
             #   `/files` endpoint here at all, so a MIME listed there would be
             #   intersected away rather than referenced — see `_body`.
             accepts: ["image/png", "image/jpeg", "image/gif", "image/webp"]
+
+# A local server serves whatever was loaded, so the one route's model is
+# `LLAMA_MODEL` — the variable the live gate already reads — and a server that
+# ignores the name answers with its loaded model either way.
+- id: models
+  config:
+    default: main
+    models:
+      main: {provider: llama, model: "${env:LLAMA_MODEL:-default}"}

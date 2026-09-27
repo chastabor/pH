@@ -493,7 +493,7 @@ def _render_head(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
     return text_content("\n".join(f"- {row}" for row in manifest) or "the corpus is empty")
 
 
-@plugin("rlm-context-loader", config=Config, inject=[TOOLS, SYSTEM_PROMPT])
+@plugin("rlm-context-loader", affects="environment", config=Config, inject=[TOOLS, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: Config) -> None:
     """Resolve the corpus, register the three queries, describe it in the prompt.
 

@@ -19,7 +19,7 @@ from rlm_fixtures import HOST_INTERPRETER, ShippedProfile
 from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Context, Profile, load_profile_documents
+from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import report_section
@@ -45,7 +45,9 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
 def test_a_patch_in_the_bundle_addresses_a_row_that_exists() -> None:
     """A patch naming an unknown id is a `LoaderError`, so composing proves it."""
     documents = load_profile_documents([BASE, HEADLESS, BUNDLE])
-    documents.append(("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}]))
+    documents.append(
+        ProfileDocument("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}])
+    )
     Profile.from_documents(documents)
 
 
@@ -66,7 +68,9 @@ async def test_every_row_in_the_profile_activates(
     """
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     documents = load_profile_documents([BASE, HEADLESS, BUNDLE])
-    documents.append(("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}]))
+    documents.append(
+        ProfileDocument("test-overlay", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}])
+    )
     profile = Profile.from_documents(documents)
     ctx = Context()
     try:

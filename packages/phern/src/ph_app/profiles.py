@@ -4,6 +4,19 @@ A profile is an ordered list of YAML documents. The shipped ones live in
 `ph.bundles`; a user profile is a file under `$PH_HOME/profiles/<name>.yaml`
 layered on top, so a deployment overrides a row by id without forking a bundle.
 
+**Three owners, one kind each** (decision 23). Every row declares what its
+settings shape (`Affects`), and each layer a person writes may set one kind:
+
+| layer | sets |
+|---|---|
+| pH's shipped documents, `presentation.yaml` included | any |
+| `$PH_HOME/daemon.yaml`'s `rows:`, and the daemon's own flags | `deployment` |
+| `$PH_HOME/profiles/<name>.yaml`, its drop-ins, `--patch` | `environment` |
+
+Presentation has no layer a person writes here: those rows ship in every
+profile, and hiding a screen is the TUI's `tui.json`. A row set in the wrong
+layer is refused by `compose_rows`, naming the configuration it belongs in.
+
 @module ph_app.profiles
 """
 
@@ -19,16 +32,21 @@ import typer
 from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.cordis import LoaderError, Profile, ProfileDocument, load_profile_documents
 from ph.cordis.loader import safe_yaml_load
-from ph.paths import resolve_roots
+from ph.cordis.plugin import Affects
+from ph.host import host_config_path, load_host_config
+from ph.paths import PathRoots, resolve_roots
 
 from .console import detail, fail
 
 __all__ = [
     "DEFAULT_PROFILE",
+    "PRESENTATION",
     "PROFILES",
     "PROFILE_DIR",
     "Bundle",
+    "ModelOption",
     "ProfileOption",
+    "ProviderOption",
     "available_profiles",
     "compose_profile",
     "profile_documents",
@@ -39,6 +57,15 @@ __all__ = [
 ]
 
 PROFILE_DIR = Path(__file__).parent / "profiles"
+
+PRESENTATION = PROFILE_DIR / "presentation.yaml"
+"""The presentation rows this package ships, layered into every named profile.
+
+Outside the `PROFILES` table on purpose: a screen is not part of the environment
+a profile names, so no entry there says whether it has one. Every named profile
+mounts them, because the daemon that holds a headless run is also what a TUI
+attaches to, and a screen nothing draws costs nothing (`base.yaml` says the same
+of `tui-screens`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,10 +276,31 @@ def resolve_profile(name: str) -> list[Path]:
 
     A name that is a path is used directly, which is what makes a scenario test
     or a one-off deployment a single file rather than an install step.
+
+    Paths only, so what each layer may set is not here: `profile_documents` is the
+    door that reads them with it.
+    """
+    shipped, person = _layers(name, resolve_roots())
+    return [*shipped, *person]
+
+
+def _layers(name: str, roots: PathRoots) -> tuple[list[Path], list[Path]]:
+    """pH's layers for `name`, and the person's over them — file or named, decided once.
+
+    A file profile is a whole composition, deployment rows and all, which is the
+    point of it: one file is the scenario. So it is one layer of pH's kind — it may
+    set any row — with nothing layered over it, `presentation.yaml` included: a
+    file that wants the trajectory screen inserts it. `extends` (S2) is what lets
+    it become sparse, and so a layer of one kind.
     """
     candidate = profile_file(name)
     if candidate is not None:
-        return [candidate]
+        return [candidate], []
+    return _shipped_layers(name), _person_layers(name, roots)
+
+
+def _shipped_layers(name: str) -> list[Path]:
+    """The layers pH provides for the named profile `name`."""
     declared = PROFILES.get(name)
     if declared is None:
         raise ValueError(
@@ -277,7 +325,13 @@ def resolve_profile(name: str) -> list[Path]:
             # composed exactly as this table says it should.
             continue
         layers.append(resolved)
-    roots = resolve_roots()
+    layers.append(PRESENTATION)
+    return layers
+
+
+def _person_layers(name: str, roots: PathRoots) -> list[Path]:
+    """What a person wrote over the named profile `name`, and what pH wrote for them."""
+    layers: list[Path] = []
     overlay = roots.profile_overlay(name)
     if overlay.exists():
         layers.append(overlay)
@@ -338,18 +392,55 @@ come to accept different things. Parsed by `safe_yaml_load`, so the code-tag
 refusal that guards a file guards the flag."""
 
 
+ProviderOption: TypeAlias = Annotated[
+    str | None,
+    typer.Option(
+        "--provider",
+        help="With --model, run on this exact route instead of one the profile lists.",
+    ),
+]
+"""`--provider`, declared once for `phern` and `phern daemon`, `ProfileOption`'s
+reason: two copies of one flag are how two commands come to mean different
+things by it. Read with `--model` by `ModelChoice.from_flags`."""
+
+ModelOption: TypeAlias = Annotated[
+    str | None,
+    typer.Option(
+        "--model",
+        help="A model the profile lists, by key (`fast`); with --provider, a model name.",
+    ),
+]
+"""`--model`, declared once beside `--provider` for the same reason."""
+
+
 CLI_LAYER = "cli"
 """The layer a `--patch` composes under — what `--dump-config` and `phern doctor`'s
 topology print as its provenance."""
 
 
 def profile_documents(name: str) -> list[ProfileDocument]:
-    """`resolve_profile`, read: the profile's layers as documents, raising as its parts raise.
+    """The profile's layers as documents, each saying what it may set — the door
+    every command composes through, raising as its parts raise.
 
     The stage a caller wants when it has a layer of its own to add before
-    composing — the benchmark's `bench` document, a fixture's overlay.
+    composing — the benchmark's `bench` document, a fixture's overlay. The kinds
+    are the module docstring's table, and `daemon.yaml`'s rows sit between pH's
+    layers and the person's: after what they patch, and apart from the environment
+    a session profile names.
     """
-    return load_profile_documents(resolve_profile(name))
+    roots = resolve_roots()
+    shipped, person = _layers(name, roots)
+    host = load_host_config(roots.home)
+    deployment = (
+        [ProfileDocument(str(host_config_path(roots.home)), host.rows, sets="deployment")]
+        if host.rows is not None
+        else []
+    )
+    return [
+        *load_profile_documents(shipped),
+        *deployment,
+        *load_profile_documents(person, sets="environment"),
+    ]
 
 
 def compose_profile(name: str) -> Profile:
@@ -360,8 +451,15 @@ def compose_profile(name: str) -> Profile:
     return Profile.from_documents(profile_documents(name), name=profile_name(name))
 
 
-def profile_or_exit(profile: str, patches: Sequence[str] = ()) -> Profile:
+def profile_or_exit(
+    profile: str, patches: Sequence[str] = (), *, deployment: Sequence[str] = ()
+) -> Profile:
     """The profile composed, `--patch` entries included — or exit 2 saying why not.
+
+    `patches` is a person's `--patch`, which sets environment rows as a session
+    profile does. `deployment` is a host flag written as the patch it is —
+    `phern daemon --max-concurrent-children` — and sets deployment rows as
+    `daemon.yaml` does, after it. Both carry `cli` as their provenance.
 
     The refusal is the command's, not the resolver's: `resolve_profile` raises a
     `ValueError` that already names the available profiles, and every caller
@@ -380,9 +478,14 @@ def profile_or_exit(profile: str, patches: Sequence[str] = ()) -> Profile:
         documents = profile_documents(profile)
     except (ValueError, LoaderError, OSError) as error:
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
-    if patches:
-        entries = [entry for text in patches for entry in _patch_entries(text)]
-        documents.append((CLI_LAYER, entries))
+    layered: tuple[tuple[Sequence[str], Affects], ...] = (
+        (deployment, "deployment"),
+        (patches, "environment"),
+    )
+    for texts, sets in layered:
+        if texts:
+            entries = [entry for text in texts for entry in _patch_entries(text)]
+            documents.append(ProfileDocument(CLI_LAYER, entries, sets=sets))
     try:
         return Profile.from_documents(documents, name=profile_name(profile))
     except LoaderError as error:

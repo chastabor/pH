@@ -13,7 +13,7 @@ type.
 
 ```bash
 uv tool install ./packages/phern        # the CLI and core alone, about 60 MB
-phern --profile llama --provider llama --model <model> -p "what is in this repo?"
+LLAMA_MODEL=<model> phern --profile llama -p "what is in this repo?"
 phern --profile tui --provider llama --model <model> --mode tui
 ```
 
@@ -81,8 +81,10 @@ it, and `command/run` records it), a Textual action, and a key:
 
 Rows contribute their own screens and commands through `ctx.tui_screens` and
 `ctx.commands`, and they arrive with the same three routes — `/trajectory` is
-one such screen, contributed by `tui.yaml` rather than built in, and it takes
-its key and palette entry away with it if the row is removed.
+one such screen, contributed by a row rather than built in, and it takes its key
+and palette entry away with it if the row is removed. Screens are presentation,
+so every named profile ships them (`profiles/presentation.yaml`) and a profile
+may not remove one; `hidden_screens` in `tui.json` hides one from this terminal.
 
 ### `$PH_HOME/tui.json`
 
@@ -98,6 +100,7 @@ screen's key is remappable exactly like a built-in.
   "turn_notification": "bell",
   "show_thinking": true,
   "show_tool_results": true,
+  "hidden_screens": [],
   "keybindings": { "command_palette": "ctrl+k", "quit": "ctrl+d" }
 }
 ```
@@ -109,7 +112,7 @@ one of them is a plugin screen's binding id.
 ## The browser tab
 
 ```bash
-phern --mode web --provider llama --model <model>     # 127.0.0.1:8000
+phern --mode web --profile llama                      # 127.0.0.1:8000
 phern --mode web --port 8080 --open
 ```
 
@@ -130,7 +133,7 @@ the install line rather than an `ImportError`.
 ## The daemon
 
 ```bash
-phern daemon --profile tui --provider llama --model <model>
+phern daemon --profile llama                  # every root on the profile's default model
 phern daemon --max-concurrent-children 6      # across every root; the rest queue
 phern daemon --passivate-after 30             # minutes of quiet before a root is released, or `off`
 phern daemon --ephemeral                      # exit once no client, root or appointment needs it
@@ -192,7 +195,7 @@ this package is the rows it registers:
 | `llm-anthropic` | `provider`, `baseUrl`, `apiKeyEnv`, `contextWindow`, `defaultMaxTokens`, `accepts`, `maxAttachmentBytes`, `uploads`, `filesBeta`, `maxImageEdge`, `usableImageEdge`, `cacheControl` | `anthropic`, `ANTHROPIC_API_KEY`, `200000`, `8192`, images + PDF, 5 MiB, prompt caching on |
 | `llm-google` | the same shape plus `uploadReadyMs` | `1048576` window, images/audio/video/PDF, 20 MiB, video routed through the Files API |
 | `llm-openai-compatible` | `profiles: [ProviderProfile, …]` | one entry per route; this is the row `llama` and `deepseek` insert |
-| `tui-screen-trajectory` | — | contributed by `tui.yaml` |
+| `tui-screen-trajectory` | — | in every named profile (`presentation.yaml`); hidden per terminal in `tui.json` |
 
 ```yaml
 # $PH_HOME/profiles/anthropic.yaml — a different model ceiling, caching off

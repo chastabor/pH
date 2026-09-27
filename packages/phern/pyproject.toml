@@ -123,7 +123,7 @@ otel = ["ph-core[otel]==0.4.0"]
 llm-openai-compatible = "ph_app.adapters.openai_compatible:apply"
 llm-anthropic = "ph_app.adapters.anthropic:apply"
 llm-google = "ph_app.adapters.google:apply"
-tui-screen-trajectory = "ph_app.tui.trajectory_screen:apply"
+tui-screen-trajectory = "ph_app.screen_rows:trajectory"
 
 [project.scripts]
 phern = "ph_app.cli:main"

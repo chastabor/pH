@@ -763,7 +763,9 @@ class Config(WireModel):
     deeper by every child."""
 
 
-@plugin("workspace-git-worktree", inject=[WORKSPACE, SUBPROCESS], config=Config)
+@plugin(
+    "workspace-git-worktree", affects="environment", inject=[WORKSPACE, SUBPROCESS], config=Config
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the worktree tier as the workspace provider.
 

@@ -79,7 +79,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -122,6 +122,19 @@ both on every call it knew as a mutation and is refused `invalid_params` by a 0.
 daemon; a 0.4.x client sends neither, which a 0.3.x daemon serves unguarded. The
 store was idempotent anyway — one value stored twice is stored once — and its key
 outlived the value it named, since the value lives in daemon memory.
+
+**5: a root runs on a model its profile lists** (session profiles, S1). A root's
+route comes from the profile's `models` row rather than from the daemon's
+`--provider`/`--model` alone. `RootDescription` and `StatusFacts` gain
+`modelKey`, the profile's name for the route in force; `daemon/status` replaces
+its `provider`/`model` with `startsOn`, the entry a new root runs on;
+`session/new` takes a `choice`, so a terminal's `--model` is its session's and
+not the daemon it spawns; and two verbs are new — `session/model` (a mutation:
+run this root on a listed key or a whole route from its next request, answered
+with the root's description) and `models/list` (the listed models, default
+first). A 0.4.x client reading a 5 daemon refuses the `modelKey` it does not
+know, since every model is `extra="forbid"`; restarting the daemon on the same
+release fixes that.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

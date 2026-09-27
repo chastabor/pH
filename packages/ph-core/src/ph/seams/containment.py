@@ -296,7 +296,7 @@ class ContainmentService:
             raise ContainmentUnavailableError(STRICT_REFUSAL.format(because=because))
 
 
-@plugin("containment", config=Config)
+@plugin("containment", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Publish the chosen rungs, and refuse the run if they cannot be honored."""
     containment = ContainmentService(

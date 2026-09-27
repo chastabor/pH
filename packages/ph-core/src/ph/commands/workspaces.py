@@ -101,7 +101,7 @@ class KeptWorktree:
         return f"{self.agent_id:<16} {state:<11} {self.session_id:<14} {self.branch:<24} {where}"
 
 
-@plugin("workspace-commands", inject=[COMMANDS, WORKSPACE, FS])
+@plugin("workspace-commands", affects="environment", inject=[COMMANDS, WORKSPACE, FS])
 async def apply(ctx: Context, config: None) -> None:
     """Register `/workspaces`.
 

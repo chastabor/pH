@@ -16,3 +16,12 @@
         baseUrl: ${env:GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
         apiKeyEnv: GEMINI_API_KEY
         contextWindow: 1048576
+
+# What this profile runs on, by key; `main` unless a person picks another.
+# `GEMINI_MODEL` names another without an overlay.
+- id: models
+  config:
+    default: main
+    models:
+      main: {provider: google, model: "${env:GEMINI_MODEL:-gemini-2.5-pro}"}
+      fast: {provider: google, model: gemini-2.5-flash}

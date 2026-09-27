@@ -37,13 +37,14 @@ from typing import Protocol
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.commands import CommandDefinition
+from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.permission_presets import PresetName, PresetSchema
 from ph.seams.tui_screens import ScreenDefinition
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session
 
-from ..payloads import AskKey
+from ..payloads import AskKey, RootDescription
 from ..sessions import SessionSummary
 from .screens import AppSurface
 from .state import Surface, TuiState
@@ -194,8 +195,12 @@ class FrontSession(Protocol):
         """
         ...
 
-    def providers(self) -> list[str]:
-        """The model routes this deployment can reach, by provider name."""
+    def models(self) -> list[ModelEntry]:
+        """The models this session's profile lists, the default first."""
+        ...
+
+    async def choose_model(self, choice: ModelChoice) -> RootDescription:
+        """Run this session on `choice` from its next request, or raise the refusal."""
         ...
 
     async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:

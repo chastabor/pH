@@ -501,7 +501,7 @@ class Config(WireModel):
     `glob` and nested one level deeper by every child."""
 
 
-@plugin("workspace-agentfs", inject=[WORKSPACE, SUBPROCESS], config=Config)
+@plugin("workspace-agentfs", affects="environment", inject=[WORKSPACE, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Probe the host, and claim the workspace slot only if the overlay isolates.
 

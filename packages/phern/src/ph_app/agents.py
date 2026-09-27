@@ -162,6 +162,16 @@ def _when(moment: object) -> str:
     return datetime.fromtimestamp(moment / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _starts_on(facts: DaemonStatusReply) -> str:
+    """`main · fake/fake-1`: the key a new root starts on, and its route."""
+    starts = facts.starts_on
+    if starts is None:
+        return "none — the profile lists no models"
+    if not starts.key:
+        return f"{starts.route.label} (not in the profile's list)"
+    return f"{starts.key} · {starts.route.label}"
+
+
 def _cadence(seconds: float) -> str:
     """One of `serve`'s five cadences, in seconds — or `off` for zero.
 
@@ -653,7 +663,7 @@ def doctor() -> None:
                 ("protocol", str(facts.protocol_version)),
                 ("capabilities", ", ".join(sorted(facts.capabilities))),
                 ("roots", str(facts.roots)),
-                ("provider", f"{facts.provider} · {facts.model}"),
+                ("model", _starts_on(facts)),
                 ("passivate after", "off" if passivate is None else duration(passivate * 1000)),
                 ("tick", _cadence(facts.tick_every)),
                 ("sweep", _cadence(facts.sweep_every)),

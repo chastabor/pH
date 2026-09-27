@@ -1,18 +1,19 @@
 """Plugin identity: what a row mounts, and how its config is validated.
 
-A plugin is a name, a list of injected service keys, an optional pydantic
-config model, and an `apply(ctx, config)` body. It may be written as a
-decorated function or as any object carrying those four attributes — the
-shape is duck-typed by `normalize_plugin`, not enforced by a base class.
+A plugin is a name, what its settings shape (`Affects`), a list of injected
+service keys, an optional pydantic config model, and an `apply(ctx, config)`
+body. It may be written as a decorated function or as any object carrying those
+attributes — the shape is duck-typed by `normalize_plugin`, not enforced by a
+base class.
 
 @module ph.cordis.plugin
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, get_args, overload
 
 from pydantic import BaseModel
 
@@ -22,7 +23,39 @@ from .key import ServiceKey, service_names
 if TYPE_CHECKING:
     from .context import Context
 
-__all__ = ["PluginSpec", "normalize_plugin", "plugin"]
+__all__ = ["AFFECTS", "CONFIGURED_IN", "Affects", "PluginSpec", "normalize_plugin", "plugin"]
+
+Affects: TypeAlias = Literal["environment", "presentation", "deployment"]
+"""What a row's settings shape, and so which configuration owns them.
+
+* `environment` — what the agent sees or can do: its model, tools, skills, sandbox,
+  workspace and posture. A session's profile covers these rows: what it starts
+  with, what is overridden during it, and what a restart compares.
+* `presentation` — only how a front end draws: screens and footer readings. The
+  TUI's configuration owns these.
+* `deployment` — the host's own machinery: persistence, telemetry, invariants,
+  doctor sections, the local stores, the credential source. The daemon's own
+  configuration owns these.
+
+Declared by every plugin, with no default, so a row that does not say is caught
+where it is written (the decorator's required keyword) rather than guessed at
+when a profile is split by owner. `plans/Session_Profiles_Plan.md` is the design.
+"""
+
+AFFECTS: frozenset[Affects] = frozenset(get_args(Affects))
+
+CONFIGURED_IN: Mapping[Affects, str] = {
+    "environment": "a session profile, `$PH_HOME/profiles/<name>.yaml`",
+    "presentation": "the TUI's settings, `$PH_HOME/tui.json`, where a screen is hidden or "
+    "its key remapped",
+    "deployment": "the daemon's configuration, `$PH_HOME/daemon.yaml`",
+}
+"""Where a person sets each kind, as the refusal of a misplaced row names it.
+
+In words rather than paths, because two of the three are a front end's and a
+host's files that `ph.cordis` never reads. Written once, so the loader's refusal
+and the documentation cannot name different files for one kind.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +69,8 @@ class PluginSpec:
     `plugin()` checked is not recoverable from here. The decorator's overload is
     what holds a body to the model it declares — this field is what the loader
     calls, and it calls every row through one signature."""
+    affects: Affects
+    """Which configuration owns this row's settings (`Affects`)."""
     inject: tuple[str, ...] = ()
     config_model: type[BaseModel] | None = None
 
@@ -72,28 +107,35 @@ class PluginSpec:
 
 @overload
 def plugin(
-    name: str, *, inject: Sequence[str | ServiceKey[Any]] = ()
+    name: str, *, affects: Affects, inject: Sequence[str | ServiceKey[Any]] = ()
 ) -> Callable[
     [Callable[[Context, None], Awaitable[None]]], Callable[[Context, None], Awaitable[None]]
 ]: ...
 @overload
 def plugin[C: BaseModel](
-    name: str, *, inject: Sequence[str | ServiceKey[Any]] = (), config: type[C]
+    name: str,
+    *,
+    affects: Affects,
+    inject: Sequence[str | ServiceKey[Any]] = (),
+    config: type[C],
 ) -> Callable[
     [Callable[[Context, C], Awaitable[None]]], Callable[[Context, C], Awaitable[None]]
 ]: ...
 def plugin(
     name: str,
     *,
+    affects: Affects,
     inject: Sequence[str | ServiceKey[Any]] = (),
     config: type[BaseModel] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a function as a plugin body.
 
     ```python
-    @plugin("session", inject=[LLM], config=SessionConfig)
+    @plugin("session", affects="deployment", inject=[LLM], config=SessionConfig)
     async def apply(ctx: Context, config: SessionConfig) -> None: ...
     ```
+
+    `affects` has no default (`Affects` says why).
 
     **Overloaded on `config=`, so the body's second parameter is checked against
     the model the decorator names.** Forty-five rows declare a model and read
@@ -107,6 +149,7 @@ def plugin(
         fn.__ph_plugin__ = PluginSpec(  # type: ignore[attr-defined]
             name=name,
             apply=fn,
+            affects=affects,
             inject=service_names(inject),
             config_model=config,
         )
@@ -136,9 +179,16 @@ def normalize_plugin(source: object) -> PluginSpec:
         isinstance(config_model, type) and issubclass(config_model, BaseModel)
     ):
         raise LoaderError(f'plugin "{name}" has a Config that is not a pydantic model')
+    affects = getattr(source, "affects", None)
+    if affects not in AFFECTS:
+        raise LoaderError(
+            f'plugin "{name}" does not say what its settings shape: give it `affects`, one '
+            f"of {', '.join(sorted(AFFECTS))}"
+        )
     return PluginSpec(
         name=str(name),
         apply=apply,
+        affects=affects,
         inject=service_names(getattr(source, "inject", ()) or ()),
         config_model=config_model,
     )

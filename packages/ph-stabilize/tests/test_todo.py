@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from stabilize_helpers import PROFILE, bash_call, run_tool_calls, todo_call
 
-from ph.cordis import DEPLOYMENT, Context, Profile, load_profile_documents
+from ph.cordis import DEPLOYMENT, Context, Profile, ProfileDocument, load_profile_documents
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolCallBlock
@@ -116,7 +116,7 @@ async def test_every_enabled_row_in_the_profile_activates(
     """
     monkeypatch.setenv("PH_HOME", str(tmp_path))
     documents = load_profile_documents(PROFILE)
-    documents.append(("test-overlay", [dict(ENABLED)]))
+    documents.append(ProfileDocument("test-overlay", [dict(ENABLED)]))
     profile = Profile.from_documents(documents)
     ctx = Context()
     try:

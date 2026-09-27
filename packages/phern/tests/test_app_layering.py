@@ -124,3 +124,30 @@ def test_the_human_door_needs_no_daemon_at_all() -> None:
     dragged = _dragged_in("ph_app.attach", ("ph_app.daemon",))
 
     assert dragged == "[]", f"ph_app.attach dragged in {dragged}"
+
+
+def test_a_headless_mount_loads_no_terminal_ui() -> None:
+    """Every named profile layers pH's presentation rows, headless included, so a
+    row that imported its screen made every mount pay for the terminal it will not
+    draw — `phern -p` and each daemon root, 166 ms against 320 ms. The row states
+    the screen (`ph_app.screen_rows`); the front end builds it.
+
+    A mount, not an import: the cost was paid when the row's entry point resolved,
+    which importing `ph_app.cli` never reaches. Sabotage: point the
+    `tui-screen-trajectory` entry point back at `ph_app.tui.trajectory_screen`.
+    """
+    probe = (
+        "import sys, anyio\n"
+        "from ph_app.profiles import compose_profile\n"
+        "from ph_app.runtime import mounted\n"
+        "async def main():\n"
+        "    async with mounted(compose_profile('headless')):\n"
+        "        pass\n"
+        "anyio.run(main)\n"
+        "print([n for n in ('textual', 'ph_app.tui') if n in sys.modules])\n"
+    )
+    found = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert found.stdout.strip().splitlines()[-1] == "[]", f"a headless mount loaded {found.stdout}"

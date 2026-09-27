@@ -45,7 +45,7 @@ log = logging.getLogger("ph.commands.revert")
 USAGE = "usage: /revert <seq>   (/revert with no argument lists the restore points)"
 
 
-@plugin("workspace-revert", inject=[COMMANDS, WORKSPACE, SUBPROCESS])
+@plugin("workspace-revert", affects="environment", inject=[COMMANDS, WORKSPACE, SUBPROCESS])
 async def apply(ctx: Context, config: None) -> None:
     """Register `/revert`."""
 

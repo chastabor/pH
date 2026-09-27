@@ -33,7 +33,7 @@ import anyio
 
 from ph.agent.types import AgentOptions
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Context, Profile, load_profile_documents
+from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.json import as_str
 from ph.keys import AGENTS, APPROVAL, INTENTS, LLM, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.adapter import ResolvedModel
@@ -95,8 +95,10 @@ async def _park_the_write(
 
 async def main(project: Path, children_on: str) -> None:
     documents = load_profile_documents([BASE, HEADLESS])
-    documents.append(("host-root", [{"id": "sandbox-local", "disabled": True}]))
-    documents.append(("host-overlay", [dict(PROVIDER_ROW, config={"maxConcurrent": 1})]))
+    documents.append(ProfileDocument("host-root", [{"id": "sandbox-local", "disabled": True}]))
+    documents.append(
+        ProfileDocument("host-overlay", [dict(PROVIDER_ROW, config={"maxConcurrent": 1})])
+    )
     ctx = Context()
     await Profile.from_documents(documents).mount(ctx, project=project)
 

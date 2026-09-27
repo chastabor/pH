@@ -305,7 +305,7 @@ def _write(path: Path, payload: bytes) -> None:
     write_atomic(path, payload, skip_if_present=True)
 
 
-@plugin("attachments-local", config=Config)
+@plugin("attachments-local", affects="deployment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local attachment store."""
     root = default_home_path(config.root, "attachments")

@@ -1495,7 +1495,7 @@ def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | No
     ctx.on("profile/mounted", once)
 
 
-@plugin("tools", config=Config)
+@plugin("tools", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the tool registry."""
     ctx.provide(TOOLS, ToolRuntime(ctx=ctx, default_mode=config.mode))

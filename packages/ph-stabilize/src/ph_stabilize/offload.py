@@ -299,7 +299,7 @@ def spill_wording(ctx: Context, scope: Boundary | None, template: str, **fields:
     return f"{said}\n{hint}\n"
 
 
-@plugin("tool-result-offload", inject=[TOOLS, SPILL_STORE], config=Config)
+@plugin("tool-result-offload", affects="environment", inject=[TOOLS, SPILL_STORE], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized result with a preview and a path to the rest."""
     ctx.require(SPILL_STORE).claim(

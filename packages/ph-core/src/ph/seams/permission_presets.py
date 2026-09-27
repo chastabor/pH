@@ -174,7 +174,7 @@ class PermissionPresetService:
         return PRESETS[self.active]
 
 
-@plugin("permission-presets")
+@plugin("permission-presets", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the permission-preset mapping, and the posture it can state."""
     service = PermissionPresetService(ctx=ctx)

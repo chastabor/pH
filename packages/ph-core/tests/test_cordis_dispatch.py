@@ -256,7 +256,7 @@ async def test_disposal_removes_listeners() -> None:
     root = Context()
     heard: list[int] = []
 
-    @plugin("listener")
+    @plugin("listener", affects="environment")
     async def listener(ctx: Context, config: None) -> None:
         ctx.on("test/emit", lambda value: heard.append(value))
 
@@ -322,7 +322,7 @@ async def test_the_answer_is_attributed_to_the_plugin_that_produced_it(
     root = Context()
 
     def listener(name: str) -> Any:  # noqa: ANN401
-        @plugin(name)
+        @plugin(name, affects="environment")
         async def apply(ctx: Context, config: None) -> None:
             async def decide(payload: dict[str, Any], next_: Callable[..., Awaitable[str]]) -> str:
                 answer = await next_()

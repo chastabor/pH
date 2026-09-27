@@ -47,6 +47,7 @@ from ph.json import JsonValue
 from ph.keys import (
     COMMANDS,
     CREDENTIALS,
+    MODELS,
     PERMISSION_PRESETS,
     SKILLS,
     TOOLS,
@@ -55,6 +56,7 @@ from ph.keys import (
 )
 from ph.llm.types import ToolSchema
 from ph.seams.commands import CommandSchema
+from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
@@ -71,6 +73,7 @@ __all__ = [
     "commands_of",
     "credentials_named",
     "credentials_of",
+    "models_of",
     "readings_of",
     "screens_of",
     "tools_of",
@@ -138,6 +141,17 @@ def tools_of(root: Root) -> list[ToolSchema]:
     if tools is None:
         return []
     return list(tools.schemas(scope=DEPLOYMENT))
+
+
+def models_of(root: Root) -> list[ModelEntry]:
+    """The models this root's profile lists, default first — what `/model` offers.
+
+    The list, not the route in force: that rides the status (`modelKey`), which
+    changes without the list changing. An unlisted route a person named is
+    therefore in neither, and the picker's free text is how it is named again.
+    """
+    models = root.ctx.get(MODELS)
+    return models.entries() if models is not None else []
 
 
 def presets_of(root: Root) -> list[PresetSchema]:

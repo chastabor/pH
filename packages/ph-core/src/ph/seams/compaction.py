@@ -286,7 +286,7 @@ class CompactionSeam:
         return rendered
 
 
-@plugin("compaction")
+@plugin("compaction", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the compaction seam definition. No engine ships in `ph-base`."""
     ctx.provide(COMPACTION, CompactionSeam(ctx=ctx))

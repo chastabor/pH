@@ -29,7 +29,7 @@ from daemon_helpers import Daemon, running, until
 from tui_helpers import StubApp, StubClient, StubHost, WorkingApp
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import DEPLOYMENT, Profile, load_profile_documents, maybe_await
+from ph.cordis import DEPLOYMENT, Profile, ProfileDocument, load_profile_documents, maybe_await
 from ph.json import as_int
 from ph.keys import APPROVAL, SKILLS, TOOLS, USER_QUESTIONS
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
@@ -450,7 +450,9 @@ async def test_the_posture_is_read_from_the_attach_reply_not_guessed(tmp_path: P
     writable = Profile.from_documents(
         [
             *load_profile_documents([BASE, HEADLESS]),
-            ("test", [{"id": "sandbox", "config": {"defaultMode": "workspace-write"}}]),
+            ProfileDocument(
+                "test", [{"id": "sandbox", "config": {"defaultMode": "workspace-write"}}]
+            ),
         ]
     )
     async with running(tmp_path, profile=writable) as daemon:

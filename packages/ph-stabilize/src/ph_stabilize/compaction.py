@@ -1382,6 +1382,7 @@ class SummarizeEngine:
 
 @plugin(
     ROW,
+    affects="environment",
     inject=[COMPACTION, TOKEN_METER, LLM, SPILL_STORE, TOOLS],
     config=Config,
 )

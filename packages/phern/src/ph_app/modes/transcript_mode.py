@@ -25,6 +25,7 @@ from ph.llm.types import (
     ToolResultBlock,
     text_of,
 )
+from ph.seams.models import ModelChoice
 from ph.text import block_marker, redacted_marker
 
 from ..runtime import prompted
@@ -80,16 +81,14 @@ async def run_transcript(
     profile: Profile,
     prompt: str,
     *,
-    provider: str,
-    model: str,
+    choice: ModelChoice = ModelChoice(),
     session_id: str | None = None,
     attachments: Sequence[Path] = (),
 ) -> TranscriptResult:
     async with prompted(
         profile,
         prompt,
-        provider=provider,
-        model=model,
+        choice=choice,
         session_id=session_id,
         attachments=attachments,
     ) as (_ctx, session):

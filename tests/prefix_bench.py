@@ -256,10 +256,10 @@ async def run_profile(
     # the guard asserts relationships rather than digits.
     work = home / f"{PROFILES.index(profile)}{WINDOWS.index(context_window)}"
     files = workload_files(work)
-    # A `(name, document)` layer is what `--patch` composes as; composed here
-    # like any other, and mounted through `ph_app.runtime` rather than a third
-    # copy of compose/mount/unwind.
-    bench: ProfileDocument = (
+    # A named layer is what `--patch` composes as; composed here like any
+    # other, and mounted through `ph_app.runtime` rather than a third copy of
+    # compose/mount/unwind.
+    bench = ProfileDocument(
         "bench",
         [
             {"id": "fs", "config": {"root": str(work)}},

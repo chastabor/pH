@@ -20,11 +20,11 @@ from typing import Any, TextIO
 
 import anyio
 
-from ph.agent.types import AgentOptions
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.persistence import open_session
+from ph.seams.models import ModelChoice, choose
 from ph.session import Session, SessionEvent
 from ph.wire import WireModel
 
@@ -80,8 +80,8 @@ class RpcServer:
 
     ctx: Context
     out: TextIO
-    provider: str = "fake"
-    model: str = "fake-1"
+    choice: ModelChoice = field(default_factory=ModelChoice)
+    """What `phern --mode rpc --provider/--model` asked for; empty is the profile default."""
     _agents: dict[str, Any] = field(default_factory=dict)
 
     def _write(self, payload: Frame) -> None:
@@ -165,13 +165,14 @@ class RpcServer:
             self._attach(session)
         agent = self._agents.get(session.id)
         if agent is None:
-            agent = self.ctx.require(AGENTS).create(
-                session,
-                AgentOptions(
-                    provider=params.provider or self.provider,
-                    model=params.model or self.model,
-                ),
+            # A prompt that names a route asks for it the way the flags do, and
+            # one that names neither takes the server's — through the one rule.
+            asked = (
+                ModelChoice.from_flags(params.provider, params.model)
+                if params.provider or params.model
+                else self.choice
             )
+            agent = self.ctx.require(AGENTS).create(session, choose(self.ctx, asked).options())
             self._agents[session.id] = agent
         self._notify(SessionStatusNotice(session_id=session.id, status="running"))
         await agent.prompt(params.prompt)
@@ -183,8 +184,7 @@ class RpcServer:
 async def run_rpc(
     profile: Profile,
     *,
-    provider: str,
-    model: str,
+    choice: ModelChoice = ModelChoice(),
     stdin: TextIO | None = None,
     out: TextIO | None = None,
 ) -> None:
@@ -192,7 +192,7 @@ async def run_rpc(
     source = stdin if stdin is not None else sys.stdin
     sink = out if out is not None else sys.stdout
     async with mounted(profile) as ctx:
-        server = RpcServer(ctx=ctx, out=sink, provider=provider, model=model)
+        server = RpcServer(ctx=ctx, out=sink, choice=choice)
         while True:
             line = await anyio.to_thread.run_sync(source.readline)
             if not line:

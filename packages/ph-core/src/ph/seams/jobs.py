@@ -414,7 +414,7 @@ class Config(WireModel):
     compares sit in one file."""
 
 
-@plugin("jobs-local", config=Config)
+@plugin("jobs-local", affects="deployment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local job runner."""
     ctx.provide(JOBS, JobService(ctx=ctx, caps=dict(config.concurrency)))

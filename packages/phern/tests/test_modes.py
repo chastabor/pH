@@ -65,7 +65,10 @@ def profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Profile:
 async def test_json_mode_streams_the_logs_own_envelopes(profile: Profile) -> None:
     out = io.StringIO()
     result = await run_json(
-        profile, "hello", provider="fake", model="fake-1", session_id="demo", out=out
+        profile,
+        "hello",
+        session_id="demo",
+        out=out,
     )
     lines = [json.loads(line) for line in out.getvalue().splitlines()]
     assert lines[0]["type"] == "session/header"
@@ -92,8 +95,8 @@ async def test_a_resumed_print_run_prints_only_the_new_answer(profile: Profile) 
     puts on stdout is narrowed. `--mode transcript` is the mode that prints the
     conversation, and it is unchanged.
     """
-    first = await run_print(profile, "one", provider="fake", model="fake-1", session_id="resumed")
-    second = await run_print(profile, "two", provider="fake", model="fake-1", session_id="resumed")
+    first = await run_print(profile, "one", session_id="resumed")
+    second = await run_print(profile, "two", session_id="resumed")
 
     assert first.text == "ok"
     assert second.text == "ok", "the first run's answer was printed again"
@@ -104,9 +107,7 @@ async def test_a_resumed_print_run_prints_only_the_new_answer(profile: Profile) 
 
 
 async def test_transcript_mode_reads_what_a_person_saw(profile: Profile) -> None:
-    result = await run_transcript(
-        profile, "what is a session log?", provider="fake", model="fake-1"
-    )
+    result = await run_transcript(profile, "what is a session log?")
     assert "you: what is a session log?" in result.text
     assert "pH: ok" in result.text
 
@@ -189,7 +190,7 @@ async def test_an_rpc_round_trip_in_the_sdk_shape(profile: Profile) -> None:
     ]
     stdin = io.StringIO("".join(f"{json.dumps(request)}\n" for request in requests))
     out = io.StringIO()
-    await run_rpc(profile, provider="fake", model="fake-1", stdin=stdin, out=out)
+    await run_rpc(profile, stdin=stdin, out=out)
 
     frames = [json.loads(line) for line in out.getvalue().splitlines()]
     replies = {frame["id"]: frame for frame in frames if "id" in frame}
@@ -225,7 +226,7 @@ async def test_an_unknown_rpc_method_is_an_error_not_a_crash(
         json.dumps({"jsonrpc": "2.0", "id": 1, "method": "nonsense", "params": {}}) + "\n"
     )
     out = io.StringIO()
-    await run_rpc(profile, provider="fake", model="fake-1", stdin=stdin, out=out)
+    await run_rpc(profile, stdin=stdin, out=out)
     (frame,) = [json.loads(line) for line in out.getvalue().splitlines()]
     assert frame["error"]["code"] == -32000
     assert "nonsense" in frame["error"]["message"]
@@ -236,7 +237,7 @@ async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
         "{not json\n\n" + json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}) + "\n"
     )
     out = io.StringIO()
-    await run_rpc(profile, provider="fake", model="fake-1", stdin=stdin, out=out)
+    await run_rpc(profile, stdin=stdin, out=out)
     frames = [json.loads(line) for line in out.getvalue().splitlines()]
     # A peer sending garbage must not take the endpoint down.
     assert len(frames) == 1
@@ -256,7 +257,10 @@ async def test_a_second_one_shot_run_on_one_session_resumes_it(
     """
     for prompt in ("hello", "and again"):
         await run_json(
-            profile, prompt, provider="fake", model="fake-1", session_id="demo", out=io.StringIO()
+            profile,
+            prompt,
+            session_id="demo",
+            out=io.StringIO(),
         )
 
     header, events = read_session(stored_log(tmp_path / "sessions", "demo"))
@@ -284,8 +288,6 @@ async def test_a_one_shot_run_is_refused_a_session_another_process_holds(
         await run_json(
             profile,
             "hello",
-            provider="fake",
-            model="fake-1",
             session_id="held",
             out=io.StringIO(),
         )

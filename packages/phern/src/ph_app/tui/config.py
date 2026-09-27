@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from ph.documents import read_document
-from ph.json import as_bool, as_str
+from ph.json import as_bool, as_seq, as_str
 from ph.paths import write_atomic
 
 __all__ = [
@@ -132,6 +132,13 @@ class TuiSettings:
     Visible by default, because what fills the context window is the thing a
     person should not have to go looking for. Hiding one hides its header too —
     a 32-column panel cannot afford a heading over nothing."""
+    hidden_screens: tuple[str, ...] = ()
+    """Screen ids this terminal does not offer: no verb, no palette entry, no key.
+
+    Here, and not as a row removed from a profile, because a screen is
+    presentation (decision 23): every named profile mounts the screens pH ships,
+    and a session profile that removed one would be refused. Hidden per terminal,
+    so a second front end on the same daemon still offers what this one hides."""
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -182,6 +189,11 @@ def tui_settings_from_json(data: object) -> TuiSettings:
         show_skills=as_bool(data.get("show_skills"), True),
         daemon_keep_alive=as_str(data.get("daemon_keep_alive"), "0"),
         show_tool_results=as_bool(data.get("show_tool_results"), True),
+        # The strings of an array, and nothing from anything else — this reader's
+        # tolerance, applied per entry.
+        hidden_screens=tuple(
+            one for one in as_seq(data.get("hidden_screens")) if isinstance(one, str) and one
+        ),
     )
 
 

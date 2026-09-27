@@ -44,6 +44,7 @@ from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
+from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.schedule import Schedule
 from ph.seams.shell import ShellService
 from ph.session import Prior, intents_of, now_ms, session_written
@@ -58,6 +59,7 @@ from ..params import (
     CommandParams,
     CreateScheduleParams,
     InitializeParams,
+    ModelParams,
     MutationParams,
     NewSessionParams,
     PresetParams,
@@ -125,6 +127,7 @@ from .projections import (
     browse_of,
     commands_of,
     credentials_of,
+    models_of,
     presets_of,
     readings_of,
     screens_of,
@@ -132,7 +135,7 @@ from .projections import (
     tools_of,
 )
 from .recovery import PASSIVATE_AFTER, WAKE_WITHIN
-from .supervisor import NON_GUARANTEES, Root, Supervisor
+from .supervisor import NON_GUARANTEES, Root, Supervisor, model_for
 
 if TYPE_CHECKING:
     from ph.seams.attachments import AttachmentStore
@@ -581,7 +584,15 @@ class _Connection:
         # why. Only for a session created here: resuming one that exists is
         # not a new decision about a new directory.
         self._check_trust(cwd, params.trust)
-        root = await self.server.supervisor.start(params.session_id, cwd=cwd)
+        supervisor = self.server.supervisor
+        root = await supervisor.start(params.session_id, cwd=cwd, choice=params.choice)
+        if not params.choice.is_default:
+            # A root that was already running — another terminal's — is on its
+            # own route, so the choice moves it. One that just mounted on it is
+            # left alone.
+            chosen = model_for(root.ctx, params.choice)
+            if chosen.options() != root.agent.options:
+                await supervisor.set_model(root, chosen)
         if params.trust == "always" and cwd is not None:
             # After the mount, not before: a directory is only worth
             # recording once its profile has actually composed.
@@ -808,6 +819,19 @@ class _Connection:
         applied = presets.apply_preset(params.preset, session=root.session)
         _refresh_readings(root)
         return PresetApplied(session_id=root.id, preset=applied.name)
+
+    async def _prepare_model(self, root: Root, params: ModelParams) -> ModelEntry:
+        """Resolve the choice **before** the key is claimed, `_prepare_shell`'s rule:
+        a key this profile does not list, or a provider nothing here serves, is a
+        refusal that must not burn the client's retry."""
+        return model_for(root.ctx, params.choice)
+
+    async def _act_model(
+        self, root: Root, params: ModelParams, chosen: ModelEntry
+    ) -> RootDescription:
+        """The root as it now stands — the reply a repeat of this key gets too."""
+        await self.server.supervisor.set_model(root, chosen)
+        return root.describe()
 
     async def _credentials_store(self, params: StoreCredentialParams) -> CredentialStored:
         """Hand a root a credential's value, which it uses and does not keep.
@@ -1107,6 +1131,7 @@ MUTATIONS: dict[str, Mutation[Any, Any]] = dict(
         _mutating(verbs.SESSION_STAGE, _Connection._prepare_stage, _Connection._act_stage),
         _mutating(verbs.SESSION_SHELL, _Connection._prepare_shell, _Connection._act_shell),
         _mutating(verbs.SESSION_PRESET, _Connection._prepare_preset, _Connection._act_preset),
+        _mutating(verbs.SESSION_MODEL, _Connection._prepare_model, _Connection._act_model),
     )
 )
 """Every method that changes a root, and the one place their idempotence lives.
@@ -1155,6 +1180,7 @@ METHODS: dict[str, _Row] = dict(
         _projection(verbs.TOOLS_LIST, "tools", tools_of),
         _projection(verbs.SKILLS_LIST, "skills", skills_of),
         _projection(verbs.PRESETS_LIST, "presets", presets_of),
+        _projection(verbs.MODELS_LIST, "models", models_of),
         _unkeyed(verbs.SCHEDULE_CREATE, _Connection._schedule_create),
         _unkeyed(verbs.SCHEDULE_CANCEL, _Connection._schedule_cancel),
         _unkeyed(verbs.SCHEDULE_LIST, _Connection._schedule_list),
@@ -1294,8 +1320,7 @@ class DaemonServer:
             socket=str(self.path),
             uptime_ms=now_ms() - self.started,
             roots=len(supervisor.roots),
-            provider=supervisor.provider,
-            model=supervisor.model,
+            starts_on=supervisor.starts_on(),
             passivate_after=supervisor.passivate_after,
             tick_every=self.tick_every,
             sweep_every=self.sweep_every,
@@ -1665,8 +1690,7 @@ async def _clear_stale(path: Path) -> None:
 async def serve(
     profile: Profile,
     *,
-    provider: str = "fake",
-    model: str = "fake-1",
+    choice: ModelChoice = ModelChoice(),
     passivate_after: float | None = PASSIVATE_AFTER,
     wake_within: float | None = WAKE_WITHIN,
     ephemeral: bool = False,
@@ -1716,8 +1740,7 @@ async def serve(
         supervisor = Supervisor(
             profile=profile,
             tasks=tasks,
-            provider=provider,
-            model=model,
+            choice=choice,
             passivate_after=passivate_after,
             wake_within=wake_within,
         )

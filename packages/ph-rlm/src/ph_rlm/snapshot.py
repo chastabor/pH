@@ -348,7 +348,9 @@ class Config(WireModel):
     inline_blob_max: int = INLINE_BLOB_MAX
 
 
-@plugin("rlm-kernel-snapshot", config=Config, inject=[SESSIONS, PYTHON_RUNTIME])
+@plugin(
+    "rlm-kernel-snapshot", affects="environment", config=Config, inject=[SESSIONS, PYTHON_RUNTIME]
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Wire the policy to the runtime provider and to session open.
 

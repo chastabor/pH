@@ -24,7 +24,7 @@ from ph.json import JsonObject
 from ph.persistence import session_path
 from ph.seams.attachments import digest_of
 from ph.session import Session, SessionHeader, SurfaceIntent
-from ph.testing import log_event
+from ph.testing import log_event, write_host_config
 from ph_app.cli import app
 
 runner = CliRunner()
@@ -178,19 +178,13 @@ def test_a_profile_with_no_store_says_so(roots: Path) -> None:
     """Two rows, one sentence — the shape `phern workspaces gc` already uses.
 
     Without a store there is nothing to sweep, and a command that answered
-    "nothing to collect" would be indistinguishable from a swept store.
+    "nothing to collect" would be indistinguishable from a swept store. The store
+    is the host's row, so a host without one says so in `daemon.yaml`: a
+    `--patch` sets only what a session profile sets.
     """
-    result = runner.invoke(
-        app,
-        [
-            "attachments",
-            "gc",
-            "--profile",
-            "headless",
-            "--patch",
-            "{id: attachments, disabled: true}",
-        ],
-    )
+    write_host_config("rows:\n  - id: attachments\n    disabled: true\n")
+
+    result = runner.invoke(app, ["attachments", "gc", "--profile", "headless"])
 
     assert result.exit_code == 0, result.output
     assert "mounts no attachment store" in result.stdout

@@ -23,7 +23,7 @@ from _pytest.terminal import TerminalReporter
 from workspace_layout import REPO
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Context, Profile, load_profile_documents
+from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.cordis.loader import compose_rows
 from ph.testing import ReapedHost
 
@@ -527,9 +527,9 @@ async def mount(tmp_path: Path) -> AsyncIterator[MountProfile]:
             # must not be refused over a row it never had.
             patches.append({"id": "sandbox-local", "disabled": True})
         if patches:
-            documents.append(("test-root", patches))
+            documents.append(ProfileDocument("test-root", patches))
         if overlay_rows:
-            documents.append(("test-overlay", list(overlay_rows)))
+            documents.append(ProfileDocument("test-overlay", list(overlay_rows)))
         ctx = Context()
         await Profile.from_documents(documents).mount(ctx, project=tmp_path)
         roots.append(ctx)

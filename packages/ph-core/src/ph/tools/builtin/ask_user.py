@@ -145,7 +145,7 @@ def _rendered(value: Any) -> str:  # noqa: ANN401
     return _SENTENCES.get(resolution, UNATTENDED)
 
 
-@plugin("tool-ask-user", inject=[TOOLS, USER_QUESTIONS])
+@plugin("tool-ask-user", affects="environment", inject=[TOOLS, USER_QUESTIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Register the question tool."""
 

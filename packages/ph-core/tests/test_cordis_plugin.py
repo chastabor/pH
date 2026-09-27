@@ -3,7 +3,7 @@
 `normalize_plugin` is the door every plugin comes through, and the *reason* it is
 duck-typed rather than a base class is that a third party should be able to
 contribute one without importing anything from pH: a module with an `apply`, an
-object with three attributes, or a bare function all work. That generosity is
+object with a handful of attributes, or a bare function all work. That generosity is
 only safe if each shape is actually read the way its author expects, and until
 this file only the decorated one was.
 
@@ -43,7 +43,7 @@ def test_a_decorated_function_carries_its_own_spec() -> None:
     """The shipped form: the decorator stamps the spec onto the function, so the
     row's name lives beside the body rather than in a registry somewhere else."""
 
-    @plugin("tool-fs", inject=["tools", "fs"], config=_Config)
+    @plugin("tool-fs", affects="environment", inject=["tools", "fs"], config=_Config)
     async def apply(ctx: Context, config: _Config) -> None: ...
 
     spec = normalize_plugin(apply)
@@ -58,7 +58,7 @@ def test_a_spec_passes_through_itself() -> None:
     """Normalizing twice is not a copy. The loader normalizes what it is given
     and a caller may normalize before handing it over, so idempotence is what
     keeps the two from disagreeing about identity."""
-    spec = PluginSpec(name="row", apply=_apply)
+    spec = PluginSpec(name="row", apply=_apply, affects="environment")
 
     assert normalize_plugin(spec) is spec
 
@@ -71,7 +71,7 @@ def test_a_module_with_a_decorated_apply_is_read_through_it() -> None:
 
     class _Module:
         @staticmethod
-        @plugin("session", inject=["llm"], config=_Config)
+        @plugin("session", affects="environment", inject=["llm"], config=_Config)
         async def apply(ctx: Context, config: _Config) -> None: ...
 
     spec = normalize_plugin(_Module)
@@ -80,17 +80,18 @@ def test_a_module_with_a_decorated_apply_is_read_through_it() -> None:
     assert spec.config_model is _Config
 
 
-def test_an_object_with_the_four_attributes_needs_no_import_from_ph() -> None:
+def test_an_object_with_the_five_attributes_needs_no_import_from_ph() -> None:
     """The reason this is duck-typed at all.
 
-    A third-party plugin can be an ordinary object — `name`, `apply`, `inject`,
-    and a nested `Config` — with no dependency on pH's decorator. `Config` is the
-    conventional attribute name because a class body is where a plugin author
-    already puts its model.
+    A third-party plugin can be an ordinary object — `name`, `apply`, `affects`,
+    `inject`, and a nested `Config` — with no dependency on pH's decorator.
+    `Config` is the conventional attribute name because a class body is where a
+    plugin author already puts its model.
     """
 
     class _Plugin:
         name = "third-party"
+        affects = "presentation"
         inject: ClassVar[list[str]] = ["fs"]
         Config = _Config
 
@@ -99,18 +100,19 @@ def test_an_object_with_the_four_attributes_needs_no_import_from_ph() -> None:
 
     spec = normalize_plugin(_Plugin)
 
-    assert spec.name == "third-party"
+    assert spec.name == "third-party" and spec.affects == "presentation"
     assert spec.inject == ("fs",)
     assert spec.config_model is _Config
 
 
 def test_a_bare_callable_is_a_plugin_named_after_itself() -> None:
-    """The smallest thing that can be a row. No decorator, no attributes: a
-    function that takes `(ctx, config)` is enough, and its `__name__` is the
+    """The smallest thing that can be a row. No decorator: a function that takes
+    `(ctx, config)` and says what it shapes is enough, and its `__name__` is the
     identity it gets."""
 
     async def scratch(ctx: Context, config: object) -> None: ...
 
+    scratch.affects = "environment"  # type: ignore[attr-defined]
     spec = normalize_plugin(scratch)
 
     assert spec.name == "scratch" and spec.apply is scratch
@@ -124,6 +126,7 @@ def test_an_object_that_names_itself_beats_its_type_name() -> None:
 
     class _Plugin:
         name = "chosen"
+        affects = "environment"
 
         @staticmethod
         async def apply(ctx: Context, config: object) -> None: ...
@@ -142,6 +145,31 @@ def test_something_that_is_not_a_plugin_says_so() -> None:
         normalize_plugin(object())
 
 
+@pytest.mark.parametrize("affects", [None, "tui", "Environment"])
+def test_a_plugin_that_does_not_say_what_it_shapes_is_refused_by_name(affects: object) -> None:
+    """There is no default. Which configuration owns a row — the session
+    profile, the TUI's, or the daemon's — is the author's call, and a guess here
+    would put a row where a person's layer can set what it must not. Missing,
+    unknown, and miscapitalized are the same refusal, and the sentence lists the
+    three words it would have taken."""
+
+    class _Plugin:
+        name = "silent"
+
+        @staticmethod
+        async def apply(ctx: Context, config: object) -> None: ...
+
+    if affects is not None:
+        _Plugin.affects = affects  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        LoaderError,
+        match=r'plugin "silent" does not say what its settings shape.*deployment, environment, '
+        r"presentation",
+    ):
+        normalize_plugin(_Plugin)
+
+
 def test_a_config_that_is_not_a_model_is_refused_at_the_door() -> None:
     """A `Config` that is a dict or a dataclass would otherwise reach
     `resolve_config` and fail there — inside a mount, named as a validation
@@ -150,6 +178,7 @@ def test_a_config_that_is_not_a_model_is_refused_at_the_door() -> None:
 
     class _Plugin:
         name = "wrong-config"
+        affects = "environment"
         Config: ClassVar[dict[str, int]] = {"depth": 1}
 
         @staticmethod
@@ -168,7 +197,7 @@ def test_a_plugin_without_a_model_takes_no_config() -> None:
     by name instead — the sentence `extra="forbid"` gives a mistyped key under a
     row that *has* a model. An empty mapping says nothing and is treated as the
     absent block it amounts to."""
-    spec = PluginSpec(name="row", apply=_apply)
+    spec = PluginSpec(name="row", apply=_apply, affects="environment")
 
     assert spec.resolve_config(None) is None
     assert spec.resolve_config({}) is None
@@ -181,7 +210,7 @@ def test_an_absent_config_becomes_the_model_s_defaults() -> None:
     `apply` as a *model* rather than as `None` — every plugin body reads
     `config.field`, and a row that omitted the block would otherwise be the one
     input that crashes it."""
-    spec = PluginSpec(name="row", apply=_apply, config_model=_Config)
+    spec = PluginSpec(name="row", apply=_apply, affects="environment", config_model=_Config)
 
     resolved = spec.resolve_config(None)
 
@@ -189,7 +218,7 @@ def test_an_absent_config_becomes_the_model_s_defaults() -> None:
 
 
 def test_a_mapping_is_validated_into_the_model() -> None:
-    spec = PluginSpec(name="row", apply=_apply, config_model=_Config)
+    spec = PluginSpec(name="row", apply=_apply, affects="environment", config_model=_Config)
 
     assert spec.resolve_config({"depth": 4}) == _Config(depth=4)
 
@@ -198,7 +227,7 @@ def test_a_model_of_the_right_type_is_not_rebuilt() -> None:
     """Identity, not equality: re-validating would copy a model the caller may
     still hold a reference to, and a plugin that read its config back through
     that reference would be reading a different object."""
-    spec = PluginSpec(name="row", apply=_apply, config_model=_Config)
+    spec = PluginSpec(name="row", apply=_apply, affects="environment", config_model=_Config)
     given = _Config(depth=7)
 
     assert spec.resolve_config(given) is given
@@ -212,7 +241,7 @@ def test_a_model_of_another_type_is_re_validated_through_its_aliases() -> None:
     a camelCase wire model re-validated through its Python names would silently
     lose every renamed field to its default.
     """
-    spec = PluginSpec(name="row", apply=_apply, config_model=_Config)
+    spec = PluginSpec(name="row", apply=_apply, affects="environment", config_model=_Config)
 
     resolved = spec.resolve_config(_Other(depth=9))
 

@@ -38,10 +38,12 @@ pytestmark = pytest.mark.anyio
 
 @pytest.fixture
 def tui_profile() -> str:
-    """`tui`, because this file's subject is a row that profile contributes.
+    """`tui`, the interactive posture a person drives these screens in.
 
-    The daemon mounts the profile now, so the choice is made before any app
-    exists — see the fixture this overrides in `conftest.py`.
+    Not because it is the profile that has them: every named profile mounts the
+    trajectory (`presentation.yaml`). The daemon mounts the profile, so the
+    choice is made before any app exists — see the fixture this overrides in
+    `conftest.py`.
     """
     return "tui"
 
@@ -112,6 +114,24 @@ async def test_a_plugin_screens_key_is_rebindable_like_every_other(
     async with running(make_tui_app()) as (app, pilot):
         await pilot.press("ctrl+j")
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
+
+
+async def test_a_screen_hidden_in_tui_json_is_not_offered(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """Hiding a screen is the terminal's, not the profile's (decision 23).
+
+    The row still mounts on the daemon — a session profile that removed it would
+    be refused — and this terminal opens none of the three routes to it. Sabotage:
+    drop the `hidden` check in `_screens_of` and every route comes back.
+    """
+    (tmp_path / "tui.json").write_text(
+        json.dumps({"hidden_screens": [SCREEN_ID]}), encoding="utf-8"
+    )
+    async with running(make_tui_app()) as (app, _pilot):
+        assert app.front is not None
+        assert _routes(app, SCREEN_ID) == set()
+        assert app.front.screen(SCREEN_ID) is None
 
 
 async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(

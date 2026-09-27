@@ -32,6 +32,7 @@ from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
 from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
+from ph.seams.models import ModelChoice
 from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, simple_tool
@@ -447,6 +448,56 @@ async def test_a_picker_blocks_the_other_global_keys(make_tui_app: MakeApp) -> N
         await pilot.pause()
         assert app.screen is picker
         assert len(app.screen_stack) == 2
+
+
+async def test_the_model_picker_lists_the_profile_s_models_and_moves_the_root(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
+    """`/model` was cosmetic: it rewrote the footer and nothing ran on it. Now the
+    picker offers the profile's keys, and the free text a whole route, and the
+    choice is the daemon's — the root's agent moves, then the footer follows.
+    Sabotage: set the footer in `_set_model` again and skip the daemon, and the
+    root stays on `fake-1` while the footer says otherwise."""
+    async with running(make_tui_app()) as (app, pilot):
+        front = not_none(app.front)
+        assert [one.key for one in front.models()] == ["main"]
+        assert front.state.model_key == "main"
+
+        await pilot.press(app.keys.model_picker)
+        await pilot.pause()
+        assert isinstance(app.screen, ChoicePicker)
+        await pilot.press(*"fake/fake-9")
+        await pilot.press("enter")
+
+        root = root_of(tui_daemon)
+        await until(pilot, lambda: root.agent.options.model == "fake-9")
+        await until(pilot, lambda: front.state.model == "fake-9")
+        assert front.state.model_key == "", "an unlisted route has no key"
+
+
+async def test_the_terminal_s_own_route_rides_its_session_new(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
+    """`phern --mode tui --model …` moves this terminal's session, not the daemon:
+    `spawn_command` carries no route, and `session/new` carries this one. Refused,
+    the start fails with the daemon's sentence — the way `phern -p --model` exits —
+    rather than opening on a route the person did not ask for."""
+    chosen = ModelChoice(provider="fake", model="fake-5")
+    async with running(make_tui_app(model_choice=chosen)) as (app, pilot):
+        await until(pilot, lambda: root_of(tui_daemon).agent.options.model == "fake-5")
+        assert not_none(app.front).state.model == "fake-5"
+
+    # The same session again, now asking for a key the profile does not list.
+    # `run_test` rather than `running`, which waits for an attach this must not get.
+    refused = make_tui_app(model_choice=ModelChoice(key="nope"))
+    async with refused.run_test() as pilot:
+        await pilot.pause()
+        await until(pilot, lambda: bool(refused._notifications))
+        assert refused.front is None, "a refused route opened a session anyway"
+        assert any(
+            "not a model this profile lists" in str(one.message) for one in refused._notifications
+        )
+    assert root_of(tui_daemon).agent.options.model == "fake-5", "and it moved nothing"
 
 
 async def test_the_theme_picker_previews_and_applies(make_tui_app: MakeApp, tmp_path: Path) -> None:

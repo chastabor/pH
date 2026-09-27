@@ -89,10 +89,16 @@ Three layers, applied in this order — and a patch replaces the targeted row's
 always one layer's and readable in one place:
 
 1. the shipped documents — `ph-base`, then whatever the profile layers;
-2. your overlay, `$PH_HOME/profiles/<name>.yaml`;
-3. drop-ins pH wrote on your behalf, `$PH_HOME/profiles/<name>.d/*.yaml`, in
+2. the host's rows, `rows:` in `$PH_HOME/daemon.yaml`, and the daemon's own flags;
+3. your overlay, `$PH_HOME/profiles/<name>.yaml`;
+4. drop-ins pH wrote on your behalf, `$PH_HOME/profiles/<name>.d/*.yaml`, in
    name order (this is where `/sandbox allow …` keeps its decisions);
-4. `--patch`, this run only, same grammar as a profile document.
+5. `--patch`, this run only, same grammar as a profile document.
+
+Each row declares what it `affects` — `environment`, `deployment` or
+`presentation` — and a layer a person writes sets one kind: layer 2 deployment,
+layers 3–5 environment. A row set in the wrong layer is refused by name.
+Presentation rows are set by no profile; a front end hides what it does not draw.
 
 A patch entry is `{id: …, config: {…}}` to reconfigure, `{id: …, disabled:
 false}` to arm a row a bundle ships off, `{id: …, remove: true}` to drop one, or

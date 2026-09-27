@@ -340,7 +340,7 @@ class UploadRegistry:
         await anyio.to_thread.run_sync(write_atomic, path, payload)
 
 
-@plugin("uploads-local", config=Config)
+@plugin("uploads-local", affects="deployment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the handle cache. Uploaders come from the adapter rows."""
     root = Path(config.root).expanduser() if config.root else resolve_roots().cache / "uploads"

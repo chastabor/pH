@@ -391,7 +391,12 @@ class Config(WireModel):
     max_parallel_sub_calls: int = 10
 
 
-@plugin("tools-code-mode", config=Config, inject=[TOOLS, CODE_RUNTIME, SYSTEM_PROMPT])
+@plugin(
+    "tools-code-mode",
+    affects="environment",
+    config=Config,
+    inject=[TOOLS, CODE_RUNTIME, SYSTEM_PROMPT],
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the reserved transport, the shipped SDK renderers, and the prompt section."""
     tools: ToolRuntime = ctx.require(TOOLS)

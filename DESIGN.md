@@ -128,6 +128,16 @@ A patch may `insert`, `remove`, replace `config`, set `disabled`, or set
 into it, deliberately: "a row's effective value is always one layer's, readable
 in one place" (`loader.py`).
 
+**Every row names the kind of setting it holds, and each kind has one owner.**
+`@plugin(..., affects=...)` is required: `environment` (what the agent works in)
+belongs to the session profile, `deployment` (the host's machinery) to
+`$PH_HOME/daemon.yaml`, and `presentation` (how a front end draws) to the TUI's
+`tui.json`. A layer a person writes carries the one kind it may set
+(`ProfileDocument.sets`), and `compose_rows` refuses an entry that touches a row
+of another kind, naming its owner. Shipped layers set any kind. The reason is the
+session audit (`plans/Session_Profiles_Plan.md`): a session's profile can only be
+compared and rebuilt on restart if it holds the environment and nothing else.
+
 **Three layers, and the third is reachable from the command line.** dsh's notes
 name them — bundle, profile, patch — and for six phases pH had the third only as
 a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `phern`, `phern doctor` and
@@ -603,7 +613,7 @@ and returns the process root.
 ### 4.1 Commands
 
 ```
-phern [--print P] [--profile P] [--provider P] [--model M] [--session ID]
+phern [--print P] [--profile P] [--model KEY | --provider P --model M] [--session ID]
       [--mode MODE] [--attach PATH ...] [--resume ID] [--dump-config]
       [--no-spawn]                                  # tui/web: refuse to start a daemon
       [--keep-daemon]                               # tui/web: start a service one, not ephemeral
@@ -611,7 +621,8 @@ phern [--print P] [--profile P] [--provider P] [--model M] [--session ID]
       [--host H] [--port N] [--open]                # web: bind, and the token URL
 
 phern doctor      [--profile]
-phern daemon      [--profile] [--provider] [--model] [--passivate-after off|MIN]
+phern daemon      [--profile] [--patch] [--model KEY | --provider P --model M]
+                  [--passivate-after off|MIN]
                   [--ephemeral]                     # exit once nothing needs it
                   [--keep-alive D]                  # "30s", "5m" — implies --ephemeral
 phern events      [--json]
@@ -711,7 +722,8 @@ installed, and have to be carried by the **daemon**, which composes the profile
 and after P5-14 may not be on the same machine as the terminal whose colors these
 are. The same line separates `tui.json` (what a person prefers) from `tui.yaml`
 (what a deployment is), and conflating them is how a color choice ends up
-deciding which tools mount (`tui/themes/__init__.py`).
+deciding which tools mount (`tui/themes/__init__.py`). Hiding a screen is on the
+`tui.json` side for the same reason (`hidden_screens`).
 
 Read at start and never again: editing a theme while pH runs changes nothing until
 the next launch, and there is no watcher (rule 6, stated on `ThemeCatalog`).

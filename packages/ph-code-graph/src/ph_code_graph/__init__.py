@@ -493,7 +493,7 @@ def offer_skills(ctx: Context) -> None:
         contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
 
 
-@plugin("code-graph", inject=[TOOLS, FS], config=Config)
+@plugin("code-graph", affects="environment", inject=[TOOLS, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam and register both tools."""
     for module in ("tree_sitter", "tree_sitter_language_pack"):

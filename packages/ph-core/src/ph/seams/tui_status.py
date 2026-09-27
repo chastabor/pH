@@ -198,7 +198,7 @@ class TuiStatusRegistry:
         return readings
 
 
-@plugin("tui-status")
+@plugin("tui-status", affects="presentation")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the footer's registration seam. No field ships in `ph-base`."""
     ctx.provide(TUI_STATUS, TuiStatusRegistry(ctx=ctx))

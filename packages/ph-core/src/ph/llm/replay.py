@@ -205,7 +205,7 @@ class Config(WireModel):
     report, not a falsy value to read as the default."""
 
 
-@plugin("llm-replay", inject=[LLM], config=Config)
+@plugin("llm-replay", affects="environment", inject=[LLM], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register a replay adapter; a test loads its recording."""
     adapter = ReplayAdapter()

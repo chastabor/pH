@@ -137,7 +137,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
     return text_content("\n\n".join(parts))
 
 
-@plugin("subagent-task", config=Config, inject=[TOOLS, SUBAGENTS])
+@plugin("subagent-task", affects="environment", config=Config, inject=[TOOLS, SUBAGENTS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the blocking delegation tool, once a provider exists to run it."""
 

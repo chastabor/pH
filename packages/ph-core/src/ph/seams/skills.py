@@ -501,7 +501,7 @@ class SkillService:
             return None
 
 
-@plugin("skills")
+@plugin("skills", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the skills seam."""
     ctx.provide(SKILLS, SkillService(ctx=ctx))
@@ -911,7 +911,12 @@ class Config(WireModel):
     rather than this row's to assume."""
 
 
-@plugin("skills-progressive", config=Config, inject=[SKILLS, SYSTEM_PROMPT, TOOLS])
+@plugin(
+    "skills-progressive",
+    affects="environment",
+    config=Config,
+    inject=[SKILLS, SYSTEM_PROMPT, TOOLS],
+)
 async def progressive(ctx: Context, config: Config) -> None:
     """Catalog in the prompt, body on demand (G9).
 

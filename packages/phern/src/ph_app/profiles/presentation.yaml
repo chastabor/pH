@@ -1,0 +1,16 @@
+# ph_app's presentation rows, layered into every named profile.
+#
+# Presentation rows shape only how a front end draws (`affects: presentation`),
+# so no profile a person writes may set them, and none of the named profiles
+# says whether it has them. `tui-screens` and `tui-status` are the seams and ship
+# in `ph-base`; this file holds the registrants this package contributes.
+#
+# In every profile, headless included: the daemon that holds a headless run is
+# also what a TUI attaches to, and a screen nothing draws costs nothing. A person
+# who does not want one hides it in `$PH_HOME/tui.json`.
+
+# The trajectory screen: `/trajectory`, its key and its palette entry, all three
+# with this row's lifetime.
+- insert:
+    - id: tui-screen-trajectory
+      name: tui-screen-trajectory

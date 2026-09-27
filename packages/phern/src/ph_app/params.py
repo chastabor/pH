@@ -54,6 +54,7 @@ from typing import Literal, TypeAlias
 from pydantic import Field
 
 from ph.llm.types import AttachmentRef
+from ph.seams.models import ModelChoice
 from ph.seams.permission_presets import PresetName
 from ph.seams.schedule import Schedule, ScheduleKind
 from ph.wire import WireModel
@@ -65,6 +66,7 @@ __all__ = [
     "CommandParams",
     "CreateScheduleParams",
     "InitializeParams",
+    "ModelParams",
     "MutationParams",
     "NewSessionParams",
     "PresetParams",
@@ -117,6 +119,10 @@ class NewSessionParams(SessionParams):
 
     cwd: str | None = None
     trust: TrustAnswer = ""
+    choice: ModelChoice = Field(default_factory=ModelChoice)
+    """What this session runs on. Empty is the daemon's own `--model`, else the
+    profile's default. A fresh root mounts on it; one already running is moved to
+    it, as `session/model` would move it."""
 
 
 class SnapshotParams(SessionParams):
@@ -183,6 +189,12 @@ class PresetParams(MutationParams):
     naming the field rather than a `KeyError` naming the value."""
 
     preset: PresetName
+
+
+class ModelParams(MutationParams):
+    """`session/model`: a listed key or a whole route, resolved by the root's profile."""
+
+    choice: ModelChoice
 
 
 class StoreCredentialParams(SessionParams):

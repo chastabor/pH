@@ -377,5 +377,7 @@ nothing committed by Claude.
     does, since two sends under one call id would now relay one message id twice.
 - [ ] **L3** *(optional, low)* — Re-read under a lock and write only the changed key, for
   `settings.json` and `tui.json`.
-- [ ] **L7** *(decide first)* — Record the sandbox allowances in the log, if egress should be
-  auditable from logs alone.
+- [ ] **L7** *(decided 2026-09-26, moved)* — Record the sandbox allowances in the log, if egress
+  should be auditable from logs alone. Widened on review to the whole working environment:
+  a session's starting profile, its logged overrides, and a rebuild on restart. Planned in
+  `plans/Session_Profiles_Plan.md`.

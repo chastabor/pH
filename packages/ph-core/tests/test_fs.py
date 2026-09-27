@@ -68,7 +68,7 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentDriver
-from ph.cordis import DEPLOYMENT, Context, Profile
+from ph.cordis import DEPLOYMENT, Context, Profile, ProfileDocument
 from ph.keys import AGENTS, FS, SESSIONS
 from ph.paths import is_under
 from ph.seams.fs import (
@@ -782,7 +782,9 @@ async def test_the_root_ladder_is_config_then_project_then_cwd(tmp_path: Path) -
             entry["config"] = config
         ctx = Context()
         try:
-            await Profile.from_documents([("t", [entry])]).mount(ctx, project=project)
+            await Profile.from_documents([ProfileDocument("t", [entry])]).mount(
+                ctx, project=project
+            )
             return ctx.require(FS).root_for()
         finally:
             await ctx.dispose()

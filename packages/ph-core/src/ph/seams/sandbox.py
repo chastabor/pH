@@ -954,7 +954,7 @@ class Config(WireModel):
     default_mode: SandboxMode = "read-only"
 
 
-@plugin("sandbox-policy", config=Config)
+@plugin("sandbox-policy", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the sandbox seam with policy resolution and no backend."""
     seam = SandboxSeam(ctx=ctx, default_mode=config.default_mode)

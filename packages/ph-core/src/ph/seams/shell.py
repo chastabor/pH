@@ -176,7 +176,7 @@ class ShellService:
         )
 
 
-@plugin("shell-local", inject=[SUBPROCESS])
+@plugin("shell-local", affects="environment", inject=[SUBPROCESS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the local shell provider."""
     ctx.provide(SHELL, ShellService(ctx=ctx))

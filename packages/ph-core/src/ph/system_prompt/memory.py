@@ -190,7 +190,7 @@ class MemoryFiles:
         return rendered
 
 
-@plugin("memory-agents-md", inject=[SYSTEM_PROMPT])
+@plugin("memory-agents-md", affects="environment", inject=[SYSTEM_PROMPT])
 async def apply(ctx: Context, config: None) -> None:
     """Contribute discovered `AGENTS.md` files as a post-cache snapshot."""
     # Resolved once: `$PH_HOME` is a process constant, and asking for it per

@@ -462,7 +462,7 @@ def handed_paths_of(ctx: Context, *, session: Session | None) -> tuple[Path, ...
     return tuple(store.owner_root(one) for one in sorted(owners))
 
 
-@plugin("spill-local", config=Config)
+@plugin("spill-local", affects="deployment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local spill store."""
     root = default_home_path(config.root, "spill")

@@ -2038,7 +2038,9 @@ class LifecycleConfig(WireModel):
     all because its root already *is* the base."""
 
 
-@plugin("workspace-lifecycle", inject=[WORKSPACE, FS], config=LifecycleConfig)
+@plugin(
+    "workspace-lifecycle", affects="environment", inject=[WORKSPACE, FS], config=LifecycleConfig
+)
 async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     """Give every agent a workspace, and point `ctx.fs` at it.
 
@@ -2146,7 +2148,7 @@ class Config(WireModel):
     `default_home_path` exists for, and outside the workspace on purpose."""
 
 
-@plugin("workspace-shared", config=Config)
+@plugin("workspace-shared", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam with the shared provider as its floor.
 
@@ -2165,7 +2167,7 @@ async def apply(ctx: Context, config: Config) -> None:
     contribute(ctx, Diagnostic(id="workspaces", title="Workspaces", read=seam.describe, order=20))
 
 
-@plugin("workspace-reconcile", inject=[WORKSPACE])
+@plugin("workspace-reconcile", affects="environment", inject=[WORKSPACE])
 async def reconcile(ctx: Context, config: None) -> None:
     """Run the seam's reconciliation whenever a session is opened (F6).
 
@@ -2185,7 +2187,7 @@ async def reconcile(ctx: Context, config: None) -> None:
     ctx.on("session/created", ctx.require(WORKSPACE).reconcile)
 
 
-@plugin("workspace-checkpoint", inject=[TOOLS, WORKSPACE])
+@plugin("workspace-checkpoint", affects="environment", inject=[TOOLS, WORKSPACE])
 async def checkpoint_policy(ctx: Context, config: None) -> None:
     """Take a restore point before every code run that has a workspace to save.
 

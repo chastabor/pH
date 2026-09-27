@@ -18,6 +18,7 @@ from ph.cordis import Context, Profile
 from ph.json import as_obj, as_str
 from ph.keys import SESSION_PERSISTENCE
 from ph.llm.types import text_of
+from ph.seams.models import ModelChoice
 from ph.session import Session, derive_transcript
 
 from ..runtime import prompted
@@ -55,8 +56,7 @@ async def run_print(
     profile: Profile,
     prompt: str,
     *,
-    provider: str,
-    model: str,
+    choice: ModelChoice = ModelChoice(),
     session_id: str | None = None,
     attachments: Sequence[Path] = (),
 ) -> PrintResult:
@@ -75,8 +75,7 @@ async def run_print(
     async with prompted(
         profile,
         prompt,
-        provider=provider,
-        model=model,
+        choice=choice,
         session_id=session_id,
         attachments=attachments,
         before=mark,

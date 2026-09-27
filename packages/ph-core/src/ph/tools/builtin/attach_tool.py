@@ -122,7 +122,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
     return text_content(f"Attached {value['path']} ({size}). It follows this result.")
 
 
-@plugin("tool-attach", config=Config, inject=[TOOLS, FS, ATTACHMENTS])
+@plugin("tool-attach", affects="environment", config=Config, inject=[TOOLS, FS, ATTACHMENTS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the attach tool.
 

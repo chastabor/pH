@@ -7,3 +7,13 @@
         apiKeyEnv: ANTHROPIC_API_KEY
         contextWindow: 200000
         defaultMaxTokens: 8192
+
+# What this profile runs on, by key; `main` unless a person picks another
+# (`--model fast`, `/model fast`). A person's overlay replaces the whole list.
+- id: models
+  config:
+    default: main
+    models:
+      main: {provider: anthropic, model: claude-sonnet-5}
+      deep: {provider: anthropic, model: claude-opus-5-5}
+      fast: {provider: anthropic, model: claude-haiku-4-5-20251001}

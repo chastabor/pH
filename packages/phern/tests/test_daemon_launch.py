@@ -36,7 +36,7 @@ from ph_app.daemon.launch import DaemonAbsent, ensure_daemon
 
 pytestmark = pytest.mark.anyio
 
-ARGV = spawn_command(profile="headless", provider="fake", model="fake-1")
+ARGV = spawn_command(profile="headless")
 """What a UI would spawn. `ensure_daemon` takes the argv and knows nothing else."""
 
 
@@ -71,7 +71,7 @@ def test_the_spawned_daemon_is_this_python_and_is_ephemeral() -> None:
     `--ephemeral` because this daemon was nobody's decision. Sabotage: drop it,
     and every TUI a person ever opens leaves a supervisor behind.
     """
-    argv = spawn_command(profile="tui", provider="fake", model="fake-1")
+    argv = spawn_command(profile="tui")
 
     assert argv[:3] == [sys.executable, "-m", "ph_app"]
     assert argv[3] == "daemon"
@@ -91,7 +91,7 @@ def test_keep_daemon_starts_a_service_instead() -> None:
     Sabotage: ignore `keep`, and `--keep-daemon` reads as accepted and does
     nothing, which is the failure mode a flag has when nobody tests it.
     """
-    kept = spawn_command(profile="tui", provider="fake", model="fake-1", keep=True)
+    kept = spawn_command(profile="tui", keep=True)
 
     assert "--ephemeral" not in kept
     assert kept[3] == "daemon", "and it is still a daemon, not a second mode"

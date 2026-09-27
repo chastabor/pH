@@ -407,7 +407,7 @@ class GoalService:
         return state.gates.get((gate, tree)) is False
 
 
-@plugin("goals")
+@plugin("goals", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Publish `ctx.goals`."""
     service = GoalService()

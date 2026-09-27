@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from .seams.goals import GoalService
     from .seams.invariants import InvariantRegistry
     from .seams.jobs import JobService
+    from .seams.models import ModelList
     from .seams.permission_presets import PermissionPresetService
     from .seams.sandbox import SandboxSeam
     from .seams.schedule import ScheduleService
@@ -99,6 +100,7 @@ __all__ = [
     "LLM",
     "LLM_FAKE",
     "LLM_REPLAY",
+    "MODELS",
     "MOUNT",
     "PERMISSION_PRESETS",
     "PROJECT_ROOT",
@@ -143,6 +145,7 @@ JOBS: ServiceKey[JobService] = ServiceKey("jobs")
 LLM: ServiceKey[LlmRuntime] = ServiceKey("llm")
 LLM_FAKE: ServiceKey[FakeAdapter] = ServiceKey("llm_fake")
 LLM_REPLAY: ServiceKey[ReplayAdapter] = ServiceKey("llm_replay")
+MODELS: ServiceKey[ModelList] = ServiceKey("models")
 PERMISSION_PRESETS: ServiceKey[PermissionPresetService] = ServiceKey("permission_presets")
 SANDBOX: ServiceKey[SandboxSeam] = ServiceKey("sandbox")
 SCHEDULE: ServiceKey[ScheduleService] = ServiceKey("schedule")

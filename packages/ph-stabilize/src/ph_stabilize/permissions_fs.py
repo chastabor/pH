@@ -717,7 +717,7 @@ def _covers_whole(pattern: str, directory: str) -> bool:
     return pattern.endswith("/**") and matches_glob(directory, pattern[:-3])
 
 
-@plugin("permissions-fs", inject=[FS], config=Config)
+@plugin("permissions-fs", affects="environment", inject=[FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Attach the rules to `ctx.fs`."""
     fs: FsService = ctx.require(FS)

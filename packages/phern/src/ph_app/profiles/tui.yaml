@@ -1,6 +1,8 @@
 # ph-tui: the interactive posture.
 #
-# Three rows differ from `headless`.
+# Two rows differ from `headless`, and both are about a person being present.
+# What a person *sees* is not here: screens ship in every profile
+# (`presentation.yaml`), and hiding one is the TUI's own `tui.json`.
 #
 # The first is attendance. `read-only` is right for an unattended run: no one
 # is there to answer an approval prompt, so nothing should be writable without
@@ -14,16 +16,7 @@
   config:
     defaultMode: workspace-write
 
-# The second is that somebody is looking at a screen. `tui-screens` is in
-# `ph-base` — the seam exists everywhere — but a *registrant* only earns its
-# place where there is a front end to draw it, so the trajectory is contributed
-# here rather than in the core bundle. It brings `/trajectory`, its key and its
-# palette entry with it, and takes all three away if this row is removed.
-- insert:
-    - id: tui-screen-trajectory
-      name: tui-screen-trajectory
-
-# The third is the other direction of the same fact: somebody is there to *ask*.
+# The second is the other direction of the same fact: somebody is there to *ask*.
 # `tool-ask-user` ships disabled in `ph-base` because a question with nobody to
 # answer it is a turn spent on nothing, and this is the profile that has a modal
 # to put it in. Armed here rather than in the core bundle so that a deployment

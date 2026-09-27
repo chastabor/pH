@@ -166,7 +166,7 @@ GLOB_LIMIT = 1_000
 GREP_LIMIT = 200
 
 
-@plugin("tool-fs", inject=[TOOLS, FS])
+@plugin("tool-fs", affects="environment", inject=[TOOLS, FS])
 async def apply(ctx: Context, config: None) -> None:
     """Register the filesystem tools."""
     fs = ctx.require(FS)

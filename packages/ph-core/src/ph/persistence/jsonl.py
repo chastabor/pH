@@ -909,7 +909,7 @@ class Config(WireModel):
     """Where the logs live; `$PH_HOME/sessions` when unset."""
 
 
-@plugin("session-persistence-jsonl", inject=[SESSIONS], config=Config)
+@plugin("session-persistence-jsonl", affects="deployment", inject=[SESSIONS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the JSONL backend and wire it to the session firehose."""
     root = Path(config.root) if config.root else resolve_roots().sessions_dir()

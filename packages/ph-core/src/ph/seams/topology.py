@@ -28,7 +28,7 @@ from .diagnostics import ORDER_SELF_ASSESSMENT, Diagnostic, contribute
 __all__ = ["apply"]
 
 
-@plugin("topology", inject=[MOUNT])
+@plugin("topology", affects="deployment", inject=[MOUNT])
 async def apply(ctx: Context, config: None) -> None:
     """Offer the mount's account of itself as a section."""
     contribute(

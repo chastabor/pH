@@ -95,7 +95,7 @@ class Config(WireModel):
     by cordis); this row holds its opt-in and nothing else."""
 
 
-@plugin(ROW, config=Config, inject=[SESSIONS])
+@plugin(ROW, affects="environment", config=Config, inject=[SESSIONS])
 async def apply(ctx: Context, config: Config) -> None:
     """Retry transient request failures with bounded backoff."""
     settings = config

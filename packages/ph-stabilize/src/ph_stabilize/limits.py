@@ -487,7 +487,7 @@ def _record(session: Session, kind: str, posture: str, detail: dict[str, Any]) -
     _LOG.append(session, "limits/exceeded", {"limit": kind, "posture": posture, **detail})
 
 
-@plugin("limits", inject=[SESSIONS], config=Config)
+@plugin("limits", affects="environment", inject=[SESSIONS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Arm the model-call limit, the tool-call limit and the breaker."""
     counts = SessionFoldCache(counts_of, extend=_extend)

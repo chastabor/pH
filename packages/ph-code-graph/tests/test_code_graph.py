@@ -903,7 +903,7 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
     the `PROFILES` entry and cannot test it — nothing there depends on the two
     indexing distributions, which is the point of discovering them as bundles.
     """
-    from ph.cordis import Context, Profile, load_profile_documents
+    from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
     from ph_app.profiles import resolve_profile
 
     # `PH_HOME`/`PH_CACHE` are not pinned here: the suite's autouse
@@ -911,7 +911,7 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
     # the first comes to be believed and bypassed.
     documents = load_profile_documents(resolve_profile("rlm-indexed"))
     documents.append(
-        (
+        ProfileDocument(
             "test-overlay",
             [
                 {"id": "fs", "config": {"root": str(tmp_path)}},

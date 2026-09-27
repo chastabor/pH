@@ -13,10 +13,10 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from ph.agent.types import AgentOptions
 from ph.cordis import Context, Profile
 from ph.keys import AGENTS, SESSIONS
 from ph.persistence import open_session
+from ph.seams.models import ModelChoice, choose
 from ph.session import Session
 
 from .attach import ingest, prompt_message
@@ -60,8 +60,7 @@ async def prompted(
     profile: Profile,
     prompt: str,
     *,
-    provider: str,
-    model: str,
+    choice: ModelChoice = ModelChoice(),
     session_id: str | None = None,
     attachments: Sequence[Path] = (),
     before: Callable[[Context, Session], None] | None = None,
@@ -80,13 +79,17 @@ async def prompted(
     the alternative would be a branch whose two halves have to stay in step.
     """
     async with mounted(profile) as ctx:
+        # Resolved inside the mount, which is the only place that knows which
+        # providers an adapter serves — and before the session opens, so a route
+        # nothing can run leaves the command as its refusal with nothing on disk.
+        options = choose(ctx, choice).options()
         session = await open_session(ctx, session_id)
         if before is not None:
             before(ctx, session)
         # Before the agent exists: a file that cannot be read should fail the
         # command, not a turn — nothing is logged and there is nothing to unwind.
         refs = await ingest(ctx, attachments)
-        agent = ctx.require(AGENTS).create(session, AgentOptions(provider=provider, model=model))
+        agent = ctx.require(AGENTS).create(session, options)
         agent.followup(prompt_message(prompt, refs))
         await agent.run()
         await ctx.require(SESSIONS).flush(session)

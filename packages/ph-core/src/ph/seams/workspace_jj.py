@@ -1013,7 +1013,7 @@ class Config(WireModel):
     on purpose — the same reason the worktree tier gives."""
 
 
-@plugin("workspace-jj", inject=[WORKSPACE, SUBPROCESS], config=Config)
+@plugin("workspace-jj", affects="environment", inject=[WORKSPACE, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Claim the workspace slot, but only where jj is installed.
 

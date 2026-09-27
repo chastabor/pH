@@ -37,7 +37,7 @@ events.declare("test/realm-probe", "emit", owner="tests")
 
 
 def _doc(name: str, text: str) -> ProfileDocument:
-    return name, safe_yaml_load(text, origin=name)
+    return ProfileDocument(name, safe_yaml_load(text, origin=name))
 
 
 def _fake_module(name: str, **plugins: object) -> None:
@@ -159,16 +159,16 @@ def test_disabled_rows_are_not_mounted() -> None:
 async def test_mounting_activates_only_rows_whose_injections_resolve() -> None:
     applied: list[str] = []
 
-    @plugin("t-provider")
+    @plugin("t-provider", affects="environment")
     async def provider(ctx: Context, config: None) -> None:
         applied.append("provider")
         ctx.provide("t_thing", 1)
 
-    @plugin("t-consumer", inject=["t_thing"])
+    @plugin("t-consumer", affects="environment", inject=["t_thing"])
     async def consumer(ctx: Context, config: None) -> None:
         applied.append("consumer")
 
-    @plugin("t-orphan", inject=["t_absent"])
+    @plugin("t-orphan", affects="environment", inject=["t_absent"])
     async def orphan(ctx: Context, config: None) -> None:
         applied.append("orphan")
 
@@ -216,15 +216,15 @@ async def test_topology_reports_what_the_mount_became_not_what_was_written() -> 
     isolated realms — none before an agent exists, and then the agent's path.
     """
 
-    @plugin("t-provider")
+    @plugin("t-provider", affects="environment")
     async def provider(ctx: Context, config: None) -> None:
         ctx.provide("t_thing", 1)
 
-    @plugin("t-consumer", inject=["t_thing"])
+    @plugin("t-consumer", affects="environment", inject=["t_thing"])
     async def consumer(ctx: Context, config: None) -> None:
         pass
 
-    @plugin("t-orphan", inject=["t_thing", "t_absent"])
+    @plugin("t-orphan", affects="environment", inject=["t_thing", "t_absent"])
     async def orphan(ctx: Context, config: None) -> None:
         pass
 
@@ -277,11 +277,11 @@ async def test_topology_follows_a_fiber_through_a_provider_swap() -> None:
     """
     withdraw: list[Disposer] = []
 
-    @plugin("t-provider")
+    @plugin("t-provider", affects="environment")
     async def provider(ctx: Context, config: None) -> None:
         withdraw.append(ctx.provide("t_thing", 1))
 
-    @plugin("t-consumer", inject=["t_thing"])
+    @plugin("t-consumer", affects="environment", inject=["t_thing"])
     async def consumer(ctx: Context, config: None) -> None:
         pass
 
@@ -331,7 +331,7 @@ def test_a_fork_that_never_activated_is_not_reported_as_unwound() -> None:
     that never came up does not borrow it.
     """
 
-    @plugin("t-consumer", inject=["t_absent"])
+    @plugin("t-consumer", affects="environment", inject=["t_absent"])
     async def consumer(ctx: Context, config: None) -> None:
         pass
 
@@ -356,11 +356,11 @@ def _realm_module(name: str) -> None:
 
     # A model, because a row that reads config has to say so (P8-04): the loader
     # refuses a `config:` block under a row that declares none.
-    @plugin("t-fs", config=FsConfig)
+    @plugin("t-fs", affects="environment", config=FsConfig)
     async def fs_provider(ctx: Context, config: FsConfig) -> None:
         ctx.provide("t_fs", {"root": config.root, "owner": ctx.path})
 
-    @plugin("t-reader", inject=["t_fs"])
+    @plugin("t-reader", affects="environment", inject=["t_fs"])
     async def reader(ctx: Context, config: None) -> None:
         ctx.provide("t_seen", ctx.require("t_fs"))
 
@@ -439,11 +439,11 @@ async def test_an_isolating_row_hears_a_dispatch_like_any_other_row() -> None:
     class FsConfig(WireModel):
         root: str = "shared"
 
-    @plugin("t-fs", config=FsConfig)
+    @plugin("t-fs", affects="environment", config=FsConfig)
     async def fs_provider(ctx: Context, config: FsConfig) -> None:
         ctx.provide("t_fs", {"root": config.root, "owner": ctx.path})
 
-    @plugin("t-listener", inject=["t_fs"])
+    @plugin("t-listener", affects="environment", inject=["t_fs"])
     async def listener(ctx: Context, config: None) -> None:
         ctx.on("test/realm-probe", lambda tag: heard.append(str(tag)))
 
@@ -492,11 +492,11 @@ async def test_an_isolating_row_registers_where_everyone_can_see_it() -> None:
     class FsConfig(WireModel):
         root: str = "shared"
 
-    @plugin("t-fs", config=FsConfig)
+    @plugin("t-fs", affects="environment", config=FsConfig)
     async def fs_provider(ctx: Context, config: FsConfig) -> None:
         ctx.provide("t_fs", {"root": config.root})
 
-    @plugin("t-registrar", inject=["t_fs"])
+    @plugin("t-registrar", affects="environment", inject=["t_fs"])
     async def registrar(ctx: Context, config: None) -> None:
         seen.append(ctx.isolation)
 
@@ -536,12 +536,12 @@ async def test_a_private_copy_in_a_realm_does_not_also_hear_the_dispatch() -> No
     class FsConfig(WireModel):
         root: str = "shared"
 
-    @plugin("t-fs2", config=FsConfig)
+    @plugin("t-fs2", affects="environment", config=FsConfig)
     async def fs_provider(ctx: Context, config: FsConfig) -> None:
         ctx.provide("t_fs2", {"root": config.root})
         ctx.on("test/realm-probe", lambda tag: heard.append(f"{config.root}:{tag}"))
 
-    @plugin("t-listener2", inject=["t_fs2"])
+    @plugin("t-listener2", affects="environment", inject=["t_fs2"])
     async def listener(ctx: Context, config: None) -> None:
         return None
 
@@ -683,15 +683,15 @@ async def test_a_private_copy_that_cannot_activate_is_refused_not_fallen_through
     come from a row above the realm.
     """
 
-    @plugin("t-needy-fs", inject=["t_late"])
+    @plugin("t-needy-fs", affects="environment", inject=["t_late"])
     async def needy(ctx: Context, config: None) -> None:
         ctx.provide("t_fs", {"root": "private"})
 
-    @plugin("t-late")
+    @plugin("t-late", affects="environment")
     async def late(ctx: Context, config: None) -> None:
         ctx.provide("t_late", True)
 
-    @plugin("t-reader", inject=["t_fs"])
+    @plugin("t-reader", affects="environment", inject=["t_fs"])
     async def reader(ctx: Context, config: None) -> None:
         ctx.provide("t_seen", ctx.require("t_fs"))
 
@@ -807,6 +807,37 @@ def test_two_plain_rows_cannot_share_an_id() -> None:
     # And within one document, which is the typo rather than the layering.
     with pytest.raises(LoaderError, match='row id "a" is already declared'):
         compose_rows([_doc("base", "- id: a\n  name: mod.a\n- id: a\n  name: mod.b\n")])
+
+
+def test_a_layer_that_names_its_kind_is_refused_every_other_kind() -> None:
+    """`sets` is checked against the row each entry touches, and the plugin behind
+    it declares the kind — so a row a person *adds*, not only one they patch, is
+    refused. A layer that names no kind is pH's own and sets anything."""
+    base = _doc("base", "- id: todo\n  name: tool-todo\n- id: store\n  name: spill-local\n")
+
+    added = ProfileDocument(
+        "mine", [{"id": "telemetry", "name": "session-telemetry"}], "environment"
+    )
+    with pytest.raises(LoaderError, match='mine: row "telemetry" is deployment'):
+        compose_rows([base, added])
+    patched = ProfileDocument("mine", [{"id": "store", "config": {}}], "environment")
+    with pytest.raises(LoaderError, match="belong in the daemon's configuration"):
+        compose_rows([base, patched])
+
+    armed = ProfileDocument("mine", [{"id": "todo", "disabled": False}], "environment")
+    assert [row.id for row in compose_rows([base, armed])] == ["todo", "store"]
+    shipped = ProfileDocument("bundle", [{"id": "store", "remove": True}])
+    assert [row.id for row in compose_rows([base, shipped])] == ["todo"]
+
+
+def test_a_patch_to_no_row_says_so_rather_than_what_kind_it_is() -> None:
+    """The kind check reads an id against the rows composed so far, and an id that
+    names none has nothing to check — the loader's own sentence for a typo
+    stands, rather than a refusal about a row that does not exist."""
+    ghost = ProfileDocument("mine", [{"id": "ghost", "config": {}}], "environment")
+
+    with pytest.raises(LoaderError, match='mine: no row with id "ghost" to patch'):
+        compose_rows([ghost])
 
 
 def test_an_interpolated_default_may_contain_braces() -> None:

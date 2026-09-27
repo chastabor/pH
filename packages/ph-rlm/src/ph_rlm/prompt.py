@@ -141,7 +141,7 @@ agent lifecycle has taken a workspace and which tier answered.
 """
 
 
-@plugin("rlm-prompt", inject=[SYSTEM_PROMPT, TOOLS, SESSIONS, SUBAGENTS])
+@plugin("rlm-prompt", affects="environment", inject=[SYSTEM_PROMPT, TOOLS, SESSIONS, SUBAGENTS])
 async def apply(ctx: Context, config: None) -> None:
     """Contribute the doctrine sections and the volatile-facts snapshot."""
 

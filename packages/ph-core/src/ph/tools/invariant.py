@@ -37,7 +37,7 @@ def violations(ctx: Context) -> list[str]:
     return list(ctx.require(TOOLS).stale_views())
 
 
-@plugin("tools-invariant", inject=[TOOLS])
+@plugin("tools-invariant", affects="deployment", inject=[TOOLS])
 async def apply(ctx: Context, config: None) -> None:
     """Declare the view cache's half of I6, pollable.
 

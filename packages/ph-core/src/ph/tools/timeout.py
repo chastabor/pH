@@ -25,7 +25,7 @@ from .definition import ToolExecution, ToolExecutionResult, error_result
 __all__ = ["apply"]
 
 
-@plugin("tools-timeout", inject=[TOOLS])
+@plugin("tools-timeout", affects="environment", inject=[TOOLS])
 async def apply(ctx: Context, config: None) -> None:
     """Bound every dispatch whose tool declared `timeout_ms`."""
 

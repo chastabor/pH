@@ -135,7 +135,7 @@ def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | Non
     return None
 
 
-@plugin("input-offload", inject=[SPILL_STORE], config=Config)
+@plugin("input-offload", affects="environment", inject=[SPILL_STORE], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Replace an oversized pasted message on the surface, not in the log."""
     ctx.require(SPILL_STORE).claim(

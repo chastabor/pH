@@ -186,7 +186,7 @@ class AgentRegistry:
             await session_written(self.ctx, agent.session)
 
 
-@plugin("agent", inject=[SESSIONS])
+@plugin("agent", affects="environment", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the agent registry."""
     ctx.provide(AGENTS, AgentRegistry(ctx=ctx))

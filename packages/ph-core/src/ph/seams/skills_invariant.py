@@ -38,7 +38,7 @@ def violations(ctx: Context) -> list[str]:
     return list(ctx.require(SKILLS).stale_reach())
 
 
-@plugin("skills-invariant", inject=[SKILLS])
+@plugin("skills-invariant", affects="deployment", inject=[SKILLS])
 async def apply(ctx: Context, config: None) -> None:
     """Declare the reach cache's half of I6, pollable.
 

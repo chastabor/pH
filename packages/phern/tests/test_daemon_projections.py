@@ -22,7 +22,7 @@ import pytest
 from daemon_helpers import Daemon, running, until
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import DEPLOYMENT, Profile, load_profile_documents
+from ph.cordis import DEPLOYMENT, Profile, ProfileDocument, load_profile_documents
 from ph.keys import (
     COMMANDS,
     FS,
@@ -645,7 +645,7 @@ async def test_a_method_whose_seam_is_absent_says_so_and_is_not_unknown(
     bare = Profile.from_documents(
         [
             *load_profile_documents([BASE, HEADLESS]),
-            ("test", [{"id": "credentials", "remove": True}]),
+            ProfileDocument("test", [{"id": "credentials", "remove": True}]),
         ]
     )
     async with running(tmp_path, profile=bare) as daemon:

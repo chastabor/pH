@@ -154,7 +154,7 @@ def contribute(ctx: Context, diagnostic: Diagnostic) -> None:
     contribute_item(ctx, DIAGNOSTICS, diagnostic, label=f"diagnostic({diagnostic.id})")
 
 
-@plugin("diagnostics")
+@plugin("diagnostics", affects="deployment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the registration seam. No section ships in `ph-base`."""
     ctx.provide(DIAGNOSTICS, DiagnosticsRegistry(ctx=ctx))

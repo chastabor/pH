@@ -124,7 +124,7 @@ def abandoned(root: Context) -> list[str]:
     return found
 
 
-@plugin("scope-invariant")
+@plugin("scope-invariant", affects="deployment")
 async def apply(ctx: Context, config: None) -> None:
     """Declare I2's structural half, pollable.
 

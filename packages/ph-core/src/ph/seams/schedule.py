@@ -494,7 +494,7 @@ class Config(WireModel):
     """
 
 
-@plugin("schedule", config=Config)
+@plugin("schedule", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Publish `ctx.schedule`."""
     # Through the writer, so an appointment changing never waits on the file

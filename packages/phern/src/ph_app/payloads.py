@@ -46,6 +46,7 @@ from ph.json import JsonObject, JsonValue
 from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
+from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_screens import ScreenSchema
@@ -91,6 +92,7 @@ __all__ = [
     "SessionCommandsNotice",
     "SessionDetached",
     "SessionEventNotice",
+    "SessionModelsReply",
     "SessionNotice",
     "SessionReadingsReply",
     "SessionSchedulesReply",
@@ -166,6 +168,8 @@ class StatusFacts(WireModel):
     readings: list[StatusReading] | None = None
     provider: str | None = None
     model: str | None = None
+    model_key: str | None = None
+    """The profile's name for the route, or `""` for one it does not list."""
 
 
 # ----------------------------------------------------------------- replies --
@@ -207,6 +211,8 @@ class RootDescription(SessionScoped):
     cursor: Cursor
     provider: str = ""
     model: str = ""
+    model_key: str = ""
+    """Which of the profile's models this is, `""` when a person named an unlisted route."""
 
     def facts(self) -> StatusFacts:
         """This description as the status half of it.
@@ -220,6 +226,7 @@ class RootDescription(SessionScoped):
             last_turn=self.last_turn,
             provider=self.provider,
             model=self.model,
+            model_key=self.model_key,
         )
 
 
@@ -380,8 +387,10 @@ class DaemonStatusReply(CapabilityBlock):
     socket: str
     uptime_ms: int
     roots: int
-    provider: str
-    model: str
+    starts_on: ModelEntry | None = None
+    """What a new root runs on: the daemon's `--provider/--model`, else its profile's
+    default, or `None` when neither names a route. Each root may move off it with
+    `/model`."""
     passivate_after: float | None = None
     """Seconds, or `None` for a daemon that never passivates. Optional because
     the absence is a *setting* and not a missing field — `exclude_none` would
@@ -623,6 +632,12 @@ class SessionPresetsReply(SessionNotice):
     """`presets/list` — the postures, and which one is in force."""
 
     presets: list[PresetSchema] = Field(default_factory=list)
+
+
+class SessionModelsReply(SessionNotice):
+    """`models/list` — the models this root's profile lists, the default first."""
+
+    models: list[ModelEntry] = Field(default_factory=list)
 
 
 class SessionSkillsReply(SessionNotice):

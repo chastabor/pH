@@ -225,6 +225,14 @@ class TuiState:
     context_window: int | None = None
     model: str = ""
     provider: str = ""
+    model_key: str = ""
+    """The profile's name for the route in force, `""` when it lists none that matches."""
+
+    @property
+    def route(self) -> str:
+        """`provider/model` in force, the spelling `/model` takes back — `""` before attach."""
+        return f"{self.provider}/{self.model}" if self.provider else ""
+
     lifetime: DaemonLifetime | None = None
     """Why the daemon behind this session is still running, or `None`.
 

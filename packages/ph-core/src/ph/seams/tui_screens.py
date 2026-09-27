@@ -256,7 +256,7 @@ class TuiScreenRegistry:
         front_end.drawn[entry.screen.id] = entry.owner.add_disposer(undo, label=label)
 
 
-@plugin("tui-screens")
+@plugin("tui-screens", affects="presentation")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the screen registry.
 

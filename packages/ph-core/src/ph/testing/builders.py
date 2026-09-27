@@ -22,6 +22,7 @@ import anyio
 from ..agent.types import AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
+from ..host import host_config_path, load_host_config
 from ..json import JsonValue, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import (
@@ -33,6 +34,7 @@ from ..llm.types import (
     text_of,
 )
 from ..locks import file_lock
+from ..paths import resolve_roots
 from ..persistence.jsonl import HEADER_LINE_TYPE, JsonlSessionStore, locate_session, session_path
 from ..persistence.lease import lease_path
 from ..persistence.turso import TursoSessionStore
@@ -93,6 +95,7 @@ __all__ = [
     "workspace_log",
     "workspace_retained",
     "workspace_seam",
+    "write_host_config",
     "write_reference_fork",
 ]
 
@@ -846,3 +849,18 @@ def not_none[T](value: T | None, what: str = "") -> T:
     """
     assert value is not None, what or "expected a value, got None"
     return value
+
+
+def write_host_config(text: str, *, home: Path | None = None) -> Path:
+    """Write `$PH_HOME/daemon.yaml` as a person would before a start, and answer its path.
+
+    `load_host_config` is read once per process (`ph.host`), so a test that writes
+    the file after something resolved the roots is a process that has not
+    restarted — forgetting the earlier read here *is* the restart. `home` defaults
+    to the `$PH_HOME` this test runs under.
+    """
+    root = home if home is not None else resolve_roots().home
+    path = host_config_path(root)
+    path.write_text(text, encoding="utf-8")
+    load_host_config.cache_clear()
+    return path

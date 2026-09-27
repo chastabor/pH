@@ -50,7 +50,7 @@ bodies are what close that.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +69,7 @@ from ph.seams.commands import (
     CommandSchema,
     parse_command_line,
 )
+from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.permission_presets import PresetName, PresetSchema
 from ph.seams.tui_screens import ScreenDefinition, ScreenSchema
 from ph.seams.tui_status import StatusReading
@@ -83,6 +84,7 @@ from ..daemon.follow import EventFrame, Followed, first_of
 from ..params import (
     BrowseParams,
     CommandParams,
+    ModelParams,
     NewSessionParams,
     PresetParams,
     ShellParams,
@@ -99,7 +101,9 @@ from ..payloads import (
     MutationRepeated,
     QuestionAsk,
     QuestionAskReply,
+    RootDescription,
     SessionCommandsNotice,
+    SessionModelsReply,
     SessionScreensNotice,
     SessionSkillsReply,
     SessionStagedNotice,
@@ -142,6 +146,11 @@ class DaemonSession:
     host: ModalHost
     remote_commands: list[CommandDefinition] = field(default_factory=list)
     screens: dict[str, ScreenDefinition] = field(default_factory=dict)
+    listed_models: list[ModelEntry] = field(default_factory=list)
+    """`models/list`, read once at attach: the list is the profile's and does not
+    change while a session is open."""
+    hidden_screens: frozenset[str] = frozenset()
+    """What this terminal's `tui.json` hides, applied again whenever the list changes."""
     held: dict[str, bool] = field(default_factory=dict)
     feed: Followed = field(init=False)
     app: AppSurface | None = None
@@ -304,6 +313,10 @@ class DaemonSession:
         """
         self.state.provider = facts.provider or self.state.provider
         self.state.model = facts.model or self.state.model
+        if facts.model_key is not None:
+            # `""` is an answer here — an unlisted route — so it is kept only
+            # when the frame does not say, not whenever it is falsy.
+            self.state.model_key = facts.model_key
         if facts.readings is not None:
             self._readings = list(facts.readings)
         if facts.status:
@@ -354,7 +367,7 @@ class DaemonSession:
             # Re-wired rather than merged: a screen's routes are a verb *and* a
             # key binding, and the key is registered on the app — so the old
             # ones have to be released before the new list is built.
-            self.screens = _screens_of(notice.screens)
+            self.screens = _screens_of(notice.screens, self.hidden_screens)
             if self.app is not None:
                 self._wire_screens(self.app)
             self.host.state_changed()
@@ -381,11 +394,24 @@ class DaemonSession:
     def screen(self, screen_id: str) -> ScreenDefinition | None:
         return self.screens.get(screen_id)
 
-    def providers(self) -> list[str]:
-        """Nothing yet. Not enforced (§5 rule 6): the model picker over a socket
-        has no projection — `llm.list_providers()` is not on the wire — so a remote
-        front end offers no `/model` choices. In process it lists them."""
-        return []
+    def models(self) -> list[ModelEntry]:
+        return list(self.listed_models)
+
+    async def choose_model(self, choice: ModelChoice) -> RootDescription:
+        """Ask the daemon to run this session on `choice` from its next request.
+
+        Awaited rather than spawned like `set_preset`, because a choice can be
+        refused — a key this profile does not list, a provider nothing serves —
+        and the person who typed it is owed the sentence, not a log line. The
+        reply is the root's description, a repeat's included, and it lands where
+        every status frame does, so a caller that reads the state after this
+        returns reads the new route.
+        """
+        reply = await self.client.mutate(
+            verbs.SESSION_MODEL, ModelParams(session_id=self.session_id, choice=choice)
+        )
+        self._status(reply.facts())
+        return reply
 
     async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:
         """The daemon's own list — stored logs and its live roots, already merged."""
@@ -643,6 +669,8 @@ async def attach_session(
     host: ModalHost,
     cwd: Path | None = None,
     trust: TrustAnswer = "",
+    hidden_screens: Collection[str] = (),
+    choice: ModelChoice = ModelChoice(),
 ) -> DaemonSession:
     """Start or resume a session on the daemon and catch this client up on it.
 
@@ -674,7 +702,12 @@ async def attach_session(
     # whole instead of re-keyed afterwards.
     created = await client.call(
         verbs.SESSION_NEW,
-        NewSessionParams(session_id=session_id, cwd=str(cwd) if cwd else None, trust=trust),
+        NewSessionParams(
+            session_id=session_id,
+            cwd=str(cwd) if cwd else None,
+            trust=trust,
+            choice=choice,
+        ),
     )
     generation = created.cursor.generation
 
@@ -694,6 +727,7 @@ async def attach_session(
     listed_screens: list[SessionScreensNotice] = []
     listed_tools: list[SessionToolsReply] = []
     listed_skills: list[SessionSkillsReply] = []
+    listed_models: list[SessionModelsReply] = []
     read_lifetime: list[DaemonLifetime] = []
     asked = SessionParams(session_id=session_id)
     async with anyio.create_task_group() as tasks:
@@ -706,12 +740,14 @@ async def attach_session(
         # registers a tool does it at mount, and installing a skill is a restart.
         tasks.start_soon(fetch, verbs.TOOLS_LIST, asked, listed_tools)
         tasks.start_soon(fetch, verbs.SKILLS_LIST, asked, listed_skills)
+        tasks.start_soon(fetch, verbs.MODELS_LIST, asked, listed_models)
         # The one read here that is not about this root: whether the daemon
         # behind it intends to stay. Read once rather than waited for, because
         # `daemon.lifetime` is sent when the answer *changes* — so a client that
         # connected between two changes would draw nothing until something moved.
         tasks.start_soon(fetch, verbs.DAEMON_LIFETIME, NoParams(), read_lifetime)
 
+    hidden = frozenset(hidden_screens)
     state.tools = _catalog(listed_tools[0].tools)
     state.skills = _catalog(listed_skills[0].skills)
     state.lifetime = read_lifetime[0]
@@ -726,7 +762,9 @@ async def attach_session(
         remote_commands=[
             _remote_command(client, session_id, one) for one in listed_commands[0].commands
         ],
-        screens=_screens_of(listed_screens[0].screens),
+        screens=_screens_of(listed_screens[0].screens, hidden),
+        listed_models=list(listed_models[0].models),
+        hidden_screens=hidden,
         generation=int(generation) if is_number(generation) else None,
     )
     client.peer.on_notify = front.dispatch
@@ -801,8 +839,10 @@ def _remote_command(
     )
 
 
-def _screens_of(schemas: Sequence[ScreenSchema]) -> dict[str, ScreenDefinition]:
-    """The screens this deployment has *and* this client can draw.
+def _screens_of(
+    schemas: Sequence[ScreenSchema], hidden: frozenset[str]
+) -> dict[str, ScreenDefinition]:
+    """The screens this deployment has, this client can draw, and its person has not hidden.
 
     The wire supplies `label`, `order` and `key` — the deployment's own — and the
     local definition supplies `build`, the one field that cannot travel.
@@ -810,6 +850,8 @@ def _screens_of(schemas: Sequence[ScreenSchema]) -> dict[str, ScreenDefinition]:
     local = {definition.id: definition for definition in LOCAL_SCREENS}
     found: dict[str, ScreenDefinition] = {}
     for schema in schemas:
+        if schema.id in hidden:
+            continue
         mine = local.get(schema.id)
         if mine is None:
             log.debug("ph_app.tui: no local builder for screen %r", schema.id)

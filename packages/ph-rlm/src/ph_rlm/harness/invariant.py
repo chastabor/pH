@@ -48,7 +48,7 @@ def stale_folds(ctx: Context, sessions: Iterable[Session]) -> list[str]:
     return [] if harness is None else list(harness.stale_folds(sessions))
 
 
-@plugin("harness-invariant", inject=[HARNESS])
+@plugin("harness-invariant", affects="deployment", inject=[HARNESS])
 async def apply(ctx: Context, config: None) -> None:
     """Declare I6's harness half, pollable.
 

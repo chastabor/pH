@@ -50,6 +50,7 @@ from textual.worker import Worker
 
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
+from ph.seams.models import ModelChoice, ModelChoiceError
 from ph.seams.permission_presets import PRESET_NAMES
 from ph.seams.tui_screens import ScreenDefinition
 from ph.seams.tui_status import StatusReading
@@ -59,6 +60,7 @@ from ph.session import new_session_id
 from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
 from ..payloads import AskKey
+from ..protocol import DaemonError
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
 from .commands import TUI_VERBS, VIEW_USAGE, VIEWS, app_bindings
@@ -168,8 +170,16 @@ class PHTuiApp(App[str | None]):
         home: Path | None = None,
         spawn: bool = True,
         offer_sessions: bool = True,
+        model_choice: ModelChoice = ModelChoice(),
     ) -> None:
         super().__init__()
+        self.model_choice = model_choice
+        """`--provider`/`--model`, carried by `session/new` for the session this opens.
+
+        This session's, not the daemon's: `spawn_command` carries no route, so a
+        daemon this terminal starts runs every other session on its profile's
+        default, and one already serving keeps them where they are. Refused, it
+        fails the start with the daemon's sentence, as `phern -p --model` would."""
         self.daemon_argv = tuple(daemon_argv)
         """What to run when no daemon is listening.
 
@@ -384,6 +394,8 @@ class PHTuiApp(App[str | None]):
                 host=self,
                 cwd=self.project,
                 trust=trust,
+                hidden_screens=self.settings.hidden_screens,
+                choice=self.model_choice,
             )
         except Exception as error:
             log.exception("ph_app.tui: could not attach to a daemon")
@@ -859,22 +871,42 @@ class PHTuiApp(App[str | None]):
         front = self.front
         if front is None:
             return
-        providers = front.providers()
+        state = front.state
         self._pick(
             "model",
-            model_choices(providers, front.state.provider, front.state.model),
+            model_choices(front.models(), state.model_key, state.route),
             self._set_model,
             free_text="provider/model",
         )
 
     def _set_model(self, chosen: str | None) -> None:
-        front = self.front
-        if chosen is None or front is None:
+        if chosen is None:
             return
-        provider, _, model = chosen.partition("/")
-        front.state.provider = provider
-        front.state.model = model or front.state.model
-        self.notify(f"{front.state.provider}/{front.state.model}", title="model", markup=False)
+        try:
+            choice = ModelChoice.parse(chosen)
+        except ModelChoiceError as error:
+            self.notify(str(error), title="model", severity="error", markup=False)
+            return
+        self.run_worker(self._choose_model(choice), group="model", exclusive=True)
+
+    async def _choose_model(self, choice: ModelChoice) -> None:
+        """Ask the daemon for `choice`, and say what it answered.
+
+        The route changes on the daemon, not here: a terminal that set its own
+        footer first would show a model nothing is running on whenever the
+        daemon refused — which is what `/model` did before it was real.
+        """
+        front = self.front
+        if front is None:
+            return
+        try:
+            await front.choose_model(choice)
+        except DaemonError as error:
+            self.notify(str(error), title="model", severity="error", markup=False)
+            return
+        state = front.state
+        named = f"{state.model_key} · " if state.model_key else ""
+        self.notify(f"{named}{state.route}", title="model", markup=False)
         self.state_changed()
 
     @verb_work("sessions")
@@ -1153,11 +1185,13 @@ async def run_tui(
     session_id: str | None = None,
     spawn: bool = True,
     offer_sessions: bool = True,
+    model_choice: ModelChoice = ModelChoice(),
 ) -> int:
     """Entry point for `--mode tui`. Answers the exit code, `0` when clean (M4).
 
-    Takes no profile and no route: the daemon mounts the one `daemon_argv` names,
-    and reports the provider and model it chose on attach. Loops so that choosing
+    Takes no profile: the daemon mounts the one `daemon_argv` names. The route is
+    `model_choice`, carried by `session/new` for each session this terminal opens
+    — and empty is the profile's default, which the attach reports. Loops so that choosing
     a session from the picker reopens it — the app exits with the id, everything
     it attached has detached, and a fresh app attaches to the chosen session. The
     *root* is untouched by that, which is the difference from before: switching
@@ -1178,6 +1212,7 @@ async def run_tui(
             session_id=session_id,
             spawn=spawn,
             offer_sessions=offer_sessions,
+            model_choice=model_choice,
         )
         chosen = await app.run_async()
         if app.return_code:

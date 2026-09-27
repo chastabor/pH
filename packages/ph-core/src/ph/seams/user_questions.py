@@ -274,7 +274,7 @@ class UserQuestionService:
         )
 
 
-@plugin("user-questions")
+@plugin("user-questions", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the user-question seam."""
     ctx.provide(USER_QUESTIONS, UserQuestionService(ctx=ctx))

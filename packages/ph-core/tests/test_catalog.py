@@ -24,6 +24,7 @@ import pytest
 from pydantic import Field
 
 from ph.cordis.catalog import config_catalog, field_docs, render_annotation
+from ph.cordis.plugin import Affects
 from ph.wire import WireModel
 
 pytestmark = pytest.mark.anyio
@@ -128,3 +129,45 @@ def test_every_row_reports_what_it_injects_and_what_it_configures() -> None:
     # omitted: "no options" and "no such row" are different answers.
     assert catalog["diagnostics"]["config"] == []
     assert catalog["workspace-git-worktree"]["injects"] == ["workspace", "subprocess"]
+
+
+# A row's kind decides which configuration may set it — the session profile, the
+# TUI's, or the daemon's — so a family whose kind follows from its name is pinned
+# by that name. A new `tui-*` row declared `environment` out of habit would put a
+# screen layout into the session log's audit; a new `*-invariant` declared the
+# same would let a person's profile switch off a check the host relies on.
+_FAMILIES: tuple[tuple[str, str, Affects], ...] = (
+    ("tui-", "", "presentation"),
+    ("", "-invariant", "deployment"),
+    ("session-persistence-", "", "deployment"),
+    ("session-telemetry", "", "deployment"),
+)
+
+
+def test_every_shipped_row_says_which_configuration_owns_it() -> None:
+    """The gate `affects` exists for: no shipped row is undeclared, and none of
+    the named families is declared as the wrong kind.
+
+    Undeclared or unknown is refused at the loader's door, so a row that forgot
+    would show here as an error entry rather than as a missing key. The families are read
+    off the names because that is how a person finds them — nobody reads
+    `affects` to learn that `tui-status` is the TUI's.
+    """
+    catalog = config_catalog()
+
+    assert not [entry["name"] for entry in catalog if "error" in entry]
+    misfiled = {
+        entry["name"]: entry["affects"]
+        for entry in catalog
+        for prefix, suffix, kind in _FAMILIES
+        if entry["name"].startswith(prefix)
+        and entry["name"].endswith(suffix)
+        and entry["affects"] != kind
+    }
+    assert not misfiled, f"declared as the wrong kind for their family: {misfiled}"
+    # Each family matched something, so a rename that emptied one is a failure
+    # here and not a rule quietly checking nothing.
+    for prefix, suffix, _ in _FAMILIES:
+        assert any(
+            entry["name"].startswith(prefix) and entry["name"].endswith(suffix) for entry in catalog
+        ), f"no shipped row matches {prefix}*{suffix}"

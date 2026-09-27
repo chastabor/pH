@@ -543,7 +543,7 @@ def offer_skills(ctx: Context) -> None:
         contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
 
 
-@plugin("text-index", inject=[TOOLS, FS], config=Config)
+@plugin("text-index", affects="environment", inject=[TOOLS, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam, and register the tools once an embedder exists."""
     if importlib.util.find_spec("turbovec") is None:
@@ -806,7 +806,7 @@ async def _passages(
     return chunks, None if chunks else "is empty"
 
 
-@plugin("text-index-local", inject=[TEXT_INDEX], config=LocalConfig)
+@plugin("text-index-local", affects="environment", inject=[TEXT_INDEX], config=LocalConfig)
 async def local(ctx: Context, config: LocalConfig) -> None:
     """Register a local `sentence-transformers` model as the embedder."""
     # The package, not the weights: see `SentenceTransformerEmbedder`. Refusing

@@ -320,7 +320,7 @@ class _Denials:
         return StatusReading(text=f"sandbox: {count_of(denied, 'refusal')}", level="warning")
 
 
-@plugin("sandbox-commands", inject=[COMMANDS, SANDBOX, MOUNT])
+@plugin("sandbox-commands", affects="environment", inject=[COMMANDS, SANDBOX, MOUNT])
 async def apply(ctx: Context, config: None) -> None:
     """Register `/sandbox`, and the footer reading that says refusals happened."""
 

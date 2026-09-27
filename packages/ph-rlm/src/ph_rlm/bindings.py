@@ -130,7 +130,9 @@ def _render_handle(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa
     return text_content("\n".join(lines))
 
 
-@plugin("rlm-bindings", config=Config, inject=[TOOLS, SUBAGENTS, RLM_CHILDREN])
+@plugin(
+    "rlm-bindings", affects="environment", config=Config, inject=[TOOLS, SUBAGENTS, RLM_CHILDREN]
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the `rlm_*` tools and group them as the `rlm` code namespace."""
 

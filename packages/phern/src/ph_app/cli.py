@@ -33,6 +33,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 import anyio
 import typer
 import yaml
+from pydantic import ValidationError
 from rich.table import Table
 
 from ph.cordis import LoaderError, MountRefusal, Profile, import_plugin_modules
@@ -43,8 +44,10 @@ from ph.keys import DIAGNOSTICS
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.seams.diagnostics import DiagnosticsRegistry
+from ph.seams.models import ModelChoice, ModelChoiceError, ModelList
 from ph.selectors import matches_any, unknown_namespaces
 from ph.session import new_session_id
+from ph.wire import validation_errors
 
 from .agents import agents_app
 from .attach import AttachmentUnavailable
@@ -64,8 +67,10 @@ from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import (
     DEFAULT_PROFILE,
+    ModelOption,
     PatchOption,
     ProfileOption,
+    ProviderOption,
     available_profiles,
     profile_or_exit,
 )
@@ -121,8 +126,8 @@ def default(
         str | None, typer.Option("-p", "--print", help="Run one prompt and print the answer.")
     ] = None,
     profile: ProfileOption = DEFAULT_PROFILE,
-    provider: Annotated[str, typer.Option("--provider")] = "fake",
-    model: Annotated[str, typer.Option("--model")] = "fake-1",
+    provider: ProviderOption = None,
+    model: ModelOption = None,
     session_id: Annotated[
         str | None,
         typer.Option(
@@ -219,6 +224,7 @@ def default(
     # through the same call that creates a new one, so the two spellings are one
     # answer and both interactive modes read it here.
     wanted = session_id or resume
+    choice = _choice_or_exit(provider, model)
 
     if mode == "tui":
         # **Before any profile work**, like the trajectory branch above and for
@@ -238,12 +244,14 @@ def default(
                 # and this is the command line that tells it which.
                 daemon_argv=spawn_command(
                     profile=profile,
-                    provider=provider,
-                    model=model,
                     patch=patch,
                     keep=keep_daemon,
                     keep_alive=_spawned_keep_alive(keep_alive, keep=keep_daemon),
                 ),
+                # The route is this terminal's session's, not the daemon's: it
+                # rides `session/new`, so a daemon already serving other sessions
+                # keeps them on their own.
+                model_choice=choice,
                 session_id=wanted,
                 spawn=not no_spawn,
                 # `--session`/`--resume` already name one, so they skip the offer
@@ -306,7 +314,7 @@ def default(
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio.
         try:
-            anyio.run(partial(run_rpc, composed, provider=provider, model=model))
+            anyio.run(partial(run_rpc, composed, choice=choice))
         except MountRefusal as error:
             fail_unmounted(profile, error)
         return
@@ -319,8 +327,7 @@ def default(
         _MODES[mode],
         composed,
         prompt,
-        provider=provider,
-        model=model,
+        choice=choice,
         session_id=session_id,
         attachments=attach or [],
     )
@@ -337,7 +344,7 @@ def default(
         # no name for the difference and printed 191 lines for the one case a
         # person most needs to read (P4-12).
         fail_unmounted(profile, error)
-    except (AttachmentUnavailable, LoaderError, OSError, SessionBusy) as error:
+    except (AttachmentUnavailable, LoaderError, ModelChoiceError, OSError, SessionBusy) as error:
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
         # turn to explain. A row whose plugin will not import is the same kind of
@@ -609,13 +616,22 @@ def _passivation(value: str) -> float | None:
     return seconds
 
 
+def _choice_or_exit(provider: str | None, model: str | None) -> ModelChoice:
+    """`--provider`/`--model` as the choice they spell, or exit 2 saying why not."""
+    try:
+        return ModelChoice.from_flags(provider, model)
+    except ModelChoiceError as error:
+        fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
+
+
 def _children_cap(value: int | None) -> list[str]:
     """The `--max-concurrent-children` override, as the patch it really is.
 
-    The cap *is* row config, so overriding it from the command line is a
-    `--patch` and not a second channel: `--dump-config` and `phern doctor` then show
-    the number actually in force with `cli` as its provenance, which a field
-    threaded past the profile could not do.
+    The cap *is* row config, so overriding it from the command line is a patch
+    and not a second channel: `--dump-config` and `phern doctor` then show the
+    number actually in force with `cli` as its provenance, which a field threaded
+    past the profile could not do. A *deployment* patch, not a `--patch`: `jobs`
+    is the host's row, which a person's `--patch` may not set (`profile_or_exit`).
 
     **Unset patches nothing**, which is what lets the flag carry no default of
     its own: whatever the composed profile says stands, so the number lives once,
@@ -643,8 +659,9 @@ def _children_cap(value: int | None) -> list[str]:
 @app.command()
 def daemon(
     profile: ProfileOption = DEFAULT_PROFILE,
-    provider: Annotated[str, typer.Option("--provider")] = "fake",
-    model: Annotated[str, typer.Option("--model")] = "fake-1",
+    patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
+    provider: ProviderOption = None,
+    model: ModelOption = None,
     max_concurrent_children: Annotated[
         int | None,
         typer.Option(
@@ -689,7 +706,19 @@ def daemon(
     # Parsed before anything is composed or bound, so a mistyped duration is a
     # usage error rather than a daemon that got as far as printing a socket path.
     window = keep_alive_seconds(keep_alive)
-    composed = profile_or_exit(profile, _children_cap(max_concurrent_children))
+    composed = profile_or_exit(profile, patch, deployment=_children_cap(max_concurrent_children))
+    # Refused before the socket is bound: a `--model` the profile does not list
+    # would otherwise be every root's refusal, one `session/new` at a time. What
+    # only a mount knows — whether an adapter serves the provider — is each
+    # root's to refuse (`Supervisor.model_for`).
+    choice = _choice_or_exit(provider, model)
+    try:
+        ModelList.of(composed).resolve(choice)
+    except ModelChoiceError as error:
+        fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
+    except ValidationError as error:
+        said = "; ".join(validation_errors(error, root="config"))
+        fail(f"[red]the models row: {said}[/red]", code=2, cause=error)
     try:
         roots = resolve_roots(create=True)
     except RuntimeDirError as error:
@@ -713,8 +742,7 @@ def daemon(
             partial(
                 serve,
                 composed,
-                provider=provider,
-                model=model,
+                choice=choice,
                 passivate_after=_passivation(passivate_after),
                 # Off here, on in `spawn_command`: `DaemonServer.ephemeral` says
                 # why the lifetime is decided by who started it (P7-08).
@@ -738,7 +766,11 @@ def daemon(
 
 
 def reinvoke(
-    *args: str, profile: str, provider: str, model: str, patch: Sequence[str] = ()
+    *args: str,
+    profile: str,
+    provider: str | None = None,
+    model: str | None = None,
+    patch: Sequence[str] = (),
 ) -> list[str]:
     """How pH starts pH: the argv for another process of this one.
 
@@ -755,20 +787,15 @@ def reinvoke(
     `--patch` travels because the *other* process is the one that composes: a
     patch accepted here and dropped would silently ignore `phern --mode tui --patch
     '{id: tool-ask-user, disabled: false}'`, which is the documented way to arm a
-    row anywhere.
+    row anywhere. The route travels only when one was typed: unset is the
+    profile's default, and a default spelled into the argv would be a choice
+    nobody made.
     """
-    argv = [
-        sys.executable,
-        "-m",
-        "ph_app",
-        *args,
-        "--profile",
-        profile,
-        "--provider",
-        provider,
-        "--model",
-        model,
-    ]
+    argv = [sys.executable, "-m", "ph_app", *args, "--profile", profile]
+    if provider is not None:
+        argv += ["--provider", provider]
+    if model is not None:
+        argv += ["--model", model]
     for one in patch:
         argv += ["--patch", one]
     return argv
@@ -778,8 +805,8 @@ def tab_command(
     *,
     session: str,
     profile: str,
-    provider: str,
-    model: str,
+    provider: str | None = None,
+    model: str | None = None,
     patch: Sequence[str] = (),
     spawn: bool = True,
     keep: bool = False,
@@ -815,8 +842,6 @@ def tab_command(
 def spawn_command(
     *,
     profile: str,
-    provider: str,
-    model: str,
     patch: Sequence[str] = (),
     keep: bool = False,
     keep_alive: str = "0",
@@ -832,6 +857,10 @@ def spawn_command(
     what `phern daemon` would have given them, without typing two commands. It is
     the mirror of `phern daemon --ephemeral`, and both exist because the lifetime is
     a decision rather than a property of the process that happened to spawn it.
+
+    **No route.** The terminal names its own in `session/new`, so the model it was
+    started with is its session's and not every session's on a daemon that may
+    outlive it.
     """
     ephemeral = () if keep else ("--ephemeral",)
     # **The only route a client's preference has to the daemon.** A daemon may not
@@ -844,8 +873,6 @@ def spawn_command(
         *ephemeral,
         *window,
         profile=profile,
-        provider=provider,
-        model=model,
         patch=patch,
     )
 
@@ -995,6 +1022,7 @@ def config(
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("row")
+    table.add_column("affects")
     table.add_column("option")
     table.add_column("type")
     table.add_column("default")
@@ -1002,10 +1030,10 @@ def config(
     table.add_column("what it does")
     for entry in shown:
         if error := entry.get("error"):
-            table.add_row(entry["name"], "[red]unavailable[/red]", "", "", "", error)
+            table.add_row(entry["name"], "", "[red]unavailable[/red]", "", "", "", error)
             continue
         if not entry["config"]:
-            table.add_row(entry["name"], "[dim]none[/dim]", "", "", "", "")
+            table.add_row(entry["name"], entry["affects"], "[dim]none[/dim]", "", "", "", "")
             continue
         # `None`, not `{}`: a row this profile never mounts is a different answer
         # from one it mounts and says nothing about, and one lookup carries both.
@@ -1014,6 +1042,7 @@ def config(
             first = index == 0
             table.add_row(
                 entry["name"] if first else "",
+                entry["affects"] if first else "",
                 field["name"],
                 field["type"],
                 # Required has no default, and printing one would invent a

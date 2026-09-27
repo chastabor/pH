@@ -318,7 +318,7 @@ class CodeRuntimeSeam:
             return await provider.run(request)
 
 
-@plugin("code-runtime")
+@plugin("code-runtime", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the code-runtime seam definition. No provider ships in Phase 1."""
     ctx.provide(CODE_RUNTIME, CodeRuntimeSeam(ctx=ctx))

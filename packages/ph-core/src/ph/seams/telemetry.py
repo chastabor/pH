@@ -238,7 +238,7 @@ class Config(WireModel):
     enabled: bool = True
 
 
-@plugin("session-telemetry", config=Config, inject=[SESSIONS])
+@plugin("session-telemetry", affects="deployment", config=Config, inject=[SESSIONS])
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the telemetry seam and, when enabled, the JSONL sink."""
     telemetry = SessionTelemetry(ctx=ctx)

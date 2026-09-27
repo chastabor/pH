@@ -38,7 +38,7 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-from ph.agent.types import AgentDriver, AgentOptions
+from ph.agent.types import AgentDriver
 from ph.cordis import Context, Profile
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
@@ -56,6 +56,7 @@ from ph.paths import resolve_roots
 from ph.persistence import open_session, resumption_of
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
+from ph.seams.models import ModelChoice, ModelChoiceError, ModelEntry, ModelList, choose
 from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
@@ -632,6 +633,7 @@ class Root:
             # of a snapshot diff nobody could read.
             provider=options.provider or "",
             model=options.model or "",
+            model_key=options.model_key,
         )
 
     def detail(self) -> RootDetail:
@@ -738,18 +740,28 @@ def _waiting_on(roots: Iterable[Root]) -> list[tuple[str, str]]:
     return [(name, ", ".join(holders)) for name, holders in sorted(waiting.items())]
 
 
+def model_for(ctx: Context, choice: ModelChoice) -> ModelEntry:
+    """`choose`, as the refusal a client is sent when it names nothing runnable."""
+    try:
+        return choose(ctx, choice)
+    except ModelChoiceError as error:
+        raise Refusal(str(error)) from error
+
+
 @dataclass(slots=True)
 class Supervisor:
     """Every root this daemon is running, and the task group they live in."""
 
     profile: Profile
     tasks: TaskGroup
-    provider: str = "fake"
-    model: str = "fake-1"
+    choice: ModelChoice = field(default_factory=ModelChoice)
+    """What `phern daemon --provider/--model` asked every root to run on; empty is
+    each root's profile default. Resolved per root, at mount, by its own
+    `ctx.models` — so a root is on what its profile lists, not on a string."""
     passivate_after: float | None = PASSIVATE_AFTER
     """Seconds of quiet before a root is released, or `None` to keep them all.
 
-    A field beside `provider` and `model` because it is the same kind of thing —
+    A field beside `choice` because it is the same kind of thing —
     per-daemon configuration — and because threading it through `serve`, the
     sweeper task and two method signatures spelled one constant in eight places,
     two of them positionally unchecked through `start_soon`."""
@@ -786,7 +798,9 @@ class Supervisor:
     _schedules: ScheduleIndex | None = None
     """The appointment index, built on first use. See `_index`."""
 
-    async def start(self, root_id: str, *, cwd: str | None = None) -> Root:
+    async def start(
+        self, root_id: str, *, cwd: str | None = None, choice: ModelChoice = ModelChoice()
+    ) -> Root:
         """Take the lease for this root, then mount it (I-5).
 
         **The mount is the supervisor's work, not the caller's**, so it runs as a
@@ -822,6 +836,10 @@ class Supervisor:
 
         A fast path that touches none of it, because `prompt` calls this on every
         turn.
+
+        `choice` is what a fresh root mounts on — `session/new`'s — and the
+        daemon's own when absent or empty. A root already mounted keeps its
+        route here; moving it is `set_model`'s.
         """
         root = self.roots.get(root_id)
         if root is not None:
@@ -837,7 +855,8 @@ class Supervisor:
         pending = self._mounting.get(root_id)
         if pending is None:
             pending = self._mounting[root_id] = _Mounting()
-            self.tasks.start_soon(self._mount, root_id, cwd, pending)
+            wanted = self.choice if choice.is_default else choice
+            self.tasks.start_soon(self._mount, root_id, cwd, wanted, pending)
         await pending.done.wait()
         if pending.error is not None:
             raise pending.error
@@ -848,7 +867,9 @@ class Supervisor:
             )
         return pending.root
 
-    async def _mount(self, root_id: str, cwd: str | None, pending: _Mounting) -> None:
+    async def _mount(
+        self, root_id: str, cwd: str | None, choice: ModelChoice, pending: _Mounting
+    ) -> None:
         """Build one root on the supervisor's own task, and publish the answer.
 
         `_starting` is held *here* rather than in `start`, which is the half that
@@ -862,14 +883,14 @@ class Supervisor:
         """
         try:
             async with self._starting:
-                pending.root = await self._start(root_id, cwd=cwd)
+                pending.root = await self._start(root_id, cwd=cwd, choice=choice)
         except Exception as error:
             pending.error = error
         finally:
             self._mounting.pop(root_id, None)
             pending.done.set()
 
-    async def _start(self, root_id: str, *, cwd: str | None = None) -> Root:
+    async def _start(self, root_id: str, *, cwd: str | None, choice: ModelChoice) -> Root:
         """Mount a profile, create its agent, and give it its own task.
 
         Through `runtime.mounted`, so a mode cannot drift from the profile semantics —
@@ -898,8 +919,8 @@ class Supervisor:
                 mounted(self.profile, project=Path(where) if where else None)
             )
             session = await self._session_for(ctx, root_id, cwd=cwd)
-            options = AgentOptions(provider=self.provider, model=self.model)
-            agent = ctx.require(AGENTS).create(session, options)
+            route = model_for(ctx, choice).options()
+            agent = ctx.require(AGENTS).create(session, route)
             wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
             root = Root(
                 id=root_id,
@@ -1130,6 +1151,44 @@ class Supervisor:
                 if root.agent.status != "idle" or root.needs_credential is not None:
                     continue
                 await self._drive(root)
+
+    async def set_model(self, root: Root, chosen: ModelEntry) -> None:
+        """Run `root` on `chosen` from its next request — `/model` (S1, item 8).
+
+        Takes the entry already resolved (`model_for`), so the refusal of a key
+        the profile does not list happens before the daemon's idempotence key is
+        claimed. From the next request, because a request in flight is already
+        on the wire; the header that request logs is the log's record of the
+        change. Not yet an override that survives a restart: that is S4's.
+
+        The credential is asked again, because the new route may name another
+        one, and every watcher is told the route now rather than at the next
+        request — a footer that kept the old model until then would be wrong for
+        exactly as long as somebody is reading it.
+        """
+        root.agent.reroute(chosen.options())
+        await self._check_credential(root)
+        if root.subscribers:
+            root.publish(
+                SessionStatusNotice(
+                    session_id=root.id,
+                    provider=chosen.route.provider,
+                    model=chosen.route.model,
+                    model_key=chosen.key,
+                )
+            )
+
+    def starts_on(self) -> ModelEntry | None:
+        """What a new root runs on, read off the composed profile without a mount.
+
+        `None` when nothing resolves — a profile that lists no models and a
+        daemon started without a route. `phern daemon` refuses that before it
+        binds, so a served daemon is in it only when built by hand, as a test is.
+        """
+        try:
+            return ModelList.of(self.profile).resolve(self.choice)
+        except ModelChoiceError:
+            return None
 
     async def _check_credential(self, root: Root) -> None:
         """Hold or release `root` on its own route's credential, and say so in its log."""
@@ -1376,12 +1435,14 @@ class Supervisor:
         the P5-14 rule that the two must not disagree about which `$PH_HOME` they
         meant is untouched.
 
-        Rule 6, since this is where it would be assumed: a deployment that *did*
-        set `session-persistence-jsonl.root` gets a cold browse of the wrong
-        directory — in practice an absent one, which lists nothing — until its
-        first root mounts and the store's own answer takes over. The alternative
-        was reading a row's config from outside the row, which is a worse trade
-        for a picker.
+        **To move the logs, `daemon.yaml`'s `paths.sessions`**, which is where
+        this default comes from as well, so the two cannot disagree. Rule 6 for
+        the other way: a deployment that sets `session-persistence-jsonl.root`
+        instead gets a cold browse of the wrong directory — in practice an absent
+        one, which lists nothing — until its first root mounts and the store's own
+        answer takes over. The row's `root` stays for a test or an embedding that
+        mounts one store somewhere private; reading it from outside the row would
+        be a worse trade for a picker.
         """
         for root in self.roots.values():
             store = root.ctx.get(SESSION_PERSISTENCE)

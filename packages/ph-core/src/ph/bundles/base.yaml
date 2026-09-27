@@ -12,6 +12,13 @@
 - id: llm
   name: llm
 
+# The models this profile means, by key, and the one a root runs on (item 8 of
+# the session-profiles plan). Empty here because this bundle registers no
+# adapter: a profile that inserts one lists what it serves, and a root on a
+# profile that lists nothing runs only on a route a person names.
+- id: models
+  name: models
+
 - id: session
   name: session
 

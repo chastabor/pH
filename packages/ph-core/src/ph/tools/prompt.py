@@ -18,7 +18,7 @@ from ..llm.types import ToolSchema
 __all__ = ["apply"]
 
 
-@plugin("tools-prompt", inject=[TOOLS, SYSTEM_PROMPT])
+@plugin("tools-prompt", affects="environment", inject=[TOOLS, SYSTEM_PROMPT])
 async def apply(ctx: Context, config: None) -> None:
     """Contribute the visible tool schemas for whichever scope is assembling."""
 

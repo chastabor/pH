@@ -37,6 +37,7 @@ from .context import Context, ForkScope
 from .errors import LoaderError
 from .events import events
 from .key import ServiceKey
+from .plugin import CONFIGURED_IN, Affects, normalize_plugin
 
 __all__ = [
     "ENTRY_POINT_GROUP",
@@ -315,7 +316,7 @@ def _as_isolate(value: object, layer: str) -> dict[str, JsonValue] | None:
 
 
 def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
-    """Apply one patch entry to the composed row list."""
+    """Apply one patch entry to `rows`, in place, and answer the rows it touched."""
     unknown = set(patch) - {"insert", "id", "config", "disabled", "remove", "isolate"}
     if unknown:
         raise LoaderError(f"{layer}: patch has unknown keys {sorted(unknown)}")
@@ -326,8 +327,9 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
         # No duplicate check here: `_check_unique_ids` runs over the composed
         # list and subsumes it, with a better message — it names the layer that
         # declared the id first, which an insert-local check cannot see.
-        rows.extend(_as_rows(inserted, layer))
-        return rows
+        added = _as_rows(inserted, layer)
+        rows.extend(added)
+        return added
     row_id = patch.get("id")
     if not isinstance(row_id, str):
         raise LoaderError(f"{layer}: a patch must carry either insert: or id:")
@@ -336,7 +338,7 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
             continue
         if patch.get("remove") is True:
             del rows[index]
-            return rows
+            return [row]
         updated = row
         if "config" in patch:
             # A patch replaces the row's WHOLE config rather than merging into
@@ -348,7 +350,7 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
         if "isolate" in patch:
             updated = replace(updated, isolate=_as_isolate(patch["isolate"], layer), layer=layer)
         rows[index] = updated
-        return rows
+        return [updated]
     raise LoaderError(f'{layer}: no row with id "{row_id}" to patch')
 
 
@@ -405,42 +407,88 @@ def _check_isolation(rows: Sequence[Row]) -> None:
                 )
 
 
-ProfileDocument = tuple[str, JsonValue]
-"""One parsed layer of a profile: where it came from, and its entries.
+@dataclass(frozen=True, slots=True)
+class ProfileDocument:
+    """One parsed layer of a profile: where it came from, its entries, and what it may set.
 
-The provenance is a *name*, not a path, because not every layer has a file — a
-`--patch` on the command line is a document like any other — and a name is what
-`Row.layer` carries and `--dump-config` prints."""
+    The provenance is a *name*, not a path, because not every layer has a file — a
+    `--patch` on the command line is a document like any other — and a name is what
+    `Row.layer` carries and `--dump-config` prints.
+    """
+
+    layer: str
+    entries: JsonValue
+    sets: Affects | None = None
+    """The one kind of row this layer may touch, or `None` for any.
+
+    `None` for a layer pH ships: a bundle defines rows of every kind, and the
+    person's layers are written against what it defines. A layer a person writes
+    names its kind, because each kind has one owner (`CONFIGURED_IN`): a session
+    profile that switched off persistence, or a daemon configuration that armed a
+    tool, would be a setting kept where the configuration that owns it cannot see
+    it — and a restart that compares the session's environment would compare
+    something it does not own."""
+
+
+def _check_kind(document: ProfileDocument, touched: Sequence[Row]) -> None:
+    """Refuse an entry whose rows — added, patched or removed — are of a kind its
+    layer does not own.
+
+    Handed the rows the one dispatcher in `compose_rows` touched, so the grammar of
+    an entry is read once. Resolving the plugin imports it, which the mount would do
+    anyway; asked here so `--dump-config` refuses the same layer `phern` would.
+    """
+    if document.sets is None:
+        return
+    for row in touched:
+        kind = normalize_plugin(resolve_plugin(row.name)).affects
+        if kind != document.sets:
+            raise LoaderError(
+                f'{document.layer}: row "{row.id}" is {kind}, and this layer sets '
+                f"{document.sets} rows only; {kind} settings belong in {CONFIGURED_IN[kind]}"
+            )
 
 
 def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
     """Compose ordered profile documents into the final row list.
 
     Each document is either a plain list of rows or a list of patch entries.
-    Rows keep file order; patches address rows by id.
+    Rows keep file order; patches address rows by id. A document that says what it
+    `sets` has every entry checked against the kind of the row it touches.
     """
     rows: list[Row] = []
-    for layer, document in documents:
-        if document is None:
+    for document in documents:
+        layer, entries = document.layer, document.entries
+        if entries is None:
             continue
-        if not isinstance(document, list):
+        if not isinstance(entries, list):
             raise LoaderError(f"{layer}: a profile document must be a list")
-        for entry in document:
+        for entry in entries:
             if not isinstance(entry, dict):
                 raise LoaderError(f"{layer}: entry must be a mapping, got {entry!r}")
             if {"insert", "remove"} & set(entry) or ("id" in entry and "name" not in entry):
-                rows = _apply_patch(rows, entry, layer)
+                touched = _apply_patch(rows, entry, layer)
             else:
-                rows.extend(_as_rows([entry], layer))
+                touched = _as_rows([entry], layer)
+                rows.extend(touched)
+            _check_kind(document, touched)
     _check_unique_ids(rows)
     _check_isolation(rows)
     return rows
 
 
-def load_profile_documents(paths: Sequence[Path]) -> list[ProfileDocument]:
-    """Read and parse each layer; the path is the provenance its rows carry."""
+def load_profile_documents(
+    paths: Sequence[Path], *, sets: Affects | None = None
+) -> list[ProfileDocument]:
+    """Read and parse each layer; the path is the provenance its rows carry.
+
+    `sets` is every layer's, for a caller reading a person's files — see
+    `ProfileDocument.sets`.
+    """
     return [
-        (str(path), safe_yaml_load(path.read_text(encoding="utf-8"), origin=str(path)))
+        ProfileDocument(
+            str(path), safe_yaml_load(path.read_text(encoding="utf-8"), origin=str(path)), sets
+        )
         for path in paths
     ]
 

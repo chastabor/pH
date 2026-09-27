@@ -629,7 +629,7 @@ def _stdio(mode: Stdio) -> int | None:
     return None
 
 
-@plugin("subprocess-local", config=Config)
+@plugin("subprocess-local", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local subprocess provider, and sweep what a hard kill left (F5).
 

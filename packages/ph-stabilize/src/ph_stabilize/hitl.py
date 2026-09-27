@@ -204,7 +204,7 @@ def _mode(session: Session | None, config: Config) -> ApprovalMode:
     return recorded if recorded in ("manual", "auto", "yolo") else config.mode
 
 
-@plugin("hitl", inject=[APPROVAL], config=Config)
+@plugin("hitl", affects="environment", inject=[APPROVAL], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Ask a human before a configured call runs."""
 

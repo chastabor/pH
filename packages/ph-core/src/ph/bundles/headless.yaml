@@ -8,3 +8,10 @@
       config:
         providers: [fake]
         replies: []
+
+# The scripted adapter's one route, as the default a root runs on.
+- id: models
+  config:
+    default: main
+    models:
+      main: {provider: fake, model: fake-1}

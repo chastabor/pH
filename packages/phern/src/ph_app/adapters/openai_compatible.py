@@ -896,7 +896,7 @@ class _Windows:
         return rows
 
 
-@plugin("llm-openai-compatible", config=Config, inject=[LLM, CREDENTIALS])
+@plugin("llm-openai-compatible", affects="environment", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register every configured OpenAI-compatible route."""
     uploads = ctx.get(UPLOADS)

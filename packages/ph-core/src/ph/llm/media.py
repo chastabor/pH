@@ -277,7 +277,7 @@ def record_oversized(session: Session, provider: str, notices: list[JsonObject])
     return _record_once(session, "attachment/oversized", provider, notices)
 
 
-@plugin("media-degrade", inject=[LLM, SESSIONS])
+@plugin("media-degrade", affects="environment", inject=[LLM, SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Replace media the routed model cannot read, before any adapter sees it."""
 

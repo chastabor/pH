@@ -112,7 +112,7 @@ async def run_gates(
     return passed, notes
 
 
-@plugin("autonomous", inject=[COMMANDS, GOALS, SHELL], config=Config)
+@plugin("autonomous", affects="environment", inject=[COMMANDS, GOALS, SHELL], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register `/autonomous`, and the turn-stopping policy that drives it."""
 

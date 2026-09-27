@@ -147,6 +147,7 @@ class ReactLoopAgent:
         self.max_parallel_tool_calls = max_parallel_tool_calls
         self._phase = _Phase(turn=_last_turn_of(session))
         self._request_header_logged = False
+        self._rerouted = False
         self._idle = anyio.Event()
         self._idle.set()
         self.inbox = Inbox(
@@ -162,6 +163,19 @@ class ReactLoopAgent:
 
     def __repr__(self) -> str:
         return f"<ReactLoopAgent {self.id} {self.status}>"
+
+    def reroute(self, options: AgentOptions) -> None:
+        """Run on `options` from the next request on.
+
+        Setting `options` alone would change nothing past this process's first
+        request: from then on a request is seeded from the conversation's own
+        `request/header`, so what a waterfall proposed stays proposed. This marks
+        the next seed as coming from `options` instead, and the header that
+        request logs — reason `change` — is the log's record of the new route.
+        A turn in flight finishes its current request on the old one.
+        """
+        self.options = options
+        self._rerouted = True
 
     @property
     def status(self) -> AgentStatus:
@@ -589,7 +603,7 @@ class ReactLoopAgent:
         persisted = session.request_header()
         seed = (
             _request_proposal(persisted)
-            if self._request_header_logged and persisted is not None
+            if self._request_header_logged and not self._rerouted and persisted is not None
             else self.options.seed_config()
         )
 
@@ -621,6 +635,9 @@ class ReactLoopAgent:
             self._request_header_logged = True
         elif baseline is None or not header_equals(baseline, header):
             _LOG.append(session, "request/header", {"header": header.to_wire(), "reason": "change"})
+        # Cleared once the route is in the log, not when it was read: a request
+        # canceled in the waterfall would otherwise take the reroute with it.
+        self._rerouted = False
 
         resolved = self.ctx.require(LLM).resolve_model(proposed.provider, proposed.model)
         request_context = RequestContext(

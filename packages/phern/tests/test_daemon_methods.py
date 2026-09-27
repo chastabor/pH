@@ -116,6 +116,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
         "tools/list",
         "skills/list",
         "presets/list",
+        "models/list",
     }
     checked = 0
     for method, row in {**METHODS, **MUTATIONS}.items():
@@ -136,7 +137,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
             f"{method} answers with {resolved} where its verb declares {row.verb.reply}"
         )
         checked += 1
-    assert checked == len(METHODS) + len(MUTATIONS) - len(projections) == 25
+    assert checked == len(METHODS) + len(MUTATIONS) - len(projections) == 26
 
 
 def test_the_one_method_with_no_reply_is_a_notify_and_not_a_verb() -> None:

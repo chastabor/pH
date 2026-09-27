@@ -42,6 +42,7 @@ from .params import (
     CommandParams,
     CreateScheduleParams,
     InitializeParams,
+    ModelParams,
     NewSessionParams,
     PresetParams,
     PromptParams,
@@ -68,6 +69,7 @@ from .payloads import (
     SessionBrowse,
     SessionCommandsNotice,
     SessionDetached,
+    SessionModelsReply,
     SessionPresetsReply,
     SessionReadingsReply,
     SessionSchedulesReply,
@@ -90,6 +92,7 @@ __all__ = [
     "DAEMON_LIFETIME",
     "DAEMON_STATUS",
     "INITIALIZE",
+    "MODELS_LIST",
     "MUTATING",
     "PRESETS_LIST",
     "SCHEDULE_CANCEL",
@@ -102,6 +105,7 @@ __all__ = [
     "SESSION_CANCEL",
     "SESSION_COMMAND",
     "SESSION_DETACH",
+    "SESSION_MODEL",
     "SESSION_NEW",
     "SESSION_PRESET",
     "SESSION_PROMPT",
@@ -168,6 +172,7 @@ SCREENS_LIST = Verb("screens/list", SessionParams, SessionScreensNotice)
 TOOLS_LIST = Verb("tools/list", SessionParams, SessionToolsReply)
 SKILLS_LIST = Verb("skills/list", SessionParams, SessionSkillsReply)
 PRESETS_LIST = Verb("presets/list", SessionParams, SessionPresetsReply)
+MODELS_LIST = Verb("models/list", SessionParams, SessionModelsReply)
 
 # --- attachments and credentials -----------------------------------------------
 
@@ -191,6 +196,7 @@ SESSION_COMMAND = Verb("session/command", CommandParams, CommandShown)
 SESSION_STAGE = Verb("session/stage", StageParams, SessionStagedNotice)
 SESSION_SHELL = Verb("session/shell", ShellParams, ShellReply)
 SESSION_PRESET = Verb("session/preset", PresetParams, PresetApplied)
+SESSION_MODEL = Verb("session/model", ModelParams, RootDescription)
 CREDENTIALS_STORE = Verb("credentials/store", StoreCredentialParams, CredentialStored)
 
 MUTATING = (
@@ -199,6 +205,7 @@ MUTATING = (
     SESSION_STAGE,
     SESSION_SHELL,
     SESSION_PRESET,
+    SESSION_MODEL,
 )
 """The verbs that change a root under an idempotence key.
 

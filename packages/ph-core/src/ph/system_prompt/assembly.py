@@ -432,7 +432,7 @@ class SystemPromptService:
         return settled("system-prompt/assemble", result, PromptAssembly)
 
 
-@plugin("system-prompt")
+@plugin("system-prompt", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the system-prompt assembly seam."""
     ctx.provide(SYSTEM_PROMPT, SystemPromptService(ctx=ctx))

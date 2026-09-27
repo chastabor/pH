@@ -1,4 +1,4 @@
-"""The auditor's screen, and the row that contributes it (P4-17).
+"""The auditor's screen (P4-17). The row that contributes it is `ph_app.screen_rows`.
 
 A `Screen` rather than an `App`, so the same view serves both entry points:
 `TrajectoryApp` composes one with records read from a file — reading a stored log
@@ -28,23 +28,15 @@ from textual.content import Content
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
-from ph.cordis import Context, plugin
-from ph.keys import SESSIONS, TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
 from ph.session import Session, SessionForkError
 
+from ..screen_rows import SCREEN_ID, TRAJECTORY_KEY
 from .screens import RevealHost, RevealSeq
 from .trajectory import TrajectoryRecord, build_trajectory
 from .widgets.trajectory import TrajectoryPanel
 
-__all__ = ["CLIENT_SIDE", "SCREEN_ID", "TRAJECTORY_KEY", "TrajectoryScreen", "apply"]
-
-SCREEN_ID = "trajectory"
-"""Its id in `ctx.tui_screens`, and so `/trajectory` and the binding id."""
-
-TRAJECTORY_KEY = "f2"
-"""Its default key. A default, not a rule: the id above is the binding id, so
-`tui.json` rebinds it like any built-in (see `TuiKeybindings.extra`)."""
+__all__ = ["CLIENT_SIDE", "SCREEN_ID", "TRAJECTORY_KEY", "TrajectoryScreen"]
 
 
 class TrajectoryScreen(Screen[None]):
@@ -217,12 +209,7 @@ class TrajectoryScreen(Screen[None]):
 
 @dataclass(frozen=True, slots=True)
 class _BuildTrajectory:
-    """`build(session)` for the registered screen.
-
-    Holds `ctx.sessions` rather than `ctx`: the factory lives as long as the
-    registration, and the store is the only thing it needs from the row's
-    activation scope.
-    """
+    """`build(session)` for this screen, holding the store a fork needs when there is one."""
 
     sessions: Any
 
@@ -249,23 +236,3 @@ reading a file"); what it costs is the fork action, exactly as `ph trajectory
 <file>` already costs it. The daemon's `screens/list` supplies `label` and
 `order` at attach time, so the copies here are defaults, not a second truth.
 """
-
-
-@plugin("tui-screen-trajectory", inject=[TUI_SCREENS, SESSIONS])
-async def apply(ctx: Context, config: None) -> None:
-    """Contribute the trajectory to whatever front end is drawing.
-
-    `scope=ctx` is this row's activation scope, and it is what makes the
-    registration an effect of *this row* — unloading it takes the screen, its
-    `/trajectory` command and its key with it (I2).
-    """
-    ctx.require(TUI_SCREENS).register(
-        ScreenDefinition(
-            id=SCREEN_ID,
-            label="Trajectory",
-            order=10,
-            key=TRAJECTORY_KEY,
-            build=_BuildTrajectory(sessions=ctx.require(SESSIONS)),
-        ),
-        scope=ctx,
-    )

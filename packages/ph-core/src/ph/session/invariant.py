@@ -26,7 +26,7 @@ def violations(ctx: Context) -> list[str]:
     return [detail for session in ctx.require(SESSIONS).list() for detail in session.stale()]
 
 
-@plugin("session-invariant", inject=[SESSIONS])
+@plugin("session-invariant", affects="deployment", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Declare the session half of I6, pollable.
 

@@ -80,7 +80,7 @@ class _Namespace:
         raise AttributeError(f"{self.namespace.name}.{name} is not a binding")
 
 
-@plugin("code-runtime-stub", inject=[CODE_RUNTIME])
+@plugin("code-runtime-stub", affects="environment", inject=[CODE_RUNTIME])
 async def apply(ctx: Context, config: None) -> None:
     """Register the stub runtime and expose it for a test to script."""
     runtime = StubCodeRuntime()

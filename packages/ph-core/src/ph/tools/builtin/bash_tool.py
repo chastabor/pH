@@ -81,7 +81,7 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
     return text_content("\n".join(parts) if parts else NO_OUTPUT)
 
 
-@plugin("tool-bash", inject=[TOOLS, SHELL])
+@plugin("tool-bash", affects="environment", inject=[TOOLS, SHELL])
 async def apply(ctx: Context, config: None) -> None:
     """Register the bash tool."""
 

@@ -192,7 +192,7 @@ def waiting_for(ctx: Context, session: Session) -> Mapping[str, str]:
     )
 
 
-@plugin("credentials-env")
+@plugin("credentials-env", affects="deployment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the environment-backed credential resolver."""
     ctx.provide(CREDENTIALS, CredentialService(ctx=ctx))

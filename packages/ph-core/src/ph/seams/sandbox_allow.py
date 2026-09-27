@@ -30,7 +30,7 @@ from .sandbox import Allowances, SandboxSeam
 __all__ = ["apply", "describe", "describe_paths"]
 
 
-@plugin("sandbox-allow", inject=[SANDBOX], config=Allowances)
+@plugin("sandbox-allow", affects="environment", inject=[SANDBOX], config=Allowances)
 async def apply(ctx: Context, config: Allowances) -> None:
     """Register the deployment's allowances and say what they are.
 

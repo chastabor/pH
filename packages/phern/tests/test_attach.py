@@ -64,8 +64,6 @@ async def test_the_one_shot_mode_accepts_an_attachment(
     result = await run_print(
         compose_profile("headless"),
         "what is this?",
-        provider="fake",
-        model="fake-1",
         session_id="attached",
         attachments=[_attach(tmp_path)],
     )
@@ -85,8 +83,6 @@ async def test_the_attachment_is_stored_and_carried_on_the_message(
     async with prompted(
         compose_profile("headless"),
         "what is this?",
-        provider="fake",
-        model="fake-1",
         session_id="carried",
         attachments=[source],
     ) as (ctx, session):
@@ -114,8 +110,6 @@ async def test_the_same_file_attached_twice_stores_one_blob(
     async with prompted(
         compose_profile("headless"),
         "these two",
-        provider="fake",
-        model="fake-1",
         session_id="twice",
         attachments=[first, second],
     ) as (ctx, _session):
@@ -141,8 +135,6 @@ async def test_a_route_that_cannot_read_it_says_so_three_ways(
     async with prompted(
         compose_profile("headless"),
         "what is this?",
-        provider="fake",
-        model="fake-1",
         session_id="refused",
         attachments=[source],
     ) as (_ctx, session):

@@ -47,7 +47,7 @@ codes pH's seam actually defines — a phrase for a code nothing raises is a
 promise nobody can check."""
 
 
-@plugin("command-compact", inject=[COMMANDS, COMPACTION])
+@plugin("command-compact", affects="environment", inject=[COMMANDS, COMPACTION])
 async def apply(ctx: Context, config: None) -> None:
     """Register `/compact`."""
 

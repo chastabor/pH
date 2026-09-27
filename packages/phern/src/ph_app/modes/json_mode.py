@@ -17,6 +17,7 @@ from typing import TextIO
 
 from ph.cordis import Context, Profile
 from ph.json import dumps
+from ph.seams.models import ModelChoice
 from ph.session import Session, SessionEvent
 
 from ..runtime import prompted
@@ -34,8 +35,7 @@ async def run_json(
     profile: Profile,
     prompt: str,
     *,
-    provider: str,
-    model: str,
+    choice: ModelChoice = ModelChoice(),
     session_id: str | None = None,
     attachments: Sequence[Path] = (),
     out: TextIO | None = None,
@@ -54,8 +54,7 @@ async def run_json(
     async with prompted(
         profile,
         prompt,
-        provider=provider,
-        model=model,
+        choice=choice,
         session_id=session_id,
         attachments=attachments,
         before=attach,

@@ -245,6 +245,33 @@ async def test_request_header_is_logged_only_when_it_changes(mount: MountProfile
     assert headers[0].data["reason"] == "initial"
 
 
+async def test_a_rerouted_agent_runs_the_new_route_from_its_next_request(
+    mount: MountProfile,
+) -> None:
+    """`reroute` is what makes `/model` real.
+
+    Setting `options` alone changed nothing past the first request, which is seeded
+    from the conversation's own header from then on — so the route change has to
+    say so, and the header its next request logs (`change`) is the log's record of
+    it. Sabotage: drop `_rerouted` from the seed and the second turn stays on
+    `fake-1`.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    await agent.prompt("first")
+
+    agent.reroute(AgentOptions(provider="fake", model="fake-2"))
+    await agent.prompt("second")
+    await agent.prompt("third")
+
+    headers = [thaw_json(e.data) for e in session.events if e.type == "request/header"]
+    assert [one["reason"] for one in headers] == ["initial", "change"], "and only once"
+    assert as_obj(as_obj(headers[-1]["header"])["config"])["model"] == "fake-2"
+    context = session.request_context()
+    assert context is not None and context.model == "fake-2"
+
+
 async def test_prompt_sections_are_static_and_context_is_snapshotted(mount: MountProfile) -> None:
     ctx = await mount()
     clock = {"value": "09:00"}
@@ -354,7 +381,7 @@ async def test_the_loop_counts_each_retry_under_the_row_that_asked(mount: MountP
             for chunk in text_chunks("ok"):
                 yield chunk
 
-    @plugin("first")
+    @plugin("first", affects="environment")
     async def first(scope: Context, config: None) -> None:
         async def listener(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
             seen.append(failure.retries_by)
@@ -364,7 +391,7 @@ async def test_the_loop_counts_each_retry_under_the_row_that_asked(mount: MountP
 
         scope.on("agent/request-error", listener)
 
-    @plugin("second")
+    @plugin("second", affects="environment")
     async def second(scope: Context, config: None) -> None:
         async def listener(failure: RequestFailure, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
             return RequestErrorAction(kind="retry")

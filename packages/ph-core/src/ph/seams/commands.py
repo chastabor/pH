@@ -292,7 +292,7 @@ class CommandRegistry:
                 _LOG.append(session, "command/done", data)
 
 
-@plugin("commands")
+@plugin("commands", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the command registry."""
     ctx.provide(COMMANDS, CommandRegistry(ctx=ctx))

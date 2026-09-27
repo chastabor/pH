@@ -692,7 +692,7 @@ def _to_anthropic(
     return {"role": role, "content": blocks or [{"type": "text", "text": ""}]}
 
 
-@plugin("llm-anthropic", config=Config, inject=[LLM, CREDENTIALS])
+@plugin("llm-anthropic", affects="environment", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the Anthropic route."""
     adapter = AnthropicAdapter(ctx=ctx, config=config)

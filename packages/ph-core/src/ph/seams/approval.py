@@ -470,7 +470,7 @@ class ApprovalService:
         _LOG.append(session, "approval/policy", {"policy": policy})
 
 
-@plugin("approval")
+@plugin("approval", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the approval seam."""
     ctx.provide(APPROVAL, ApprovalService(ctx=ctx))

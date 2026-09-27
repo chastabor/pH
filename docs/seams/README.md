@@ -92,6 +92,7 @@ caller's own content hash.
 
 | service | module | |
 |---|---|---|
+| [`ctx.models`](models.md) | `seams/models.py` | The models a profile lists, and which one a root runs on. |
 | [`ctx.subagents`](subagents.md) | `seams/subagents.py` | Delegation to a child agent, and the handle it returns. |
 | [`ctx.subagent_presets`](subagents.md) | `seams/subagents.py` | The named grants a child may be admitted under — documented with the delegation it configures. |
 | [`ctx.jobs`](jobs.md) | `seams/jobs.py` | Background work with a handle, a cancel and a completion. |

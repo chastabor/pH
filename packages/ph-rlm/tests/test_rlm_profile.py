@@ -26,7 +26,7 @@ from ph.keys import AGENTS, COMMANDS, SESSIONS, TOOLS
 from ph.session.json import freeze_json_value
 from ph.testing import FAKE_OPTIONS, MountProfile
 from ph.tools import ToolResult
-from ph_app.profiles import PROFILE_DIR, available_profiles, resolve_profile
+from ph_app.profiles import PRESENTATION, PROFILE_DIR, available_profiles, resolve_profile
 from ph_rlm import BUNDLE
 from ph_rlm.keys import HARNESS
 from ph_rlm.presentation import IPYTHON
@@ -61,6 +61,7 @@ def test_the_profile_is_tui_plus_the_bundle() -> None:
         resolve_bundle("stabilize"),
         PROFILE_DIR / "tui.yaml",
         resolve_bundle("rlm"),
+        PRESENTATION,
     ]
 
 

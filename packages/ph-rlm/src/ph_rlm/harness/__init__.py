@@ -152,6 +152,7 @@ def render_state(state: HarnessState, *, per_kind: int, refinements: int) -> str
 
 @plugin(
     "rlm-harness",
+    affects="environment",
     config=Config,
     inject=[SYSTEM_PROMPT, COMMANDS, TOOLS, SESSIONS, AGENTS, LLM, JOBS],
 )

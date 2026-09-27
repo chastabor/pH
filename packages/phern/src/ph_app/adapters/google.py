@@ -806,7 +806,7 @@ def _to_usage(raw: dict[str, Any]) -> TokenUsage:
     )
 
 
-@plugin("llm-google", config=Config, inject=[LLM, CREDENTIALS])
+@plugin("llm-google", affects="environment", config=Config, inject=[LLM, CREDENTIALS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the Google route."""
     adapter = GoogleAdapter(ctx=ctx, config=config)

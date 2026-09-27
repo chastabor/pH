@@ -206,7 +206,12 @@ def _label(role: FamilyRole, name: str) -> str:
     return role if role in ("parent", "self") else f"{role}:{name}"
 
 
-@plugin("rlm-messaging", config=Config, inject=[TOOLS, SESSIONS, AGENTS, SUBAGENTS])
+@plugin(
+    "rlm-messaging",
+    affects="environment",
+    config=Config,
+    inject=[TOOLS, SESSIONS, AGENTS, SUBAGENTS],
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the send/observe tools, the family guard, and the two namespaces."""
     tools = ctx.require(TOOLS)

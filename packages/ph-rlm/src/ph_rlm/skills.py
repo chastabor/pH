@@ -107,7 +107,7 @@ def _module_name(directory: Path) -> str | None:
     return str(name).replace("-", "_") if isinstance(name, str) and name else None
 
 
-@plugin("rlm-skills-python", config=Config, inject=[SKILLS, PYTHON_RUNTIME])
+@plugin("rlm-skills-python", affects="environment", config=Config, inject=[SKILLS, PYTHON_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
     """Discover skills, register them, and make their packages importable.
 

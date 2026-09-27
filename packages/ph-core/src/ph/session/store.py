@@ -547,7 +547,7 @@ async def session_written(ctx: Context, session: Session) -> bool:
     return sessions is None or await sessions.written(session)
 
 
-@plugin("session")
+@plugin("session", affects="deployment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the session store, and the intent journal over it (decision 1).
 

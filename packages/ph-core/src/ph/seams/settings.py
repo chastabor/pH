@@ -85,7 +85,7 @@ class Config(WireModel):
     path: str | None = None
 
 
-@plugin("settings-local", config=Config)
+@plugin("settings-local", affects="deployment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local settings store."""
     path = default_home_path(config.path, "settings.json")

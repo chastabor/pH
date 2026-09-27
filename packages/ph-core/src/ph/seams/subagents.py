@@ -1511,13 +1511,13 @@ class SubagentPresetService:
         return sorted(self.presets)
 
 
-@plugin("subagent-presets", config=PresetConfig)
+@plugin("subagent-presets", affects="environment", config=PresetConfig)
 async def presets(ctx: Context, config: PresetConfig) -> None:
     """Publish the deployment's named child kinds. None ship in `ph-base`."""
     ctx.provide(SUBAGENT_PRESETS, SubagentPresetService(presets=dict(config.presets)))
 
 
-@plugin("subagents", inject=[SESSIONS])
+@plugin("subagents", affects="environment", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
     service = SubagentService(ctx=ctx)

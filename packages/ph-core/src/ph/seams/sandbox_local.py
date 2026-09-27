@@ -883,7 +883,7 @@ class Config(WireModel):
     """Where the probes do their work. `$PH_HOME/sandbox` by default."""
 
 
-@plugin("sandbox-local", inject=[SANDBOX, SUBPROCESS], config=Config)
+@plugin("sandbox-local", affects="environment", inject=[SANDBOX, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Probe the host, and claim the sandbox slot only if the kernel enforced it.
 

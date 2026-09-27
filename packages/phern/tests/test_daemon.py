@@ -154,6 +154,7 @@ from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context, Profile
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
+from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
 from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
@@ -728,9 +729,11 @@ async def test_two_clients_naming_one_new_root_share_it(
         builds: list[str] = []
         parked, release = anyio.Event(), anyio.Event()
 
-        async def counted(self: Supervisor, root_id: str, *, cwd: str | None = None) -> Root:
+        async def counted(
+            self: Supervisor, root_id: str, *, cwd: str | None, choice: ModelChoice
+        ) -> Root:
             builds.append(root_id)
-            return await build(self, root_id, cwd=cwd)
+            return await build(self, root_id, cwd=cwd, choice=choice)
 
         # On the class: `Supervisor` is a `slots=True` dataclass, so an instance
         # attribute cannot be shadowed.

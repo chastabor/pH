@@ -7,7 +7,8 @@ hand-kept table of options drifts from the code the moment somebody adds a field
 and the person it drifts under is the one editing a YAML file with no schema.
 
 **Generated from `PluginSpec`, so it cannot drift.** The plugin decorator already
-carries the two facts a catalog needs — `config_model` and `inject` — and the
+carries the facts a catalog needs — `config_model`, `inject`, and `affects`, which
+says whose configuration the row's settings belong in — and the
 entry-point group already enumerates every row a deployment could name, including
 ones from third-party wheels. Nothing here is written down twice.
 
@@ -144,7 +145,8 @@ def _fields(model: type[BaseModel]) -> list[dict[str, Any]]:
 
 
 def config_catalog(*, group: str = ENTRY_POINT_GROUP) -> list[dict[str, Any]]:
-    """Every registered row, its injected services, and the config it accepts.
+    """Every registered row, what it shapes, its injected services, and the config
+    it accepts.
 
     In name order, one entry per row, whether or not it takes config — a row
     with no `Config` is a fact worth printing, since "this row has no options"
@@ -164,6 +166,7 @@ def config_catalog(*, group: str = ENTRY_POINT_GROUP) -> list[dict[str, Any]]:
         except Exception as error:
             catalog.append({**entry, "error": f"{type(error).__name__}: {error}", "config": []})
             continue
+        entry["affects"] = spec.affects
         entry["injects"] = list(spec.inject)
         entry["config"] = [] if spec.config_model is None else _fields(spec.config_model)
         catalog.append(entry)

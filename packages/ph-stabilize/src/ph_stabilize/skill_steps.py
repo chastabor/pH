@@ -248,7 +248,7 @@ def nudges_since(session: Session, seq: int, *, up_to: int | None = None) -> int
     return sum(1 for _ in islice(nudges, up_to))
 
 
-@plugin("skill-steps", config=Config)
+@plugin("skill-steps", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Seed a read skill's steps, and object while they are unfinished.
 

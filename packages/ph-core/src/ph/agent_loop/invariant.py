@@ -31,7 +31,7 @@ class ModelVisibleNotLoggedError(AssertionError):
     """A loop request carried messages that are not the session's derivation."""
 
 
-@plugin("agent-loop-invariant", inject=[SESSIONS])
+@plugin("agent-loop-invariant", affects="deployment", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Assert `messages == derive_messages()` on every loop request."""
 

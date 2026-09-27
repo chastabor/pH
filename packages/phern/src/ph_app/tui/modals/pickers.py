@@ -22,6 +22,7 @@ from collections.abc import Iterable, Sequence
 from rich.filesize import decimal
 
 from ph.seams.commands import CommandDefinition
+from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 
 from ...sessions import SessionSummary
@@ -132,24 +133,32 @@ def history_choices(history: Sequence[PromptRecord]) -> list[Choice]:
 
 
 def model_choices(
-    providers: Sequence[str], active_provider: str, active_model: str
+    entries: Sequence[ModelEntry], active_key: str, active_route: str
 ) -> list[Choice]:
-    """The registered providers, the active one carrying its model.
+    """The models this session's profile lists, by key, the one in force marked.
 
-    pH has no model catalog — a provider knows its own models and Phase 1
-    deliberately did not invent a list to go stale. So the rows are providers,
-    and the picker's free-text entry is how a model is named: typing
-    `anthropic/claude-opus-5` offers itself as the value.
+    Still no catalog pH keeps: the list is the profile's, which is the person's to
+    write, so nothing here goes stale on its own. A key is the value because it
+    is what `/model` and `--model` take; the route beside it is what it means.
+
+    A route in force that the profile does not list — one a person named — is a
+    row of its own at the top, so the picker never marks a listed model active
+    when none is. The free-text entry names another as `provider/model`.
     """
-    return [
+    rows = [
         Choice(
-            value=f"{name}/{active_model}" if name == active_provider else name,
-            label=name,
-            detail="active" if name == active_provider else "provider",
-            marked=name == active_provider,
+            value=entry.key,
+            label=entry.key,
+            detail=entry.route.label + (" · default" if entry.default else ""),
+            marked=entry.key == active_key,
         )
-        for name in providers
+        for entry in entries
     ]
+    if active_route and not active_key:
+        rows.insert(
+            0, Choice(value=active_route, label=active_route, detail="in force", marked=True)
+        )
+    return rows
 
 
 NEW_SESSION = ""

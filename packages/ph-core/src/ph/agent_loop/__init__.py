@@ -24,7 +24,12 @@ class Config(WireModel):
     max_parallel_tool_calls: int = 10
 
 
-@plugin("agent-loop", config=Config, inject=[AGENTS, LLM, SESSIONS, SYSTEM_PROMPT])
+@plugin(
+    "agent-loop",
+    affects="environment",
+    config=Config,
+    inject=[AGENTS, LLM, SESSIONS, SYSTEM_PROMPT],
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register `ReactLoopAgent` as the driver `ctx.agents.create()` uses."""
     # Annotated, so mypy holds the driver to `AgentDriver` here — `ctx.agents` is

@@ -352,7 +352,7 @@ async def _normalized(
         yield Finish(reason=FinishReason(kind="error", failure=failure))
 
 
-@plugin("llm")
+@plugin("llm", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the model adapter seam."""
     ctx.provide(LLM, LlmRuntime(ctx=ctx))

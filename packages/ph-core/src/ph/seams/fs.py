@@ -1285,7 +1285,7 @@ class Config(WireModel):
     did not mention it."""
 
 
-@plugin("fs-local", config=Config)
+@plugin("fs-local", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local filesystem provider, and its one built-in screen."""
     # Three answers, most specific first. `config.root` is a deployment saying
@@ -1324,7 +1324,7 @@ async def apply(ctx: Context, config: Config) -> None:
     service.screen(ignore, scope=ctx)
 
 
-@plugin("fs-read-before-edit", inject=[FS])
+@plugin("fs-read-before-edit", affects="environment", inject=[FS])
 async def read_before_edit(ctx: Context, config: None) -> None:
     """Refuse an edit to a file this session has not read since it last changed.
 
