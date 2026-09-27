@@ -189,6 +189,38 @@ not asked about again. `adopt` writes a stored session under its lease without
 resuming it (`stored_session`, on a mount of the host's rows alone), and one a daemon
 holds through that daemon (`session/adopt`).
 
+**`/profile` is the person's half, and the daemon's own command** (S7), registered on
+each root beside its ask desk rather than by a row: saving, switching and restarting
+are this host's. `show` and `diff` read the log (`environment_listing`, `listing`);
+`save` writes the base's own person layers, as recorded, and the overrides after them
+as a sparse named profile (`save_session`), composes it again, and keeps it only if
+the two agree; `use` switches the base (`switch_base`, overrides kept or cleared) and
+sets `Root.restart_wanted`, which the mutation honors once the command and its key are
+durable — the root starts again from its log; `clear` records the clears in one batch,
+then brings the live mount to them (`clear_overrides`), restarting only for a row it
+cannot change live. A fork is a session of its own for all of this: `SessionHeader.is_subagent`
+is a sub-agent's `origin`, not a `parent_session`, which a fork names too.
+
+**A child's model is a key of its parent's list, and a profile a parent assigns is a
+narrowing** (S7b). `SubagentService.resolve_model` resolves a spawn's `model` — or a
+named skill's front matter `model:` — through the parent's own `ctx.models`, and
+refuses a key it does not hold. `resolve_profile` has the host compose a named
+profile (`ctx.named_profiles`) and reads it against the parent's mount
+(`ph.seams.subagent_profiles`): a row it runs that the parent does not is refused by
+name, the tools of the rows it drops go (`ToolRuntime.registrants`), its skills
+paths, models default and read-only sandbox narrow the child, and the rest is the
+parent's. Written into the request before `check_grant`, so the ceiling checks it and
+the admission records it.
+
+**The audit reads the same fold** (S8). The environment at seq N is the base in force
+there and the overrides logged up to it — `fold_environment` over the log's prefix,
+read through its lineage. `phern profiles session <id> --at N` prints it
+(`environment_listing`, or `--full` every row as it ran), and the trajectory view
+gives each `profile/*` record the environment it leads to as its detail. A skill's
+body read at runtime — by the `skill` tool, or into a child's prompt — is an
+ignorable `skill/read` with the hash of the text, so two runs can say whether they
+followed the same instructions; nothing waits on it.
+
 **Three layers, and the third is reachable from the command line.** dsh's notes
 name them — bundle, profile, patch — and for six phases pH had the third only as
 a file, `$PH_HOME/profiles/<name>.yaml`. `--patch` on `phern`, `phern doctor` and

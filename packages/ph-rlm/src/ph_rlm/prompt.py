@@ -22,7 +22,7 @@ history, and only when the text changed.
 from __future__ import annotations
 
 from ph.cordis import Context, plugin
-from ph.keys import SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.keys import MODELS, SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams.subagents import reachable_family
 from ph.seams.workspace import workspace_of
 from ph.system_prompt.assembly import (
@@ -93,12 +93,16 @@ This is the part that trips up a control loop: there is nothing to await. Do not
 agent message on one of your later turns; until then, do other useful work or
 finish your turn.
 
-Two things the call signatures above cannot tell you:
+What the call signatures above cannot tell you:
 
 - `name` is how you address a child later, so name it for its task rather than
   by number.
 - `access` defaults to `"read"`. Ask for `"write"` only when the child must
   change files — a child that only reads should not be able to.
+- `model` is one of the models your profile lists, by key; omit it to run the
+  child on your own. A skill you give the child may name the one it needs.
+- `profile` assigns the child a named profile: it keeps only what that profile
+  runs of what you hold, and a profile that asks for more is refused.
 
 You may message your parent, your siblings and your own children, and nobody
 else. Delegate work that is genuinely separable and worth another agent's
@@ -155,7 +159,14 @@ async def apply(ctx: Context, config: None) -> None:
         that denied `rlm_run` alone would otherwise drop it from the listing
         while this section kept teaching it.
         """
-        return DELEGATION if ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL) else ""
+        if not ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL):
+            return ""
+        listed = ctx.get(MODELS)
+        keys = [entry.key for entry in listed.entries()] if listed is not None else []
+        if not keys:
+            return DELEGATION
+        # The list the key is checked against, so a model knows the names it may use.
+        return f"{DELEGATION}\nModels a child can run on: {', '.join(keys)}.\n"
 
     def child_doctrine(request: AssembleContext) -> str:
         session = request.session

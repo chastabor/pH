@@ -30,21 +30,25 @@ import typer
 import yaml
 from pydantic import ValidationError
 
-from ph.cordis import LoaderError, Profile, sparse_entries
+from ph.cordis import LoaderError, sparse_entries
 from ph.documents import decode_document
 from ph.json import as_seq, as_str, thaw_json
 from ph.paths import RuntimeDirError, resolve_roots, write_atomic
-from ph.persistence import SessionBusy, read_session, stored_session
-from ph.persistence.jsonl import locate_session
+from ph.persistence import LineageError, SessionBusy, materialize, stored_session
+from ph.persistence.jsonl import read_stored
+from ph.seams.skills import READ as SKILL_READ
+from ph.seams.skills import read_summary
 from ph.session_profile import (
-    BASE,
     LoggedEnvironment,
     ProfileBase,
     ProfileChange,
     base_of,
+    environment_listing,
+    fold_environment,
     listing,
     profile_change,
     record_adopted,
+    resolved_environment,
 )
 from ph.text import count_of
 from ph.wire import validation_errors
@@ -127,26 +131,53 @@ def show(
 @profiles_app.command()
 def session(
     session_id: Annotated[str, typer.Argument(help="A stored session's id.")],
+    at: Annotated[
+        int | None,
+        typer.Option("--at", help="The seq to read it at; the log's end when left out."),
+    ] = None,
+    full: Annotated[
+        bool, typer.Option("--full", help="Every environment row as it ran, defaults included.")
+    ] = False,
 ) -> None:
-    """Print the profile a session started in — its `profile/base`, from its log (S3).
+    """The environment a session ran in, at any point of its log (S3, S8).
 
-    Read from the file on disk, so a session nothing is running is readable too.
-    The rows are the full environment it was mounted with, defaults included; the
-    sources are the person's own layers it was composed from, as they were then.
+    A fold of the session's own log (item 11): the base in force at `--at`, the
+    overrides logged up to it and what they change, and each skill read by then
+    with the hash of what was read. Read from disk through the log's lineage, so a
+    session nothing is running is readable too, and a fork answers with the base its
+    prefix holds. `--full` prints every environment row as it ran at that point,
+    defaults included.
     """
-    path = locate_session(resolve_roots().sessions_dir(), session_id)
-    if path is None:
-        fail(f"[red]no session {session_id!r} under {resolve_roots().sessions_dir()}[/red]", code=2)
-    _header, events = read_session(path)
-    recorded = [event for event in events if event.type == BASE]
-    if not recorded:
+    sessions_dir = resolve_roots().sessions_dir()
+    try:
+        _header, events = materialize(partial(read_stored, sessions_dir), session_id)
+    except FileNotFoundError:
+        fail(f"[red]no session {session_id!r} under {sessions_dir}[/red]", code=2)
+    except (LineageError, ValueError) as error:
+        fail(f"[red]{session_id}'s log does not read: {detail(error)}[/red]", code=2, cause=error)
+    end = events[-1].seq if events else 0
+    point = end if at is None else at
+    upto = [event for event in events if event.seq <= point]
+    env = fold_environment((event.type, event.data) for event in upto)
+    if env.base is None:
         fail(
-            f"[red]{session_id} has no recorded base: it has not started since pH began "
-            "recording one[/red]",
+            f"[red]{session_id} has no recorded base by seq {point}: it had not started "
+            "since pH began recording one[/red]",
             code=2,
         )
-    shown = yaml.safe_dump(thaw_json(recorded[-1].data), sort_keys=False, default_flow_style=False)
-    emit(shown.rstrip())
+    if full:
+        rows = _resolved_or_exit(env, resolved_environment)
+        emit(yaml.safe_dump(thaw_json(rows), sort_keys=False, default_flow_style=False).rstrip())
+        return
+    lines = [f"{session_id} at seq {point} of {end}:", *environment_listing(env)]
+    read = {as_str(event.data.get("name")): event for event in upto if event.type == SKILL_READ}
+    if read:
+        lines.append("Skills read by then, each as it was last read:")
+        lines += [
+            f"  {read_summary(event.data)} at seq {event.seq}"
+            for _name, event in sorted(read.items())
+        ]
+    emit("\n".join(lines))
 
 
 @profiles_app.command()
@@ -196,9 +227,10 @@ def _version_or_exit(name: str) -> ProfileBase:
     return _resolved_or_exit(profile_or_exit(name), base_of)
 
 
-def _resolved_or_exit[T](composed: Profile, resolve: Callable[[Profile], T]) -> T:
+def _resolved_or_exit[S, T](composed: S, resolve: Callable[[S], T]) -> T:
     """Every row of `composed` through its model, or exit 2 naming what refused —
-    `show --full`'s listing and `diff`'s version both resolve, and both refuse alike."""
+    `show --full`'s listing, `session --full`'s and `diff`'s version all resolve,
+    and all refuse alike."""
     try:
         return resolve(composed)
     except ValidationError as error:

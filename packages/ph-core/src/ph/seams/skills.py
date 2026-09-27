@@ -20,9 +20,10 @@ file in a directory", which is the capability boundary I7 draws.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,15 +37,19 @@ from ..cordis import (
     Context,
     Disposer,
     LoaderError,
+    Profile,
     boundary_of,
     chain_label,
     drop_dead_chains,
     events,
+    interpolate,
     plugin,
     safe_yaml_load,
 )
-from ..json import as_str, dumps
+from ..json import JsonValue, as_str, dumps
 from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
+from ..session import Session
+from ..session.writers import log_writer
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ..tools.definition import (
     ToolDefinition,
@@ -61,6 +66,7 @@ from ..wire import WireModel
 from ._names import require_slug, slug_pattern
 from ._registry import claim_entry, claim_key
 from ._restriction import NameFilter
+from .models import KEY_MAX
 
 __all__ = [
     "ARGUMENT_HINT_MAX",
@@ -68,6 +74,7 @@ __all__ = [
     "HINT_MAX",
     "MAX_SKILL_BYTES",
     "NAME_PATTERN",
+    "READ",
     "SKILL_FILE",
     "Skill",
     "SkillRestriction",
@@ -76,11 +83,52 @@ __all__ = [
     "discover_skills",
     "progressive",
     "read_skill",
+    "read_summary",
+    "record_read",
     "render_catalog",
     "rendered_skill",
 ]
 
 log = logging.getLogger("ph.seams.skills")
+
+_LOG = log_writer(__name__)
+
+READ = "skill/read"
+"""A skill's body read at runtime, for the audit (session profiles, S8, decision 12):
+the skill, its version, and the hash of exactly what was read — by the `skill` tool,
+or into a child's prompt at a spawn that names it (`via`). Ignorable: it never blocks
+a task and never makes a restart ask, since skills are meant to keep being refined;
+a session's base records only the directories they are found in."""
+
+
+def read_summary(data: Mapping[str, JsonValue]) -> str:
+    """One `skill/read` as an audit reads it: `review 2.0 sha256:0a1b2c3d4e5f (tool)`."""
+    version = as_str(data.get("version")) or "no version"
+    digest = as_str(data.get("sha256"))[:12]
+    return f"{as_str(data.get('name'))} {version} sha256:{digest} ({as_str(data.get('via'))})"
+
+
+def record_read(session: Session | None, skill: Skill, body: str, *, via: str) -> None:
+    """Say that `body` — `skill`'s, as read just now — reached an agent.
+
+    Hashed as read, so two runs of a session can say whether they followed the same
+    text even when the author never touched `version`. Nothing for an agent with no
+    session to log to.
+    """
+    if session is None:
+        return
+    _LOG.append(
+        session,
+        READ,
+        {
+            "name": skill.name,
+            "version": skill.version,
+            "path": skill.path or "",
+            "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "via": via,
+        },
+    )
+
 
 NAME_MAX = 64
 DESCRIPTION_MAX = 1_024
@@ -167,6 +215,11 @@ one of them *tests* rather than raises, warning past a bad frontmatter block
 instead of refusing the whole scan. The format itself is `_names`', shared with
 the screen ids that are the same kind of token."""
 
+MODEL_KEY = slug_pattern(KEY_MAX)
+"""What a `model:` may name: a key of a profile's `models` list, by that list's own
+rule (`ph.seams.models.Config`), so a key no list could hold is refused at discovery
+rather than at the spawn that reads it."""
+
 
 class Skill(WireModel):
     """One installed skill: a name, a one-line description, and a body on disk."""
@@ -204,6 +257,11 @@ class Skill(WireModel):
     Declared here and consumed in `ph-stabilize`, across a package boundary this
     seam cannot cross, which is why reading a skill emits `skills/read` rather
     than reaching for a todo list ph-core knows nothing about."""
+    model: str = ""
+    """The listed model a child this skill directs runs on, by key (session profiles,
+    S7b) — `model: classify` for a skill that sorts rather than writes. Read when a
+    spawn names this skill; the key is the parent's profile's to hold, and one it
+    does not list is refused at the spawn. Empty says nothing."""
     max_nudges: int | None = None
     """How many times `skill-steps` may steer toward this skill's steps without
     the plan moving, or `None` for the row's own `maxNudges` (D16).
@@ -478,7 +536,9 @@ class SkillService:
     def get(self, name: str, scope: Boundary) -> Skill | None:
         return self._skills.get(name) if self.admits(name, scope) else None
 
-    def body(self, name: str, scope: Boundary) -> str | None:
+    def body(
+        self, name: str, scope: Boundary, *, session: Session | None = None, via: str = ""
+    ) -> str | None:
         """The skill's full text, read only when asked for (G9).
 
         Capped again here rather than trusting discovery: a file is validated
@@ -486,6 +546,11 @@ class SkillService:
         those two is exactly where a skill directory that is a checkout gets
         `git pull`ed. `None` for an unknown name or a body that no longer fits,
         because both mean "there is nothing to hand you".
+
+        **The one place a body is read, so the one place its read is recorded**
+        (S8): with `session`, a `skill/read` names what reached an agent and how
+        (`via`) — the `skill` tool, a spawn's brief — and a third reader passing
+        its session is in the audit without anything else to remember.
         """
         skill = self.get(name, scope)
         if skill is None or skill.path is None:
@@ -495,10 +560,12 @@ class SkillService:
             if path.stat().st_size > MAX_SKILL_BYTES:
                 log.warning("ph.seams.skills: %s grew past %s bytes", path, MAX_SKILL_BYTES)
                 return None
-            return path.read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as error:
             log.warning("ph.seams.skills: %s could not be read: %s", path, error)
             return None
+        record_read(session, skill, text, via=via)
+        return text
 
 
 @plugin("skills", affects="environment")
@@ -614,8 +681,15 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         log.warning("ph.seams.skills: %s max-nudges is not a non-negative integer", path)
         return None
 
+    model = as_str(front.get("model"))
+    if model and not MODEL_KEY.match(model):
+        # A key of a profile's `models` list, and held to that list's own rule.
+        log.warning("ph.seams.skills: %s names a model %r that is not a key", path, model)
+        return None
+
     return {
         "version": version,
+        "model": model,
         "argument_hint": hint,
         "allowed_tools": tools,
         "parameters": schema,
@@ -911,6 +985,16 @@ class Config(WireModel):
     rather than this row's to assume."""
 
 
+def progressive_paths(profile: Profile) -> list[Path] | None:
+    """The directories `profile`'s `skills-progressive` row scans, resolved, read
+    without mounting it — `None` when it has no such row (S7b)."""
+    row = next((one for one in profile.enabled_rows() if one.name == "skills-progressive"), None)
+    if row is None:
+        return None
+    config = Config.model_validate(interpolate(row.config) or {})
+    return [Path(one).expanduser().resolve() for one in config.paths]
+
+
 @plugin(
     "skills-progressive",
     affects="environment",
@@ -962,7 +1046,7 @@ async def progressive(ctx: Context, config: Config) -> None:
         tools = ctx.require(TOOLS)
         scope = run.scope
         skill = skills.get(args.name, scope)
-        body = skills.body(args.name, scope)
+        body = skills.body(args.name, scope, session=run.session, via="tool")
         if skill is None or body is None:
             # Named, because "unknown skill" and "this skill has no readable
             # body" are different problems for the model: one is a typo it can

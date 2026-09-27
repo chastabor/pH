@@ -13,18 +13,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from daemon_helpers import allowed_hosts, running
+from daemon_helpers import allowed_hosts, run_command, running
 from typer.testing import CliRunner
 
 from ph.cordis.loader import Mount
 from ph.json import JsonObject, as_obj
-from ph.keys import COMMANDS, MOUNT
+from ph.keys import MOUNT
 from ph.paths import resolve_roots
 from ph.session import now_ms
 from ph.session_profile import OVERRIDE, Override, overrides, rebuilt, saved_base
 from ph.testing import logged_events, not_none
 from ph_app.cli import app
-from ph_app.daemon.supervisor import Root
 from ph_app.profiles import compose_profile
 
 pytestmark = pytest.mark.anyio
@@ -37,12 +36,6 @@ def _logged(session_id: str) -> list[Override]:
     return [
         Override.of(event.data) for event in logged_events(session_id) if event.type == OVERRIDE
     ]
-
-
-async def _sandbox(root: Root, line: str) -> str:
-    shown = await root.ctx.require(COMMANDS).dispatch(line, session=root.session)
-    assert isinstance(shown, str)
-    return shown
 
 
 async def test_a_sandbox_change_is_recorded_before_it_is_made(
@@ -62,7 +55,7 @@ async def test_a_sandbox_change_is_recorded_before_it_is_made(
     async with running(tmp_path) as daemon:
         root = await daemon.root("allowed")
 
-        shown = await _sandbox(root, "/sandbox allow host example.com")
+        shown = await run_command(root, "/sandbox allow host example.com")
 
         assert "example.com is now reachable" in shown and "session's log" in shown
         assert seen_on_disk == [1], "the record was on disk when the row changed"
@@ -79,9 +72,9 @@ async def test_a_sandbox_change_is_recorded_before_it_is_made(
 async def test_a_value_already_in_force_leaves_no_record(tmp_path: Path) -> None:
     async with running(tmp_path) as daemon:
         root = await daemon.root("unchanged")
-        await _sandbox(root, "/sandbox allow host example.com")
+        await run_command(root, "/sandbox allow host example.com")
 
-        again = await _sandbox(root, "/sandbox allow host example.com")
+        again = await run_command(root, "/sandbox allow host example.com")
 
         assert "already on the allowlist" in again
         assert len(_logged("unchanged")) == 1
@@ -100,7 +93,7 @@ async def test_a_change_whose_record_cannot_be_written_is_not_made(
         root = await daemon.root("unwritable")
         monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
-        shown = await _sandbox(root, "/sandbox allow host example.com")
+        shown = await run_command(root, "/sandbox allow host example.com")
 
         assert "was not changed" in shown
         assert "example.com" not in allowed_hosts(root)
@@ -111,8 +104,8 @@ async def test_the_log_alone_rebuilds_the_allowances_in_force(tmp_path: Path) ->
     this session: the allowance the session runs with is in it."""
     async with running(tmp_path) as daemon:
         root = await daemon.root("rebuilt")
-        await _sandbox(root, "/sandbox allow host example.com")
-        await _sandbox(root, "/sandbox allow host example.org")
+        await run_command(root, "/sandbox allow host example.com")
+        await run_command(root, "/sandbox allow host example.org")
 
         again = rebuilt(
             not_none(saved_base(root.session)),
@@ -131,7 +124,7 @@ async def test_a_session_s_next_start_puts_its_overrides_back(tmp_path: Path) ->
     async with running(tmp_path) as daemon:
         supervisor = daemon.running.supervisor
         root = await daemon.root("returning")
-        await _sandbox(root, "/sandbox allow host example.com")
+        await run_command(root, "/sandbox allow host example.com")
         await supervisor.passivate(root, now=now_ms())
 
         back = await supervisor.start("returning")

@@ -126,6 +126,9 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "profile/adopted",
         "profile/declined",
         "profile/override-cleared",
+        "profile/saved",
+        # S8: which text of a skill was read, by hash.
+        "skill/read",
         "fs/observed",
         "session/end-seed",
         "compaction/summarized",

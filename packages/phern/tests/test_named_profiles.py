@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from ph.cordis import LoaderError, Row
 from ph.json import JsonValue
+from ph.keys import NAMED_PROFILES
 from ph.paths import resolve_roots
 from ph.testing import write_host_config, write_profile
 from ph_app.cli import app
@@ -30,6 +31,7 @@ from ph_app.profiles import (
     unfolded_profiles,
 )
 from ph_app.profiles_cli import FoldRefused, fold_profile
+from ph_app.runtime import mounted
 
 runner = CliRunner()
 
@@ -267,3 +269,18 @@ def test_show_prints_what_the_file_sets_and_full_prints_everything() -> None:
     )
     assert "session-persistence" not in rows, "a session's profile, not the host's"
     assert "no file of yours" in shipped.stdout
+
+
+@pytest.mark.anyio
+async def test_every_mount_can_compose_a_named_profile_for_a_child() -> None:
+    """A profile a parent assigns its child is composed by the host (S7b): `mounted`
+    provides the store, so the seam can read a person's own named profile as the
+    narrowing it is. Sabotage: drop the `provide` in `runtime.mounted`, and a spawn
+    naming a profile is refused for want of one."""
+    write_profile("reviewer", "extends: headless\nrows:\n  - id: tool-bash\n    disabled: true\n")
+
+    async with mounted(compose_profile("headless")) as ctx:
+        reviewer = ctx.require(NAMED_PROFILES).compose("reviewer")
+
+    rows = {row.id: row for row in reviewer.rows}
+    assert rows["tool-bash"].disabled and reviewer.name == "reviewer"

@@ -40,14 +40,13 @@ async def test_two_roots_on_two_profiles_share_one_daemon(tmp_path: Path) -> Non
     created on, and each root is mounted in its own."""
     async with running(tmp_path) as daemon:
         client = await daemon.client()
-        supervisor = daemon.running.supervisor
 
         plain = await client.call("session/new", sessionId="plain", profile="headless")
         posed = await client.call("session/new", sessionId="posed", profile="tui")
 
         assert (plain["profile"], posed["profile"]) == ("headless", "tui")
-        assert row_disabled(supervisor.roots["plain"], "tool-ask-user")
-        assert not row_disabled(supervisor.roots["posed"], "tool-ask-user"), "tui arms it"
+        assert row_disabled(daemon.held("plain"), "tool-ask-user")
+        assert not row_disabled(daemon.held("posed"), "tool-ask-user"), "tui arms it"
 
 
 async def test_a_root_comes_back_on_the_profile_its_log_records(tmp_path: Path) -> None:
@@ -58,7 +57,7 @@ async def test_a_root_comes_back_on_the_profile_its_log_records(tmp_path: Path) 
         client = await daemon.client()
         supervisor = daemon.running.supervisor
         await client.call("session/new", sessionId="kept", profile="tui")
-        await supervisor.passivate(supervisor.roots["kept"], now=now_ms())
+        await supervisor.passivate(daemon.held("kept"), now=now_ms())
 
         back = await supervisor.start("kept")
 
@@ -82,7 +81,7 @@ async def test_a_session_whose_profile_went_away_still_runs_on_its_log(tmp_path:
         client = await daemon.client()
         supervisor = daemon.running.supervisor
         await client.call("session/new", sessionId="orphan", profile="gone")
-        await supervisor.passivate(supervisor.roots["orphan"], now=now_ms())
+        await supervisor.passivate(daemon.held("orphan"), now=now_ms())
         resolve_roots().profile_overlay("gone").unlink()
 
         back = await supervisor.start("orphan")
@@ -99,7 +98,7 @@ async def test_a_fork_is_mounted_from_the_base_its_prefix_holds(tmp_path: Path) 
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="trunk", profile="tui")
-        trunk = daemon.running.supervisor.roots["trunk"]
+        trunk = daemon.held("trunk")
         fork = trunk.ctx.require(SESSIONS).fork(trunk.session, child_session_id="branch")
         await trunk.ctx.require(SESSIONS).flush(fork)
 

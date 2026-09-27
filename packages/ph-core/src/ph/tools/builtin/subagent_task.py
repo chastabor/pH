@@ -103,6 +103,20 @@ class TaskArgs(ToolModel):
             "have yourself."
         ),
     )
+    model: str | None = Field(
+        None,
+        description=(
+            "A model your profile lists, by key. Omit to run the child on your own; a "
+            "skill you give it may name the one it needs."
+        ),
+    )
+    profile: str | None = Field(
+        None,
+        description=(
+            "A named profile for the child: it keeps only what that profile runs of "
+            "what you hold. One that would give it more than you have is refused."
+        ),
+    )
 
 
 class TaskValue(ToolModel):
@@ -160,6 +174,8 @@ async def apply(ctx: Context, config: Config) -> None:
                 name=args.name,
                 access=args.access,
                 preset=args.preset,
+                profile=args.profile,
+                model_key=args.model,
                 skills=args.skills,
                 tools=args.tools,
             ),

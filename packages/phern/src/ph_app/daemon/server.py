@@ -545,6 +545,12 @@ class _Connection:
         # refuses writes is the root's own flushes failing next, which is the
         # retry ladder's to report (`supervisor/failed`).
         await session_written(root.ctx, root.session)
+        if root.restart_wanted:
+            # The act moved the root's environment where a live mount cannot follow
+            # (`/profile use`, S7): it starts again from its log now that the act and
+            # its key are on disk — here, and not inside the act, which was still
+            # writing to the session a restart unwinds.
+            await self.server.supervisor.restart(root)
         return reply
 
     # --- the methods -----------------------------------------------------------

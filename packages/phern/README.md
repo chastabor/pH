@@ -77,6 +77,7 @@ it, and `command/run` records it), a Textual action, and a key:
 | `/tools` | `ctrl+o` | show or hide tool results |
 | `/sidebar` | `ctrl+b` | show or hide the sidebar |
 | `/login` | | provide a provider credential for this process |
+| `/profile …` | | the session's profile: `show`, `diff`, `save <name>`, `use <name>`, `clear [row]` — the daemon's, registered on every root |
 | `/attach <path> …` | | attach files to the next prompt |
 | `/quit` | `ctrl+d` | |
 

@@ -43,6 +43,7 @@ from ph.cordis import Context, LoaderError, Profile
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
+    COMMANDS,
     INVARIANTS,
     MOUNT,
     SCHEDULE,
@@ -114,6 +115,7 @@ from ..sessions import recorded_start
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
+from .profile_command import profile_command
 from .projections import commands_of, readings_of, screens_of
 from .recovery import (
     CHILD_RETRY_LIMIT,
@@ -397,6 +399,12 @@ class Root:
     """How this root's named profile had moved when it started, against the version
     it runs on (S6) — `None` when it had not. It runs on its own version until one
     is adopted; `describe` says how many settings differ."""
+    restart_wanted: bool = False
+    """Set by a command that moved this root's environment where a live mount cannot
+    follow — `/profile use`, a `/profile clear` of an override that turned a row on
+    or off (S7). The mutation that ran it starts the root again from its log once
+    the command and its key are durable (`DaemonServer._mutate`): not inside the
+    command, whose own records are still being written to this root's session."""
     held_on_profile: bool = False
     """Whether this root waits on a person's decision about `change` (S6): the
     person's own profile moved, and the root was started for a front end that can
@@ -1051,6 +1059,11 @@ class Supervisor:
             root.desk = AskDesk(root=root)
             for dispose in root.desk.attach():
                 exits.callback(dispose)
+            # `/profile` (S7) the same way, and for the same reason: saving and
+            # switching a session's profile are this host's, not a row's.
+            commands = ctx.get(COMMANDS)
+            if commands is not None:
+                exits.callback(commands.register(profile_command(root)))
             # Read back from this session's own log, once, here: how far up the
             # retry ladder it got, so a root resumed mid-ladder does not start
             # the count over and retry forever. What it already did is the
@@ -1369,7 +1382,7 @@ class Supervisor:
             if decision == "adopt":
                 if not await record_adopted(root.ctx, root.session, change.now):
                     log.warning("ph_app.daemon: root %s: the adoption did not reach disk", root.id)
-                await self._remount(root)
+                await self.restart(root)
                 return
             if decision == "keep":
                 await record_declined(root.ctx, root.session, change.now)
@@ -1382,15 +1395,15 @@ class Supervisor:
         root.publish(root.status_notice())
         root.ring()
 
-    async def _remount(self, root: Root) -> None:
+    async def restart(self, root: Root) -> None:
         """Release `root` and start it again from its log, keeping who watches it (S6).
 
-        What a "yes" to a moved profile does: the version is in the log, and a start
-        is where a base changes, so the root is unmounted as a passivation would —
-        without the passivation's record, since it did not go quiet — and mounted
-        again. Its watchers and answerers move to the new root, which a
-        connection finds by id, and are told what changed: the route, the verbs
-        and the screens are the new mount's. A prompt still in the inbox is rung.
+        What a "yes" to a moved profile does, and `/profile use` (S7): the new base is
+        in the log, and a start is where a base takes effect, so the root is unmounted
+        as a passivation would — without the passivation's record, since it did not go
+        quiet — and mounted again. Its watchers and answerers move to the new root,
+        which a connection finds by id, and are told what changed: the route, the
+        verbs and the screens are the new mount's. A prompt still in the inbox is rung.
         """
         async with self._starting:
             if self.roots.get(root.id) is not root:

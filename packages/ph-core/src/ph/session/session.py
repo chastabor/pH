@@ -166,6 +166,28 @@ class SessionHeader(WireModel):
 
     origin: Literal["subagent"] | None = None
     delegation_depth: NonNegativeInt | None = None
+
+    @property
+    def is_subagent(self) -> bool:
+        """Whether this is a sub-agent's log, which runs on its root's mount.
+
+        By `origin`, not by `parent_session`: a fork and a segment name their parent
+        too, and each is a session of its own — started by a person, with start
+        options to log and a version of its profile to adopt — where a child is
+        neither (session profiles, S7)."""
+        return self.origin == "subagent"
+
+    @property
+    def delegating_parent(self) -> str | None:
+        """The agent that spawned this one — the family link messaging and the roster
+        read (C7) — or `None` for a session a person started.
+
+        `parent_session` for a sub-agent's log, and nothing for a fork or a segment,
+        whose `parent_session` is the log it continues rather than an agent that
+        delegated to it: a forked root is a root, a sibling of the other roots, and
+        not a child of the session it was cut from."""
+        return self.parent_session if self.is_subagent else None
+
     agent_preset: str | None = None
 
     @field_validator("version")

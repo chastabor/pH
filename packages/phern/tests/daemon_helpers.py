@@ -28,12 +28,12 @@ from anyio.abc import TaskGroup
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
-from ph.keys import MOUNT, SANDBOX
+from ph.keys import COMMANDS, MOUNT, SANDBOX
 from ph.llm.types import StreamChunk
 from ph.paths import resolve_roots
 from ph.session import Session
 from ph.session_profile import BASE as PROFILE_BASE
-from ph.testing import not_none
+from ph.testing import logged_events, not_none
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
@@ -434,3 +434,14 @@ def allowed_hosts(root: Root) -> list[str]:
     """The hosts `root`'s sandbox may reach now — what `/sandbox allow` changes."""
     allowances = not_none(root.ctx.require(SANDBOX).allowances)
     return list(not_none(allowances.network).hosts)
+
+
+async def run_command(root: Root, line: str) -> str:
+    """One `/…` line run in `root`'s own context, and what it said."""
+    shown = await root.ctx.require(COMMANDS).dispatch(line, session=root.session)
+    return str(shown)
+
+
+def logged_types(session_id: str) -> list[str]:
+    """The types a session's log on disk holds, in order."""
+    return [event.type for event in logged_events(session_id)]

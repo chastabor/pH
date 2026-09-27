@@ -23,6 +23,7 @@ parent's prompt assembly measured **3.9x slower** for it. Keyed, a read walks
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -39,6 +40,7 @@ from ph.seams.skills import (
     MAX_ALLOWED_TOOLS,
     MAX_PARAMETERS,
     MAX_SKILL_BYTES,
+    READ,
     SKILL_FILE,
     Skill,
     SkillRestriction,
@@ -48,7 +50,7 @@ from ph.seams.skills import (
     rendered_skill,
 )
 from ph.system_prompt import render_prompt
-from ph.testing import FAKE_OPTIONS, MountProfile, run_tool, skill, write_skill
+from ph.testing import FAKE_OPTIONS, MountProfile, not_none, run_tool, skill, write_skill
 
 pytestmark = pytest.mark.anyio
 
@@ -653,3 +655,36 @@ async def test_the_deployment_wide_answer_has_to_be_asked_for(mount: MountProfil
     # the sugar hid it behind an `Any`.
     with pytest.raises(TypeError, match="missing 1 required positional argument"):
         ctx.require(SKILLS).list()  # type: ignore[call-arg]
+
+
+async def test_a_read_is_recorded_with_the_hash_of_what_was_read(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Decision 12: a skill's version is for the audit, so a read names the skill, its
+    version and the hash of exactly the text read — never blocking the read. Sabotage:
+    drop `record_read` from `read_body`, and nothing says which text was followed."""
+    write_skill(tmp_path, "note-taking", body="Step one: open a file.", extra="version: 1.2.0")
+    ctx = await mount(row(tmp_path))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+
+    await run_tool(ctx, "skill", {"name": "note-taking"}, agent=agent, session=session)
+
+    (read,) = session.select(READ)
+    body = not_none(ctx.require(SKILLS).body("note-taking", DEPLOYMENT))
+    assert read.data["sha256"] == hashlib.sha256(body.encode("utf-8")).hexdigest()
+    assert (read.data["name"], read.data["version"], read.data["via"]) == (
+        "note-taking",
+        "1.2.0",
+        "tool",
+    )
+
+
+def test_a_skill_may_name_the_model_a_child_it_directs_runs_on(tmp_path: Path) -> None:
+    """`model:` in the front matter (S7b), read as a key of the parent's list at the
+    spawn. Sabotage: leave it out of `_optional_front`, and the skill names nothing."""
+    write_skill(tmp_path, "sort", extra="model: classify")
+
+    (found,) = discover_skills([str(tmp_path)])
+
+    assert found.model == "classify"

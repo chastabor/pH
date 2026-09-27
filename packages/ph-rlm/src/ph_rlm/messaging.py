@@ -457,8 +457,12 @@ async def apply(ctx: Context, config: Config) -> None:
         children in its own roster, and a child's siblings in its parent's. A root's
         siblings are the other roots, which only the live ones stand for, so a root's
         sibling send can be found but never ruled out.
+
+        The parent is the agent that spawned the sender (`delegating_parent`), not
+        the log a fork continues: a forked root's parent send reached nobody, and its
+        siblings are the roots, as `reachable_family` has it.
         """
-        parent_id = sender.header.parent_session
+        parent_id = sender.header.delegating_parent
         if role == "parent":
             return ([parent_id] if parent_id else []), True
         if role == "child":
@@ -466,7 +470,7 @@ async def apply(ctx: Context, config: Config) -> None:
             return [as_str(row.get("sessionId")) for row in children], True
         if parent_id is None:
             live = ctx.require(SESSIONS).list()
-            return [one.id for one in live if one.header.parent_session is None], False
+            return [one.id for one in live if one.header.delegating_parent is None], False
         parent_log = await log_of(parent_id)
         if parent_log is None:
             return None

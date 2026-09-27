@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from .seams.shell import ShellService
     from .seams.skills import SkillService
     from .seams.spill import SpillStore
+    from .seams.subagent_profiles import NamedProfiles
     from .seams.subagents import SubagentPresetService, SubagentService
     from .seams.subprocess import SubprocessService
     from .seams.telemetry import SessionTelemetry
@@ -102,6 +103,7 @@ __all__ = [
     "LLM_REPLAY",
     "MODELS",
     "MOUNT",
+    "NAMED_PROFILES",
     "PERMISSION_PRESETS",
     "PROJECT_ROOT",
     "SANDBOX",
@@ -146,6 +148,7 @@ LLM: ServiceKey[LlmRuntime] = ServiceKey("llm")
 LLM_FAKE: ServiceKey[FakeAdapter] = ServiceKey("llm_fake")
 LLM_REPLAY: ServiceKey[ReplayAdapter] = ServiceKey("llm_replay")
 MODELS: ServiceKey[ModelList] = ServiceKey("models")
+NAMED_PROFILES: ServiceKey[NamedProfiles] = ServiceKey("named_profiles")
 PERMISSION_PRESETS: ServiceKey[PermissionPresetService] = ServiceKey("permission_presets")
 SANDBOX: ServiceKey[SandboxSeam] = ServiceKey("sandbox")
 SCHEDULE: ServiceKey[ScheduleService] = ServiceKey("schedule")

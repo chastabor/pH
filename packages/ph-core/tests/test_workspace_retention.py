@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from ph.persistence.protocol import StoredSession
+from ph.persistence.protocol import StoredSession, stored_row
 from ph.seams.subagents import descendants, reachable_family
 from ph.seams.workspace import (
     WorkspaceRecord,
@@ -246,8 +246,18 @@ def test_the_fold_starts_after_the_seed() -> None:
 
 
 def _family(*links: tuple[str, str | None]) -> list[Session]:
+    """Sessions as a delegation writes them: a child's header names its parent and
+    says it is a sub-agent's (`origin`), which is how the family is told from a fork."""
     return [
-        Session(child, header=SessionHeader(id=child, created_at=1, parent_session=parent))
+        Session(
+            child,
+            header=SessionHeader(
+                id=child,
+                created_at=1,
+                parent_session=parent,
+                origin="subagent" if parent is not None else None,
+            ),
+        )
         for child, parent in links
     ]
 
@@ -309,7 +319,7 @@ def test_a_parent_reads_what_its_family_left_without_opening_a_child_log() -> No
     answer is read in.
     """
     parent = _log(_acquired("p", "/trees/p"), _disposed("p", kept=True), session_id="p")
-    kid = Session("kid", header=SessionHeader(id="kid", created_at=1, parent_session="p"))
+    kid = _child("kid", "p")
     log_event(kid, *_acquired("k", "/trees/k"))
     log_event(kid, *_disposed("k", kept=True, retained="error"))
     stranger = _log(_acquired("x", "/trees/x"), _disposed("x", kept=True), session_id="x")
@@ -320,6 +330,38 @@ def test_a_parent_reads_what_its_family_left_without_opening_a_child_log() -> No
     assert [one.session_id for one in found] == ["p", "kid"], (
         "a record has to name the log it came from; the collector reads back through it"
     )
+
+
+def _child(session_id: str, parent: str) -> Session:
+    """A sub-agent's log, as a delegation writes its header."""
+    return Session(
+        session_id,
+        header=SessionHeader(id=session_id, created_at=1, parent_session=parent, origin="subagent"),
+    )
+
+
+def test_a_fork_s_trees_are_its_own_and_not_its_source_s_leftovers() -> None:
+    """A fork names the log it was cut from in `parent_session`, as a child names the
+    agent that spawned it — but a fork is a session a person started, and what it
+    left is its own to account for. Walked by that field, a source's family took the
+    fork's trees: listed as its leftovers, and collectable with them. Sabotage: walk
+    `parent_session` in `family_survivors` or `stored_survivors` again, and the
+    branch's tree is the source's."""
+    parent = _log(_acquired("p", "/trees/p"), _disposed("p", kept=True), session_id="p")
+    kid = _child("kid", "p")
+    branch = Session(
+        "branch",
+        header=SessionHeader(id="branch", created_at=1, parent_session="p", kind="fork"),
+    )
+    for session, agent in ((kid, "k"), (branch, "b")):
+        log_event(session, *_acquired(agent, f"/trees/{agent}"))
+        log_event(session, *_disposed(agent, kept=True, retained="error"))
+
+    live = family_survivors([parent, kid, branch], "p")
+    stored, _touched = stored_survivors(_Store([parent, kid, branch]), family="p")
+
+    assert [str(one.root) for one in live] == ["/trees/p", "/trees/k"]
+    assert sorted(str(one.root) for one in stored) == ["/trees/k", "/trees/p"]
 
 
 def test_an_unlisted_agent_yields_nothing_rather_than_raising() -> None:
@@ -473,9 +515,10 @@ class _Store:
         self.unreadable = unreadable
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
+        """Rows as both backends build them: one header peek each (`stored_row`)."""
         return [
-            StoredSession(session_id=one, modified=float(index))
-            for index, one in enumerate(self.sessions)
+            stored_row(one, session.header, float(index))
+            for index, (one, session) in enumerate(self.sessions.items())
         ][:limit]
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:

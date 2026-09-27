@@ -368,7 +368,7 @@ def stored_on(sessions_dir: Path, name: str) -> list[tuple[str, LoggedEnvironmen
     found: list[tuple[str, LoggedEnvironment]] = []
     for path, _stat in session_logs(sessions_dir):
         header = _header_line(path)
-        if header is None or header.origin == "subagent":
+        if header is None or header.is_subagent:
             continue
         env = _environment_at(sessions_dir, path, header)
         if env.base is not None and env.base.name == name:

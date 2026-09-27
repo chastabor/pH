@@ -73,6 +73,13 @@ class StoredSession:
     modified: float
     cwd: str = ""
     parent: str | None = None
+    """The log this one continues or was spawned from — `SessionHeader.parent_session`,
+    what a lineage check follows (`lineage_faults`)."""
+    delegating_parent: str | None = None
+    """The agent that spawned this one, or `None` for a session a person started —
+    `SessionHeader.delegating_parent`. Not `parent`: a fork names the log it was cut
+    from there, and is a session of its own, so a family walk over a listing
+    (`workspace.stored_survivors`) follows this link and not that one."""
     family: str = ""
     """The directory this session's log lives in — its lineage's root id.
 
@@ -116,6 +123,7 @@ def stored_row(session_id: str, header: SessionHeader | None, modified: float) -
         modified=modified,
         cwd=(header.cwd or "") if header is not None else "",
         parent=header.parent_session if header is not None else None,
+        delegating_parent=header.delegating_parent if header is not None else None,
         # No `or ""` guard, unlike `cwd` above: `SessionHeader.family` is a
         # `str` with `min_length=1` whose docstring says it is never absent, so
         # the idiom copied from the nullable line next to it would suggest this

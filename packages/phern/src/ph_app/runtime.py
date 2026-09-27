@@ -14,14 +14,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from ph.cordis import Context, Profile
-from ph.keys import AGENTS, SESSIONS
+from ph.keys import AGENTS, NAMED_PROFILES, SESSIONS
 from ph.persistence import open_session
 from ph.seams.models import ModelChoice, choose, start_on
 from ph.session import Session
 
 from .attach import ingest, prompt_message
 from .console import err
-from .profiles import kept_note, session_profile
+from .profiles import NAMED, kept_note, session_profile
 
 __all__ = ["mounted", "prompted"]
 
@@ -44,6 +44,10 @@ async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIter
     """
     ctx = Context()
     try:
+        # Where named profiles live is this host's to know, and a child a parent
+        # assigns one to is narrowed by it (S7b): provided before the rows, beside
+        # what `Profile.mount` provides itself.
+        ctx.provide(NAMED_PROFILES, NAMED)
         await profile.mount(ctx, project=project)
         yield ctx
     finally:

@@ -38,9 +38,28 @@ import anyio
 from pydantic import Field
 
 from ..agent.types import AgentDriver, AgentHandle
-from ..cordis import Context, Disposer, Running, maybe_await, plugin, releasing, running
+from ..cordis import (
+    Context,
+    Disposer,
+    LoaderError,
+    Running,
+    maybe_await,
+    plugin,
+    releasing,
+    running,
+)
 from ..json import JsonValue, as_int, as_str
-from ..keys import AGENTS, SESSIONS, SKILLS, SUBAGENT_PRESETS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ..keys import (
+    AGENTS,
+    NAMED_PROFILES,
+    SANDBOX,
+    SESSIONS,
+    SKILLS,
+    SUBAGENT_PRESETS,
+    SUBAGENTS,
+    SYSTEM_PROMPT,
+    TOOLS,
+)
 from ..session import Session, SessionEvent, SessionFoldCache
 from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
@@ -57,7 +76,9 @@ from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
 from .credentials import hold_for_credential
 from .invariants import contribute_fold_cache
+from .models import ModelChoice, ModelChoiceError, choose
 from .skills import ORDER_SKILLS, SkillRestriction, SkillService
+from .subagent_profiles import NarrowingRefused, narrowing
 
 _LOG = log_writer(__name__)
 
@@ -89,6 +110,7 @@ __all__ = [
     "admission_payload",
     "apply",
     "child_is_live",
+    "child_model_key",
     "child_route",
     "default_child_name",
     "descendants",
@@ -193,6 +215,16 @@ def child_route(request: SubagentRequest) -> tuple[str, str]:
     """
     options = request.parent.options
     return request.provider or options.provider or "", request.model or options.model or ""
+
+
+def child_model_key(request: SubagentRequest) -> str:
+    """The listed name of the route `child_route` gives a child (S7b): the key its
+    spawn resolved, none for a route named whole, else its parent's own."""
+    if request.model_key is not None:
+        return request.model_key
+    if request.provider or request.model:
+        return ""
+    return request.parent.options.model_key
 
 
 def child_is_live(row: Mapping[str, Any]) -> bool:
@@ -356,6 +388,12 @@ class SubagentRequest:
     """Exact selector. A provider must not silently fall back to another model —
     a child that answered on a cheaper model than the parent asked for is a
     result the parent cannot interpret."""
+    model_key: str | None = None
+    """A model the parent's profile lists, by key (session profiles, S7b) — what a
+    spawn names, where `provider` and `model` are the route it resolves to. A key the
+    list does not hold is refused, so the models an agent can reach are the ones its
+    profile says (`SubagentService.resolve_model`). `None` with no route runs the
+    child on its parent's."""
     reasoning_effort: str | None = None
     access: Access = "read"
     preset: str | None = None
@@ -364,6 +402,12 @@ class SubagentRequest:
     Resolved into the fields below before the ceiling is checked, so a preset is
     a set of defaults and never a way past it.
     """
+    profile: str | None = None
+    """A named profile the parent assigns its child (session profiles, S7b), read as a
+    narrowing on the parent's own mount (`ph.seams.subagent_profiles`): the tools and
+    skills of what it runs, its default model, and a read-only sandbox. Resolved into
+    the fields around it before the ceiling is checked; one that would widen anything
+    is refused, naming the row."""
     skills: tuple[str, ...] | None = None
     """Which skills the child gets. `None` inherits the parent's whole set.
 
@@ -528,6 +572,12 @@ def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, J
     payload: dict[str, JsonValue] = {**run.to_wire(), "prompt": request.prompt.strip()}
     if request.preset is not None:
         payload["preset"] = request.preset
+    if request.profile is not None:
+        payload["profile"] = request.profile
+    if request.model_key is not None:
+        # Beside the route `run.to_wire()` carries: the key a spawn named and what it
+        # resolved to, for the audit (item 8).
+        payload["modelKey"] = request.model_key
     if request.skills is not None:
         payload["skills"] = list(request.skills)
     if request.tools is not None:
@@ -856,6 +906,114 @@ class SubagentService:
             tools=request.tools if request.tools is not None else preset.tools,
         )
 
+    def resolve_model(self, request: SubagentRequest) -> SubagentRequest:
+        """The route a spawn's model key names, from the parent's own list (S7b, item 8).
+
+        The key is the request's, or the one a skill it names asks for in its front
+        matter (`model: classify`) — the skill directs the child, so it may say what
+        the child should think with. Resolved by the mount's `models` list, which is
+        the parent's profile as it runs, `/model` included: a key it does not hold is
+        refused, naming what it does. A request that already carries a route — a
+        readmitted child, fixed at its admission — is left as it is.
+        """
+        if request.provider or request.model:
+            return request
+        key = request.model_key or self._skill_model(request)
+        if not key:
+            return request
+        try:
+            entry = choose(self.ctx, ModelChoice(key=key))
+        except ModelChoiceError as error:
+            raise SubagentSpawnError(f"a child cannot run on {key!r}: {error}") from error
+        return replace(
+            request,
+            model_key=key,
+            provider=entry.route.provider,
+            model=entry.route.model,
+            reasoning_effort=request.reasoning_effort or entry.route.reasoning_effort,
+        )
+
+    def _skill_model(self, request: SubagentRequest) -> str:
+        """The model the skills a spawn names ask for, or `""` when none does."""
+        service = self.ctx.get(SKILLS)
+        if not request.skills or service is None:
+            return ""
+        boundary = self._delegating_boundary(request)
+        asked = {
+            name: skill.model
+            for name in request.skills
+            if (skill := service.get(name, boundary)) is not None and skill.model
+        }
+        if len(set(asked.values())) > 1:
+            said = ", ".join(f"{name} names {key}" for name, key in sorted(asked.items()))
+            raise SubagentSpawnError(
+                f"the skills this child is given name different models ({said}); "
+                "name the one it should run on with `model=`"
+            )
+        return next(iter(asked.values()), "")
+
+    async def resolve_profile(self, request: SubagentRequest) -> SubagentRequest:
+        """A profile the parent assigns, as the narrowing it is (S7b, item 9).
+
+        Composed by the host (`ctx.named_profiles`) and read against the parent's
+        mount (`ph.seams.subagent_profiles.narrowing`), then written into the request
+        as the tools, skills, model and access it resolves to — so the ceiling below
+        checks what it gives, and the admission records it: a child's reach is fixed
+        when it is admitted. **A ceiling, not defaults**: what a spawn names beside
+        it may narrow further, and naming more than it gives is refused.
+        """
+        name = request.profile
+        if name is None:
+            return request
+        composer = self.ctx.get(NAMED_PROFILES)
+        if composer is None:
+            raise SubagentSpawnError(
+                f'this deployment cannot compose a named profile, so "{name}" cannot be '
+                "assigned to a child"
+            )
+        try:
+            # On a worker thread: composing reads and parses every layer file, and a
+            # spawn runs on the event loop every root of a daemon shares.
+            composed = await anyio.to_thread.run_sync(composer.compose, name)
+        except (LoaderError, OSError, ValueError) as error:
+            raise SubagentSpawnError(f'profile "{name}" does not compose: {error}') from error
+        boundary = self._delegating_boundary(request)
+        held_skills, held_tools = self.held_by(request, boundary)
+        sandbox = self.ctx.get(SANDBOX)
+        mode = (
+            sandbox.resolve_mode(request.parent.session)
+            if sandbox is not None
+            else "danger-full-access"
+        )
+        try:
+            narrowed = narrowing(
+                self.ctx,
+                composed,
+                held_tools=held_tools,
+                held_skills=held_skills,
+                boundary=boundary,
+                parent_mode=mode,
+            )
+        except NarrowingRefused as refusal:
+            raise SubagentSpawnError(f'profile "{name}": {refusal}') from refusal
+        for kind, asked, gives in (
+            ("tool", request.tools, narrowed.tools),
+            ("skill", request.skills, narrowed.skills),
+        ):
+            beyond = sorted(set(asked or ()) - set(gives))
+            if beyond:
+                raise SubagentSpawnError(
+                    f'profile "{name}" does not give its child the {kind}s {", ".join(beyond)}'
+                )
+        if narrowed.read_only and request.access == "write":
+            raise SubagentSpawnError(f'profile "{name}" is read-only, so its child cannot write')
+        return replace(
+            request,
+            tools=request.tools if request.tools is not None else narrowed.tools,
+            skills=request.skills if request.skills is not None else narrowed.skills,
+            model_key=request.model_key or narrowed.model_key,
+        )
+
     def grant_for(
         self,
         request: SubagentRequest,
@@ -878,7 +1036,11 @@ class SubagentService:
         return Grant(
             skills=named if named is not None else held_skills,
             tools=request.tools if request.tools is not None else held_tools,
-            brief=(_brief_text(skills, named, target) if named and skills is not None else ""),
+            brief=(
+                _brief_text(skills, named, target, request.parent.session)
+                if named and skills is not None
+                else ""
+            ),
         )
 
     def _settle_unadmitted(
@@ -1017,7 +1179,7 @@ class SubagentService:
 
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
-        request = self.resolve_preset(request)
+        request = self.resolve_model(self.resolve_preset(await self.resolve_profile(request)))
         # Guards first: a refusal here has nothing to unwind, which is the
         # contract `SubagentSpawnError` states. Bound to the registering row, as
         # every registry-invoked body is (P6-29).
@@ -1081,7 +1243,7 @@ class SubagentService:
         """`roster_name`, through the cached fold. The live path."""
         by_id = {session.id: session for session in sessions}
         session = by_id.get(agent_id)
-        parent = by_id.get(session.header.parent_session or "") if session else None
+        parent = by_id.get(session.header.delegating_parent or "") if session else None
         return _name_in(self.roster(parent), agent_id) if parent is not None else agent_id
 
     def get(self, run_id: str) -> SubagentRun | None:
@@ -1368,6 +1530,7 @@ class SubagentService:
                 name=_optional(row, "name"),
                 provider=_optional(row, "modelProvider"),
                 model=_optional(row, "model"),
+                model_key=_optional(row, "modelKey"),
                 reasoning_effort=_optional(row, "reasoningEffort"),
                 access=ACCESS_LEVELS.get(as_str(row.get("requestedAccess")), "read"),
                 preset=_optional(row, "preset"),
@@ -1582,7 +1745,9 @@ class Grant:
             )
 
 
-def _brief_text(skills: SkillService, named: Sequence[str], scope: Context) -> str:
+def _brief_text(
+    skills: SkillService, named: Sequence[str], scope: Context, session: Session | None
+) -> str:
     """The named skills' instructions, read once.
 
     **A named skill is direction, not a lookup.** G9 keeps bodies out of the
@@ -1594,7 +1759,8 @@ def _brief_text(skills: SkillService, named: Sequence[str], scope: Context) -> s
     """
     parts = []
     for name in named:
-        body = skills.body(name, scope)
+        # Read into a child's prompt is read at runtime, for the audit (S8).
+        body = skills.body(name, scope, session=session, via="brief")
         if body:
             parts.append(f"## {name}\n\n{body.strip()}")
     if not parts:
@@ -1734,7 +1900,7 @@ class _Parented(Protocol):
 
 class _HasParent(Protocol):
     @property
-    def parent_session(self) -> str | None: ...
+    def delegating_parent(self) -> str | None: ...
 
 
 def reachable_family(sessions: Iterable[_Parented], agent_id: str) -> dict[str, FamilyRole]:
@@ -1745,11 +1911,12 @@ def reachable_family(sessions: Iterable[_Parented], agent_id: str) -> dict[str, 
     the model who it may address must not be able to disagree.
 
     An agent's id is its session's id, so the parent link is
-    `SessionHeader.parent_session` and nothing needs a side index. Sessions are
-    passed in rather than read from a store, so this answers on a resumed log
-    with no live agents as readily as in a running process.
+    `SessionHeader.delegating_parent` and nothing needs a side index — the agent
+    that spawned it, which a fork's `parent_session` is not: a forked root is a
+    root. Sessions are passed in rather than read from a store, so this answers on
+    a resumed log with no live agents as readily as in a running process.
     """
-    parents = {session.id: session.header.parent_session for session in sessions}
+    parents = {session.id: session.header.delegating_parent for session in sessions}
     if agent_id not in parents:
         return {}
     mine = parents[agent_id]
@@ -1784,10 +1951,13 @@ def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> lis
     evidence its grandparent is the only live party left to look at, because the
     child that spawned it settled too.
 
-    An agent's id is its session's id, so the links are `parent_session` and nothing
-    needs a side index. **`(id, parent)` pairs rather than `Session` objects**, which
-    is what lets the collector answer this from a *listing* — a family is narrowed
-    before a single log is read rather than after all of them are.
+    An agent's id is its session's id, so the links are `delegating_parent` — the
+    agent that spawned each one — and nothing needs a side index. Not
+    `parent_session`: a fork names the log it was cut from there, and a fork's
+    trees are its own, not its source's leftovers. **`(id, parent)` pairs rather than
+    `Session` objects**, which is what lets the collector answer this from a
+    *listing* — a family is narrowed before a single log is read rather than after
+    all of them are.
 
     Breadth-first, and cycle-safe by construction: `seen` is tested before descent,
     so a log claiming its own ancestor as a child costs a wasted lookup rather than a
@@ -1827,7 +1997,7 @@ def roster_name(sessions: Iterable[Session], agent_id: str) -> str:
     """
     by_id = {session.id: session for session in sessions}
     session = by_id.get(agent_id)
-    parent = by_id.get(session.header.parent_session or "") if session else None
+    parent = by_id.get(session.header.delegating_parent or "") if session else None
     if parent is None:
         return agent_id
     return _name_in(subagent_roster(parent), agent_id)

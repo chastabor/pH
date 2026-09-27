@@ -5,11 +5,13 @@ profile drop-in, not the session log"), which widened, on review, from an audit 
 allowances into an audit of the whole working environment. The decisions below are the
 user's, taken after the options review of 2026-09-25.*
 
-**Status, 2026-09-26.** S1–S4 are done: the `affects` declaration, the layers by kind
+**Status, 2026-09-27.** S1–S7b are done: the `affects` declaration, the layers by kind
 (decisions 23 and 24), the `models` row, the named profile format with `phern profiles
 show|fold`, each root's `profile/base` in its log, overrides through one door, each
-root mounted from its own log (S5), and a changed named profile held, listed and
-adopted on purpose (S6). S7 is next.
+root mounted from its own log (S5), a changed named profile held, listed and adopted
+on purpose (S6), `/profile show|diff|save|use|clear` (S7), a child's model from its
+parent's list and a profile its parent assigns (S7b), and reading the audit (S8).
+Every step is done; what each left open is under its own entry.
 
 ## The goal
 
@@ -603,19 +605,102 @@ nothing committed by Claude.
     - Not done: a TUI attaching to a root that kept a changed version (pH's alone, or
       declined) says nothing in the terminal; `phern profiles diff` and `phern agents
       doctor` list it. `phern doctor` does not scan stored sessions.
-    - Not done, found in review: a fork's header names its parent (`parent_session`)
-      as a child's does, so `record_base` and `opened` pass it over — a fork started
-      as a root mounts its inherited environment but logs no start options and never
-      switches to a version adopted for it. The two want telling apart by `origin`,
-      as `stored_on` now does. And `session/adopt` on a root held for a decision
-      records the version but leaves the hold and its modal up.
-- [ ] **S7 — `/profile show | diff | save | use | clear`.**
+    - Found in review: a fork's header names its parent (`parent_session`) as a
+      child's does, so `record_base` and `opened` passed it over — a fork started as
+      a root logged no start options and never switched to a version adopted for it.
+      Fixed in S7: a child is told by `origin` (`SessionHeader.is_subagent`). Still open:
+      `session/adopt` on a root held for a decision records the version but leaves
+      the hold and its modal up.
+- [x] **S7 — `/profile show | diff | save | use | clear`.** Done 2026-09-27.
   - *Gate:* tune in a session, save, start a headless run on the saved profile, and the two
     environments match.
-- [ ] **S7b — Subagents: an assigned profile, and a model from the list** (items 8, 9).
+  - Built: `ph_app.daemon.profile_command`, registered by the supervisor on every root
+    beside its ask desk. `show` is `environment_listing` (the base, each override and
+    what asked, and each setting that is not the base's), `--full` every row as it
+    runs; `diff` is S6's listing against the named profile as it composes now. `save`
+    is `ph_app.profiles.save_session`, and `profile/saved {name, path, entries}`
+    (ignorable). `use` is `switch_base` with `clear_all`, then `Root.restart_wanted`,
+    which `DaemonServer._mutate` honors once the command and its key are durable
+    (`Supervisor.restart`, S6's remount, made public). `clear` is
+    `ph.session_profile.clear_overrides`: the clears in one batch, written, then the
+    live mount brought to them through `_converge` — `opened`'s step 3, factored out.
+    Settled in the building:
+    - **`/profile` is the host's, not a row's**, as the ask desk is: it saves to the
+      host's named-profile store and restarts the host's roots, and commands run only
+      in the daemon. So no profile carries or disables it.
+    - **A save is the base's own layers and the overrides, as documents** — the
+      person's layers as the base recorded them, then every override — over the
+      shipped profile the base extends, written sparse. Not the resolved rows: those
+      would pin every pH default as it is today and write `${env:...}` settings as
+      their values. The file is composed again and kept only when it gives the same
+      environment, and taken back otherwise, as `phern profiles fold` does. A name
+      is a file name (`PROFILE_NAME`), and an existing file needs `--replace`.
+    - **`use` restarts the root**, since a base changes rows a live mount cannot
+      follow; it is refused while the agent works or while the root waits on its
+      profile question. `use` of the base's own name takes its current version now,
+      which is what `/profile diff` offers.
+    - **`clear` is live where it can be**: a config override is undone on the running
+      mount; one that turned a row on or off restarts the root.
+    - **A fork is a session of its own**: `SessionHeader.is_subagent` is `origin == "subagent"`.
+    - Not done: a `use` whose new profile fails to mount leaves the session on it —
+      the log holds the switch — and the root failed, where a rollback to the
+      previous base would keep it usable.
+- [x] **S7b — Subagents: an assigned profile, and a model from the list** (items 8, 9).
+  Done 2026-09-27.
   - A spawn names a listed model, or its skill does; an assigned profile narrows within the
     parent's ceiling.
   - *Gate:* a skill naming `classify` starts its child on that route; an unlisted key is
     refused; an assigned profile wider than the parent is refused, naming the row.
-- [ ] **S8 — Reading the audit.** The environment at any seq, in the CLI and the trajectory
-  view, and the skill-read records (decision 12).
+  - Built: `SubagentRequest.model_key` and `profile`. `SubagentService.resolve_model`
+    turns a key — the spawn's, or a named skill's front matter `model:` (`Skill.model`)
+    — into a route through the parent's own `ctx.models`, refusing one the list does
+    not hold; `subagent/admitted` records `modelKey` beside the route, and a child's
+    options carry the key. `resolve_profile` composes a named profile through
+    `ctx.named_profiles` (`ph_app.profiles.NamedProfileStore`, provided by
+    `runtime.mounted` before the rows) and reads it with
+    `ph.seams.subagent_profiles.narrowing` against the parent's mount; the result is
+    written into the request before `check_grant`. `ToolRuntime.registrants` says which
+    row gave each tool. `rlm.run` and `task` take `model` as a key and a new
+    `profile`; the RLM delegation doctrine lists the keys a child can run on.
+    Settled in the building:
+    - **`model` is a key now, not a model name.** A spawn could name any model string on
+      its parent's provider; the list bounds what an agent picks (S1c's settlement). A
+      readmitted child keeps the route it was admitted on and is not resolved again.
+    - **An assigned profile is read, not mounted**, for what a child can hold less of:
+      a row it runs that the parent does not is refused by name; the tools of rows it
+      does not run are taken away; skills by the `skills-progressive` paths; its models
+      default, which the parent must list; and a read-only sandbox default. Everything
+      else it says is the parent's, since the child runs on the parent's mount.
+    - **A ceiling, not defaults**, unlike a preset: tools or skills named beside it may
+      narrow further, and naming more than it gives is refused, as is `access="write"`
+      under a read-only one.
+    - **The host composes it** (`ctx.named_profiles`): ph-core has no named-profile
+      store, and `runtime.mounted` is the one door every phern host mounts through.
+    - Not done: a narrower sandbox than the parent's other than read-only — the
+      allowances (`sandbox-allow`) are mount-wide, so a child cannot hold fewer hosts
+      than its parent; and a skill registered by a row other than `skills-progressive`
+      stays with the child even when its profile drops that row, since the skill
+      registry, unlike the tool registry, keeps no registrant.
+- [x] **S8 — Reading the audit.** The environment at any seq, in the CLI and the trajectory
+  view, and the skill-read records (decision 12). Done 2026-09-27.
+  - Built: `phern profiles session <id> [--at SEQ] [--full]` — the fold of the log's
+    prefix, read through its lineage (`materialize` over `read_stored`, so a fork
+    answers too): `environment_listing` and the skills read by then, or every row as
+    it ran. The trajectory view gives each `profile/*` record a summary
+    (`record_summary`) and, as its detail, the environment it leads to.
+    `ph.seams.skills.record_read` writes an ignorable `skill/read {name, version,
+    path, sha256, via}` for the `skill` tool's read (`via: tool`) and for a named
+    skill's body put in a child's prompt at a spawn (`via: brief`).
+    Settled in the building:
+    - **`phern profiles session` prints the environment, not the base record**: the
+      base, the overrides and what they change, as `/profile show` does, with
+      `--full` for every row. The raw `profile/base` is in the log for anyone who
+      wants the record itself.
+    - **The environment is shown where it changes**: each `profile/*` record in the
+      trajectory carries the environment from that point, rather than every record
+      repeating it.
+    - **A brief is a read**: the body a child is prompted with is recorded in its
+      parent's log, where the admission that caused it is.
+    - Not done: the hash is of the body as read, before a skill's declared inputs
+      are filled in — two reads with different arguments hash the same, which is
+      what "the same instructions" means here.

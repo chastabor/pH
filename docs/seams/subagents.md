@@ -1,7 +1,7 @@
 # `ctx.subagents` — delegation to a child agent, and the handle it returns
 
 **Module:** `ph/seams/subagents.py` · **Rows:** `subagents`, `subagent-presets` ·
-**Also documents:** `ctx.subagent_presets` ·
+**Also documents:** `ctx.subagent_presets`, `ctx.named_profiles` ·
 **Provider:** `rlm-child` (ships with the `rlm` bundle) · **Consumers:**
 `subagent-task`, `rlm-*`
 
@@ -87,6 +87,36 @@ walks the parent scope rather than trusting a claim on the request.
 
 The `task` tool refuses to widen rather than silently narrowing, so a parent
 asking for more than it has gets an error it can act on.
+
+## A model from the list, and a profile a parent assigns (S7b)
+
+A spawn names a model by **key** (`model="classify"`, `SubagentRequest.model_key`),
+and a skill it gives the child may name the one it needs in its front matter
+(`model: classify`). `resolve_model` turns the key into a route through the
+parent's own `models` list (`ctx.models`, the profile as it runs); a key the list
+does not hold is refused, so the models an agent can reach are the ones its
+profile says. `subagent/admitted` records the key beside the route it resolved to.
+Two skills naming different models are refused — name one with `model=`.
+
+`profile="reviewer"` assigns the child a named profile, composed by the host
+(`ctx.named_profiles`, which `ph_app.runtime.mounted` provides) and read by
+`ph/seams/subagent_profiles.py` as a **narrowing on the parent's mount** — a child
+never gets a mount of its own:
+
+- a row the profile runs that the parent's mount does not is refused, naming it;
+- the tools of each row the parent runs and the profile does not are taken away,
+  found by the row that registered them (`ToolRuntime.registrants`);
+- the `skills-progressive` paths must be a subset of the parent's, and only skills
+  found under them stay;
+- the `models` default must be a key the parent lists, and is the child's model;
+- a `read-only` sandbox default makes the child read-only; one wider than the
+  parent's posture is refused.
+
+Everything else the profile says is the parent's, since it is the parent's mount the
+child runs on. The narrowing is written into the request before the ceiling, so
+`check_grant` checks it and the admission records it: a child's reach is fixed when
+it is admitted. What a spawn names beside a profile may narrow it further, and
+naming more than it gives is refused.
 
 ## Guards: a policy asked before the child exists
 

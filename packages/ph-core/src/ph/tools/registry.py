@@ -489,6 +489,13 @@ class ToolRuntime:
             record=definition.name,
         )
 
+    def registrants(self) -> dict[str, Context]:
+        """Each deployment-wide tool by name, and the scope that registered it — the
+        row whose activation it belongs to, for a caller that has to say which tools
+        a row gives (an assigned profile's narrowing, S7b)."""
+        layer = self._layers.get(None)
+        return {} if layer is None else {name: by.owner for name, by in layer.by.items()}
+
     def restrict(self, restriction: ToolRestriction, *, scope: Context | None = None) -> Disposer:
         """Mask global tools for one scope. Restrictions intersect."""
         return self._claim(

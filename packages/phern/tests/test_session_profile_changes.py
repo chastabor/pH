@@ -18,11 +18,18 @@ from typing import Any
 
 import pytest
 from anyio import wait_all_tasks_blocked
-from daemon_helpers import Daemon, allowed_hosts, row_disabled, running, until
+from daemon_helpers import (
+    Daemon,
+    allowed_hosts,
+    logged_types,
+    row_disabled,
+    run_command,
+    running,
+    until,
+)
 from typer.testing import CliRunner
 
 from ph.json import as_obj, as_seq
-from ph.keys import COMMANDS
 from ph.llm import retry
 from ph.paths import resolve_roots
 from ph.session import now_ms
@@ -47,10 +54,6 @@ EDITED = (
 )
 
 
-def _types(session_id: str) -> list[str]:
-    return [event.type for event in logged_events(session_id)]
-
-
 def _environment(session_id: str) -> LoggedEnvironment:
     """What the session's log on disk says about its environment."""
     return recorded_environment(resolve_roots().sessions_dir(), session_id)
@@ -61,7 +64,7 @@ async def _created_then_released(daemon: Daemon, session_id: str) -> Root:
     client = await daemon.client()
     await client.call("session/new", sessionId=session_id, profile="work")
     supervisor = daemon.running.supervisor
-    root = supervisor.roots[session_id]
+    root = daemon.held(session_id)
     await supervisor.passivate(root, now=now_ms())
     return root
 
@@ -147,11 +150,11 @@ async def test_no_starts_it_unchanged_and_is_not_asked_again(tmp_path: Path) -> 
         client = await _person(daemon, "keep", seen)
 
         await client.call("session/attach", sessionId="kept")
-        root = supervisor.roots["kept"]
+        root = daemon.held("kept")
         await until(lambda: not root.held_on_profile, what="the decision")
 
         assert row_disabled(root, "tool-bash"), "unchanged"
-        assert DECLINED in _types("kept")
+        assert DECLINED in logged_types("kept")
         await client.call("session/detach", sessionId="kept")
         await supervisor.passivate(root, now=now_ms())
         again = await supervisor.start("kept", asks=True)
@@ -175,7 +178,7 @@ async def test_a_prompt_held_with_the_root_runs_once_it_is_decided(tmp_path: Pat
         # honor its hold would be mid-turn by now.
         await wait_all_tasks_blocked()
         assert root.status == "needs-profile-decision"
-        assert "turn/start" not in _types("waiting") and "turn/start" not in [
+        assert "turn/start" not in logged_types("waiting") and "turn/start" not in [
             event.type for event in root.session.events
         ]
         seen: list[dict[str, Any]] = []
@@ -186,7 +189,7 @@ async def test_a_prompt_held_with_the_root_runs_once_it_is_decided(tmp_path: Pat
             lambda: any(event.type == "turn/end" for event in root.session.events),
             what="the held turn",
         )
-        assert _types("waiting").count(DECLINED) == 0, "`later` records nothing"
+        assert logged_types("waiting").count(DECLINED) == 0, "`later` records nothing"
 
 
 async def test_yes_takes_the_new_version_keeps_the_overrides_then_the_start_options(
@@ -203,20 +206,18 @@ async def test_yes_takes_the_new_version_keeps_the_overrides_then_the_start_opti
         supervisor = daemon.running.supervisor
         client = await daemon.client()
         await client.call("session/new", sessionId="moved", profile="work")
-        first = supervisor.roots["moved"]
-        shown = await first.ctx.require(COMMANDS).dispatch(
-            "/sandbox allow host example.com", session=first.session
-        )
-        assert "now reachable" in str(shown)
+        first = daemon.held("moved")
+        shown = await run_command(first, "/sandbox allow host example.com")
+        assert "now reachable" in shown
         await supervisor.passivate(first, now=now_ms())
         write_profile("work", EDITED)
         seen: list[dict[str, Any]] = []
         person = await _person(daemon, "adopt", seen)
 
         await person.call("session/attach", sessionId="moved")
-        held = supervisor.roots["moved"]
+        held = daemon.held("moved")
         await until(lambda: supervisor.roots.get("moved") not in (None, held), what="the remount")
-        back = supervisor.roots["moved"]
+        back = daemon.held("moved")
 
         assert row_disabled(back, "tool-result-offload"), "the new version"
         assert "example.com" in allowed_hosts(back), "the override, kept"
@@ -258,14 +259,14 @@ def test_adopt_moves_every_session_on_the_profile_and_each_keeps_its_overrides()
     assert "second, first:" in listed.output or "first, second:" in listed.output, listed.output
     assert adopted.exit_code == 0, adopted.output
     for session_id, row in (("first", "tool-fs"), ("second", "tool-attach")):
-        assert _types(session_id).count(ADOPTED) == 1
+        assert logged_types(session_id).count(ADOPTED) == 1
         again = runner.invoke(app, ["-p", "again", "--session", session_id])
         assert again.exit_code == 0, again.output
         env = _environment(session_id)
         rows = {as_obj(one).get("id"): as_obj(one) for one in not_none(env.base).rows}
         assert rows["tool-result-offload"]["disabled"] is True, "the adopted version is the base"
         assert [one.row for one in env.overrides] == [row], "its own override, kept"
-        assert _types(session_id).count(BASE) == 2
+        assert logged_types(session_id).count(BASE) == 2
 
 
 async def test_adopt_goes_through_the_daemon_that_holds_a_session(tmp_path: Path) -> None:
@@ -275,7 +276,7 @@ async def test_adopt_goes_through_the_daemon_that_holds_a_session(tmp_path: Path
     async with running(tmp_path, path=resolve_roots().daemon_socket()) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="live", profile="work")
-        root = daemon.running.supervisor.roots["live"]
+        root = daemon.held("live")
         write_profile("work", EDITED)
 
         lines, missed = await adopt_version("work", ["live"], named_version("work"))

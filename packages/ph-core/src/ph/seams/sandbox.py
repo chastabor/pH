@@ -50,7 +50,7 @@ from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
-from ..cordis import Context, Disposer, Running, plugin, running
+from ..cordis import Context, Disposer, Profile, Running, interpolate, plugin, running
 from ..json import JsonValue, as_str
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical
@@ -952,6 +952,16 @@ class Config(WireModel):
     """Row config for the policy-only sandbox provider."""
 
     default_mode: SandboxMode = "read-only"
+
+
+def default_mode_of(profile: Profile) -> SandboxMode | None:
+    """The posture `profile`'s `sandbox-policy` row starts a session in, read without
+    mounting it — `None` when it has no such row. Here, beside the row, so a reader
+    of another profile (an assigned child's, S7b) asks the row's own model."""
+    row = next((one for one in profile.enabled_rows() if one.name == "sandbox-policy"), None)
+    if row is None:
+        return None
+    return Config.model_validate(interpolate(row.config) or {}).default_mode
 
 
 @plugin("sandbox-policy", affects="environment", config=Config)

@@ -168,11 +168,11 @@ def test_a_session_s_base_can_be_read_back_from_its_log() -> None:
     )
 
     shown = runner.invoke(app, ["profiles", "session", "audited"])
+    full = runner.invoke(app, ["profiles", "session", "audited", "--full"])
 
     assert shown.exit_code == 0, shown.output
-    read = yaml.safe_load(shown.stdout)
-    assert read["name"] == "work"
-    assert _by_id(read["rows"])["tool-bash"]["disabled"] is True
-    assert read["sources"][0]["layer"].endswith("work.yaml")
+    assert "Base: work (pH " in shown.output, "the environment, as `/profile show` says it (S8)"
+    rows = yaml.safe_load(full.stdout)
+    assert _by_id(rows)["tool-bash"]["disabled"] is True
     missing = runner.invoke(app, ["profiles", "session", "nobody"])
     assert missing.exit_code == 2 and "no session" in missing.output

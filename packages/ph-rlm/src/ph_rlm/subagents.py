@@ -72,6 +72,7 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     SubagentStatus,
     admission_payload,
+    child_model_key,
     child_route,
     default_child_name,
 )
@@ -340,7 +341,11 @@ class RlmChildProvider:
         # leave a phantom child in an append-only roster. It does not *run* yet,
         # so the ordering the log cares about still holds.
         options = replace(
-            parent.options, provider=provider_name, model=model, reasoning_effort=effort
+            parent.options,
+            provider=provider_name,
+            model=model,
+            reasoning_effort=effort,
+            model_key=child_model_key(request),
         )
         try:
             # `parent=` nests the child's scope inside its parent's (P6-27), so

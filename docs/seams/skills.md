@@ -43,6 +43,7 @@ which is honest: the model was genuinely told something new.
 | `parameters` | declared inputs, validated before the body is rendered |
 | `steps` | the playbook, seeded into the todo list |
 | `allowed_tools` | what this skill may reach |
+| `model` | the listed model a child this skill directs runs on, by key (`model: classify`) |
 | `hint` | |
 
 `parameters` and `steps` are what make a skill a *playbook* rather than a
@@ -52,6 +53,13 @@ because an author writing `Run {{parameters.gate}}` in a step otherwise got the
 literal placeholder in the todo list while the instructions got the value, which
 is one procedure spelled two ways in the one place the model cannot go back and
 check.
+
+**Every read is recorded, for the audit** (session profiles, S8, decision 12). The
+`skill` tool, and a spawn that puts a named skill's body in its child's prompt, each
+log an ignorable `skill/read {name, version, path, sha256, via}` — the hash of exactly
+the text read. It never blocks a read and never makes a restart ask: skills are meant
+to keep being refined, so a session's base records only the directories they are
+found in, and `phern profiles session <id>` lists which text of each was read.
 
 ## The surface
 

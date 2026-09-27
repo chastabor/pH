@@ -44,6 +44,9 @@ def _log(
         id=session_id,
         created_at=1,
         parent_session=parent or None,
+        # A child names the agent that spawned it and says it is a sub-agent's log,
+        # which is how a family walk tells it from a fork.
+        origin="subagent" if parent else None,
         # A child shares its parent's lineage; these parents are all roots, whose
         # family is their own id.
         family=parent or session_id,

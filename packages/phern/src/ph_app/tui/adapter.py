@@ -1262,6 +1262,11 @@ RECORDLESS: frozenset[str] = frozenset(
         "profile/adopted",
         "profile/declined",
         "profile/override-cleared",
+        # `/profile save` (S7): the command's own row says what it wrote.
+        "profile/saved",
+        # A skill's body read, hashed for the audit (S8): the `skill` call that read
+        # it is already the transcript's row.
+        "skill/read",
         "step/start",
         "step/end",
         # A model call made again (P1). The transcript shows the answer, and

@@ -95,6 +95,7 @@ caller's own content hash.
 | [`ctx.models`](models.md) | `seams/models.py` | The models a profile lists, and which one a root runs on. |
 | [`ctx.subagents`](subagents.md) | `seams/subagents.py` | Delegation to a child agent, and the handle it returns. |
 | [`ctx.subagent_presets`](subagents.md) | `seams/subagents.py` | The named grants a child may be admitted under — documented with the delegation it configures. |
+| [`ctx.named_profiles`](subagents.md) | `seams/subagent_profiles.py` | A named profile a parent assigns its child, composed by the host and read as a narrowing on the parent's mount. |
 | [`ctx.jobs`](jobs.md) | `seams/jobs.py` | Background work with a handle, a cancel and a completion. |
 | [`ctx.schedule`](schedule.md) | `seams/schedule.py` | Work a root will do later, folded from its own log (P5-06). |
 | [`ctx.goals`](goals.md) | `seams/goals.py` | An objective, a budget, and the gates that decide it (P5-07). |

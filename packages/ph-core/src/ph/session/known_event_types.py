@@ -190,6 +190,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "profile/adopted",
         "profile/declined",
         "profile/override-cleared",
+        # The session's environment saved as a named profile (S7): ignorable, since
+        # it changes nothing the session runs with.
+        "profile/saved",
+        # A skill's body read at runtime, hashed, for the audit (S8, decision 12).
+        # Ignorable: a skill's version never stops a task or makes a restart ask.
+        "skill/read",
         "permission/preset",
         "sandbox/mode",
         # A confined command refused something (P6-38): a host the egress proxy
@@ -433,6 +439,10 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # skipped, the session starts on the base it has, or is asked once more.
         "profile/adopted",
         "profile/declined",
+        # A save changes nothing the session runs with (S7).
+        "profile/saved",
+        # The audit of what a skill said when it was read (S8).
+        "skill/read",
     }
 )
 """Types a *different* build may skip without misreading the rest of the log.
@@ -532,6 +542,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.seams.goals": frozenset({"goal/continued", "goal/gate", "goal/set", "goal/settled"}),
         "ph.seams.permission_presets": frozenset({"permission/preset"}),
         "ph.seams.sandbox": frozenset({"sandbox/denied", "sandbox/mode"}),
+        "ph.seams.skills": frozenset({"skill/read"}),
         "ph.seams.schedule": frozenset(
             {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
         ),
@@ -556,6 +567,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "profile/declined",
                 "profile/override",
                 "profile/override-cleared",
+                "profile/saved",
             }
         ),
         "ph.session.store": frozenset({"session/segmented"}),

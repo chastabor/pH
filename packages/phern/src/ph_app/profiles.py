@@ -24,12 +24,14 @@ layer is refused by `compose_rows`, naming the configuration it belongs in.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, TypeAlias
 
 import typer
+from pydantic import ValidationError
 
 from ph.bundles import BASE, HEADLESS, resolve_bundle
 from ph.cordis import (
@@ -44,12 +46,14 @@ from ph.cordis.loader import safe_yaml_load
 from ph.cordis.plugin import Affects
 from ph.documents import decode_document
 from ph.host import host_config_path, load_host_config
+from ph.json import JsonObject
 from ph.paths import PathRoots, resolve_roots, write_atomic
 from ph.session_profile import (
     LoggedEnvironment,
     ProfileBase,
     ProfileChange,
     base_of,
+    override_documents,
     profile_change,
     rebuilt,
 )
@@ -61,14 +65,17 @@ from .sessions import recorded_environment
 
 __all__ = [
     "DEFAULT_PROFILE",
+    "NAMED",
     "PRESENTATION",
     "PROFILES",
     "PROFILE_DIR",
     "Bundle",
     "ModelOption",
+    "NamedProfileStore",
     "ProfileOption",
     "ProfilePlan",
     "ProviderOption",
+    "SaveRefused",
     "StartingProfile",
     "available_profiles",
     "base_documents",
@@ -86,6 +93,7 @@ __all__ = [
     "read_named_profile",
     "resolve_profile",
     "save_named_profile",
+    "save_session",
     "session_profile",
     "sparse_text",
     "start_documents",
@@ -569,6 +577,75 @@ def save_named_profile(name: str, profile: Profile, *, extends: str, comment: st
     return path
 
 
+class SaveRefused(RuntimeError):
+    """`/profile save` wrote nothing: the name, the file, or the round trip refused it."""
+
+
+PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+"""What a saved profile may be called: a file name under `$PH_HOME/profiles`, and a
+word `--profile` takes — no separator, so it cannot name a file anywhere else."""
+
+
+def save_session(
+    name: str, env: LoggedEnvironment, *, comment: str, replace: bool = False
+) -> tuple[Path, list[JsonObject]]:
+    """A session's environment as the sparse named profile `name` (S7, decision 5).
+
+    **The base merged with the overrides**, as documents: the person's own layers its
+    base was composed from, as recorded then, and every override after them, over the
+    shipped profile that base extends. Composed rather than resolved, so what the
+    person wrote — an `${env:...}` setting, a sparse config — is written as they wrote
+    it, and pH's own defaults are left to pH. Then only the rows that differ
+    (`sparse_entries`), and the file composed again: kept only when it gives the
+    environment the documents do, and taken back otherwise, as `phern profiles fold`
+    does. Returns the file and the entries written.
+
+    :raises SaveRefused: for a name that is not a file name, a file that exists
+        without `replace`, a base with no named profile to extend, or a round trip
+        that does not agree.
+    """
+    if not PROFILE_NAME.match(name):
+        raise SaveRefused(f'"{name}" is not a profile name: letters, digits, ".", "_" and "-"')
+    base = env.base
+    if base is None or not base.name:
+        raise SaveRefused(
+            "this session started on a profile file, not a named profile, so there is "
+            "no shipped profile to save it over"
+        )
+    path = resolve_roots().profile_overlay(name)
+    if path.exists() and not replace:
+        raise SaveRefused(f"{path} exists; `--replace` writes over it")
+    plan = profile_plan(base.name)
+    extends = plan.named.extends if plan.named is not None else base.name
+    shipped = base_documents(extends)
+    wanted = [
+        *shipped,
+        *(
+            ProfileDocument(source.layer, list(source.entries), sets="environment")
+            for source in base.sources
+        ),
+        *override_documents(env.overrides),
+    ]
+    composed = Profile.from_documents(wanted, name=name)
+    entries = sparse_entries(compose_rows(shipped), composed.rows)
+    original = path.read_text(encoding="utf-8") if path.exists() else None
+    write_atomic(path, render_named_profile(extends, entries, comment=comment))
+    try:
+        agrees = compose_profile(name).resolved({"environment"}) == composed.resolved(
+            {"environment"}
+        )
+        failure = "" if agrees else "composed again, it gives a different environment"
+    except (LoaderError, OSError, ValueError, ValidationError) as error:
+        failure = detail(error)
+    if failure:
+        if original is None:
+            path.unlink()
+        else:
+            write_atomic(path, original)
+        raise SaveRefused(f"{name}: not saved — {failure}; {path} is as it was")
+    return path, entries
+
+
 def sparse_text(profile: Profile, *, extends: str, comment: str) -> str:
     """`profile` as the text of a sparse named profile over `extends`: only the rows
     that differ from it (`sparse_entries`)."""
@@ -674,6 +751,18 @@ def log_host(name: str) -> Profile:
     """
     rows = [row.to_entry() for row in compose_profile(name).rows_of({"deployment"})]
     return Profile.from_documents([ProfileDocument("host", rows)], name=profile_name(name))
+
+
+class NamedProfileStore:
+    """`ctx.named_profiles` — the named profiles this host composes (S7b): a profile a
+    parent assigns its child is read from here as the narrowing it is."""
+
+    def compose(self, name: str) -> Profile:
+        return compose_profile(name)
+
+
+NAMED = NamedProfileStore()
+"""The one store: it holds nothing, so every mount may share it."""
 
 
 def compose_profile(name: str, *, then: Sequence[ProfileDocument] = ()) -> Profile:

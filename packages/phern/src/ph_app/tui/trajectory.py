@@ -32,8 +32,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 from ph.json import as_int, as_obj, as_seq, as_str
+from ph.seams.skills import read_summary
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
+from ph.session_profile import EnvironmentFold, environment_listing, record_summary
 from ph.text import block_marker, count_of
 
 from ..wire import describe, message_of, one_line, result_block, source_of, text_of_wire
@@ -189,6 +191,9 @@ class _Builder:
     _step_started: int | None = None
     _first_chunk: int | None = None
     _system: str = ""
+    _profile: EnvironmentFold = field(default_factory=EnvironmentFold)
+    """The `profile/*` records so far, folded one at a time: the environment at the
+    record being built (S8)."""
 
     def add(self, **fields: Any) -> TrajectoryRecord:  # noqa: ANN401
         record = TrajectoryRecord(index=len(self.records) + 1, **fields)
@@ -294,14 +299,17 @@ class _Builder:
             turn=self.turn,
         )
 
-    def on_event(self, event: SessionEvent, title: str, summary: str) -> None:
-        """A harness fact with no conversational kind."""
+    def on_event(
+        self, event: SessionEvent, title: str, summary: str, detail: str | None = None
+    ) -> None:
+        """A harness fact with no conversational kind; its detail is its summary
+        unless it has more to say."""
         self.add(
             kind="event",
             source_seq=event.seq,
             title=title,
             summary=summary,
-            detail=summary,
+            detail=summary if detail is None else detail,
             source=SourceRef(kind="harness", name=event.type),
             turn=self.turn,
         )
@@ -381,6 +389,24 @@ def _on_harness_event(builder: _Builder, event: SessionEvent) -> None:
     builder.on_event(event, event.type, _describe(event))
 
 
+def _on_profile_record(builder: _Builder, event: SessionEvent) -> None:
+    """A change to the environment, and the environment it leads to (S8, item 11).
+
+    The detail is the environment at this seq — the base in force and the overrides
+    logged up to here, folded as a restart would fold them — so an auditor reads what
+    the agent ran in from this point, not only what moved.
+    """
+    builder._profile.step(event.type, event.data)
+    summary = record_summary(event.type, event.data)
+    listing = environment_listing(builder._profile.environment)
+    builder.on_event(event, event.type, summary, "\n".join([summary, "", *listing]))
+
+
+def _on_skill_read(builder: _Builder, event: SessionEvent) -> None:
+    """Which text of a skill an agent read, by hash (S8, decision 12)."""
+    builder.on_event(event, event.type, f"read skill {read_summary(event.data)}")
+
+
 Handler = Callable[["_Builder", SessionEvent], None]
 
 HANDLERS: Mapping[str, Handler] = {
@@ -415,13 +441,17 @@ HANDLERS: Mapping[str, Handler] = {
     "permission/preset": _on_harness_event,
     # The environment the session started in (session profiles, S3) — the first
     # thing an audit of a run asks, and nothing a conversation shows.
-    "profile/base": _on_harness_event,
+    "profile/base": _on_profile_record,
     # And each deviation from it (S4): what asked, and what changed.
-    "profile/override": _on_harness_event,
+    "profile/override": _on_profile_record,
     # And what a person decided about a named profile that moved (S6).
-    "profile/adopted": _on_harness_event,
-    "profile/declined": _on_harness_event,
-    "profile/override-cleared": _on_harness_event,
+    "profile/adopted": _on_profile_record,
+    "profile/declined": _on_profile_record,
+    "profile/override-cleared": _on_profile_record,
+    # A named profile written from this session's environment (S7).
+    "profile/saved": _on_profile_record,
+    # A skill's body read at runtime, hashed (S8, decision 12).
+    "skill/read": _on_skill_read,
     "sandbox/mode": _on_harness_event,
     "sandbox/denied": _on_harness_event,
     "command/run": _on_harness_event,

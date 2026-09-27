@@ -1149,7 +1149,7 @@ class WorkspaceSeam:
         containment = self.ctx.get(CONTAINMENT)
         if containment is None:
             return None
-        child = session is not None and session.header.origin == "subagent"
+        child = session is not None and session.header.is_subagent
         chosen: ContainmentTier | None = containment.for_role(child=child)
         return chosen
 
@@ -1915,7 +1915,7 @@ def stored_survivors(
     wanted = (
         set(touched)
         if not family
-        else set(descendants(((one.session_id, one.parent) for one in listed), family))
+        else set(descendants(((one.session_id, one.delegating_parent) for one in listed), family))
     )
     for entry in listed:
         if entry.session_id not in wanted:
@@ -1947,7 +1947,7 @@ def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[Workspa
     listing is an ordinary answer.
     """
     by_id = {session.id: session for session in sessions}
-    lineage = [(session.id, session.header.parent_session) for session in sessions]
+    lineage = [(session.id, session.header.delegating_parent) for session in sessions]
     return [
         record
         for one in descendants(lineage, agent_id)
@@ -2076,7 +2076,7 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     ) -> PreStepDecision:
         agent = request.agent
         if ctx.require(WORKSPACE).of(agent.id) is None:
-            if request.session.header.origin == "subagent":
+            if request.session.header.is_subagent:
                 # Refused rather than answered: see `ChildWorkspaceMissing`. The
                 # test is the seam's own — `_chosen_tier` reads the same field to
                 # decide which rung a child gets, so "is this a child" has one

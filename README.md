@@ -259,7 +259,8 @@ rows:
 phern profiles show work            # what the file sets
 phern profiles show work --full     # every setting a session on it runs with, defaults included
 phern profiles fold                 # fold drop-ins and old list-format files into one file each
-phern profiles session <id>         # the profile a session started in, from its log
+phern profiles session <id>         # the environment a session ran in, and the skills it read
+phern profiles session <id> --at N  # the same at seq N of its log (--full: every row)
 phern profiles diff work            # what each session on it would change, to take its current version
 phern profiles adopt work           # take it, at each session's next start (--session <id>, --yes)
 ```
@@ -283,6 +284,21 @@ new version. A start nobody is there to answer — a schedule's, or `phern -p` �
 the session's version and says so, and so does a change that is only pH's own defaults
 moving under a file you did not edit. `phern profiles adopt` takes a new version on
 purpose, for every session on the profile, without starting any of them.
+
+Inside a session, `/profile` manages its profile:
+
+```text
+/profile show [--full]        the base, each override and what asked for it, and what they change
+/profile diff                 how the session's named profile has moved since it started
+/profile save <name>          the session's environment as a named profile (--replace to overwrite)
+/profile use <name> [--clear] run the session on another named profile, its overrides kept or cleared
+/profile clear [row]          stop one override, or all of them, from applying
+```
+
+So a profile is tuned in a TUI session and saved to run headless: `/sandbox allow` and
+`/model` there, `/profile save work`, then `phern -p … --profile work` starts on the same
+environment. `/profile use` restarts the session on the new profile; `/profile use` of
+the name it already runs on takes that profile's current version.
 
 `daemon.yaml` can also move where sessions and profiles are kept. It is read
 when a process starts:

@@ -72,6 +72,7 @@ class RunArgs(ToolModel):
     prompt: str
     name: str | None = None
     model: str | None = None
+    """A model your profile lists, by key; `None` runs the child on your own (S7b)."""
     thinking: str | None = None
     access: Access = "read"
     """`read` | `write`. Defaults to `read` (E4): a child that only needs to read
@@ -88,6 +89,9 @@ class RunArgs(ToolModel):
     tools: tuple[str, ...] | None = None
     """Tools the child may call. `None` gives it everything you have. You cannot
     name a tool you do not have."""
+    profile: str | None = None
+    """A named profile for the child: it keeps only what that profile runs of what
+    you hold. One that would give it more than you have is refused (S7b)."""
 
 
 class DeleteArgs(ToolModel):
@@ -154,7 +158,8 @@ async def apply(ctx: Context, config: Config) -> None:
                 scope=run.scope,
                 name=args.name,
                 reasoning_effort=args.thinking,
-                model=args.model,
+                model_key=args.model,
+                profile=args.profile,
                 access=args.access,
                 preset=args.preset,
                 skills=args.skills,

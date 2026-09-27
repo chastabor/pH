@@ -42,12 +42,13 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_a_root_records_its_base_and_a_child_or_fork_does_not(mount: MountProfile) -> None:
-    """Sabotage: drop the `parent_session` check, and the child records a base of
-    its own — the fork too, over the one it inherited."""
+    """A child is a sub-agent's log (`origin`); a fork names its parent too, and is a
+    session of its own that already holds its root's base. Sabotage: drop the
+    `is_subagent` check, and the child records a base of its own."""
     ctx = await mount()
     sessions = ctx.require(SESSIONS)
     root = sessions.create("root")
-    child = sessions.create("child", meta={"parent_session": "root"})
+    child = sessions.create("child", meta={"parent_session": "root", "origin": "subagent"})
 
     recorded = await record_base(ctx, root)
     fork = sessions.fork(root, child_session_id="fork")

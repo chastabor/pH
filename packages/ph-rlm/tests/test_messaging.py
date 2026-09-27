@@ -23,7 +23,7 @@ from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
 from ph.persistence import resume_session
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
-from ph.session import Session, SessionEvent, outcome_of
+from ph.session import Session, SessionEvent, SessionHeader, outcome_of
 from ph.session.json import freeze_json_value
 from ph.session.kinds import TOOL_DISPATCH
 from ph.testing import (
@@ -112,7 +112,7 @@ def test_the_reach_rule_and_its_enumeration_are_one_implementation() -> None:
 
     class _Header:
         def __init__(self, parent: str | None) -> None:
-            self.parent_session = parent
+            self.delegating_parent = parent
 
     class _Session:
         def __init__(self, session_id: str, parent: str | None) -> None:
@@ -138,12 +138,65 @@ def test_the_reach_rule_and_its_enumeration_are_one_implementation() -> None:
         reach = reachable_family(sessions, one.id)
         for two in sessions:
             predicate = family_reach(
-                sender_parent=one.header.parent_session,
+                sender_parent=one.header.delegating_parent,
                 sender_id=one.id,
-                target_parent=two.header.parent_session,
+                target_parent=two.header.delegating_parent,
                 target_id=two.id,
             )
             assert (two.id in reach) is predicate
+
+
+def test_a_forked_root_is_a_root_and_not_a_child_of_its_source() -> None:
+    """A fork names the log it continues in `parent_session`, as a child names the
+    agent that spawned it. Read as a parent, it made a forked root its source's child:
+    reaching the source as its parent and the source's children as its siblings, and
+    out of reach of the other roots. Sabotage: read `parent_session` in
+    `reachable_family` again, and the fork's family is its source's."""
+    sessions = [
+        Session("root", header=SessionHeader(id="root", created_at=1)),
+        Session(
+            "kid",
+            header=SessionHeader(id="kid", created_at=1, parent_session="root", origin="subagent"),
+        ),
+        Session(
+            "branch",
+            header=SessionHeader(id="branch", created_at=1, parent_session="root", kind="fork"),
+        ),
+    ]
+
+    assert reachable_family(sessions, "branch") == {"branch": "self", "root": "sibling"}
+    assert reachable_family(sessions, "root") == {
+        "root": "self",
+        "kid": "child",
+        "branch": "sibling",
+    }
+
+
+async def test_a_forked_root_has_no_parent_and_its_siblings_are_the_roots(
+    family_ctx: MountedRuntime,
+) -> None:
+    """Live, and on resume. A forked root sends to the root it was cut from as a
+    sibling, and to no parent; after a crash the sibling send is found in that root's
+    log, because the roots are where a root's siblings are — and the source's send to
+    the branch is found in the branch's. Sabotage: read `parent_session` in
+    `messaging.candidates` again, and one of the two delivered sends reads as never
+    made or unknown."""
+    ctx, session, root = await family_ctx()
+    branch = ctx.require(SESSIONS).fork(session, child_session_id="branch")
+    sender = ctx.require(AGENTS).create(branch, FAKE_OPTIONS)
+
+    orphaned = await _send(ctx, sender, branch, message="anyone?", receiver_role="parent")
+    arguments = {"message": "from the branch", "receiver_role": "sibling"}
+    sent = await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=branch)
+
+    assert orphaned.is_error is True
+    assert 'no family member has the role "parent"' in orphaned.error.message
+    assert sent.is_error is False
+    assert isinstance(await _reconciled(ctx, branch, "call-1", arguments), tuple)
+    # And the other way: the branch is one of the roots its source's sends can reach.
+    back = {"message": "to the branch", "receiver_role": "sibling"}
+    assert (await run_tool(ctx, SEND_TOOL, back, agent=root, session=session)).is_error is False
+    assert isinstance(await _reconciled(ctx, session, "call-1", back), tuple)
 
 
 async def test_a_child_reaches_its_parent(family_ctx: MountedRuntime) -> None:

@@ -840,6 +840,7 @@ async def test_a_listing_row_says_the_same_thing_from_either_backend(
         "modified",
         "cwd",
         "parent",
+        "delegating_parent",
         "family",
     }, "a new listing field belongs in `stored_row`, where both backends get it"
 
