@@ -9,6 +9,7 @@ scopes whose disposal unwinds every registration and every acquired artifact
 
 from __future__ import annotations
 
+from .child_limit import ChildLimit, ChildReach, NarrowingRefused, Narrows
 from .context import (
     ABANDONED_LEDGER,
     DEPLOYMENT,
@@ -32,6 +33,7 @@ from .context import (
     is_bailed,
     maybe_await,
     releasing,
+    remove_identical,
     running,
     settled,
     settled_or_none,
@@ -63,6 +65,7 @@ from .loader import (
     sparse_entries,
 )
 from .plugin import PluginSpec, normalize_plugin, plugin
+from .scoped import ScopedEntries, ScopedTable
 
 __all__ = [
     "ABANDONED_LEDGER",
@@ -72,6 +75,8 @@ __all__ = [
     "GRACE_SECONDS",
     "Abandoned",
     "Boundary",
+    "ChildLimit",
+    "ChildReach",
     "Context",
     "CordisError",
     "Deployment",
@@ -89,12 +94,16 @@ __all__ = [
     "MaybeAwaitable",
     "Mount",
     "MountRefusal",
+    "NarrowingRefused",
+    "Narrows",
     "Next",
     "PluginSpec",
     "Profile",
     "ProfileDocument",
     "Row",
     "Running",
+    "ScopedEntries",
+    "ScopedTable",
     "ServiceConflictError",
     "ServiceKey",
     "ServiceNotFoundError",
@@ -112,6 +121,7 @@ __all__ = [
     "normalize_plugin",
     "plugin",
     "releasing",
+    "remove_identical",
     "resolve_plugin",
     "running",
     "safe_yaml_load",

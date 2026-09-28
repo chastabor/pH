@@ -1538,6 +1538,9 @@ UNBOUND: dict[str, str] = {
     "_FrontEnd.drawn": "TUI presentation, outside the pipeline",
     "_FrontEnd.present": "TUI presentation, outside the pipeline",
     "_Layer.guards": "a monotonic policy answer, read on the deny path",
+    # Asked, at a spawn, what a child of this row holds back — a `ChildLimit` or a
+    # refusal. The child it limits does not exist yet, so there is nothing to register on.
+    "PluginSpec.narrows": "a policy answer read at a spawn; the child does not exist yet",
     # Asked "is anyone there?" at the moment a question is about to be put, and
     # answers yes or no. Nothing to register — and it is consulted *before* the
     # ask is committed, so there is no execution for it to belong to yet.

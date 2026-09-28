@@ -9,21 +9,39 @@ profile semantics.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
-from ph.cordis import Context, Profile
+from pydantic import ValidationError
+
+from ph.cordis import Context, LoaderError, MountRefusal, Profile
 from ph.keys import AGENTS, NAMED_PROFILES, SESSIONS
-from ph.persistence import open_session
+from ph.persistence import open_session, stored_session
 from ph.seams.models import ModelChoice, choose, start_on
 from ph.session import Session
+from ph.session_profile import (
+    LoggedEnvironment,
+    logged_environment,
+    withdraw_adoption,
+    withdrawn_note,
+)
+from ph.wire import validation_summary
 
 from .attach import ingest, prompt_message
 from .console import err
-from .profiles import NAMED, kept_note, session_profile
+from .profiles import NAMED, StartingProfile, host_rows, kept_note, session_profile
 
-__all__ = ["mounted", "prompted"]
+__all__ = ["mount_session", "mounted", "prompted"]
+
+log = logging.getLogger(__name__)
+
+_REFUSED = (LoaderError, MountRefusal, ValidationError)
+"""What a profile's own refusal to mount is: a row that does not resolve, one that
+declines on purpose, a config its model rejects. Anything else — a disk that filled,
+a bug in a row — is a start failing, not the profile."""
 
 
 @asynccontextmanager
@@ -61,6 +79,64 @@ async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIter
         await ctx.dispose()
 
 
+async def mount_session(
+    exits: AsyncExitStack,
+    session_id: str | None,
+    requested: Profile,
+    *,
+    recorded: LoggedEnvironment | None = None,
+    project: Path | None = None,
+) -> tuple[Context, StartingProfile]:
+    """A session mounted on `exits` in its own log's environment (`session_profile`),
+    and **the one rule for a version the loader refuses**, for every host that starts
+    one — the daemon's roots, `phern -p`, rpc.
+
+    Every base change after the first is a pending adoption the next start applies
+    (`/profile use`, a "yes" to a moved profile, `phern profiles adopt`), so a version
+    that does not mount would be mounted again at every start, and the session would
+    never open again. It is withdrawn instead — `profile/withdrawn`, under the
+    session's lease on a mount of the host's rows alone — and the session mounted on
+    the version it had; `StartingProfile.withdrawn` says so, for a host with somebody
+    to tell. Only the profile's own refusals withdraw (`_REFUSED`): anything else fails
+    the start as any start fails, and takes nothing back the next might mount.
+    """
+    starting = session_profile(session_id, requested, recorded=recorded)
+    try:
+        ctx = await exits.enter_async_context(mounted(starting.profile, project=project))
+    except _REFUSED as error:
+        adopting = starting.adopting
+        if not session_id or adopting is None:
+            raise
+        reason = _refusal(error)
+        log.warning(
+            "ph_app: session %s: the adopted version of %s did not start (%s); "
+            "withdrawing it and starting on the version it had",
+            session_id,
+            adopting.name,
+            reason,
+        )
+        async with mounted(host_rows(requested)) as host:
+            session = await stored_session(host, session_id)
+            await withdraw_adoption(host, session, reason=reason)
+            # Read from the session just written, which now says the version was
+            # taken back — one store for the write and the read.
+            recorded = logged_environment(session)
+        starting = replace(
+            session_profile(session_id, requested, recorded=recorded),
+            withdrawn=withdrawn_note(adopting.name, reason),
+        )
+        ctx = await exits.enter_async_context(mounted(starting.profile, project=project))
+    return ctx, starting
+
+
+def _refusal(error: LoaderError | MountRefusal | ValidationError) -> str:
+    """Why a profile would not mount, in one line for its log and a person: pydantic's
+    own message runs to a paragraph per field, with a link each."""
+    if isinstance(error, ValidationError):
+        return validation_summary(error, root="config")
+    return str(error)
+
+
 @asynccontextmanager
 async def prompted(
     profile: Profile,
@@ -86,13 +162,16 @@ async def prompted(
 
     **A resumed session mounts in its own log's environment** (S5): `profile` is what
     a new one is created on, and one that already has a base comes back as its log
-    says (`session_profile`), whatever `--profile` this run was given. A named profile
-    that moved since is kept, and said on stderr (S6): nobody is here to ask.
+    says (`mount_session`), whatever `--profile` this run was given. A named profile
+    that moved since is kept, and said on stderr (S6): nobody is here to ask. So is an
+    adopted version the loader refused, which this start took back.
     """
-    starting = session_profile(session_id, profile)
-    if starting.change is not None and session_id:
-        err.print(kept_note(starting.change, session_id), style="yellow", markup=False)
-    async with mounted(starting.profile) as ctx:
+    async with AsyncExitStack() as exits:
+        ctx, starting = await mount_session(exits, session_id, profile)
+        if starting.withdrawn:
+            err.print(starting.withdrawn, style="yellow", markup=False)
+        elif starting.change is not None and session_id:
+            err.print(kept_note(starting.change, session_id), style="yellow", markup=False)
         # Resolved inside the mount, which is the only place that knows which
         # providers an adapter serves — and before the session opens, so a route
         # nothing can run leaves the command as its refusal with nothing on disk.

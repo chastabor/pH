@@ -206,6 +206,12 @@ class FrontSession(Protocol):
         """The models this session's profile lists, the default first."""
         ...
 
+    @property
+    def arrival(self) -> str:
+        """What the person should know about this session as they arrive, once — a
+        named profile that moved past the version it runs on (S6) — or `""`."""
+        ...
+
     async def choose_model(self, choice: ModelChoice) -> RootDescription:
         """Run this session on `choice` from its next request, or raise the refusal."""
         ...

@@ -190,6 +190,9 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "profile/adopted",
         "profile/declined",
         "profile/override-cleared",
+        # An adopted version a start could not mount, taken back with the reason.
+        # Required: a reader that skipped it would apply the adoption again.
+        "profile/withdrawn",
         # The session's environment saved as a named profile (S7): ignorable, since
         # it changes nothing the session runs with.
         "profile/saved",
@@ -568,6 +571,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "profile/override",
                 "profile/override-cleared",
                 "profile/saved",
+                "profile/withdrawn",
             }
         ),
         "ph.session.store": frozenset({"session/segmented"}),

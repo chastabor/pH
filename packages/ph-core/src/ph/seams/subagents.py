@@ -39,9 +39,11 @@ from pydantic import Field
 
 from ..agent.types import AgentDriver, AgentHandle
 from ..cordis import (
+    ChildReach,
     Context,
     Disposer,
     LoaderError,
+    NarrowingRefused,
     Running,
     maybe_await,
     plugin,
@@ -78,7 +80,7 @@ from .credentials import hold_for_credential
 from .invariants import contribute_fold_cache
 from .models import ModelChoice, ModelChoiceError, choose
 from .skills import ORDER_SKILLS, SkillRestriction, SkillService
-from .subagent_profiles import NarrowingRefused, narrowing
+from .subagent_profiles import narrowing
 
 _LOG = log_writer(__name__)
 
@@ -429,6 +431,12 @@ class SubagentRequest:
     unrestrictable by construction and a child with no way to call anything is
     not a narrower child, it is a broken one.
     """
+    paths: tuple[str, ...] | None = None
+    """The extra directories the child's sandbox binds writable, canonical. `None`
+    binds the parent's. Set by an assigned profile's `sandbox-allow` row
+    (`resolve_profile`) and applied as a limit (`SandboxSeam.restrict_paths`), which
+    can only subtract.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -582,6 +590,8 @@ def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, J
         payload["skills"] = list(request.skills)
     if request.tools is not None:
         payload["tools"] = list(request.tools)
+    if request.paths is not None:
+        payload["paths"] = list(request.paths)
     if request.reasoning_effort is not None:
         payload["reasoningEffort"] = request.reasoning_effort
     return payload
@@ -979,21 +989,11 @@ class SubagentService:
             raise SubagentSpawnError(f'profile "{name}" does not compose: {error}') from error
         boundary = self._delegating_boundary(request)
         held_skills, held_tools = self.held_by(request, boundary)
-        sandbox = self.ctx.get(SANDBOX)
-        mode = (
-            sandbox.resolve_mode(request.parent.session)
-            if sandbox is not None
-            else "danger-full-access"
+        reach = ChildReach(
+            ctx=self.ctx, boundary=boundary, agent=request.parent.id, skills=held_skills
         )
         try:
-            narrowed = narrowing(
-                self.ctx,
-                composed,
-                held_tools=held_tools,
-                held_skills=held_skills,
-                boundary=boundary,
-                parent_mode=mode,
-            )
+            narrowed = narrowing(composed, reach, held_tools=held_tools)
         except NarrowingRefused as refusal:
             raise SubagentSpawnError(f'profile "{name}": {refusal}') from refusal
         for kind, asked, gives in (
@@ -1005,13 +1005,14 @@ class SubagentService:
                 raise SubagentSpawnError(
                     f'profile "{name}" does not give its child the {kind}s {", ".join(beyond)}'
                 )
-        if narrowed.read_only and request.access == "write":
+        if narrowed.limit.read_only and request.access == "write":
             raise SubagentSpawnError(f'profile "{name}" is read-only, so its child cannot write')
         return replace(
             request,
             tools=request.tools if request.tools is not None else narrowed.tools,
             skills=request.skills if request.skills is not None else narrowed.skills,
-            model_key=request.model_key or narrowed.model_key,
+            model_key=request.model_key or narrowed.limit.model_key,
+            paths=narrowed.limit.writable_paths,
         )
 
     def grant_for(
@@ -1036,6 +1037,7 @@ class SubagentService:
         return Grant(
             skills=named if named is not None else held_skills,
             tools=request.tools if request.tools is not None else held_tools,
+            paths=request.paths,
             brief=(
                 _brief_text(skills, named, target, request.parent.session)
                 if named and skills is not None
@@ -1538,6 +1540,7 @@ class SubagentService:
                 # and what a log written before the narrowing was recorded says.
                 skills=None if row.get("skills") is None else tuple(row["skills"]),
                 tools=None if row.get("tools") is None else tuple(row["tools"]),
+                paths=None if row.get("paths") is None else tuple(row["paths"]),
             )
         )
 
@@ -1716,6 +1719,8 @@ class Grant:
 
     skills: tuple[str, ...]
     tools: tuple[str, ...]
+    paths: tuple[str, ...] | None = None
+    """The extra writable directories, where an assigned profile narrowed them."""
     brief: str = ""
 
     def apply(self, ctx: Context, scope: Context) -> None:
@@ -1737,6 +1742,9 @@ class Grant:
         tools = ctx.get(TOOLS)
         if tools is not None:
             tools.restrict(ToolRestriction(allow=frozenset(self.tools)), scope=scope)
+        sandbox = ctx.get(SANDBOX)
+        if self.paths is not None and sandbox is not None:
+            sandbox.restrict_paths(self.paths, scope=scope)
         prompt = ctx.get(SYSTEM_PROMPT)
         if self.brief and prompt is not None:
             prompt.section(

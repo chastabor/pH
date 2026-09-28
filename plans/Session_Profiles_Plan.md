@@ -11,7 +11,9 @@ show|fold`, each root's `profile/base` in its log, overrides through one door, e
 root mounted from its own log (S5), a changed named profile held, listed and adopted
 on purpose (S6), `/profile show|diff|save|use|clear` (S7), a child's model from its
 parent's list and a profile its parent assigns (S7b), and reading the audit (S8).
-Every step is done; what each left open is under its own entry.
+Every step is done; what each left open is under its own entry, and the follow-ups
+after S8 closed most of it (2026-09-27). Still open: a child holding fewer hosts than
+its parent, and the named-profile store as a deployment row.
 
 ## The goal
 
@@ -602,15 +604,15 @@ nothing committed by Claude.
       continues its root's from `seed_length`, and the base is in that prefix, so the
       one-file scan found none and a fork mounted what was asked. `read_stored` is the
       store's one-file read with no mount behind it, which `materialize` walks.
-    - Not done: a TUI attaching to a root that kept a changed version (pH's alone, or
-      declined) says nothing in the terminal; `phern profiles diff` and `phern agents
-      doctor` list it. `phern doctor` does not scan stored sessions.
+    - ~~Not done: a TUI attaching to a root that kept a changed version says nothing in
+      the terminal.~~ Fixed in the follow-ups: the attach notes it (`profileNote`).
+      `phern doctor` still does not scan stored sessions.
     - Found in review: a fork's header names its parent (`parent_session`) as a
       child's does, so `record_base` and `opened` passed it over — a fork started as
       a root logged no start options and never switched to a version adopted for it.
-      Fixed in S7: a child is told by `origin` (`SessionHeader.is_subagent`). Still open:
-      `session/adopt` on a root held for a decision records the version but leaves
-      the hold and its modal up.
+      Fixed in S7: a child is told by `origin` (`SessionHeader.is_subagent`).
+      ~~Still open: `session/adopt` on a held root leaves the hold and its modal up.~~
+      Fixed in the follow-ups: it answers the question (`AskDesk.settle`).
 - [x] **S7 — `/profile show | diff | save | use | clear`.** Done 2026-09-27.
   - *Gate:* tune in a session, save, start a headless run on the saved profile, and the two
     environments match.
@@ -642,9 +644,9 @@ nothing committed by Claude.
     - **`clear` is live where it can be**: a config override is undone on the running
       mount; one that turned a row on or off restarts the root.
     - **A fork is a session of its own**: `SessionHeader.is_subagent` is `origin == "subagent"`.
-    - Not done: a `use` whose new profile fails to mount leaves the session on it —
-      the log holds the switch — and the root failed, where a rollback to the
-      previous base would keep it usable.
+    - ~~Not done: a `use` whose new profile fails to mount leaves the session on
+      it.~~ Fixed in the follow-ups: `use` is an adoption, and a start that cannot
+      mount an adopted version withdraws it and starts on the one it had.
 - [x] **S7b — Subagents: an assigned profile, and a model from the list** (items 8, 9).
   Done 2026-09-27.
   - A spawn names a listed model, or its skill does; an assigned profile narrows within the
@@ -676,11 +678,11 @@ nothing committed by Claude.
       under a read-only one.
     - **The host composes it** (`ctx.named_profiles`): ph-core has no named-profile
       store, and `runtime.mounted` is the one door every phern host mounts through.
-    - Not done: a narrower sandbox than the parent's other than read-only — the
-      allowances (`sandbox-allow`) are mount-wide, so a child cannot hold fewer hosts
-      than its parent; and a skill registered by a row other than `skills-progressive`
-      stays with the child even when its profile drops that row, since the skill
-      registry, unlike the tool registry, keeps no registrant.
+    - Not done: a narrower sandbox than the parent's other than read-only. Fixed in
+      the follow-ups for writable directories (`SandboxSeam.restrict_paths`) and for a
+      dropped row's skills (`SkillService.registrants`). **Still open: hosts** — one
+      egress proxy serves every agent, so a profile with fewer hosts than its
+      parent is refused rather than given its parent's.
 - [x] **S8 — Reading the audit.** The environment at any seq, in the CLI and the trajectory
   view, and the skill-read records (decision 12). Done 2026-09-27.
   - Built: `phern profiles session <id> [--at SEQ] [--full]` — the fold of the log's
@@ -704,3 +706,40 @@ nothing committed by Claude.
     - Not done: the hash is of the body as read, before a skill's declared inputs
       are filled in — two reads with different arguments hash the same, which is
       what "the same instructions" means here.
+- [x] **Follow-ups — what the steps left open.** Done 2026-09-27, except as noted.
+  - **Every base change after the first is an adoption applied at a start**, so
+    `/profile use`, a "yes" and `phern profiles adopt` share one rule, and one rollback:
+    a start the loader refuses the adopted version at withdraws it —
+    `profile/withdrawn {…, reason}` (`withdraw_adoption`), required, read by the fold
+    as a decline so it is not offered again — and starts on the version it had. The
+    reason reaches the command's reply, the attach (`RootDescription.profileNote`),
+    `phern -p` and rpc (one rule for every host, `runtime.mount_session`) and
+    `/profile show`. Only the loader's
+    refusals (`LoaderError`, `MountRefusal`, a config's `ValidationError`) withdraw;
+    a disk or a bug fails the start and leaves the adoption. An adoption can carry
+    `clear: true` (`/profile use --clear`).
+  - **A mutation's `after` hook** (`Mutation.after`) replaces the generic
+    `restart_wanted` check in `_mutate`: the command row's hook restarts the root once
+    the command is durable, and also when it failed, so a request is never left for
+    the next command.
+  - **`session/adopt` settles the held root's question** (`AskDesk.settle`), which
+    tells every front end, so its modal closes.
+  - **The TUI notes a kept version on attach**, in the daemon's own sentence
+    (`RootDescription.profileNote`, `kept_note` with `/profile`'s commands), so a
+    terminal and the command line word it once — whose the settings are included.
+  - **One per-scope table for the three registries that narrow per agent**
+    (`ph.cordis.ScopedTable`, `ScopedEntries`): the tool registry's layers, the skill
+    registry's restrictions — whose release now also refreshes the catalog when a
+    child's scope unwinds — and the sandbox's writable-directory limits.
+  - **Each scope knows its row** (`Context.row_id`, stamped by the loader and
+    inherited), so `ToolRuntime.registrants` reads it rather than keeping its own
+    table, and `SkillService.registrants` exists.
+  - **A plugin declares how a child holds less of it** (`plugin(..., narrows=)`,
+    `ph.cordis.child_limit`), typed against its config model; `models`,
+    `sandbox-policy`, `skills-progressive` and `sandbox-allow` are the four, and
+    `ph.seams.subagent_profiles` names none of them.
+  - **A child binds only the writable directories its profile keeps**
+    (`SandboxSeam.restrict_paths`, the admission's `paths`), in the prompt boundary
+    too (`allowed_paths_of(ctx, agent)`).
+  - Deferred: fewer hosts for a child (a per-agent egress list), and the
+    named-profile store as a deployment row.

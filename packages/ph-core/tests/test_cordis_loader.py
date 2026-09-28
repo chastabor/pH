@@ -32,7 +32,7 @@ from ph.cordis.loader import (
     sparse_entries,
 )
 from ph.json import JsonValue, as_obj
-from ph.keys import MOUNT, SANDBOX
+from ph.keys import MOUNT, SANDBOX, TOOLS
 from ph.testing import MountProfile, not_none
 from ph.wire import WireModel
 
@@ -943,3 +943,21 @@ def test_entry_ids_reads_the_grammar_compose_rows_reads() -> None:
         "mod.a",
         "c",
     ]
+
+
+async def test_a_row_s_scope_names_its_row_and_what_it_registers_says_so(
+    mount: MountProfile,
+) -> None:
+    """The loader stamps each row's id on the scope its plugin runs in, beside the
+    plugin's name, and a scope opened beneath it inherits it — so a registry says
+    which row gave a tool from the registration alone (S7b). Sabotage: leave `row=`
+    out of the loader's `ctx.plugin` call, and no tool names a row."""
+    ctx = await mount()
+
+    forks = ctx.require(MOUNT).forks
+
+    assert not_none(forks["tool-bash"].ctx).row_id == "tool-bash"
+    assert not_none(forks["tool-bash"].ctx).scope("beneath").row_id == "tool-bash"
+    registrants = ctx.require(TOOLS).registrants()
+    assert registrants["bash"] == "tool-bash" and registrants["read"] == "tool-fs"
+    assert ctx.row_id == "", "the mount itself is no row"

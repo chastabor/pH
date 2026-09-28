@@ -223,6 +223,11 @@ class RootDescription(SessionScoped):
     """How many settings that named profile, as it composes now, differs by from the
     version this root started on (S6) — `0` when it has not moved. A root runs on its
     own version until one is adopted; `phern profiles diff` lists them."""
+    profile_note: str = ""
+    """What a person attaching is told about how that named profile moved — the one
+    wording (`ph_app.profiles.kept_note`, naming `/profile` commands), with whose the
+    settings are, or why a start took the new version back — or `""` when it has
+    not moved, and while the root is held on that very question (`profile/ask`)."""
 
     def facts(self) -> StatusFacts:
         """This description as the status half of it.

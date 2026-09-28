@@ -448,6 +448,8 @@ HANDLERS: Mapping[str, Handler] = {
     "profile/adopted": _on_profile_record,
     "profile/declined": _on_profile_record,
     "profile/override-cleared": _on_profile_record,
+    # And an adopted version a start could not mount, taken back with why.
+    "profile/withdrawn": _on_profile_record,
     # A named profile written from this session's environment (S7).
     "profile/saved": _on_profile_record,
     # A skill's body read at runtime, hashed (S8, decision 12).

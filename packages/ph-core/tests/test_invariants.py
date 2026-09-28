@@ -40,6 +40,7 @@ from ph.session.invariant import violations as session_violations
 from ph.testing import (
     MountProfile,
     log_event,
+    not_none,
     raising,
     report_section,
     simple_tool,
@@ -232,7 +233,7 @@ async def test_a_layer_changed_without_a_generation_bump_trips_the_tool_invarian
 
     assert tool_violations(root) == []
 
-    tools._layers[None].tools.pop("read")
+    not_none(tools._layers.get(None)).tools.pop("read")
 
     (found,) = tool_violations(root)
     assert "differs from a rebuild on ['read']" in found
@@ -356,7 +357,7 @@ async def test_a_child_reaching_past_its_ancestor_trips_the_skill_invariant(
         lambda self, chain: frozenset(
             name
             for name in self._skills
-            if all(one.admits(name) for one in self._restrictions.get(chain[0], ()))
+            if all(one.admits(name) for one in self._restrictions.gathered(chain[:1]))
         ),
     )
     skills._changed()

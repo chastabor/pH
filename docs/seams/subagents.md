@@ -104,16 +104,24 @@ Two skills naming different models are refused — name one with `model=`.
 never gets a mount of its own:
 
 - a row the profile runs that the parent's mount does not is refused, naming it;
-- the tools of each row the parent runs and the profile does not are taken away,
-  found by the row that registered them (`ToolRuntime.registrants`);
-- the `skills-progressive` paths must be a subset of the parent's, and only skills
-  found under them stay;
-- the `models` default must be a key the parent lists, and is the child's model;
-- a `read-only` sandbox default makes the child read-only; one wider than the
-  parent's posture is refused.
+- the tools and skills of each row the parent runs and the profile does not are
+  taken away, found by the row that registered them (`ToolRuntime.registrants`,
+  `SkillService.registrants`);
+- each row it keeps is asked of its own plugin, which declares how a child holds
+  less of it (`plugin(..., narrows=)`, `ph.cordis.child_limit`):
+  - `models` — the default must be a key the parent lists, and is the child's model;
+  - `sandbox-policy` — a `read-only` default makes the child read-only; one wider
+    than the parent's posture is refused;
+  - `skills-progressive` — the paths must be a subset of the parent's, and only
+    skills found under them stay;
+  - `sandbox-allow` — the writable directories must be the parent's or inside them,
+    and are all the child's sandbox binds (`SandboxSeam.restrict_paths`, recorded
+    as the admission's `paths`). Its network must be the parent's exactly: one
+    egress proxy serves every agent, so a profile with fewer hosts is refused
+    rather than given its parent's.
 
-Everything else the profile says is the parent's, since it is the parent's mount the
-child runs on. The narrowing is written into the request before the ceiling, so
+What a row with no narrower says is the parent's, since it is the parent's mount the
+child runs on. A new row joins by declaring one, and nothing in the narrowing names it, as long as what it holds back is one of `ChildLimit`'s kinds; a new kind is a field there and on the child's grant. The narrowing is written into the request before the ceiling, so
 `check_grant` checks it and the admission records it: a child's reach is fixed when
 it is admitted. What a spawn names beside a profile may narrow it further, and
 naming more than it gives is refused.

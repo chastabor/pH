@@ -66,6 +66,13 @@ claim helpers in `ph.seams._registry`, and the choice is a design statement:
 `claim_entry` removes **by identity**, because frozen dataclasses compare by value
 and two equal registrations would otherwise unregister the wrong one.
 
+A seam that answers **per agent** — a filter or a limit that narrows one scope and
+every scope inside it — keeps them in a `ph.cordis.ScopedEntries` (or a
+`ScopedTable` of richer buckets): keyed by `running_for(scope).layer.isolation`,
+released with the pair's lifetime, emptied with its last entry, and read with
+`gathered(scope.isolation_chain())`. Pass `then=` for a registry that caches what
+it answers, so a scope that unwinds tells it too.
+
 `claim_slot` takes the `Running` pair rather than a context, and holds it in
 `<attr>_by`: a provider is a body the seam invokes *later*, so to enter the right
 binding then it must have kept who registered it (P6-29). Invoke it with

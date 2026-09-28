@@ -232,6 +232,16 @@ class Mutation[P: MutationParams, R: WireModel]:
     `act`. Each pair agrees on it by being written together, and no third party
     ever sees it."""
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]]
+    after: Callable[[_Connection, Root, R | None], Awaitable[R | None]] | None = None
+    """What the act leaves for once it is on disk, and what it makes of the reply.
+
+    Run after `_mutate`'s flush — so a step that unwinds the root (a restart) never
+    races the act's own records, the key and its settle — and **on the error path
+    too**, with no reply, so a request the act made before it failed is not left
+    lying on the root for an unrelated mutation to find. Answers the reply to send,
+    or `None` to send the act's own. `session/command` is the one that has one: a
+    command that moved the root's environment past what a live mount can follow
+    (`/profile use`) asks for the root to start again from its log."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,6 +517,20 @@ class _Connection:
         parsed = mutation.verb.parse(params)
         root = await self.server.supervisor.start(parsed.session_id)
         plan = await mutation.prepare(self, root, parsed)
+        try:
+            reply = await self._acted(mutation, root, parsed, plan)
+        except Exception:
+            if mutation.after is not None:
+                await mutation.after(self, root, None)
+            raise
+        if mutation.after is not None:
+            reply = await mutation.after(self, root, reply) or reply
+        return reply
+
+    async def _acted(
+        self, mutation: Mutation[Any, WireModel], root: Root, parsed: MutationParams, plan: object
+    ) -> WireModel:
+        """The act under its idempotence key, and on disk before anyone is told."""
         key = _command_key(parsed)
         if not key:
             # No identity offered, so no deduplication wanted: it always acts.
@@ -545,12 +569,6 @@ class _Connection:
         # refuses writes is the root's own flushes failing next, which is the
         # retry ladder's to report (`supervisor/failed`).
         await session_written(root.ctx, root.session)
-        if root.restart_wanted:
-            # The act moved the root's environment where a live mount cannot follow
-            # (`/profile use`, S7): it starts again from its log now that the act and
-            # its key are on disk — here, and not inside the act, which was still
-            # writing to the session a restart unwinds.
-            await self.server.supervisor.restart(root)
         return reply
 
     # --- the methods -----------------------------------------------------------
@@ -799,6 +817,25 @@ class _Connection:
         # attached to see it.
         _refresh_readings(root)
         return CommandShown(session_id=root.id, shown=shown)
+
+    async def _after_command(self, root: Root, reply: CommandShown | None) -> CommandShown | None:
+        """A command that moved the root past what a live mount follows starts it again.
+
+        `/profile use`, or a `/profile clear` of an override that turned a row on or
+        off, asks with `Root.restart_wanted`; the request is consumed here, once the
+        command is on disk, and the root starts again from its log. When that start
+        had to withdraw the version it was given (`runtime.mount_session`), the reply
+        says so (`Root.withdrew`) — the person who asked is listening here, before any
+        attach reads it.
+        """
+        if not root.restart_wanted:
+            return None
+        root.restart_wanted = False
+        back = await self.server.supervisor.restart(root)
+        if reply is None or back is None or not back.withdrew:
+            return None
+        said = f"{reply.shown}\n" if reply.shown else ""
+        return reply.model_copy(update={"shown": f"{said}{back.withdrew}"})
 
     async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[ShellService, str]:
         """Resolve the seam and the command **before** the key is claimed.
@@ -1123,6 +1160,8 @@ def _mutating[P: MutationParams, R: WireModel](
     verb: Verb[P, R],
     prepare: Callable[[_Connection, Root, P], Awaitable[Any]],
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]],
+    *,
+    after: Callable[[_Connection, Root, R | None], Awaitable[R | None]] | None = None,
 ) -> tuple[str, Mutation[Any, Any]]:
     """One `MUTATIONS` row, keyed by its verb's name and **checked against it**.
 
@@ -1135,7 +1174,7 @@ def _mutating[P: MutationParams, R: WireModel](
     names no type variable, so `P` and `R` can only come from the verb, and the
     two halves are checked against it.
     """
-    return verb.name, Mutation(verb, prepare, act)
+    return verb.name, Mutation(verb, prepare, act, after)
 
 
 def _unkeyed[P: WireModel, R: WireModel](
@@ -1161,7 +1200,12 @@ def _announcing[P: WireModel](
 MUTATIONS: dict[str, Mutation[Any, Any]] = dict(
     (
         _mutating(verbs.SESSION_PROMPT, _Connection._prepare_prompt, _Connection._act_prompt),
-        _mutating(verbs.SESSION_COMMAND, _Connection._prepare_command, _Connection._act_command),
+        _mutating(
+            verbs.SESSION_COMMAND,
+            _Connection._prepare_command,
+            _Connection._act_command,
+            after=_Connection._after_command,
+        ),
         _mutating(verbs.SESSION_STAGE, _Connection._prepare_stage, _Connection._act_stage),
         _mutating(verbs.SESSION_SHELL, _Connection._prepare_shell, _Connection._act_shell),
         _mutating(verbs.SESSION_PRESET, _Connection._prepare_preset, _Connection._act_preset),

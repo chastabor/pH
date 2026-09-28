@@ -126,6 +126,8 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "profile/adopted",
         "profile/declined",
         "profile/override-cleared",
+        # And a version a start took back because it would not mount, with why.
+        "profile/withdrawn",
         "profile/saved",
         # S8: which text of a skill was read, by hash.
         "skill/read",

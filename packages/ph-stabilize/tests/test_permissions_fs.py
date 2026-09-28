@@ -889,6 +889,12 @@ async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
         permissions.objection("write", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
     )
 
+    # And per agent (S7b, item 3): one narrowed out of the directory is asked about it,
+    # since its sandbox no longer binds it. Sabotage: ask `allowed_paths_of` without
+    # the agent, and the narrowed agent writes there unasked.
+    ctx.require(SANDBOX).restrict_paths((), scope=agent.ctx)
+    assert permissions.objection("write", cache / "wheel.whl", agent=agent) is not None
+
 
 async def test_a_spilled_result_is_readable_but_not_writable(
     mount: MountProfile, tmp_path: Path

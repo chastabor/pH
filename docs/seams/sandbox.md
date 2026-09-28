@@ -179,7 +179,9 @@ ctx.sandbox.register_egress(egress)         -> Disposer   # the backend row, onc
 ctx.sandbox.confine(argv, policy, agent=)   -> ConfinedArgv     # raises if it cannot; stamps the effective policy
 ctx.sandbox.effective(policy, agent=)       -> SandboxPolicy    # the request with the allowances merged in
 ctx.sandbox.permits(host, port)             -> bool             # what the proxy asks, per connection
-ctx.sandbox.allowed_paths()                 -> tuple[Path, ...] # existing directories only
+ctx.sandbox.allowed_paths(agent=None)       -> tuple[Path, ...] # existing directories only, as that agent may use them
+ctx.sandbox.writable_for(agent=None)        -> tuple[str, ...]  # the same, canonical, existing or not
+ctx.sandbox.restrict_paths(paths, scope=)   -> Disposer         # a narrowed child binds only these
 ctx.sandbox.network_posture()               -> str              # one sentence, for doctor and /sandbox
 ctx.sandbox.read_denial(output, network=)   -> Denial | None    # asks the backend; None if it has no reader
 ctx.sandbox.record_denial(denial, agent=)                       # appends sandbox/denied to the agent's session

@@ -250,6 +250,36 @@ class AskDesk:
         )
         return result.decision
 
+    def settle(self, method: str, answer: dict[str, Any]) -> None:
+        """Answer every open ask of `method` from outside the desk, and take it off
+        every front end's screen.
+
+        For a question something other than a person answered — `session/adopt`
+        settling the profile question a root was held on (S6). Every front end is
+        told `ask.settled`, as the ones a person did not answer are, so no modal is
+        left up asking about a decision already made.
+        """
+        for pending in list(self.asks.values()):
+            if pending.method == method and not pending.answered.is_set():
+                self._answer(pending, answer)
+
+    def _answer(
+        self, pending: PendingAsk, answer: dict[str, Any], *, by: FrontEnd | None = None
+    ) -> None:
+        """Take `answer` as the one decision, and tell every front end but the one
+        that gave it that the question is settled — one that cannot hear it stops
+        being asked."""
+        pending.answer = answer
+        pending.answered.set()
+        settled = AskSettledNotice(session_id=self.root.id, ask_id=pending.ask_id)
+        for other in list(self.front_ends):
+            if other is by:
+                continue
+            try:
+                other.notify(settled.METHOD, settled.to_wire())
+            except Exception:
+                self.front_ends.discard(other)
+
     # ------------------------------------------------------------ the ask --
 
     def _name(self) -> str:
@@ -313,13 +343,4 @@ class AskDesk:
             # is discarded rather than recorded, because pH appends the decision
             # it acted on and a second one would be a log claiming two.
             return
-        pending.answer = answer
-        pending.answered.set()
-        settled = AskSettledNotice(session_id=self.root.id, ask_id=pending.ask_id)
-        for other in list(self.front_ends):
-            if other is who:
-                continue
-            try:
-                other.notify(settled.METHOD, settled.to_wire())
-            except Exception:
-                self.front_ends.discard(other)
+        self._answer(pending, answer, by=who)

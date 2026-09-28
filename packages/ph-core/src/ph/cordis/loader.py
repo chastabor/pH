@@ -784,7 +784,9 @@ class Profile:
         by_id = {row.id: row for row in self.rows}
         for row in self.enabled_rows():
             if not row.isolate:
-                forks[row.id] = ctx.plugin(resolve_plugin(row.name), interpolate(row.config))
+                forks[row.id] = ctx.plugin(
+                    resolve_plugin(row.name), interpolate(row.config), row=row.id
+                )
                 continue
             # dsh's `isolate.fs`. The row's own scope becomes an isolation
             # boundary and its own provisioning realm — `scope()` is exactly
@@ -812,7 +814,7 @@ class Profile:
                 source = by_id[source_id]
                 config = source.config if override is None else override
                 privates[source_id] = forks[f"{row.id}/{source_id}"] = realm.plugin(
-                    resolve_plugin(source.name), interpolate(config)
+                    resolve_plugin(source.name), interpolate(config), row=row.id
                 )
             await ctx.reconcile()
             for source_id, private in privates.items():
@@ -835,7 +837,7 @@ class Profile:
             # dispatch would double-handle events with the instance it exists to
             # shadow, and register a second copy of whatever it registers.
             forks[row.id] = realm.plugin(
-                resolve_plugin(row.name), interpolate(row.config), transparent=True
+                resolve_plugin(row.name), interpolate(row.config), transparent=True, row=row.id
             )
         await ctx.reconcile()
         # The one moment a composed profile is whole and nothing has run yet, so
@@ -942,7 +944,9 @@ class Mount:
         previous = self.forks.get(row_id)
         if previous is not None:
             await previous.dispose()
-        fork = self.forks[row_id] = self.root.plugin(resolve_plugin(row.name), interpolate(config))
+        fork = self.forks[row_id] = self.root.plugin(
+            resolve_plugin(row.name), interpolate(config), row=row_id
+        )
         self.reconfigured.add(row_id)
         await self.root.reconcile()
         return fork

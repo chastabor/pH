@@ -412,6 +412,8 @@ class PHTuiApp(App[str | None]):
         # this list, which is what makes unloading one take all three with it.
         self._command_disposers = self.front.attach_surfaces(self)
         self.state_changed()
+        if self.front.arrival:
+            self.notify(self.front.arrival, title="profile", markup=False)
 
     async def _offer_sessions(self, client: DaemonClient) -> str | None:
         """The session this person picked to resume, or `None` for a fresh one.

@@ -4,23 +4,30 @@ The gate: a skill naming `classify` starts its child on that route; a key the li
 does not hold is refused; and an assigned profile wider than the parent is refused,
 naming the row. Around it: a spawn names a key itself, the admission records the key
 and the route, and an assigned profile narrows what a child holds — its tools, its
-model and its access — on the parent's own mount.
+model, its access, its skills and its writable directories — on the parent's own
+mount, each row by the narrower its plugin declares.
 """
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import Field
 from rlm_fixtures import PROVIDER_ROW
 
-from ph.cordis import Context, Profile, ProfileDocument
+from ph.cordis import ChildLimit, ChildReach, Context, Profile, ProfileDocument, plugin
 from ph.json import JsonObject, as_obj, as_seq
-from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SESSIONS, SKILLS, SUBAGENTS
+from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SANDBOX, SESSIONS, SKILLS, SUBAGENTS
+from ph.paths import canonical
+from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
 from ph.seams.skills import Skill
 from ph.seams.subagents import SubagentRequest, SubagentSpawnError
-from ph.testing import FAKE_OPTIONS, MountProfile, write_skill
+from ph.testing import FAKE_OPTIONS, MountProfile, not_none, write_skill
+from ph.wire import WireModel
 from ph_rlm.subagents import PROVIDER_NAME
 
 pytestmark = pytest.mark.anyio
@@ -51,8 +58,10 @@ class _Profiles:
         return Profile.from_documents(documents, name=name)
 
 
-async def _parent(mount: MountProfile, **profiles: list[JsonObject]) -> tuple[Context, Any]:
-    ctx = await mount(dict(PROVIDER_ROW), dict(MODELS))
+async def _parent(
+    mount: MountProfile, *rows: JsonObject, **profiles: list[JsonObject]
+) -> tuple[Context, Any]:
+    ctx = await mount(dict(PROVIDER_ROW), dict(MODELS), *rows)
     ctx.provide(NAMED_PROFILES, _Profiles(ctx.require(MOUNT).profile, **profiles))
     session = ctx.require(SESSIONS).create("parent")
     return ctx, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -211,3 +220,177 @@ async def test_a_skill_given_to_a_child_is_recorded_as_read_into_its_prompt(
 
     (read,) = session.select("skill/read")
     assert (read.data["name"], read.data["via"]) == ("sort", "brief")
+
+
+async def test_a_skill_goes_with_the_row_that_gave_it(mount: MountProfile) -> None:
+    """(b) A row the assigned profile does not run takes its skills with it, as it
+    takes its tools — found by the row that installed each (`SkillService.
+    registrants`), whatever row that is. A skill no row installed stays. Sabotage:
+    skip the registrants in `_skills`, and the dropped row's skill stays."""
+    ctx, parent = await _parent(mount, nobash=[{"id": "tool-bash", "disabled": True}])
+    service = ctx.require(SKILLS)
+    beside = not_none(ctx.require(MOUNT).forks["tool-bash"].ctx)
+    service.register(Skill(name="shell-tips", description="running things"), scope=beside)
+    service.register(Skill(name="review", description="reviewing things"))
+
+    await _spawn(ctx, parent, profile="nobash")
+
+    skills = as_seq(_admitted(parent)["skills"])
+    assert "shell-tips" not in skills and "review" in skills
+
+
+def _dirs(root: Path, *names: str) -> list[str]:
+    """Directories that exist, spelled as the sandbox binds them."""
+    made = []
+    for name in names:
+        (root / name).mkdir()
+        made.append(str(canonical(root / name)))
+    return made
+
+
+def _writable(*paths: str) -> tuple[JsonObject, JsonObject]:
+    """A parent whose confined commands may write `paths` beside its workspace."""
+    return (
+        {"id": "sandbox", "config": {"defaultMode": "workspace-write"}},
+        {"id": "sandbox-allow", "config": {"paths": list(paths)}},
+    )
+
+
+async def test_a_child_given_fewer_writable_directories_writes_only_those(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Item 3's paths: an assigned `sandbox-allow` with fewer directories binds only
+    those for the child — in the sandbox and in the prompt boundary drawn from it —
+    and its parent keeps both. Sabotage: skip `restrict_paths` in `Grant.apply`, and
+    the child binds its parent's store too."""
+    cache, store = _dirs(tmp_path, "cache", "store")
+    ctx, parent = await _parent(
+        mount,
+        *_writable(cache, store),
+        cacheonly=[{"id": "sandbox-allow", "config": {"paths": [cache]}}],
+    )
+
+    run = await _spawn(ctx, parent, profile="cacheonly")
+
+    sandbox = ctx.require(SANDBOX)
+    assert list(as_seq(_admitted(parent)["paths"])) == [cache]
+    assert sandbox.effective(SandboxPolicy(), agent=run.session_id).writable_extra == [cache]
+    assert allowed_paths_of(ctx, run.session_id) == (Path(cache),)
+    assert sandbox.effective(SandboxPolicy(), agent=parent.id).writable_extra == [cache, store]
+
+
+async def test_a_child_cannot_be_given_a_directory_its_parent_cannot_write(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Sabotage: drop the `beyond` check in `sandbox_allow.narrows`, and the child is
+    admitted."""
+    cache, store = _dirs(tmp_path, "cache", "store")
+    ctx, parent = await _parent(
+        mount,
+        *_writable(cache),
+        wider=[{"id": "sandbox-allow", "config": {"paths": [cache, store]}}],
+    )
+
+    with pytest.raises(SubagentSpawnError, match=f"sandbox-allow lets a child write {store}"):
+        await _spawn(ctx, parent, profile="wider")
+
+
+@pytest.mark.parametrize(
+    ("network", "said"),
+    [
+        ({"mode": "full"}, "gives a child full network where its parent has allowlist"),
+        ({"hosts": ["pypi.org", "example.com"]}, r"other hosts than its parent's \(.*example\.com"),
+        ({"hosts": ["pypi.org"]}, "other hosts than its parent's"),
+    ],
+    ids=["wider-mode", "other-host", "fewer-hosts"],
+)
+async def test_a_child_s_network_is_its_parent_s(
+    mount: MountProfile, network: JsonObject, said: str
+) -> None:
+    """Wider is refused as every widening is; narrower is refused too, since one
+    egress proxy serves every agent and a child cannot hold fewer hosts yet — given
+    its parent's instead, the ceiling its admission states would not be the one it
+    ran under. Sabotage: return the limit whatever the network says, and each is
+    admitted."""
+    ctx, parent = await _parent(
+        mount, other=[{"id": "sandbox-allow", "config": {"network": network}}]
+    )
+
+    with pytest.raises(SubagentSpawnError, match=said):
+        await _spawn(ctx, parent, profile="other")
+
+
+async def test_a_child_s_sandbox_cannot_be_wider_than_its_parent_s(mount: MountProfile) -> None:
+    ctx, parent = await _parent(
+        mount, writer=[{"id": "sandbox", "config": {"defaultMode": "workspace-write"}}]
+    )
+
+    with pytest.raises(SubagentSpawnError, match="run workspace-write, where its parent runs"):
+        await _spawn(ctx, parent, profile="writer")
+
+
+async def test_a_child_holds_the_skills_found_under_the_paths_it_keeps(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Of the row's own skills — by the row that installed each, so another row's,
+    found where this one does not look, stays. Sabotage: return an empty limit from
+    `skills.narrows`, and the child keeps the skill under the directory its profile
+    does not scan; test the skill's `source` rather than its row, and the other
+    row's goes too."""
+    kept, other = tmp_path / "kept", tmp_path / "other"
+    write_skill(kept, "sort", body="Sort by kind.")
+    write_skill(other, "audit", body="Audit it.")
+    ctx, parent = await _parent(
+        mount,
+        {"id": "skills-progressive", "config": {"paths": [str(kept), str(other)]}},
+        sorting=[{"id": "skills-progressive", "config": {"paths": [str(kept)]}}],
+    )
+    beside = not_none(ctx.require(MOUNT).forks["tool-bash"].ctx)
+    found = Skill(
+        name="shell-kit",
+        description="shell things",
+        path=str(other / "shell-kit" / "SKILL.md"),
+        source="skills-progressive",
+    )
+    ctx.require(SKILLS).register(found, scope=beside)
+
+    await _spawn(ctx, parent, profile="sorting")
+
+    skills = as_seq(_admitted(parent)["skills"])
+    assert "sort" in skills and "audit" not in skills
+    assert "shell-kit" in skills, "another row's skill is not this row's to withhold"
+
+
+class _Shelf(WireModel):
+    skills: list[str] = Field(default_factory=list)
+
+
+def _shelf_narrows(mounted: _Shelf, asked: _Shelf, _reach: ChildReach) -> ChildLimit:
+    return ChildLimit(withheld_skills=frozenset(mounted.skills) - frozenset(asked.skills))
+
+
+@plugin("shelf", affects="environment", inject=[SKILLS], config=_Shelf, narrows=_shelf_narrows)
+async def _shelf(ctx: Context, config: _Shelf) -> None:
+    for name in config.skills:
+        ctx.require(SKILLS).register(Skill(name=name, description=f"{name}s"), scope=ctx)
+
+
+async def test_a_row_says_how_a_child_holds_less_of_it(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(a) A row the narrowing module has never heard of joins by declaring
+    `narrows=` beside its body. Sabotage: skip the declared narrowers in
+    `narrowing`, and the child keeps the skill its profile's shelf leaves off."""
+    module = types.ModuleType("ph_test_shelf")
+    setattr(module, "shelf", _shelf)  # noqa: B010 - a module built at runtime
+    monkeypatch.setitem(sys.modules, "ph_test_shelf", module)
+    ctx, parent = await _parent(
+        mount,
+        {"id": "shelf", "name": "ph_test_shelf:shelf", "config": {"skills": ["sort", "audit"]}},
+        sorting=[{"id": "shelf", "config": {"skills": ["sort"]}}],
+    )
+
+    await _spawn(ctx, parent, profile="sorting")
+
+    skills = as_seq(_admitted(parent)["skills"])
+    assert "sort" in skills and "audit" not in skills

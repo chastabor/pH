@@ -34,6 +34,7 @@ from ..cordis import (
     Disposer,
     MaybeAwaitable,
     Running,
+    ScopedTable,
     boundary_of,
     chain_label,
     drop_dead_chains,
@@ -333,7 +334,9 @@ class ToolRuntime:
 
     ctx: Context
     default_mode: PresentationMode = "native"
-    _layers: dict[Context | None, _Layer] = field(default_factory=dict)
+    _layers: ScopedTable[_Layer] = field(default_factory=lambda: ScopedTable(_Layer, _Layer.empty))
+    """Each scope's contribution (`ScopedTable`): made on its first registration,
+    dropped with its last."""
     _generation: int = 0
     """Bumped on every mutation. The view cache is valid for one generation."""
     _views: dict[tuple[Context | None, ...], tuple[int, _View]] = field(default_factory=dict)
@@ -346,23 +349,10 @@ class ToolRuntime:
 
     # ---------------------------------------------------------- registration --
 
-    def _layer(self, key: Context | None) -> _Layer:
-        layer = self._layers.get(key)
-        if layer is None:
-            layer = self._layers[key] = _Layer()
-        return layer
-
     def _changed(self) -> None:
         self._generation += 1
         self._views.clear()
         self.ctx.emit("tools/change")
-
-    def _release(self, key: Context | None, undo: Callable[[], Any]) -> None:
-        undo()
-        layer = self._layers.get(key)
-        if layer is not None and layer.empty():
-            del self._layers[key]
-        self._changed()
 
     def _claim(
         self,
@@ -377,9 +367,8 @@ class ToolRuntime:
 
         **Two questions, from one `scope`.** `owner.isolation` chooses *which layer* a
         registration lands in — tool visibility, B7's subject — while lifetime chooses
-        *when it goes away*. Both are derived here rather than passed in, so the
-        relationship is stated once instead of at each call site where a caller could pair
-        them wrongly.
+        *when it goes away*. Both come from the one `Running` pair asked for here, rather
+        than being passed in, so a caller cannot pair them wrongly.
 
         `isolation` is what keeps the two answers apart even though both read the running
         binding (P6-26). An activation scope is not isolated, so a row's tool still lands
@@ -391,39 +380,40 @@ class ToolRuntime:
         (P6-29): the two scopes are unrelated branches and either can end first. Owning it
         by the row alone strands the agent's `_Layer` under a disposed key; owning it by
         the agent alone lets a registration outlive the row whose code made it, which is
-        I2 verbatim. So the release goes on both scopes and the first to fire wins,
-        through `Running.add_disposer` — where that rule lives, because `ph.seams.skills`
-        keys `_restrictions` by the layer too.
+        I2 verbatim. So the release goes on both scopes and the first to fire wins —
+        `ScopedTable.claim`, the table the skill registry's restrictions and the
+        sandbox's path limits are kept in too.
         """
         by = self.ctx.running_for(scope)
-        key = by.layer.isolation
-        layer = self._layer(key)
-        mutate(layer)
-        if record:
-            # Only a registration this registry will later *invoke* needs the
-            # pair kept — a tool, not a guard or a restriction, which are called
-            # as policy rather than as the row's body. Here rather than in
-            # `_register` so it is written where the pair is derived: computing
-            # it twice would ask `owner_for` twice and warn twice for a disposed
-            # activation, which is the one branch that is meant to be audible.
-            # Named `record` after `claim_slot`'s parameter, which does the same
-            # job for the at-most-one shape — one idiom, one word.
-            #
-            # **After `mutate`, not before.** `_register`'s `add` refuses a
-            # duplicate name by raising, and writing the pair first meant a
-            # *rejected* registration overwrote the surviving one's — so the
-            # tool that stayed ran as the row whose registration had just been
-            # refused. Invisible until the next `_changed()` rebuilt the view
-            # from the corrupted cell, which is the worst kind of visible.
-            layer.by[record] = by
-        self._changed()
 
-        def finish() -> None:
+        def apply(layer: _Layer) -> None:
+            mutate(layer)
+            if record:
+                # Only a registration this registry will later *invoke* needs the
+                # pair kept — a tool, not a guard or a restriction, which are called
+                # as policy rather than as the row's body. Here rather than in
+                # `_register` so it is written where the pair is derived: computing
+                # it twice would ask `owner_for` twice and warn twice for a disposed
+                # activation, which is the one branch that is meant to be audible.
+                # Named `record` after `claim_slot`'s parameter, which does the same
+                # job for the at-most-one shape — one idiom, one word.
+                #
+                # **After `mutate`, not before.** `_register`'s `add` refuses a
+                # duplicate name by raising, and writing the pair first meant a
+                # *rejected* registration overwrote the surviving one's — so the
+                # tool that stayed ran as the row whose registration had just been
+                # refused. Invisible until the next `_changed()` rebuilt the view
+                # from the corrupted cell, which is the worst kind of visible.
+                layer.by[record] = by
+
+        def revert(layer: _Layer) -> None:
             if record:
                 layer.by.pop(record, None)
-            self._release(key, lambda: undo(layer))
+            undo(layer)
 
-        return by.add_disposer(finish, label=label)
+        released = self._layers.claim(by, apply, revert, label=label, then=self._changed)
+        self._changed()
+        return released
 
     def register(self, definition: ToolDefinition, *, scope: Context | None = None) -> Disposer:
         """Register a tool globally, or on an agent's scope to shadow by name."""
@@ -489,12 +479,14 @@ class ToolRuntime:
             record=definition.name,
         )
 
-    def registrants(self) -> dict[str, Context]:
-        """Each deployment-wide tool by name, and the scope that registered it — the
-        row whose activation it belongs to, for a caller that has to say which tools
-        a row gives (an assigned profile's narrowing, S7b)."""
+    def registrants(self) -> dict[str, str]:
+        """Each deployment-wide tool by name, and the profile row that registered it
+        (`Context.row_id`) — for a caller that has to say which tools a row gives (an
+        assigned profile's narrowing, S7b). A tool no row registered is absent."""
         layer = self._layers.get(None)
-        return {} if layer is None else {name: by.owner for name, by in layer.by.items()}
+        if layer is None:
+            return {}
+        return {name: by.owner.row_id for name, by in layer.by.items() if by.owner.row_id}
 
     def restrict(self, restriction: ToolRestriction, *, scope: Context | None = None) -> Disposer:
         """Mask global tools for one scope. Restrictions intersect."""
@@ -606,7 +598,7 @@ class ToolRuntime:
         presentation = next(
             (
                 layer.transport
-                for layer in self._layers_for(target.isolation_chain())
+                for layer in self._layers.along(target.isolation_chain())
                 if layer.transport is not None
             ),
             None,
@@ -627,7 +619,7 @@ class ToolRuntime:
         """
         found: list[str] = []
         for chain, (_, cached) in self._views.items():
-            fresh = self._build_view(self._layers_for(chain))
+            fresh = self._build_view(self._layers.along(chain))
             differing = sorted(
                 name
                 for name in fresh.visible.keys() | cached.visible.keys()
@@ -662,20 +654,13 @@ class ToolRuntime:
         # retained by its own key until something invalidates, which a deployment
         # that has stopped registering never does (I2).
         drop_dead_chains(self._views)
-        view = self._build_view(self._layers_for(cache_key))
+        # From the **cache key**, not the context it was first built for: the key is
+        # `target.isolation_chain()`, and its layers are all `_build_view` wants of
+        # the target — which makes the view a pure function of the key, and so
+        # something `stale_views` can check.
+        view = self._build_view(self._layers.along(cache_key))
         self._views[cache_key] = (self._generation, view)
         return view
-
-    def _layers_for(self, chain: Sequence[Context | None]) -> list[_Layer]:
-        """The layers an isolation chain resolves to, most-specific-first.
-
-        Split out from `_chain` so a view can be rebuilt from a **cache key**
-        rather than from the context it was first built for. The key already is
-        `target.isolation_chain()`, and the layers are all `_build_view` ever
-        wanted from the target — which is what makes the view a pure function of
-        the key, and therefore what makes `stale_views` able to check it.
-        """
-        return [layer for key in chain if (layer := self._layers.get(key)) is not None]
 
     def _build_view(self, layers: Sequence[_Layer]) -> _View:
         visible: dict[str, ToolDefinition] = {}
@@ -820,7 +805,7 @@ class ToolRuntime:
 
     def guard_reason(self, execution: ToolExecution) -> str | None:
         """The first monotonic denial from every layer this call can see."""
-        for layer in self._layers_for(execution.scope.isolation_chain()):
+        for layer in self._layers.along(execution.scope.isolation_chain()):
             for guard in layer.guards:
                 reason = guard(execution)
                 if reason is not None:

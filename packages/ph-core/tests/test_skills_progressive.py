@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 
 from ph.cordis import DEPLOYMENT
-from ph.keys import AGENTS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
+from ph.keys import AGENTS, MOUNT, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
 from ph.seams.skills import (
     ARGUMENT_HINT_MAX,
@@ -688,3 +688,26 @@ def test_a_skill_may_name_the_model_a_child_it_directs_runs_on(tmp_path: Path) -
     (found,) = discover_skills([str(tmp_path)])
 
     assert found.model == "classify"
+
+
+async def test_a_skill_names_the_row_that_installed_it(mount: MountProfile, tmp_path: Path) -> None:
+    """As a tool does (`ToolRuntime.registrants`): the row a skill came from, for a
+    narrowing that drops the row (S7b). One installed with no scope named is the
+    seam's own row's, which is whose scope it then lives in; released, it is gone."""
+    write_skill(tmp_path, "note-taking")
+    ctx = await mount(row(tmp_path))
+    service = ctx.require(SKILLS)
+    release = service.register(skill("loose"))
+
+    assert service.registrants() == {"note-taking": "skills-progressive", "loose": "skills"}
+    release()
+    assert "loose" not in service.registrants()
+
+    # And when its scope unwinds rather than being released by hand — the disposer
+    # the scope holds is the one that runs. Sabotage: pop the registrant outside
+    # `claim_key`'s `then`, and the skill's row outlives it.
+    beside = not_none(ctx.require(MOUNT).forks["skills-progressive"].ctx).scope("beside")
+    service.register(skill("passing"), scope=beside)
+    assert service.registrants()["passing"] == "skills-progressive"
+    await beside.dispose()
+    assert "passing" not in service.registrants()

@@ -30,9 +30,11 @@ the named profile as it composes now against the version the session starts on
 recorded beside the base:
 
 ```text
-profile/adopted {name, rows, sources, phVersion}   a version accepted; the next start
-                                                  makes it the base
+profile/adopted {name, rows, sources, phVersion,   a version accepted; the next start
+                 clear?}                          makes it the base
 profile/declined {…}                               a version a person said no to
+profile/withdrawn {…, reason}                      an adopted version a start could
+                                                  not mount, taken back
 profile/override-cleared {row, command}            an override that stops applying
 profile/saved {name, path, entries}                the environment saved as a named
                                                   profile (S7)
@@ -70,7 +72,7 @@ from .cordis import (
     compose_rows,
 )
 from .cordis.loader import Mount, entry_ids, resolve_row
-from .json import JsonObject, JsonValue, as_obj, as_seq, as_str, thaw_json
+from .json import JsonObject, JsonValue, as_bool, as_obj, as_seq, as_str, thaw_json
 from .keys import MOUNT
 from .session import Session
 from .session.store import session_written
@@ -85,6 +87,8 @@ __all__ = [
     "DECLINED",
     "OVERRIDE",
     "SAVED",
+    "WITHDRAWN",
+    "Declined",
     "Difference",
     "EnvironmentFold",
     "LoggedEnvironment",
@@ -116,6 +120,8 @@ __all__ = [
     "resolved_environment",
     "saved_base",
     "switch_base",
+    "withdraw_adoption",
+    "withdrawn_note",
 ]
 
 _LOG = log_writer(__name__)
@@ -387,7 +393,8 @@ async def override(
 async def opened(ctx: Context, session: Session) -> None:
     """What opening a root does to its environment — the one call `open_session` makes.
 
-    0. **A version it adopted** (S6), made its base — `switch_base`, overrides kept.
+    0. **A version it adopted** (S6), made its base — `switch_base`, overrides kept,
+       or cleared when the adoption said `clear`.
     1. **Its base** (S3), recorded if it has none, before anything runs in it.
     2. **This start's options** (S4): each `--patch` (`ProfileDocument.override`) that
        differs from the base and the overrides already logged is logged as one,
@@ -411,7 +418,13 @@ async def opened(ctx: Context, session: Session) -> None:
     # so a base record always marks when a base took effect.
     env = logged_environment(session)
     if env.adopted is not None:
-        await switch_base(ctx, session, env.adopted, command=f"adopt {env.adopted.name}")
+        await switch_base(
+            ctx,
+            session,
+            env.adopted,
+            command=f"adopt {env.adopted.name}",
+            clear_all=env.adopted_clears,
+        )
         env = logged_environment(session)
     if await record_base(ctx, session) is not None:
         env = logged_environment(session)
@@ -576,17 +589,35 @@ def _changed(
 
 ADOPTED = "profile/adopted"
 """A version of the session's named profile, accepted ahead of the start that applies
-it (S6): by `phern profiles adopt`, or a "yes" when a start asked. The next start
-makes it the base, with `switch_base`. Ignorable: a reader that skipped it would
+it (S6): by `phern profiles adopt`, a "yes" when a start asked, or `/profile use`,
+which may carry `clear: true` (`--clear`). The next start makes it the base, with
+`switch_base`. Ignorable: a reader that skipped it would
 start the session on the base it already has, which is what it ran in until then."""
 
 DECLINED = "profile/declined"
 """A version a person said no to when a start asked (S6), so the same version is not
 asked about again. Ignorable: a reader that skipped it asks once more."""
 
+WITHDRAWN = "profile/withdrawn"
+"""An adopted version taken back, and why: the start that applied it could not mount
+it (`withdraw_adoption`). The session stays on its base, and the version reads as
+declined, so no start offers it again — a later version of the profile is asked about
+as any is. Required: a reader that skipped it would apply the adoption at its next
+start, and fail on it again."""
+
 CLEARED = "profile/override-cleared"
 """An override that stops applying, by the row it addressed. Required: a reader that
 skipped it would rebuild a session with an override it no longer runs with."""
+
+
+@dataclass(frozen=True, slots=True)
+class Declined:
+    """A version said no to since the base — by a person when a start asked
+    (`profile/declined`), or by a start that could not mount it (`profile/withdrawn`)."""
+
+    version: ProfileBase
+    reason: str = ""
+    """What stopped the start that took it back; `""` when a person said no."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,8 +629,11 @@ class LoggedEnvironment:
     overrides: tuple[Override, ...] = ()
     adopted: ProfileBase | None = None
     """A version accepted since the base, which the next start makes the base."""
-    declined: ProfileBase | None = None
-    """The version a person last said no to, since the base."""
+    declined: Declined | None = None
+    """The version last said no to since the base, and by what."""
+    adopted_clears: bool = False
+    """Whether the overrides go with the switch to `adopted` (`/profile use --clear`,
+    decision 11) rather than applying over it."""
 
     @property
     def starts_on(self) -> ProfileBase | None:
@@ -614,19 +648,22 @@ class EnvironmentFold:
     the prefix again at every one.
 
     A base replaces the base and settles what was adopted or declined against the
-    one before it. An override applies from where it is logged, **across a base
+    one before it; a withdrawal takes back what was adopted and declines it. An
+    override applies from where it is logged, **across a base
     switch** (decision 5), until a `profile/override-cleared` names a row it
     addresses. Other types are passed over, so a caller may hand in a whole log.
     """
 
     base: ProfileBase | None = None
     adopted: ProfileBase | None = None
-    declined: ProfileBase | None = None
+    declined: Declined | None = None
+    adopted_clears: bool = False
     changes: list[Override] = field(default_factory=list)
 
     def step(self, kind: str, data: Mapping[str, JsonValue]) -> None:
         if kind == BASE:
             self.base, self.adopted, self.declined = ProfileBase.of(data), None, None
+            self.adopted_clears = False
         elif kind == OVERRIDE:
             self.changes.append(Override.of(data))
         elif kind == CLEARED:
@@ -634,12 +671,20 @@ class EnvironmentFold:
             self.changes = [one for one in self.changes if row not in entry_ids(one.entry)]
         elif kind == ADOPTED:
             self.adopted, self.declined = ProfileBase.of(data), None
+            self.adopted_clears = as_bool(data.get("clear"))
         elif kind == DECLINED:
-            self.declined = ProfileBase.of(data)
+            self.declined = Declined(ProfileBase.of(data))
+        elif kind == WITHDRAWN:
+            # A decline with a reason: the adoption goes, and the version it named
+            # is not offered again.
+            self.adopted, self.adopted_clears = None, False
+            self.declined = Declined(ProfileBase.of(data), as_str(data.get("reason")))
 
     @property
     def environment(self) -> LoggedEnvironment:
-        return LoggedEnvironment(self.base, tuple(self.changes), self.adopted, self.declined)
+        return LoggedEnvironment(
+            self.base, tuple(self.changes), self.adopted, self.declined, self.adopted_clears
+        )
 
 
 def fold_environment(records: Iterable[tuple[str, Mapping[str, JsonValue]]]) -> LoggedEnvironment:
@@ -698,10 +743,37 @@ def _said_by(base: ProfileBase, kept: Sequence[Override]) -> list[str]:
     ]
 
 
-async def record_adopted(ctx: Context, session: Session, version: ProfileBase) -> bool:
-    """Accept `version` for this session's next start. Whether it reached disk."""
-    _LOG.append(session, ADOPTED, version.to_wire())
+async def record_adopted(
+    ctx: Context, session: Session, version: ProfileBase, *, clear: bool = False
+) -> bool:
+    """Accept `version` for this session's next start. Whether it reached disk.
+
+    `clear` says the session's overrides go with the switch rather than applying
+    over the new base — `/profile use --clear` (decision 11); the start that applies
+    the version clears them in the same batch as the base (`switch_base`)."""
+    payload = dict(version.to_wire())
+    if clear:
+        payload["clear"] = True
+    _LOG.append(session, ADOPTED, payload)
     return await session_written(ctx, session)
+
+
+async def withdraw_adoption(ctx: Context, session: Session, *, reason: str) -> None:
+    """Take back a version adopted for this session's next start, when that start
+    could not mount it, saying why (`reason`). Nothing when none is pending.
+
+    **A record of its own** (`profile/withdrawn`), which the fold reads as a decline:
+    the session starts on the base it has, overrides and all — nothing of it was
+    cleared, since clearing is the start's own step and that start never opened —
+    and the version is not offered again, while the reason stays in the log for
+    whoever attaches, or audits, next. Without it, a version that will not mount is
+    applied again at every start, and the session never opens again.
+    """
+    adopted = logged_environment(session).adopted
+    if adopted is None:
+        return
+    _LOG.append(session, WITHDRAWN, {**adopted.to_wire(), "reason": reason})
+    await session_written(ctx, session)
 
 
 SAVED = "profile/saved"
@@ -741,7 +813,10 @@ class ProfileChange:
     setting (the loader's rule), so it still applies over the new version, and the
     new version's change to that row does not."""
     declined: bool
-    """Whether a person already said no to this version."""
+    """Whether a person already said no to this version, or a start took it back."""
+    withdrawn: str = ""
+    """Why a start took this version back (`Declined.reason`) — `""` when a person
+    declined it, or nobody did."""
 
     @property
     def yours(self) -> int:
@@ -772,12 +847,16 @@ def profile_change(env: LoggedEnvironment, now: ProfileBase) -> ProfileChange | 
     if not found:
         return None
     moved = {one.row for one in found}
+    no = (
+        env.declined if env.declined is not None and env.declined.version.rows == now.rows else None
+    )
     return ProfileChange(
         was=was,
         now=now,
         differences=tuple(found),
         shadowed=tuple(one for one in env.overrides if moved & set(entry_ids(one.entry))),
-        declined=env.declined is not None and env.declined.rows == now.rows,
+        declined=no is not None,
+        withdrawn=no.reason if no is not None else "",
     )
 
 
@@ -796,9 +875,19 @@ def record_summary(kind: str, data: Mapping[str, JsonValue]) -> str:
         return f"adopted {as_str(data.get('name'))}'s version, for the next start"
     if kind == DECLINED:
         return f"kept this session's version over {as_str(data.get('name'))}'s"
+    if kind == WITHDRAWN:
+        name, reason = as_str(data.get("name")), as_str(data.get("reason"))
+        return f"took back {name}'s version: it did not start ({reason})"
     if kind == SAVED:
         return f"saved as {as_str(data.get('name'))}: {as_str(data.get('path'))}"
     return kind
+
+
+def withdrawn_note(name: str, reason: str) -> str:
+    """The sentence for a version a start took back (`profile/withdrawn`): the one
+    wording for the command that asked for it, a terminal attaching to the session,
+    and a one-shot start on it."""
+    return f"{name} did not start ({reason}), so this session runs on the version it had."
 
 
 def environment_listing(env: LoggedEnvironment) -> list[str]:
@@ -810,6 +899,9 @@ def environment_listing(env: LoggedEnvironment) -> list[str]:
     lines = [f"Base: {base.name or 'a profile file'} (pH {base.ph_version})"]
     if env.adopted is not None:
         lines.append(f"Adopted, for the next start: {env.adopted.name}")
+    elif env.declined is not None and env.declined.reason:
+        taken = withdrawn_note(env.declined.version.name, env.declined.reason)
+        lines.append(f"Taken back at its last start: {taken}")
     if not env.overrides:
         lines.append("No overrides: it runs on its base as recorded.")
         return lines

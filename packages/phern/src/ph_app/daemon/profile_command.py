@@ -44,12 +44,12 @@ from ph.session_profile import (
     listing,
     logged_environment,
     profile_change,
+    record_adopted,
     record_saved,
     resolved_environment,
-    switch_base,
 )
 from ph.text import count_of
-from ph.wire import validation_errors
+from ph.wire import validation_summary
 
 from ..console import detail
 from ..profiles import SaveRefused, named_version, save_session
@@ -87,7 +87,7 @@ def profile_command(root: Root) -> CommandDefinition:
             if verb == "save" and words:
                 return await _save(root, words[0], line, replace="--replace" in words)
             if verb == "use" and words:
-                return await _use(root, words[0], line, clear="--clear" in words)
+                return await _use(root, words[0], clear="--clear" in words)
             if verb == "clear":
                 return await _clear(root, words[0] if words else None, line)
         except (_Refused, SaveRefused, OverrideNotRecorded) as refusal:
@@ -137,24 +137,32 @@ async def _save(root: Root, name: str, line: str, *, replace: bool) -> str:
     )
 
 
-async def _use(root: Root, name: str, line: str, *, clear: bool) -> str:
-    """Make `name`'s current version the base, then have the root start again."""
+async def _use(root: Root, name: str, *, clear: bool) -> str:
+    """Adopt `name`'s current version, then have the root start again on it.
+
+    **An adoption, as every base change after the first is** — a "yes" to a moved
+    profile, `phern profiles adopt` — so the start that applies it is where the base
+    changes, and a version that will not mount is withdrawn there rather than left to
+    strand the session (`runtime.mount_session`). The overrides go with it or apply over
+    it, as the person chose (decision 11).
+    """
     if root.held_on_profile:
         raise _Refused("This session is waiting on its profile question; answer that first.")
     if root.agent.status != "idle":
         raise _Refused("The agent is working; `/profile use` when it is idle.")
     version = _version(name)
-    cleared = await switch_base(root.ctx, root.session, version, command=line, clear_all=clear)
+    if not await record_adopted(root.ctx, root.session, version, clear=clear):
+        raise _Refused(f"{name} was not adopted: the session log could not be written.")
     root.restart_wanted = True
     kept = len(logged_environment(root.session).overrides)
-    said = [f"This session now runs on {name}."]
-    if cleared:
-        said.append(f"Cleared {count_of(len(cleared), 'override')}: {', '.join(cleared)}.")
-    if kept:
+    said = [f"Starting this session again on {name}."]
+    if kept and clear:
+        said.append(f"Its {count_of(kept, 'override')} go with the old profile.")
+    elif kept:
         said.append(
-            f"Still applied over it: {count_of(kept, 'override')}; `/profile clear` drops them."
+            f"Its {count_of(kept, 'override')} still apply over it, less any it already "
+            "says; `/profile clear` drops them."
         )
-    said.append("Starting it again on the new profile.")
     return " ".join(said)
 
 
@@ -177,7 +185,7 @@ def _version(name: str) -> ProfileBase:
     try:
         return named_version(name)
     except ValidationError as error:
-        said = "; ".join(validation_errors(error, root="config"))
+        said = validation_summary(error, root="config")
         raise _Refused(f'profile "{name}" does not resolve: {said}') from error
     except (LoaderError, OSError, ValueError) as error:
         raise _Refused(f'profile "{name}" does not compose: {detail(error)}') from error

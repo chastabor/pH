@@ -44,16 +44,27 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field
 
-from ..cordis import Context, Disposer, Profile, Running, interpolate, plugin, running
+from ..agent.types import AgentHandle
+from ..cordis import (
+    ChildLimit,
+    ChildReach,
+    Context,
+    Disposer,
+    NarrowingRefused,
+    Running,
+    ScopedEntries,
+    plugin,
+    running,
+)
 from ..json import JsonValue, as_str
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
-from ..paths import canonical
+from ..paths import canonical, is_under
 from ..session import Session
 from ..session.writers import log_writer
 from ..tools.errors import FailureKind, HarnessError
@@ -84,9 +95,11 @@ __all__ = [
     "SandboxPolicy",
     "SandboxProvider",
     "SandboxSeam",
+    "allowance_path",
     "allowed_paths_of",
     "apply",
     "enforcement_of",
+    "held_under",
     "host_allowed",
     "narrower",
     "writable_paths",
@@ -361,6 +374,19 @@ directory and no network. The closed direction, stated as a value so `effective`
 has no `if allowances is None` branch to get wrong."""
 
 
+def allowance_path(entry: str) -> str:
+    """A directory as `sandbox-allow` names it, spelled as the kernel will match it:
+    `~` expanded and every symlink resolved (`canonical`). The one spelling for the
+    deployment's directories and for a child's narrower list of them."""
+    return str(canonical(Path(entry).expanduser()))
+
+
+def held_under(path: str, roots: Sequence[str]) -> bool:
+    """Whether canonical `path` is one of `roots` or inside one — what a narrowed
+    child's directory must be of its parent's, at admission and at every bind."""
+    return any(is_under(Path(path), Path(root)) for root in roots)
+
+
 def host_allowed(hosts: Sequence[str], host: str, port: int) -> bool:
     """Whether `host:port` is named by `hosts`.
 
@@ -573,9 +599,13 @@ class SandboxSeam:
     """The proxy door, once the backend row has proved a confined command can reach
     it. `None` with `allowlist` in force means no network at all, and
     `network_posture` says so."""
+    _path_limits: ScopedEntries[tuple[str, ...]] = field(default_factory=ScopedEntries)
+    """The writable directories a narrowed child keeps (`restrict_paths`), by the scope
+    each binds (`ScopedEntries`, as `ctx.skills` keeps its filters): a command reads
+    only the ones along its agent's `isolation_chain()`."""
 
     @property
-    def _allowed(self) -> Allowances:
+    def allowed(self) -> Allowances:
         """What this deployment permits, with the unmounted case already answered.
 
         The one spelling of `allowances or NOTHING`, which is what `NOTHING` is for:
@@ -620,9 +650,7 @@ class SandboxSeam:
             self.ctx.running_for(scope),
             self,
             "allowances",
-            allowances.model_copy(
-                update={"paths": [str(canonical(Path(p).expanduser())) for p in allowances.paths]}
-            ),
+            allowances.model_copy(update={"paths": [allowance_path(p) for p in allowances.paths]}),
             label="sandbox.allowances",
         )
 
@@ -660,6 +688,10 @@ class SandboxSeam:
         """Explicit beats the log; the log beats the deployment default."""
         return explicit or self.logged_mode(session) or self.default_mode
 
+    def mode_for(self, agent: str | None) -> SandboxMode:
+        """The posture `agent`'s session runs in — the deployment's without one."""
+        return self.resolve_mode(self._session_of(agent))
+
     def set_mode(self, session: Session, mode: SandboxMode) -> None:
         _LOG.append(session, "sandbox/mode", {"mode": mode})
 
@@ -693,9 +725,47 @@ class SandboxSeam:
 
     # ------------------------------------------------------------ allowances --
 
-    def allowed_paths(self) -> tuple[Path, ...]:
-        """The deployment's extra writable directories — expanded, and only the
-        ones that exist.
+    def restrict_paths(self, paths: Sequence[str], *, scope: Context) -> Disposer:
+        """Bind only `paths` of the extra writable directories for what runs in `scope`
+        and every scope inside it — a child an assigned profile narrowed (S7b).
+
+        Canonical (`allowance_path`), as the deployment's are, and within them:
+        `sandbox-allow`'s narrower checks that at admission, and `writable_for` keeps
+        a limit to what its parent's own reach still holds, so a directory the
+        deployment stops allowing is not kept by a child that was once given it.
+        Lifted with `scope`, as `ctx.skills.restrict` is.
+        """
+        # The table empties with its last limit, which is what keeps `_limits_of`'s
+        # fast path for every command once the narrowed children are gone.
+        by = self.ctx.running_for(scope)
+        return self._path_limits.add(by, tuple(paths), label="sandbox.path-limit")
+
+    def writable_for(self, agent: str | None = None) -> tuple[str, ...]:
+        """The extra writable directories `agent` may use, canonical, whether or not
+        they exist: the deployment's, less what a narrowing along its scope keeps back.
+
+        Each limit is read outermost first and keeps only what the one before left, so
+        a grandchild holds no more than its parent does *now*.
+        """
+        paths = tuple(self.allowed.paths)
+        for limit in self._limits_of(agent):
+            paths = tuple(path for path in limit if held_under(path, paths))
+        return paths
+
+    def _limits_of(self, agent: str | None) -> list[tuple[str, ...]]:
+        """The path limits along `agent`'s scope, outermost first."""
+        if not self._path_limits or not agent:
+            # The common case, answered before the lookup: this runs inside
+            # `effective`, on every confined command and gated write.
+            return []
+        found = self._agent(agent)
+        if found is None:
+            return []
+        return self._path_limits.gathered(reversed(found.ctx.isolation_chain()))
+
+    def allowed_paths(self, agent: str | None = None) -> tuple[Path, ...]:
+        """The extra writable directories `agent` may use (`writable_for`) — only
+        the ones that exist.
 
         A missing directory is skipped rather than bound, because `bwrap` refuses
         to start when a bind source is absent and every confined command would
@@ -707,7 +777,7 @@ class SandboxSeam:
         # mint. This is a filter and nothing more: it runs inside `effective`, so on
         # every confined command and every gated write, and a `realpath` here would
         # be a syscall per configured directory per command.
-        found = [Path(entry) for entry in self._allowed.paths]
+        found = [Path(entry) for entry in self.writable_for(agent)]
         existing = tuple(path for path in found if path.is_dir())
         for path in found:
             if path not in existing:
@@ -721,7 +791,7 @@ class SandboxSeam:
         `/sandbox allow host` take effect on the next request without the proxy —
         and the tunnels it is carrying — being restarted.
         """
-        network = self._allowed.network
+        network = self.allowed.network
         match network.mode:
             case "off":
                 return False
@@ -791,11 +861,11 @@ class SandboxSeam:
         # chosen, where the footer said `read-only` and the backend got
         # `workspace-write`. A caller that states nothing takes the posture
         # whole; a caller that states something can only ask for less.
-        mode = narrower(policy.mode, self.resolve_mode(self._session_of(agent)))
+        mode = narrower(policy.mode, self.mode_for(agent))
         extra = list(policy.writable_extra or ())
         if mode != "read-only":
-            extra += [str(path) for path in self.allowed_paths() if str(path) not in extra]
-        allowed = self._allowed.network
+            extra += [str(path) for path in self.allowed_paths(agent) if str(path) not in extra]
+        allowed = self.allowed.network
         network, egress = False, None
         if mode == "danger-full-access":
             network = True
@@ -904,20 +974,25 @@ class SandboxSeam:
     def _session_of(self, agent: str | None) -> Session | None:
         """The session an agent's records and posture belong to.
 
-        Two readers now: `report_denial`, which records where a person will look
-        for it, and `effective`, which reads the mode that session chose (J2).
-        The second is why the lookup is here rather than threaded through every
-        caller — `confine` already takes the agent id, because a denial has to
-        land in that agent's transcript, and the mode is a fact about the same
-        session. A `session=` parameter would have to be added to
-        `ShellService.run`, to the kernel's confiner and to everything that
-        builds one, to carry something the seam can already ask for.
+        Two readers: `report_denial`, which records where a person will look for
+        it, and `mode_for`, which reads the mode that session chose (J2) for
+        `effective` and for a child's `sandbox-policy`. The second is why the
+        lookup is here rather than threaded through every caller — `confine`
+        already takes the agent id, because a denial has to land in that agent's
+        transcript, and the mode is a fact about the same session. A `session=`
+        parameter would have to be added to `ShellService.run`, to the kernel's
+        confiner and to everything that builds one, to carry something the seam
+        can already ask for.
         """
+        found = self._agent(agent)
+        return found.session if found is not None else None
+
+    def _agent(self, agent: str | None) -> AgentHandle | None:
+        """The live agent by id — whose session and scope a command runs for."""
         agents = self.ctx.get(AGENTS)
         if agents is None or not agent:
             return None
-        found = agents.get(agent)
-        return found.session if found is not None else None
+        return agents.get(agent)
 
 
 def enforcement_of(ctx: Context) -> Enforcement | None:
@@ -935,17 +1010,18 @@ def enforcement_of(ctx: Context) -> Enforcement | None:
     return None if seam is None else seam.enforcement
 
 
-def allowed_paths_of(ctx: Context) -> tuple[Path, ...]:
-    """The deployment's extra writable directories, asked of a seam that may not
+def allowed_paths_of(ctx: Context, agent: str | None = None) -> tuple[Path, ...]:
+    """The extra writable directories `agent` may use, asked of a seam that may not
     be mounted.
 
     For `permissions-fs`, whose `outside-workspace` rule prompts about what the
     backend would refuse — and must therefore stop prompting about what the
     backend now allows, or the prompt boundary and the enforced one describe two
-    different sets (E6).
+    different sets (E6). Per agent for the same reason: a child narrowed to fewer
+    directories is asked about the ones it lost.
     """
     seam = ctx.get(SANDBOX)
-    return () if seam is None else seam.allowed_paths()
+    return () if seam is None else seam.allowed_paths(agent)
 
 
 class Config(WireModel):
@@ -954,17 +1030,21 @@ class Config(WireModel):
     default_mode: SandboxMode = "read-only"
 
 
-def default_mode_of(profile: Profile) -> SandboxMode | None:
-    """The posture `profile`'s `sandbox-policy` row starts a session in, read without
-    mounting it — `None` when it has no such row. Here, beside the row, so a reader
-    of another profile (an assigned child's, S7b) asks the row's own model."""
-    row = next((one for one in profile.enabled_rows() if one.name == "sandbox-policy"), None)
-    if row is None:
-        return None
-    return Config.model_validate(interpolate(row.config) or {}).default_mode
+def narrows(_mounted: Config, asked: Config, reach: ChildReach) -> ChildLimit:
+    """A child's `sandbox-policy` row may start it in a narrower posture than its
+    parent runs in and never a wider one (S7b). `read-only` is the one a child holds on
+    its own: `SubagentService.resolve_profile` refuses it write."""
+    seam = reach.ctx.get(SANDBOX)
+    parent = seam.mode_for(reach.agent) if seam is not None else "danger-full-access"
+    mode = asked.default_mode
+    if narrower(mode, parent) != mode:
+        raise NarrowingRefused(
+            f"its sandbox-policy lets a child run {mode}, where its parent runs {parent}"
+        )
+    return ChildLimit(read_only=mode == "read-only")
 
 
-@plugin("sandbox-policy", affects="environment", config=Config)
+@plugin("sandbox-policy", affects="environment", config=Config, narrows=narrows)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the sandbox seam with policy resolution and no backend."""
     seam = SandboxSeam(ctx=ctx, default_mode=config.default_mode)

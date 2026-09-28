@@ -553,3 +553,19 @@ async def test_the_deployment_default_reaches_the_backend_it_is_shown_for(
     # out of the writable set. `scratch` stays in it, which is the kind's own
     # rule and not this posture's — see `Workspace.scratch`.
     assert str(tmp_path) not in writable_paths(resolved), "the repo was writable after all"
+
+
+async def test_a_child_s_path_limit_goes_with_its_scope(mount: MountProfile) -> None:
+    """A narrowed child's limit is keyed by its scope, and the key goes when the scope
+    does: left behind, it would hold the settled scope and keep every later command,
+    the root's included, off the no-limits fast path. Sabotage: keep an emptied bucket
+    in `ScopedTable.claim`'s release, and the key outlives the child."""
+    ctx = await mount()
+    sandbox = ctx.require(SANDBOX)
+    child = ctx.scope("child")
+
+    sandbox.restrict_paths((), scope=child)
+    assert sandbox._path_limits, "the limit is keyed by the child's scope"
+    await child.dispose()
+
+    assert not sandbox._path_limits, "the table empties with its last limit"

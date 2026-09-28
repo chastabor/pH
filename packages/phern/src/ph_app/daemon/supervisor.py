@@ -81,10 +81,10 @@ from ph.session import (
 from ph.session.kinds import SESSION_HOLDER
 from ph.session.writers import log_writer
 from ph.session_profile import (
-    LoggedEnvironment,
     OverrideSource,
     ProfileBase,
     ProfileChange,
+    logged_environment,
     record_adopted,
     record_declined,
 )
@@ -93,6 +93,8 @@ from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
 from ..payloads import (
+    ProfileAsk,
+    ProfileAskReply,
     RootDescription,
     RootDetail,
     SessionCommandsNotice,
@@ -104,13 +106,11 @@ from ..payloads import (
     ShellReply,
 )
 from ..profiles import (
-    StartingProfile,
     composed_like,
     kept_note,
-    session_profile,
 )
 from ..protocol import Refusal, cursor_of
-from ..runtime import mounted
+from ..runtime import mount_session
 from ..sessions import recorded_start
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
@@ -399,12 +399,18 @@ class Root:
     """How this root's named profile had moved when it started, against the version
     it runs on (S6) — `None` when it had not. It runs on its own version until one
     is adopted; `describe` says how many settings differ."""
+    withdrew: str = ""
+    """What this root's start took back — an adopted version the loader refused, as
+    `withdrawn_note` says it (`StartingProfile.withdrawn`) — or `""`. For the command
+    that asked for the start (`_Connection._after_command`) to say."""
     restart_wanted: bool = False
     """Set by a command that moved this root's environment where a live mount cannot
     follow — `/profile use`, a `/profile clear` of an override that turned a row on
-    or off (S7). The mutation that ran it starts the root again from its log once
-    the command and its key are durable (`DaemonServer._mutate`): not inside the
-    command, whose own records are still being written to this root's session."""
+    or off (S7). The `session/command` mutation's `after` step
+    (`_Connection._after_command`) consumes it and starts the root again from its
+    log once the command and its key are durable — or once the command failed — not
+    inside the command, whose own records are still being written to this root's
+    session."""
     held_on_profile: bool = False
     """Whether this root waits on a person's decision about `change` (S6): the
     person's own profile moved, and the root was started for a front end that can
@@ -682,6 +688,13 @@ class Root:
             model_key=options.model_key,
             profile=self.ctx.require(MOUNT).profile.name,
             profile_changes=len(self.change.differences) if self.change is not None else 0,
+            # Nothing while held: the question its modal asks is the account, and the
+            # note's "runs on the version it started on" is not yet true of either.
+            profile_note=(
+                kept_note(self.change, self.id, door="session")
+                if self.change is not None and not self.held_on_profile
+                else ""
+            ),
         )
 
     def status_notice(self) -> SessionStatusNotice:
@@ -1015,7 +1028,9 @@ class Supervisor:
         (`session_profile`), and a new one from the profile it was asked for — so two
         roots on two profiles share a daemon, and one that went idle comes back as it
         was. A named profile that moved since it began is kept, or put to a person
-        (`asks`, S6) before anything runs.
+        (`asks`, S6) before anything runs; an adopted version the loader refuses is
+        taken back there, and the root starts on the version it had
+        (`runtime.mount_session`, the rule `phern -p` and rpc keep too).
         """
         if root_id in self.roots:
             return self.roots[root_id]
@@ -1029,9 +1044,12 @@ class Supervisor:
             # because there is no store to ask until this mount exists.
             recorded = recorded_start(resolve_roots().sessions_dir(), root_id)
             where = cwd or recorded.cwd
-            starting = self._profile_for(root_id, profile, recorded.environment)
-            ctx = await exits.enter_async_context(
-                mounted(starting.profile, project=Path(where) if where else None)
+            ctx, starting = await mount_session(
+                exits,
+                root_id,
+                self._requested(profile),
+                recorded=recorded.environment,
+                project=Path(where) if where else None,
             )
             session = await self._session_for(ctx, root_id, cwd=cwd)
             # The session's own model first — the base, and any `/model` it logged,
@@ -1093,7 +1111,7 @@ class Supervisor:
             # **A named profile that moved since this root began** (S6): kept,
             # unless the person's own file moved and a person is here to ask — then
             # held, and asked, before anything runs on either version.
-            root.change = starting.change
+            root.change, root.withdrew = starting.change, starting.withdrawn
             root.held_on_profile = (
                 asks and starting.change is not None and starting.change.worth_asking
             )
@@ -1320,17 +1338,15 @@ class Supervisor:
                 )
             )
 
-    def _profile_for(self, root_id: str, name: str, recorded: LoggedEnvironment) -> StartingProfile:
-        """The profile `root_id` mounts in: its log's, else `name` (or the daemon's own).
-
-        `name` is composed with the daemon's own start options, so a `--patch` given
-        to `phern daemon` reaches every root whatever profile it was asked for.
-        """
+    def _requested(self, name: str) -> Profile:
+        """The profile a new root starts on: `name`, else the daemon's own — composed
+        with the daemon's start options, so a `--patch` given to `phern daemon` reaches
+        every root whatever profile it was asked for. A root with a log mounts that
+        log's environment over it (`session_profile`)."""
         try:
-            requested = composed_like(name, self.profile) if name else self.profile
+            return composed_like(name, self.profile) if name else self.profile
         except (LoaderError, OSError, ValueError) as error:
             raise Refusal(f'profile "{name}" does not compose: {error}') from error
-        return session_profile(root_id, requested, recorded=recorded)
 
     def starts_on(self) -> ModelEntry | None:
         """What a new root runs on, read off the composed profile without a mount.
@@ -1380,7 +1396,10 @@ class Supervisor:
             if asking.cancelled_caught:
                 return
             if decision == "adopt":
-                if not await record_adopted(root.ctx, root.session, change.now):
+                # Unless a version was adopted while this was asked (`adopt`): that
+                # one is what the person saw and accepted, and it stands.
+                adopted = logged_environment(root.session).adopted is not None
+                if not adopted and not await record_adopted(root.ctx, root.session, change.now):
                     log.warning("ph_app.daemon: root %s: the adoption did not reach disk", root.id)
                 await self.restart(root)
                 return
@@ -1395,7 +1414,7 @@ class Supervisor:
         root.publish(root.status_notice())
         root.ring()
 
-    async def restart(self, root: Root) -> None:
+    async def restart(self, root: Root) -> Root | None:
         """Release `root` and start it again from its log, keeping who watches it (S6).
 
         What a "yes" to a moved profile does, and `/profile use` (S7): the new base is
@@ -1404,10 +1423,13 @@ class Supervisor:
         quiet — and mounted again. Its watchers and answerers move to the new root,
         which a connection finds by id, and are told what changed: the route, the
         verbs and the screens are the new mount's. A prompt still in the inbox is rung.
+        An adopted version that will not mount is withdrawn by `_start`, so the root
+        comes back on what it ran in, and its log says why (`profile/withdrawn`).
+        Returns the new root, or `None` when it did not start at all.
         """
         async with self._starting:
             if self.roots.get(root.id) is not root:
-                return
+                return None
             await self._unmount(root)
             try:
                 back = await self._start(root.id, cwd=None, choice=ModelChoice())
@@ -1417,7 +1439,7 @@ class Supervisor:
                 )
                 # Its watchers are still on it, so the old root can say so.
                 root.publish(SessionStatusNotice(session_id=root.id, status="failed"))
-                return
+                return None
         for watcher in root.subscribers:
             back.subscribe(watcher)
         # The composer's tray and the desk's count go with the root: a chip dropped
@@ -1433,15 +1455,21 @@ class Supervisor:
         back.publish(SessionScreensNotice(session_id=back.id, screens=screens_of(back)))
         if back.agent.inbox.has_pending:
             back.ring()
+        return back
 
     async def adopt(self, root: Root, version: ProfileBase) -> None:
         """Accept `version` for `root`'s next start — `phern profiles adopt` (S6).
 
         A running root is not interrupted (decision 18): it keeps its base, and the
-        start after its release makes this the base, overrides kept.
+        start after its release makes this the base, overrides kept. **A root held on
+        that very question is answered by it**: the pending ask is settled as "adopt",
+        which takes its modal off every front end and starts the root on the version
+        recorded here — the one the person was shown.
         """
         if not await record_adopted(root.ctx, root.session, version):
             raise Refusal(f"{root.id}: the adoption could not be written to its log")
+        if root.held_on_profile and root.desk is not None:
+            root.desk.settle(ProfileAsk.METHOD, ProfileAskReply(decision="adopt").to_wire())
 
     def behind(self) -> list[tuple[str, str]]:
         """`(root, what)` for every mounted root whose named profile moved since it

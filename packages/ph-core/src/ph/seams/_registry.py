@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from ..cordis import Context
 
-from ..cordis import Context, Disposer, Running, ServiceKey
+from ..cordis import Context, Disposer, Running, ServiceKey, remove_identical
 
 __all__ = ["Registers", "claim_entry", "claim_key", "claim_slot", "contribute_item"]
 
@@ -88,14 +88,7 @@ def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, labe
     is this module's whole complaint one container over.
     """
     entries.append(value)
-
-    def release() -> None:
-        for index, held in enumerate(entries):
-            if held is value:
-                del entries[index]
-                return
-
-    return owner.add_disposer(release, label=label)
+    return owner.add_disposer(lambda: remove_identical(entries, value), label=label)
 
 
 def claim_slot(

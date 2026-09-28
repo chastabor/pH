@@ -14,15 +14,18 @@ class Config(WireModel):
     greeting: str = "hello"
 
 
-@plugin("greeter", inject=["tools"], config=Config)
+@plugin("greeter", affects="environment", inject=["tools"], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Whatever this row contributes, it contributes by registering."""
     ...
 ```
 
-Three parts, and each has a consequence:
+Four parts, and each has a consequence:
 
 * **`"greeter"`** is the plugin's name — what a profile row's `name:` refers to.
+* **`affects`** says which configuration owns the row's settings: `environment`
+  (a session profile), `presentation` (the TUI's) or `deployment` (the daemon's).
+  It has no default, so a row that does not say is caught where it is written.
 * **`inject`** lists service keys this row needs. It gates activation: with
   `ctx.tools` absent from the profile, `apply` never runs. Ask for what you
   actually use, and nothing else — an over-broad `inject` makes your row silently
@@ -120,6 +123,36 @@ anything else as the traceback a bug deserves. `containment.strict` on a host wi
 no sandbox backend and the OTel exporter without its extra are the two shipped
 examples (E8). Refuse at mount, not at first use: by then the agent is running and
 "refuse to start" has already been disobeyed.
+
+## When a child holds less of your row
+
+A child runs on its parent's mount, so a profile its parent assigns it
+(`profile="reviewer"`) is read against the parent's rows rather than mounted. A
+row it drops takes the tools and skills that row registered. What a row it keeps
+says is the parent's, unless the plugin declares how a child holds less of it:
+
+```python
+from ph.cordis import ChildLimit, ChildReach, NarrowingRefused
+
+
+def narrows(mounted: Config, asked: Config, reach: ChildReach) -> ChildLimit:
+    """The parent's row as it runs, the child's as its profile says it."""
+    if asked.greeting != mounted.greeting:
+        raise NarrowingRefused("its greeter greets differently, which a child cannot")
+    return ChildLimit()
+
+
+@plugin("greeter", affects="environment", config=Config, narrows=narrows)
+async def apply(ctx: Context, config: Config) -> None: ...
+```
+
+`ChildLimit` is what the child is held to: a model key its parent lists, read-only,
+skills withheld, or fewer writable directories. A limit of another kind is a field
+there and on the child's grant, not something a narrower can say alone. `NarrowingRefused` refuses the
+spawn, and names the row; a narrower refuses anything wider than the parent. The
+narrower is typed against the same `config` model, so mypy holds the two together.
+`models`, `sandbox-policy`, `sandbox-allow` and `skills-progressive` are the shipped
+examples.
 
 ## Checklist
 

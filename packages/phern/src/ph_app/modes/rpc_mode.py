@@ -36,7 +36,6 @@ from ..payloads import (
     SessionNotice,
     SessionStatusNotice,
 )
-from ..profiles import session_profile
 from ..protocol import (
     Frame,
     MethodResult,
@@ -48,7 +47,7 @@ from ..protocol import (
     parse_params,
     respond,
 )
-from ..runtime import mounted
+from ..runtime import mount_session, mounted
 
 __all__ = ["RpcServer", "run_rpc"]
 
@@ -92,7 +91,7 @@ class RpcServer:
     One mount per session, as the daemon has one per root: a session's overrides are
     realized on its mount, so a shared one made one session's `/model` or allowance
     the next session's too, with nothing in the second's log to say so. Each is
-    mounted from its own log's environment (`session_profile`), `profile` being what a
+    mounted from its own log's environment (`mount_session`), `profile` being what a
     new one starts on; all of them unwind with `exits`.
     """
 
@@ -109,8 +108,9 @@ class RpcServer:
         an id this server just made, which has no log to read an environment from."""
         served = self._served.get(session_id)
         if served is None:
-            starting = session_profile(None if fresh else session_id, self.profile)
-            ctx = await self.exits.enter_async_context(mounted(starting.profile))
+            # An adopted version the loader refuses is taken back there, as the
+            # daemon's roots and `phern -p` do; its log says why.
+            ctx, _ = await mount_session(self.exits, None if fresh else session_id, self.profile)
             served = self._served[session_id] = _Served(ctx)
         return served
 

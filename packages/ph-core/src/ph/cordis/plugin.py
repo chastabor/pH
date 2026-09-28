@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias, get_args, overload
 
 from pydantic import BaseModel
 
+from .child_limit import ChildLimit, Narrows
 from .errors import LoaderError
 from .key import ServiceKey, service_names
 
@@ -73,6 +74,10 @@ class PluginSpec:
     """Which configuration owns this row's settings (`Affects`)."""
     inject: tuple[str, ...] = ()
     config_model: type[BaseModel] | None = None
+    narrows: Callable[..., ChildLimit] | None = None
+    """How a child holds less of this row (`ph.cordis.child_limit`), or `None` when
+    it holds this row as its parent runs it or not at all. Erased as `apply` is, and
+    held to the config model by the same overload."""
 
     def resolve_config(self, raw: object) -> BaseModel | None:
         """Validate a row's raw config against the plugin's model.
@@ -118,6 +123,7 @@ def plugin[C: BaseModel](
     affects: Affects,
     inject: Sequence[str | ServiceKey[Any]] = (),
     config: type[C],
+    narrows: Narrows[C] | None = None,
 ) -> Callable[
     [Callable[[Context, C], Awaitable[None]]], Callable[[Context, C], Awaitable[None]]
 ]: ...
@@ -127,6 +133,7 @@ def plugin(
     affects: Affects,
     inject: Sequence[str | ServiceKey[Any]] = (),
     config: type[BaseModel] | None = None,
+    narrows: Callable[..., ChildLimit] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a function as a plugin body.
 
@@ -143,6 +150,10 @@ def plugin(
     annotated `config: OtherConfig` type-checked, and the first field read at
     mount was where the difference surfaced. A row with no model takes `None`,
     and `resolve_config` above is what makes that annotation true.
+
+    `narrows` is how a child's copy of this row holds less than its parent's
+    (`ph.cordis.child_limit`), and takes the config model too, so it comes only with
+    one: a row with no config has nothing to narrow but whether it runs.
     """
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -152,6 +163,7 @@ def plugin(
             affects=affects,
             inject=service_names(inject),
             config_model=config,
+            narrows=narrows,
         )
         return fn
 

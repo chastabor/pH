@@ -28,7 +28,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 import typer
 from pydantic import ValidationError
@@ -56,6 +56,7 @@ from ph.session_profile import (
     override_documents,
     profile_change,
     rebuilt,
+    withdrawn_note,
 )
 from ph.text import count_of
 
@@ -72,6 +73,7 @@ __all__ = [
     "Bundle",
     "ModelOption",
     "NamedProfileStore",
+    "NoteDoor",
     "ProfileOption",
     "ProfilePlan",
     "ProviderOption",
@@ -81,6 +83,7 @@ __all__ = [
     "base_documents",
     "compose_profile",
     "composed_like",
+    "host_rows",
     "kept_note",
     "log_host",
     "named_version",
@@ -677,6 +680,12 @@ class StartingProfile:
     """The named profile as it composes now, against the version the session starts
     on — `None` when it has not moved, or when there is nothing to compare: a new
     session, a `--profile` path, a named profile that no longer composes."""
+    adopting: ProfileBase | None = None
+    """The version this start applies, adopted since the base (S6) — what a start the
+    loader refuses takes back (`runtime.mount_session`)."""
+    withdrawn: str = ""
+    """What this start took back, as `withdrawn_note` says it, when the loader refused
+    the version it was to apply; `""` otherwise."""
 
 
 def session_profile(
@@ -715,15 +724,38 @@ def session_profile(
         except (LoaderError, OSError, ValueError):
             named = None
     start = start_documents(requested)
-    profile = rebuilt(starts_on, named or requested, env.overrides, then=start)
+    # An adoption that clears the overrides (`/profile use --clear`) mounts without
+    # them: the start that applies it logs the clears, and a mount composed with them
+    # would run with settings the log is about to say it dropped.
+    kept = () if env.adopted_clears else env.overrides
+    profile = rebuilt(starts_on, named or requested, kept, then=start)
     change = profile_change(env, base_of(named)) if named is not None else None
-    return StartingProfile(profile, change)
+    return StartingProfile(profile, change, adopting=env.adopted)
 
 
-def kept_note(change: ProfileChange, session_id: str) -> str:
-    """One line for a start that kept a session's version over a named profile that
-    moved — the one-shot path, and a root nobody was there to ask (S6)."""
+NoteDoor: TypeAlias = Literal["cli", "session"]
+"""Where a person reading `kept_note` acts on it: the command line, or inside the
+session (`/profile`) — which commands the note names."""
+
+
+def kept_note(change: ProfileChange, session_id: str, *, door: NoteDoor = "cli") -> str:
+    """One line for a session kept on its version of a named profile that moved (S6),
+    or on the one it had when a start took the new one back — the one wording, for
+    the one-shot path and the daemon's log (`cli`) and for a terminal attaching to the
+    session (`session`, sent as `RootDescription.profile_note`)."""
     name, count, yours = change.now.name, len(change.differences), change.yours
+    if door == "cli":
+        who, diff, take = (
+            session_id,
+            f"`phern profiles diff {name} --session {session_id}`",
+            "`phern profiles adopt`",
+        )
+    else:
+        who, diff, take = "this session", "/profile diff", f"/profile use {name}"
+    if change.withdrawn:
+        # Adopted, and taken back at the start that applied it: taking it again
+        # would only fail on it again, so what changed is what is worth offering.
+        return f"{withdrawn_note(name, change.withdrawn)} {diff} lists what it changes."
     if yours == count:
         whose = "yours"
     elif yours:
@@ -731,9 +763,8 @@ def kept_note(change: ProfileChange, session_id: str) -> str:
     else:
         whose = change.ph_moved
     return (
-        f"{name} has changed since {session_id} started ({count_of(count, 'setting')}, "
-        f"{whose}); it runs on the version it started on. `phern profiles diff {name} "
-        f"--session {session_id}` lists them; `phern profiles adopt` takes them."
+        f"{name} has changed since {who} started ({count_of(count, 'setting')}, {whose}); "
+        f"it runs on the version it started on. {diff} lists them; {take} takes them."
     )
 
 
@@ -749,8 +780,14 @@ def log_host(name: str) -> Profile:
     and the rest of the host, with no tool, workspace or model mounted — so a log
     can be written to (`phern profiles adopt`) without starting what runs in it.
     """
-    rows = [row.to_entry() for row in compose_profile(name).rows_of({"deployment"})]
-    return Profile.from_documents([ProfileDocument("host", rows)], name=profile_name(name))
+    return host_rows(compose_profile(name))
+
+
+def host_rows(profile: Profile) -> Profile:
+    """`profile`'s deployment rows alone: the session store and the rest of the host,
+    with nothing that runs — enough to write to a log without starting it."""
+    rows = [row.to_entry() for row in profile.rows_of({"deployment"})]
+    return Profile.from_documents([ProfileDocument("host", rows)], name=profile.name)
 
 
 class NamedProfileStore:

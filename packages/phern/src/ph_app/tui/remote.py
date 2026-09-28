@@ -177,6 +177,9 @@ class DaemonSession:
 
     `None` only where no daemon said otherwise: a headless test driving this
     directly gets a session with a generation of its own."""
+    arrival: str = ""
+    """`FrontSession.arrival`: the attach reply's `profile_note`, the daemon's own
+    sentence about a session kept on a version its named profile moved past."""
     session: Session = field(init=False)
     """This client's mirror of the daemon's log — **a `Session`, kept incrementally.**
 
@@ -779,6 +782,7 @@ async def attach_session(
     # Through the feed, which owns the rule that this reply is the first status
     # frame — the CLI reached for it separately and got a different answer.
     front.feed.seed(attached)
+    front.arrival = attached.profile_note
     # The attach reply's **cursor**, wound back to the start — not its `from`,
     # which is the *index* the live stream begins at and is not a cursor at all.
     # Passing it as one cost the client seq 0 of every session: `session/snapshot`

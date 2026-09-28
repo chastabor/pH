@@ -178,25 +178,39 @@ and the overrides that still apply over a changed row. A person's own edit, when
 front end that can answer asked for the start (`session/new` or `session/attach` from
 a client that declared `asks`), holds the root — `needs-profile-decision`, nothing
 driven — and puts the listing to it through the root's `AskDesk` (`profile/ask`).
-Anything else keeps the saved version and says so. A version is taken by recording it,
-`profile/adopted`, whether by a "yes" there or by `phern profiles adopt`; the next
-start makes it the base — `switch_base`, one batch of `profile/base` and a
-`profile/override-cleared` for each override the new base already says — and the
-supervisor starts a held root again at once, its watchers carried over. Overrides
-apply across a base switch until cleared; `fold_environment` is that rule, for a live
-log and for one read off disk. A "no" is `profile/declined`, so the same version is
-not asked about again. `adopt` writes a stored session under its lease without
-resuming it (`stored_session`, on a mount of the host's rows alone), and one a daemon
-holds through that daemon (`session/adopt`).
+Anything else keeps the saved version and says so, in one sentence (`kept_note`) whose
+commands follow where it is read: the command line's, or `/profile`'s for a terminal
+attaching, which the daemon sends it as `profileNote`. A version is taken by recording it, `profile/adopted`,
+whether by a "yes" there, by `phern profiles adopt` or by `/profile use`; **every base
+change after the first is such an adoption, applied at a start**: the start makes it
+the base — `switch_base`, one batch of `profile/base` and a `profile/override-cleared`
+for each override the new base already says, or for every one when the adoption said
+`clear` — and the supervisor starts a held root again at once, its watchers carried
+over. A version the loader refuses at that start — a row that does not resolve,
+declines, or has a config its model rejects — is withdrawn there: `profile/withdrawn`,
+the version and why (`withdraw_adoption`), which the fold reads as a decline, so the
+session starts on the version it had and no start offers that version again. One rule
+for every host that starts a session — a daemon's root, `phern -p --session`, rpc
+(`runtime.mount_session`) — and the reason reaches the command that asked, a terminal
+attaching (`profileNote`), stderr and `/profile show`, so a bad profile never strands a
+session; any other failure fails the start and takes nothing back. Overrides apply across a
+base switch until cleared; `fold_environment` is that rule, for a live log and for one
+read off disk. A "no" is `profile/declined`, so the same version is not asked about
+again. `adopt` writes a stored session under its lease without resuming it
+(`stored_session`, on a mount of the host's rows alone), and one a daemon holds through
+that daemon (`session/adopt`), which answers the question a held root is waiting on
+(`AskDesk.settle`), so its modal closes wherever it is open.
 
 **`/profile` is the person's half, and the daemon's own command** (S7), registered on
 each root beside its ask desk rather than by a row: saving, switching and restarting
 are this host's. `show` and `diff` read the log (`environment_listing`, `listing`);
 `save` writes the base's own person layers, as recorded, and the overrides after them
 as a sparse named profile (`save_session`), composes it again, and keeps it only if
-the two agree; `use` switches the base (`switch_base`, overrides kept or cleared) and
-sets `Root.restart_wanted`, which the mutation honors once the command and its key are
-durable — the root starts again from its log; `clear` records the clears in one batch,
+the two agree; `use` adopts the named profile's current version (`record_adopted`,
+overrides kept or cleared) and sets `Root.restart_wanted`, which the command
+mutation's `after` hook honors once the command and its key are durable — or once it
+has failed, so a request is never left for a later command to find — and the root
+starts again from its log on the adopted version; `clear` records the clears in one batch,
 then brings the live mount to them (`clear_overrides`), restarting only for a row it
 cannot change live. A fork is a session of its own for all of this: `SessionHeader.is_subagent`
 is a sub-agent's `origin`, not a `parent_session`, which a fork names too.
@@ -207,10 +221,15 @@ named skill's front matter `model:` — through the parent's own `ctx.models`, a
 refuses a key it does not hold. `resolve_profile` has the host compose a named
 profile (`ctx.named_profiles`) and reads it against the parent's mount
 (`ph.seams.subagent_profiles`): a row it runs that the parent does not is refused by
-name, the tools of the rows it drops go (`ToolRuntime.registrants`), its skills
-paths, models default and read-only sandbox narrow the child, and the rest is the
-parent's. Written into the request before `check_grant`, so the ceiling checks it and
-the admission records it.
+name; the tools and skills of the rows it drops go, found by the row that registered
+each (`Context.row_id`, stamped by the loader on every row's scope, read back as
+`ToolRuntime.registrants` and `SkillService.registrants`); and each row it keeps is
+asked of its own plugin, which declares how a child holds less of it
+(`plugin(..., narrows=)`, returning a `ChildLimit`) — the `models` default, the
+`sandbox-policy` posture, the `skills-progressive` paths and the `sandbox-allow`
+writable directories, which a child binds alone (`SandboxSeam.restrict_paths`). A row
+with no narrower is the parent's. Written into the request before `check_grant`, so
+the ceiling checks it and the admission records it.
 
 **The audit reads the same fold** (S8). The environment at seq N is the base in force
 there and the overrides logged up to it — `fold_environment` over the log's prefix,
@@ -611,6 +630,15 @@ so a holder that omits the field fails loudly at registration (`slots=True` plus
 
 Unwinding is *not* these helpers' job; they delegate to `Context.add_disposer`.
 Ownership is decided by the caller through `owner_for`/`running_for`.
+
+A registry that answers **per agent** — narrowing or shadowing for one scope — keys
+what it holds by the registration's layer instead, and `ph.cordis.ScopedTable` (with
+`ScopedEntries`, its list form) is that table: one bucket per isolation scope, made on
+the first registration and dropped with the last, released by the disposer the scope
+holds — so it announces a change an unwinding scope makes (`then`) — and read along an
+isolation chain. The tool registry's layers, the skill registry's restrictions and the
+sandbox's per-child writable directories are its three users; each had written it by
+hand, and a stranded bucket or a silent release had been fixed in each separately.
 
 ### 3.3 How a provider is actually verified — four layers
 

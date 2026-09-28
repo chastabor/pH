@@ -550,9 +550,14 @@ class FsPermissions:
         workspace = None if self.ctx is None else workspace_of(self.ctx, agent)
         if workspace is None:
             return False
+        inside = writable_roots(workspace)
+        if any(is_under(path, root) for root in inside):
+            return False
         # Plus the deployment's own allowances: the backend binds those writable, and
         # a prompt about a write the kernel would permit describes a boundary that
-        # is not there (E6).
+        # is not there (E6). Asked once the workspace has said no, since nearly every
+        # screened path is inside it and this is a stat per configured directory —
+        # and, for a narrowed agent, a walk of its scope.
         #
         # **Not quite one set, and the difference is worth stating.** `effective`
         # drops these under `read-only`, where the session has said nothing is
@@ -562,10 +567,13 @@ class FsPermissions:
         # session to read the mode from; a seam that answered "may this path be
         # written, in this mode" would collapse the two, and is worth building when
         # something needs the mode for another reason.
-        allowed = () if self.ctx is None else allowed_paths_of(self.ctx)
-        roots = (*writable_roots(workspace), *allowed)
-        if any(is_under(path, root) for root in roots):
+        # Per agent: a child an assigned profile narrowed is asked about the
+        # directories it lost, which its sandbox no longer binds.
+        who = None if agent is None else agent.id
+        allowed = () if self.ctx is None else allowed_paths_of(self.ctx, who)
+        if any(is_under(path, root) for root in allowed):
             return False
+        roots = (*inside, *allowed)
         # Asked only once the workspace itself has said no, which is what keeps it
         # free: nearly every screened path is inside, and this is a service lookup
         # on a walk that reaches five figures of candidates.

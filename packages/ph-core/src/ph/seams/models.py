@@ -43,7 +43,16 @@ from dataclasses import dataclass, field
 from pydantic import Field, ValidationError, model_validator
 
 from ..agent.types import AgentOptions
-from ..cordis import Context, Profile, Row, interpolate, plugin
+from ..cordis import (
+    ChildLimit,
+    ChildReach,
+    Context,
+    NarrowingRefused,
+    Profile,
+    Row,
+    interpolate,
+    plugin,
+)
 from ..keys import LLM, MODELS, MOUNT
 from ..session import Session
 from ..session_profile import OverrideSource, override
@@ -367,7 +376,22 @@ async def start_on(
     return await move_to(ctx, session, choose(ctx, choice), source=source, command=command)
 
 
-@plugin("models", affects="environment", config=Config)
+def narrows(mounted: Config, asked: Config, _reach: ChildReach) -> ChildLimit:
+    """A child's `models` row names the model it runs on, which must be a key its
+    parent's list holds: the child runs on its parent's adapters (S7b)."""
+    key = asked.default
+    if not key:
+        return ChildLimit()
+    try:
+        ModelList(mounted).resolve(ModelChoice(key=key))
+    except ModelChoiceError as error:
+        raise NarrowingRefused(
+            f"its models row runs on {key}, which its parent does not list: {error}"
+        ) from error
+    return ChildLimit(model_key=key)
+
+
+@plugin("models", affects="environment", config=Config, narrows=narrows)
 async def apply(ctx: Context, config: Config) -> None:
     """Provide the profile's model list."""
     ctx.provide(MODELS, ModelList(config))

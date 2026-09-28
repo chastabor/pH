@@ -41,6 +41,7 @@ __all__ = [
     "declarable_fields",
     "literal_lookup",
     "validation_errors",
+    "validation_summary",
     "wire_alias",
 ]
 
@@ -99,6 +100,12 @@ def validation_errors(error: ValidationError, *, root: str = "<root>") -> list[s
         f"{'.'.join(str(part) for part in one['loc']) or root}: {one['msg']}"
         for one in error.errors()
     ]
+
+
+def validation_summary(error: ValidationError, *, root: str = "<root>") -> str:
+    """`validation_errors` in one line — the reason a refusal gives, one clause per
+    violation. Five refusals joined them by hand, each with its own `root`."""
+    return "; ".join(validation_errors(error, root=root))
 
 
 class WireForm:

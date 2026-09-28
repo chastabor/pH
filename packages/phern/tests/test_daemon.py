@@ -159,8 +159,8 @@ from ph.seams.schedule import Schedule
 from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
 from ph.testing import ReapedHost, log_event, stored_log
+from ph_app import runtime as runtime_module
 from ph_app.daemon import recovery, server
-from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
@@ -1727,7 +1727,7 @@ async def test_a_client_that_leaves_mid_mount_still_gets_a_whole_root(
             yield ctx
 
     async with supervised(tmp_path, monkeypatch) as supervisor:
-        monkeypatch.setattr(supervisor_module, "mounted", slow_mount)
+        monkeypatch.setattr(runtime_module, "mounted", slow_mount)
         async with anyio.create_task_group() as client:
             client.start_soon(supervisor.start, "left-early")
             await entered.wait()
@@ -1803,7 +1803,7 @@ async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
     private_runtime(tmp_path, monkeypatch)
     async with anyio.create_task_group() as tasks:
         supervisor = Supervisor(profile=PROFILE, tasks=tasks)
-        monkeypatch.setattr(supervisor_module, "mounted", slow_mount)
+        monkeypatch.setattr(runtime_module, "mounted", slow_mount)
         async with anyio.create_task_group() as client:
             client.start_soon(supervisor.start, "in-flight")
             await entered.wait()

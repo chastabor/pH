@@ -16,6 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from anyio import wait_all_tasks_blocked
 from daemon_helpers import (
@@ -27,6 +28,7 @@ from daemon_helpers import (
     running,
     until,
 )
+from tui_helpers import StubHost
 from typer.testing import CliRunner
 
 from ph.json import as_obj, as_seq
@@ -42,6 +44,7 @@ from ph_app.payloads import ProfileAskReply, ProfileDecision
 from ph_app.profiles import named_version, profile_or_exit
 from ph_app.profiles_cli import adopt_version
 from ph_app.sessions import recorded_environment
+from ph_app.tui.remote import attach_session
 
 pytestmark = pytest.mark.anyio
 
@@ -285,3 +288,78 @@ async def test_adopt_goes_through_the_daemon_that_holds_a_session(tmp_path: Path
         assert "through the daemon" in lines[0]
         assert logged_environment(root.session).adopted is not None
         assert row_disabled(root, "tool-bash"), "not interrupted"
+
+
+async def test_adopt_answers_the_question_a_root_is_held_on(tmp_path: Path) -> None:
+    """(1) `phern profiles adopt` while a root is still asking about that change: the
+    adoption is the answer. The question is settled — its modal taken off every
+    front end — and the root starts on the version the command recorded, recorded
+    once. Sabotage: drop the `settle` in `Supervisor.adopt`, and the root stays held
+    with its modal up."""
+    write_profile("work", WORK)
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.running.supervisor
+        await _created_then_released(daemon, "asking")
+        write_profile("work", EDITED)
+        settled: list[str] = []
+        asked: list[dict[str, Any]] = []
+
+        def notice(method: str, params: dict[str, Any]) -> None:
+            if method == "ask.settled":
+                settled.append(params["askId"])
+
+        async def unanswered(params: dict[str, Any]) -> ProfileAskReply:
+            asked.append(params)
+            await anyio.sleep_forever()
+            raise AssertionError("never answered")
+
+        person = await daemon.client("asks", on_notify=notice)
+        person.handlers["profile/ask"] = unanswered
+        await person.call("session/attach", sessionId="asking")
+        held = daemon.held("asking")
+        await until(lambda: bool(asked), what="the question on screen")
+
+        cli = await daemon.client()
+        await cli.call(
+            "session/adopt", sessionId="asking", version=dict(named_version("work").to_wire())
+        )
+        await until(
+            lambda: supervisor.roots.get("asking") not in (None, held),
+            what="the start on the adopted version",
+        )
+
+        back = daemon.held("asking")
+        assert row_disabled(back, "tool-result-offload"), "the version adopted"
+        assert settled == [asked[0]["askId"]], "the modal came down"
+        assert logged_types("asking").count(ADOPTED) == 1
+
+
+async def test_a_terminal_arriving_at_a_kept_version_is_told(tmp_path: Path) -> None:
+    """(4) A session that runs on a version its named profile moved past — kept
+    because nobody was there to ask when it started — says so to the terminal that
+    attaches, once, and points at `/profile diff`. Not for a root still asking, whose
+    modal is already the account. Sabotage: leave `arrival` empty in
+    `attach_session`, and the person is told nothing; describe the root without
+    `profile_note`, and the terminal has nothing to show; describe a held root with
+    one, and it contradicts the question it is asking."""
+    write_profile("work", WORK)
+    async with running(tmp_path) as daemon:
+        supervisor = daemon.running.supervisor
+        await _created_then_released(daemon, "kept")
+        write_profile("work", EDITED)
+        await supervisor.start("kept")
+
+        front = await attach_session(await daemon.client(), "kept", host=StubHost())
+
+        # The daemon's sentence, whose included — the command line's wording, with the
+        # commands a terminal has.
+        assert front.arrival == (
+            "work has changed since this session started (2 settings, yours); it runs on "
+            "the version it started on. /profile diff lists them; /profile use work takes "
+            "them."
+        )
+        # Held on that very question, it says nothing: the modal is the account, and
+        # the note would claim a version the person has not chosen yet.
+        held = daemon.held("kept")
+        held.held_on_profile = True
+        assert held.describe().profile_note == ""

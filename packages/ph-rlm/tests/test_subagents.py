@@ -1412,13 +1412,17 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
 
     The ceiling is re-derived from the admission, so a child admitted with one
     skill does not return holding every skill its parent has. Rebuilt from the
-    run alone it would, and nothing would have said so.
+    run alone it would, and nothing would have said so. Its writable directories
+    too (S7b, item 3). Sabotage: drop `paths` from `_request_of`, and the child
+    comes back binding its parent's.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     ctx.require(SKILLS).register(skill("review"))
     ctx.require(SKILLS).register(skill("audit"))
     await _spawn(ctx, parent, "first")
-    narrowed = await _spawn(ctx, parent, "second", skills=("review",), tools=("read",))
+    narrowed = await _spawn(
+        ctx, parent, "second", skills=("review",), tools=("read",), paths=("/srv/cache",)
+    )
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
     await _persisted(ctx, session)
 
@@ -1437,6 +1441,7 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     assert back.grant is not None
     assert back.grant.skills == ("review",)
     assert back.grant.tools == ("read",)
+    assert back.grant.paths == ("/srv/cache",)
 
 
 async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(

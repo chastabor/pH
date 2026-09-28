@@ -47,7 +47,7 @@ from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.seams.models import ModelChoice, ModelChoiceError, ModelList
 from ph.selectors import matches_any, unknown_namespaces
 from ph.session import new_session_id
-from ph.wire import validation_errors
+from ph.wire import validation_summary
 
 from .agents import agents_app
 from .attach import AttachmentUnavailable
@@ -735,7 +735,7 @@ def daemon(
     except ModelChoiceError as error:
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
     except ValidationError as error:
-        said = "; ".join(validation_errors(error, root="config"))
+        said = validation_summary(error, root="config")
         fail(f"[red]the models row: {said}[/red]", code=2, cause=error)
     try:
         roots = resolve_roots(create=True)

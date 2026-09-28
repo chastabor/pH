@@ -34,15 +34,17 @@ from pydantic import Field
 from ..cordis import (
     DEPLOYMENT,
     Boundary,
+    ChildLimit,
+    ChildReach,
     Context,
     Disposer,
     LoaderError,
-    Profile,
+    NarrowingRefused,
+    ScopedEntries,
     boundary_of,
     chain_label,
     drop_dead_chains,
     events,
-    interpolate,
     plugin,
     safe_yaml_load,
 )
@@ -64,7 +66,7 @@ from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
 from ._names import require_slug, slug_pattern
-from ._registry import claim_entry, claim_key
+from ._registry import claim_key
 from ._restriction import NameFilter
 from .models import KEY_MAX
 
@@ -334,8 +336,12 @@ class SkillService:
 
     ctx: Context
     _skills: dict[str, Skill] = field(default_factory=dict)
-    _restrictions: dict[Context | None, list[SkillRestriction]] = field(default_factory=dict)
-    """Filters keyed by the scope they belong to, as `ctx.tools` keys its layers.
+    _registrants: dict[str, str] = field(default_factory=dict)
+    """Each installed skill's profile row (`Context.row_id`), as `ToolRuntime` keeps a
+    tool's: which row gave it, for a narrowing that drops that row (S7b)."""
+    _restrictions: ScopedEntries[SkillRestriction] = field(default_factory=ScopedEntries)
+    """Filters by the scope they belong to (`ScopedEntries`), as `ctx.tools` keeps its
+    layers.
 
     A flat list scanned per read makes **every agent pay for every other agent's
     narrowing**: a fan-out of sixteen children puts sixteen filters in front of the
@@ -360,16 +366,24 @@ class SkillService:
             raise ValueError(f"a skill description must be at most {DESCRIPTION_MAX} characters")
         if len(skill.hint) > HINT_MAX:
             raise ValueError(f"a skill hint must be at most {HINT_MAX} characters")
-        released = claim_key(
-            self.ctx.owner_for(scope), self._skills, skill.name, skill, label="skill"
-        )
-        self._changed()
+        owner = self.ctx.owner_for(scope)
 
-        def release() -> None:
-            released()
+        def released() -> None:
+            # Inside the disposer the scope holds (`claim_key`'s `then`), so a row
+            # that unwinds takes its registrant and tells the catalog too.
+            self._registrants.pop(skill.name, None)
             self._changed()
 
+        release = claim_key(owner, self._skills, skill.name, skill, label="skill", then=released)
+        if owner.row_id:
+            self._registrants[skill.name] = owner.row_id
+        self._changed()
         return release
+
+    def registrants(self) -> dict[str, str]:
+        """Each installed skill by name, and the profile row it lives with — the one
+        that registered it, or this seam's own for one registered with no scope."""
+        return dict(self._registrants)
 
     def restrict(self, restriction: SkillRestriction, *, scope: Context | None = None) -> Disposer:
         """Narrow what one scope may see. Filters along the chain intersect.
@@ -387,39 +401,30 @@ class SkillService:
         # Through the *pair*, not `by.owner` (P6-29): the bucket is keyed by
         # the layer's isolation, so a restriction registered by a body running
         # for an agent would otherwise sit under that agent's key with its
-        # disposer on the row — and stay there until the next `_changed()`
-        # happened to sweep it. `Running.add_disposer` releases on whichever
-        # scope ends first, which is the same reason `ToolRuntime._claim` uses
-        # it for `_layers`.
+        # disposer on the row — and stay there. `Running.add_disposer` releases
+        # on whichever scope ends first, which is the same reason
+        # `ToolRuntime._claim` uses it for `_layers` — and the release announces
+        # itself (`then`), so a
+        # child that unwinds takes its narrowing out of the memo too.
         by = self.ctx.running_for(scope)
-        bucket = self._restrictions.setdefault(by.layer.isolation, [])
-        released = claim_entry(by, bucket, restriction, label="skill-restriction")
-
+        release = self._restrictions.add(
+            by, restriction, label="skill-restriction", then=self._changed
+        )
         self._changed()
-
-        def release() -> None:
-            released()
-            self._changed()
-
         return release
 
     def _changed(self) -> None:
         """Bump the generation **and drop the caches**, as `ToolRuntime` does.
 
         Bumping alone made every entry stale without removing any, so `_reach`
-        and `_restrictions` grew an entry per scope ever seen and never shrank —
-        both keyed by `Context`, so a settled agent stayed reachable through its
-        own cache line. Since P6-27 a child's `_reach` key is `(child, parent,
-        None)` rather than `(child, None)`, which made a stale child entry pin
-        its parent's context too.
+        grew an entry per scope ever seen and never shrank — keyed by `Context`, so
+        a settled agent stayed reachable through its own cache line. Since P6-27 a
+        child's `_reach` key is `(child, parent, None)` rather than `(child, None)`,
+        which made a stale child entry pin its parent's context too.
+        `_restrictions` empties itself, with each scope's last filter.
         """
         self._generation += 1
         self._reach.clear()
-        self._restrictions = {
-            scope: value
-            for scope, value in self._restrictions.items()
-            if scope is None or scope.active
-        }
 
     def reach(self, scope: Boundary) -> frozenset[str]:
         """Every skill name this boundary may use. The one place filters compose.
@@ -438,9 +443,9 @@ class SkillService:
         cached = self._reach.get(chain)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
-        # On the miss, before the table grows — `_changed` already sweeps dead
-        # scopes out of `_restrictions`, and this is the same sweep for the memo
-        # keyed by those scopes (I2).
+        # On the miss, before the table grows — `_restrictions` drops a scope with
+        # its last filter, and this is the same care for the memo keyed by those
+        # scopes (I2).
         drop_dead_chains(self._reach)
         names = self._resolve(chain)
         self._reach[chain] = (self._generation, names)
@@ -462,7 +467,7 @@ class SkillService:
         for twenty skills on an unnarrowed chain, which is every deployment-wide
         resolve and every agent nobody narrowed.
         """
-        filters = [one for key in chain for one in self._restrictions.get(key, ())]
+        filters = self._restrictions.gathered(chain)
         if not filters:
             return frozenset(self._skills)
         return frozenset(name for name in self._skills if all(one.admits(name) for one in filters))
@@ -985,13 +990,40 @@ class Config(WireModel):
     rather than this row's to assume."""
 
 
-def progressive_paths(profile: Profile) -> list[Path] | None:
-    """The directories `profile`'s `skills-progressive` row scans, resolved, read
-    without mounting it — `None` when it has no such row (S7b)."""
-    row = next((one for one in profile.enabled_rows() if one.name == "skills-progressive"), None)
-    if row is None:
-        return None
-    config = Config.model_validate(interpolate(row.config) or {})
+def narrows(mounted: Config, asked: Config, reach: ChildReach) -> ChildLimit:
+    """A child's `skills-progressive` row may scan fewer of its parent's directories,
+    never others, and the child holds only the skills found under the ones it keeps
+    (S7b)."""
+    if asked.paths == mounted.paths:
+        return ChildLimit()
+    theirs, mine = _scanned(mounted), _scanned(asked)
+    if mine == theirs:
+        return ChildLimit()
+    extra = [path for path in mine if path not in theirs]
+    if extra:
+        raise NarrowingRefused(
+            f"its skills-progressive reads {', '.join(map(str, extra))}, which its parent's "
+            "does not"
+        )
+    service = reach.ctx.get(SKILLS)
+    if service is None:
+        return ChildLimit()
+    mine_by_row = service.registrants()
+
+    def found_elsewhere(name: str) -> bool:
+        # This row's skills only — by the row that installed each, so another row's
+        # skill, or a second `skills-progressive` row's, is not this one's to keep.
+        skill = service.get(name, reach.boundary)
+        if mine_by_row.get(name) != reach.row or skill is None or skill.path is None:
+            return False
+        where = Path(skill.path).resolve()
+        return not any(where.is_relative_to(path) for path in mine)
+
+    return ChildLimit(withheld_skills=frozenset(filter(found_elsewhere, reach.skills)))
+
+
+def _scanned(config: Config) -> list[Path]:
+    """The directories a `skills-progressive` config scans, resolved."""
     return [Path(one).expanduser().resolve() for one in config.paths]
 
 
@@ -1000,6 +1032,7 @@ def progressive_paths(profile: Profile) -> list[Path] | None:
     affects="environment",
     config=Config,
     inject=[SKILLS, SYSTEM_PROMPT, TOOLS],
+    narrows=narrows,
 )
 async def progressive(ctx: Context, config: Config) -> None:
     """Catalog in the prompt, body on demand (G9).

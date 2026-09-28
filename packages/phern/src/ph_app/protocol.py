@@ -134,7 +134,9 @@ its `provider`/`model` with `startsOn`, the entry a new root runs on;
 are new — `session/model` (a mutation: run this root on a listed key or a whole
 route from its next request, answered with the root's description) and
 `models/list` (the listed models, default first). Then S6: a root whose named
-profile moved since it started says how far behind it is (`profileChanges`), one
+profile moved since it started says how far behind it is (`profileChanges`) and
+what a person attaching is told (`profileNote`, which says why when a start took
+the new version back because it would not mount), one
 held on a person's decision about it reports `needs-profile-decision`, the daemon
 asks that decision with `profile/ask` (answered `adopt`, `keep` or `later`), and
 `session/adopt` records a version for a held root's next start. A 0.4.x client

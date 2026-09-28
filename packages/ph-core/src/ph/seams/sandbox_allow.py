@@ -23,15 +23,57 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..cordis import Context, plugin
+from ..cordis import ChildLimit, ChildReach, Context, NarrowingRefused, plugin
 from ..keys import SANDBOX
 from .diagnostics import Diagnostic, contribute
-from .sandbox import Allowances, SandboxSeam
+from .sandbox import Allowances, SandboxSeam, allowance_path, held_under
 
-__all__ = ["apply", "describe", "describe_paths"]
+__all__ = ["apply", "describe", "describe_paths", "narrows"]
 
 
-@plugin("sandbox-allow", affects="environment", inject=[SANDBOX], config=Allowances)
+def narrows(_mounted: Allowances, asked: Allowances, reach: ChildReach) -> ChildLimit:
+    """A child's `sandbox-allow` row may bind fewer of its parent's writable
+    directories, or directories inside them, and never others (S7b, item 3).
+
+    Against the parent's reach as the seam holds it now (`writable_for`), which is
+    the deployment's after any `/sandbox allow path`, less its own narrowing when the
+    parent is a child too.
+
+    **Its network is its parent's, exactly.** Confined commands reach the network
+    through one egress proxy that knows the agent but not a per-agent list, so a
+    child cannot hold fewer hosts than its parent yet — and a row that asks for other
+    network is refused, wider or narrower, rather than quietly given its parent's,
+    since a ceiling a child did not get is one nobody could read off its admission.
+    """
+    seam = reach.ctx.require(SANDBOX)
+    held = seam.writable_for(reach.agent)
+    paths = tuple(dict.fromkeys(allowance_path(one) for one in asked.paths))
+    beyond = [one for one in paths if not held_under(one, held)]
+    if beyond:
+        raise NarrowingRefused(
+            f"its sandbox-allow lets a child write {', '.join(beyond)}, which its parent's does not"
+        )
+    parent, wanted = seam.allowed.network, asked.network
+    if wanted.mode != parent.mode:
+        differs = f"{wanted.mode} network where its parent has {parent.mode}"
+    elif wanted.mode == "allowlist" and set(wanted.hosts) != set(parent.hosts):
+        hosts = sorted(set(wanted.hosts) ^ set(parent.hosts))
+        differs = f"other hosts than its parent's ({', '.join(hosts)})"
+    else:
+        return ChildLimit(writable_paths=None if set(paths) == set(held) else paths)
+    raise NarrowingRefused(
+        f"its sandbox-allow gives a child {differs}; a child's network is its parent's, "
+        "since one egress proxy serves both"
+    )
+
+
+@plugin(
+    "sandbox-allow",
+    affects="environment",
+    inject=[SANDBOX],
+    config=Allowances,
+    narrows=narrows,
+)
 async def apply(ctx: Context, config: Allowances) -> None:
     """Register the deployment's allowances and say what they are.
 

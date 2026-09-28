@@ -44,7 +44,7 @@ from pydantic import ValidationError
 from .cordis import LoaderError
 from .documents import decode_document
 from .json import JsonValue
-from .wire import WireModel, validation_errors
+from .wire import WireModel, validation_summary
 
 __all__ = ["HostConfig", "HostPaths", "host_config_path", "load_host_config"]
 
@@ -101,6 +101,6 @@ def load_host_config(home: Path) -> HostConfig:
     try:
         paths = HostPaths.model_validate(raw.get("paths") or {})
     except ValidationError as error:
-        said = "; ".join(validation_errors(error, root="the block"))
+        said = validation_summary(error, root="the block")
         raise LoaderError(f"{path}: paths: {said}") from error
     return HostConfig(paths=paths, rows=raw.get("rows"))

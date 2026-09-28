@@ -466,6 +466,9 @@ class _Dependent:
     """The mounted plugin's name, stamped by `ForkScope`; blank for an `inject`,
     which runs as the row that asked. Reaches `Context.plugin_name`, which is how
     `waterfall_attributed` names the row that answered."""
+    row: str = ""
+    """The profile row the plugin was mounted for, when the loader said; reaches
+    `Context.row_id`. Blank for an `inject`, and for a plugin mounted by hand."""
     active: bool = False
     ever_active: bool = False
     """Whether this has ever activated — the bit that tells `waiting on fs` for a
@@ -558,7 +561,13 @@ class ForkScope:
     __slots__ = ("_config", "_dependent", "_parent", "_spec", "_unmount")
 
     def __init__(
-        self, parent: Context, spec: PluginSpec, config: object, *, transparent: bool = False
+        self,
+        parent: Context,
+        spec: PluginSpec,
+        config: object,
+        *,
+        transparent: bool = False,
+        row: str = "",
     ) -> None:
         self._parent = parent
         self._spec = spec
@@ -568,6 +577,7 @@ class ForkScope:
             self._apply,
             label=f"plugin({spec.name})",
             plugin=spec.name,
+            row=row,
             transparent=transparent,
             # Where the plugin's code lives, which nothing else in the mount path
             # knows: the loader has a name and an entry point, and the *module* is
@@ -650,6 +660,11 @@ class ForkScope:
     def config(self) -> object:
         return self._config
 
+    @property
+    def spec(self) -> PluginSpec:
+        """The plugin this fork mounted — its config model and its narrower."""
+        return self._spec
+
     async def _apply(self, ctx: Context) -> None:
         await maybe_await(self._spec.apply(ctx, self._spec.resolve_config(self._config)))
 
@@ -700,6 +715,21 @@ is neither — there is nothing for it to unwind with.
 """
 
 
+def remove_identical[T](entries: list[T], value: T) -> None:
+    """Remove **that object** from `entries`, not one equal to it; nothing if absent.
+
+    `list.remove` compares with `==`, and two registrations of one value are equal
+    by field — so disposing the second deleted the first, and the first's disposer
+    then deleted the survivor, reordering what was left. Every registry of values
+    releases through this: a hook (`Context.on`), a contribution (`claim_entry`), a
+    per-scope filter (`ScopedEntries`).
+    """
+    for index, held in enumerate(entries):
+        if held is value:
+            del entries[index]
+            return
+
+
 def drop_dead_chains(cache: MutableMapping[tuple[Context | None, ...], Any]) -> None:
     """Delete every memo entry whose innermost scope has been disposed (I2).
 
@@ -720,9 +750,9 @@ def drop_dead_chains(cache: MutableMapping[tuple[Context | None, ...], Any]) -> 
     `__weakref__` slot, so an eviction disposer per scope with a `WeakSet` of
     hooked scopes would retain nothing and need no re-registration — it is not
     ruled out by the mechanics. The sweep is chosen because it is smaller: no
-    per-registry hook table, no disposer per scope, and `SkillService._changed`
-    already drops dead scopes out of `_restrictions` the same way. A cache is a
-    thing legitimately allowed to forget.
+    per-registry hook table and no disposer per scope. A cache is a thing
+    legitimately allowed to forget — unlike a registry's own table, which holds a
+    disposer per entry anyway and drops a scope with its last (`ScopedTable`).
 
     Called on a **miss**, which keeps it O(live scopes): a miss is the only moment
     the table grows, and sweeping then keeps the count proportional to what is
@@ -921,6 +951,7 @@ class Context:
         "_parent",
         "_plugin",
         "_provide_to",
+        "_row",
         "_running_self",
         "_runtime",
         "_services",
@@ -931,6 +962,7 @@ class Context:
     _label: str
     _module: str
     _plugin: str
+    _row: str
     _children: list[Context]
     _effects: list[_Effect]
     _services: dict[str, _Provision]
@@ -955,6 +987,7 @@ class Context:
         # Inherited, so a scope a plugin opens for itself still answers as the
         # plugin; `_activation_scope` is what sets it.
         self._plugin = parent._plugin if parent is not None else ""
+        self._row = parent._row if parent is not None else ""
         self._children = []
         self._effects = []
         self._services = {}
@@ -979,6 +1012,8 @@ class Context:
         )
         if dependent.plugin:
             scope._plugin = dependent.plugin
+        if dependent.row:
+            scope._row = dependent.row
         if dependent.transparent:
             # **A deployment row mounted into its own realm is still a
             # deployment row** (A9). `isolate:` narrows its *service lookup*,
@@ -1146,6 +1181,15 @@ class Context:
         reading a tree, and a name a decision is keyed on should not depend on
         how that prose is spelled."""
         return self._plugin
+
+    @property
+    def row_id(self) -> str:
+        """The profile row this scope belongs to, or `""` outside one — stamped by the
+        loader beside `plugin_name` and inherited the same way, so a registry can
+        say which row gave what it holds (an assigned child's narrowing, S7b)
+        without walking up to the mount. A private copy mounted in a row's realm is
+        that row's: it exists because the row isolates."""
+        return self._row
 
     @property
     def parent(self) -> Context | None:
@@ -1433,7 +1477,7 @@ class Context:
         return child
 
     def plugin(
-        self, plugin: object, config: object = None, *, transparent: bool = False
+        self, plugin: object, config: object = None, *, transparent: bool = False, row: str = ""
     ) -> ForkScope:
         """Mount `plugin` as a child fork of this context.
 
@@ -1446,7 +1490,7 @@ class Context:
         copies mounted beside it, whose invisibility is the isolation working.
         """
         self._assert_active()
-        return ForkScope(self, normalize_plugin(plugin), config, transparent=transparent)
+        return ForkScope(self, normalize_plugin(plugin), config, transparent=transparent, row=row)
 
     def inject(
         self,
@@ -1471,6 +1515,7 @@ class Context:
         label: str,
         module: str = "",
         plugin: str = "",
+        row: str = "",
         transparent: bool = False,
     ) -> tuple[_Dependent, Disposer]:
         """The one registration path for plugins and injections alike."""
@@ -1483,6 +1528,7 @@ class Context:
             label=label,
             module=module,
             plugin=plugin,
+            row=row,
         )
         self._runtime.dependents.append(dependent)
         self._runtime.dirty = True
@@ -1753,16 +1799,11 @@ class Context:
             registered first starts running last, which is the one thing `on`
             and `prepend` promise.
 
-            The same loop as `ph.seams._registry.claim_entry`, whose docstring
-            calls this "this module's whole complaint one container over" — this
-            is that container. Identity rather than `eq=False` on `Hook`, which
-            would answer this one question by silently changing what equality
-            and hashing mean for the type.
+            `remove_identical`, as `ph.seams._registry.claim_entry` releases. Identity
+            rather than `eq=False` on `Hook`, which would answer this one question
+            by silently changing what equality and hashing mean for the type.
             """
-            for index, held in enumerate(hooks):
-                if held is hook:
-                    del hooks[index]
-                    return
+            remove_identical(hooks, hook)
 
         return self.add_disposer(off, label=f"on({event})")
 
