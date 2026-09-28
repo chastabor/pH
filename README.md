@@ -73,7 +73,7 @@ uv prints where it put `phern` — `~/.local/bin` by default — and `uv tool
 update-shell` fixes a PATH that misses it. Afterwards the deployment answers to
 its own name: `uv tool upgrade phern`, `uv tool uninstall phern`. `--editable`
 reaches every member through the workspace, so a `git pull` is the whole
-upgrade.
+upgrade. Coming from 0.4, read [*Upgrading from 0.4*](#upgrading-from-04) first.
 
 `phern doctor` reports what you actually got — which rows mounted, which
 profiles this install can compose, and why any of them refused.
@@ -283,7 +283,17 @@ that version again), or decide next time. The session's overrides still apply ov
 new version. A start nobody is there to answer — a schedule's, or `phern -p` — keeps
 the session's version and says so, and so does a change that is only pH's own defaults
 moving under a file you did not edit. `phern profiles adopt` takes a new version on
-purpose, for every session on the profile, without starting any of them.
+purpose, for every session on the profile, without starting any of them. A terminal
+that attaches to a session kept on an older version is told so once, with whose the
+changed settings are and the commands that list them and take them.
+
+A version that will not mount — a row that no longer resolves, one that declines, a
+config its model rejects — is taken back at the start that tried it, whichever start
+that is: a daemon's, `phern -p --session`, rpc. The session starts on the version it
+had, is not offered that one again, and says why: in the reply to `/profile use`, to
+a terminal that attaches, on stderr, and in `/profile show`. Any other failure — a
+full disk, a bug in a row — fails the start and takes nothing back, so the next start
+can mount it.
 
 Inside a session, `/profile` manages its profile:
 
@@ -299,6 +309,22 @@ So a profile is tuned in a TUI session and saved to run headless: `/sandbox allo
 `/model` there, `/profile save work`, then `phern -p … --profile work` starts on the same
 environment. `/profile use` restarts the session on the new profile; `/profile use` of
 the name it already runs on takes that profile's current version.
+
+**A child agent can be given a profile too.** A parent that delegates — the `task`
+tool, or `rlm.run` under Code Mode — names the child's `model` by a key its own
+profile lists, or lets a skill it hands over name one (`model:` in the skill's front
+matter), and may assign it a named profile, `profile="reviewer"`. A child runs on its
+parent's mount, so that profile is read as a narrowing rather than mounted:
+
+- a row it runs that the parent does not is refused, by name;
+- a row it leaves out takes the tools and skills that row gave with it;
+- a row it keeps holds the child to what it says: the `models` default, a `read-only`
+  sandbox, fewer `skills-progressive` paths, fewer writable directories in
+  `sandbox-allow` — whose network must be the parent's, since one egress proxy
+  serves every agent.
+
+A child holds less than its parent and never more, and its admission records what it
+got, so a restart brings it back no wider.
 
 `daemon.yaml` can also move where sessions and profiles are kept. It is read
 when a process starts:
@@ -330,6 +356,31 @@ Three roots, each overridable by its variable: `PH_HOME` (`~/.ph` — sessions,
 attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` — safe to delete
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
+
+## Upgrading from 0.4
+
+0.5 gives each kind of setting one owner and makes a session's profile its own, so
+some of what an 0.4 setup did now lands somewhere else:
+
+- **Restart the daemon.** It speaks protocol 5, and a client and a daemon from
+  different releases refuse each other's new fields — which an upgrade reaches,
+  since a command connects to whatever daemon is already listening. `phern agents
+  shutdown`, and the next command that needs one starts the new one.
+- **Your profile files keep working, then fold.** A file still in the old list
+  format, and the `<name>.d/` drop-ins `/sandbox` wrote, are read as before, and
+  `phern doctor` names each one; `phern profiles fold` turns them into one named
+  file — `extends` plus the rows that differ — and changes nothing a session runs
+  with.
+- **A row in the wrong file is refused, by name.** Persistence, telemetry and the
+  job bound are the daemon's (`$PH_HOME/daemon.yaml`, under `rows:`), and screens
+  and footer readings the TUI's (`$PH_HOME/tui.json`); a profile that still sets
+  one says which file to move it to. `phern config` shows each row's kind.
+- **`--model` alone is a key** of the profile's `models` list (`phern config --row
+  models`). A model the list does not hold needs `--provider` beside it. A child's
+  `model` is a key the same way, where it was a model name.
+- **Sessions carry on.** The log format is unchanged, and a session from 0.4
+  records the profile it starts on at its next start; from then on it comes back as
+  its log says, whatever `--profile` a later run gives.
 
 ## Optional plugins
 

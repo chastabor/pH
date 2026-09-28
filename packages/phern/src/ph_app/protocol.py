@@ -123,7 +123,7 @@ daemon; a 0.4.x client sends neither, which a 0.3.x daemon serves unguarded. The
 store was idempotent anyway — one value stored twice is stored once — and its key
 outlived the value it named, since the value lives in daemon memory.
 
-**5: a root runs on a model its profile lists** (session profiles, S1). A root's
+**5 (0.5.0): a root runs on a model its profile lists** (session profiles, S1). A root's
 route comes from the profile's `models` row rather than from the daemon's
 `--provider`/`--model` alone. `RootDescription` and `StatusFacts` gain
 `modelKey`, the profile's name for the route in force; `daemon/status` replaces

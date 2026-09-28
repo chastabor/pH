@@ -188,10 +188,13 @@ deployment one file rather than an install step.
 
 ## Adjusting it
 
-The same three layers every pH row uses — the shipped documents, your named
-profile at `$PH_HOME/profiles/<name>.yaml` (`extends` plus the rows that differ),
-then `--patch` for one run. What is specific to
-this package is the rows it registers:
+The layers every pH row uses — the shipped documents; `rows:` in
+`$PH_HOME/daemon.yaml` for the host's own machinery; your named profile at
+`$PH_HOME/profiles/<name>.yaml` (`extends` plus the rows that differ) for what an
+agent runs with; then `--patch` for one run. Each row belongs to one of those files
+by what it shapes, and one set in the wrong file is refused with the file it belongs
+in (`phern config` shows each row's kind; screens and footer readings are
+`tui.json`'s). What is specific to this package is the rows it registers:
 
 | row | config | default |
 |---|---|---|
@@ -223,6 +226,25 @@ An `apiKeyEnv` is a **name**, never an interpolation. The adapter resolves it at
 the request edge, so the value never enters a row, an event, or a child process
 (I-3). `${env:…}` interpolation is available for everything that is not a
 secret, with `${env:VAR:-default}` for a fallback.
+
+## Upgrading from 0.4
+
+- **Restart the daemon** (`phern agents shutdown`): it speaks protocol 5, and a
+  client and a daemon from different releases refuse each other's new fields.
+- **Fold your profiles.** A file in the old list format and the `<name>.d/` drop-ins
+  `/sandbox` wrote are read until `phern profiles fold` folds them into one named
+  file, and `phern doctor` names each one until then.
+- **A row in the wrong file is refused, by name** — persistence, telemetry and the
+  job bound belong in `daemon.yaml`, screens in `tui.json`.
+- **`--model` alone is a key** of the profile's `models` list; a model the list does
+  not hold needs `--provider` beside it. A child's `model` is a key too.
+- **Sessions carry on**: the log format is unchanged, and a session from 0.4 records
+  the profile it starts on at its next start and comes back as its log says after.
+
+A session keeps the version of its named profile it started on; `/profile diff` and
+`phern profiles diff` say how it has moved, and `/profile use` or `phern profiles
+adopt` takes it. A version that will not mount is taken back at the start that tried
+it, and the session runs on the one it had.
 
 ## Limitations, and things that are deliberate
 
