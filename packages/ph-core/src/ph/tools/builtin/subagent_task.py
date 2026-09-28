@@ -41,14 +41,21 @@ from ...seams.subagents import (
     SubagentResult,
     SubagentRun,
     SubagentStatus,
+    admitted_by,
+    child_is_live,
     downgrade_text,
 )
+from ...session import Session, SessionEvent
 from ...wire import WireModel
 from ..definition import (
+    Done,
+    NotDone,
+    Reconciled,
     ToolDefinition,
     ToolModel,
     ToolOutput,
     ToolRunContext,
+    Unknown,
     define_tool,
     text_content,
 )
@@ -127,8 +134,10 @@ class TaskValue(ToolModel):
     answer: str = ""
     granted_access: Access = "read"
     note: str | None = None
-    """Why `granted_access` is narrower than asked, rendered from the seam's code
-    so the prose the model reads and the code the log keeps cannot disagree."""
+    """What the model should know beside the answer: for a child that outlived its
+    wait, where it is (`STILL_WORKING`); and why `granted_access` is narrower than
+    asked, rendered from the seam's code so the prose the model reads and the code
+    the log keeps cannot disagree."""
 
 
 class Config(WireModel):
@@ -144,7 +153,36 @@ class Config(WireModel):
     """
 
 
+STILL_WORKING = (
+    "This child was still working when the harness stopped, so the wait for it ended "
+    "here. It is started again with its parent and reports back by message when it "
+    "finishes; do not delegate the same task again."
+)
+"""What a `task` call says about a child that outlived its wait (S1, S2): suspended by a
+harness that is stopping, or found in the roster on resume, still live."""
+
+
+def _task_value(run: SubagentRun, status: SubagentStatus, answer: str = "") -> dict[str, Any]:
+    """The call's value for the child `run` names, however the call learned of it — its
+    own wait, or the roster on resume. One builder, so the two cannot disagree."""
+    notes = [] if status == "done" else [STILL_WORKING]
+    if run.downgrade_reason is not None:
+        notes.append(downgrade_text(run.downgrade_reason))
+    return TaskValue(
+        child_id=run.id,
+        name=run.name,
+        session_id=run.session_id,
+        status=status,
+        answer=answer,
+        granted_access=run.granted_access,
+        note=" ".join(notes) or None,
+    ).model_dump()
+
+
 def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
+    if value.get("status") != "done":
+        # A child that outlived its wait has no answer yet; the note says where it is.
+        return text_content(as_str(value.get("note")))
     parts = [as_str(value.get("answer"), "(the child produced no answer)")]
     if value.get("note"):
         parts.append(as_str(value["note"]))
@@ -178,6 +216,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 model_key=args.model,
                 skills=args.skills,
                 tools=args.tools,
+                call_id=run.call_id,
             ),
         )
         if handle.result is None:
@@ -186,7 +225,9 @@ async def apply(ctx: Context, config: Config) -> None:
                 "this deployment needs the handle-and-collect tools instead"
             )
         outcome = await _collected(handle, run)
-        if outcome.status != "done":
+        # `queued` is a child suspended by a harness that is stopping (S1): coming
+        # back, not failed — and a parent told it failed delegates it again.
+        if outcome.status not in ("done", "queued"):
             # A failure, not a value with a sad field: a child that was canceled
             # or fell over did not answer the question, and a parent reading
             # `answer: ""` as an answer is the misreading this prevents.
@@ -194,16 +235,25 @@ async def apply(ctx: Context, config: Config) -> None:
                 f"subagent {handle.name} ({handle.session_id}) ended as {outcome.status}"
                 + (f": {outcome.error}" if outcome.error else "")
             )
-        reason = handle.downgrade_reason
-        return TaskValue(
-            child_id=handle.id,
-            name=handle.name,
-            session_id=handle.session_id,
-            status=outcome.status,
-            answer=outcome.answer,
-            granted_access=handle.granted_access,
-            note=downgrade_text(reason) if reason is not None else None,
-        ).model_dump()
+        return _task_value(handle, outcome.status, outcome.answer)
+
+    async def reconciled(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
+        """Did a `task` call a crash cut short start a child? The parent's roster says (S2).
+
+        No admission under this call's id is a call that started nothing — the
+        admission reaches disk before the child runs — so it is `NotDone`, and asking
+        again is what the call wanted. A child still live is `Done` as the wait's
+        honest ending: it was delegated, the resume puts it back to work, and its
+        answer comes by message. One that ended without an answer is `Unknown`, as a
+        failed wait would have read.
+        """
+        row = admitted_by(ctx.require(SUBAGENTS).roster(session), call)
+        if row is None:
+            return NotDone()
+        if not child_is_live(row):
+            return Unknown()
+        status: SubagentStatus = "queued" if row.get("status") == "queued" else "running"
+        return Done(_task_value(SubagentRun.of(row), status))
 
     async def _collected(handle: SubagentRun, run: ToolRunContext) -> SubagentResult:
         """Wait for the child, releasing it if this call is canceled (C7).
@@ -249,6 +299,7 @@ async def apply(ctx: Context, config: Config) -> None:
             parameters=TaskArgs,
             output=ToolOutput(schema=TaskValue, render=_render),
             execute=partial(delegate, provider),
+            reconcile=reconciled,
             # The fan-out §4.8 opens with: several children at once is the point
             # of delegating, and each one has its own workspace.
             is_concurrency_safe=True,

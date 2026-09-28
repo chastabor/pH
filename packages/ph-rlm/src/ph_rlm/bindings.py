@@ -40,12 +40,15 @@ from ph.llm.types import ContentBlock
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import (
     Access,
-    DowngradeReason,
     SubagentRequest,
+    SubagentRun,
+    admitted_by,
     downgrade_text,
 )
+from ph.session import Session, SessionEvent
 from ph.tools import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
+from ph.tools.definition import Done, NotDone, Reconciled
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
@@ -122,6 +125,21 @@ class Config(WireModel):
     """Which `ctx.subagents` provider `rlm.run` delegates to."""
 
 
+def _spawn_handle(run: SubagentRun) -> dict[str, Any]:
+    """What a spawn hands back for the child `run` names, whether the spawn just
+    admitted it or the roster says, on resume, that it did."""
+    reason = run.downgrade_reason
+    return SpawnHandle(
+        child_id=run.id,
+        name=run.name,
+        session_id=run.session_id,
+        model=run.model,
+        requested_access=run.requested_access,
+        granted_access=run.granted_access,
+        note=downgrade_text(reason) if reason is not None else None,
+    ).to_wire()
+
+
 def _render_handle(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     lines = [
         f"admitted {value['name']} ({value['childId']}) on {value['model']}",
@@ -164,18 +182,24 @@ async def apply(ctx: Context, config: Config) -> None:
                 preset=args.preset,
                 skills=args.skills,
                 tools=args.tools,
+                # The dispatch's own id inside a cell, the model's call id outside
+                # one — whichever record a crash leaves for `reconciled_spawn`.
+                call_id=run.call_id,
             ),
         )
-        reason: DowngradeReason | None = handle.downgrade_reason
-        return SpawnHandle(
-            child_id=handle.id,
-            name=handle.name,
-            session_id=handle.session_id,
-            model=handle.model,
-            requested_access=handle.requested_access,
-            granted_access=handle.granted_access,
-            note=downgrade_text(reason) if reason is not None else None,
-        ).to_wire()
+        return _spawn_handle(handle)
+
+    async def reconciled_spawn(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
+        """Did an `rlm.run` a crash cut short admit a child? The parent's roster says (S2).
+
+        The call's whole value is the admission handle, and the admission reaches
+        disk before the child runs — so the row is the answer: `Done` with the handle
+        it would have returned, whatever the child has done since (the resume sweep
+        is what puts it back to work), and `NotDone` when no admission names this
+        call, since then no child was started and spawning is what the program asked.
+        """
+        row = admitted_by(ctx.require(SUBAGENTS).roster(session), call)
+        return NotDone() if row is None else Done(_spawn_handle(SubagentRun.of(row)))
 
     def list_children(_args: object, run: ToolRunContext) -> dict[str, Any]:
         """The roster, folded from the parent's own log — never a side table."""
@@ -199,6 +223,7 @@ async def apply(ctx: Context, config: Config) -> None:
             parameters=RunArgs,
             output=ToolOutput(schema=SpawnHandle, render=_render_handle),
             execute=run_child,
+            reconcile=reconciled_spawn,
         )
     )
     tools.register(

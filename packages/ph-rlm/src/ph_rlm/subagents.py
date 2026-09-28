@@ -61,6 +61,7 @@ from ph.seams.subagents import (
     ADMITTED,
     DELETED,
     STATUS,
+    SUSPENDED_DETAIL,
     USAGE,
     Access,
     DowngradeReason,
@@ -87,6 +88,7 @@ _LOG = log_writer(__name__)
 
 __all__ = [
     "MAX_NAME_CHARS",
+    "PARENT_TEARDOWN",
     "PROVIDER_NAME",
     "RLM_MAX_DEPTH",
     "TASK_PREFIX",
@@ -106,6 +108,8 @@ question and the tokens that answer it."""
 MAX_NAME_CHARS = 64
 TASK_PREFIX = "[task from parent]"
 """Ported verbatim: the child's prompt recognizes this label."""
+PARENT_TEARDOWN = "parent-teardown"
+"""The release reason for a child whose parent's scope unwound under it (I2)."""
 
 
 class Config(WireModel):
@@ -393,19 +397,31 @@ class RlmChildProvider:
         # to answer — and `delete()` becomes "release it early" rather than a
         # second cleanup path that has to remember everything.
         run.dispose = await parent.ctx.effect(
-            lambda: partial(self._release, parent_session, run_id, "parent-teardown"),
+            lambda: partial(self._release, parent_session, run_id, PARENT_TEARDOWN),
             label=f"subagent:{run_id}",
         )
+        # A child whose own log shows it working has been started, whatever the
+        # parent's roster says: `running` rides the parent's log in memory, so a
+        # crash can keep the child's turns and lose the record of its start — and
+        # the task would be presented as a first attempt beside the turn it cut
+        # short (S2).
+        if not restarts and child_session.latest("turn/start") is not None:
+            restarts = 1
         # **Presented again, and that is what makes a retry real.** Starting a
-        # turn claims the task from the inbox, and the claim is a logged splice —
+        # step claims the task from the inbox, and the claim is a logged splice —
         # so a resumed child whose task was not re-presented finds an empty inbox,
         # ends at step zero, and reports `completed` for work it never did.
-        child_agent.followup(
-            create_user_message(
-                content=[{"type": "text", "text": _task_text(prompt, restarts)}],
-                source=PluginSource(plugin="ph_rlm.subagents", form="relay"),
+        # **Unless it is still there** (S3): the inbox gives up a batch only in the
+        # step that records it, so a child stopped before its first step has its
+        # task pending in its own log, and a second copy would be the same work
+        # handed over twice.
+        if not _task_pending(child_agent):
+            child_agent.followup(
+                create_user_message(
+                    content=[{"type": "text", "text": _task_text(prompt, restarts)}],
+                    source=_TASK_SOURCE,
+                )
             )
-        )
         # `resumed` is what makes a restart countable: without it the log holds
         # a `running` record per start and no way to tell a first one from a
         # fourth, which is the fold the ladder needs.
@@ -666,6 +682,12 @@ class RlmChildProvider:
             # readmitted child its own children swept, so neither its ceiling nor
             # the roster its first prompt shows is still being worked out.
             await run.ready.wait()
+            # **Once released, the release owns the ending** — here, at the gate, and
+            # after the run below: revoked, refused or suspended, the child's ending
+            # is already written, and the drive's would overwrite it. A job past its
+            # slot is one `Job.cancel` no longer reaches, so the check is the drive's.
+            if child.finished.is_set():
+                return
             # `running` either way; `cause` says *why* it is running, because the
             # roster folds status last-write-wins and a woken child that is
             # working must not read as not-running.
@@ -673,6 +695,8 @@ class RlmChildProvider:
             agent = child.agent
             assert agent is not None, "a child runs only after it has an agent"
             await agent.run()
+            if child.finished.is_set():
+                return
             answer = _last_assistant_text(child.session)
             child.result = SubagentResult(status="done", answer=answer)
             # The child's own outcome is on disk before its parent says so (F1).
@@ -703,6 +727,8 @@ class RlmChildProvider:
                     f"{run.name} finished without replying",
                 )
         except Exception as error:
+            if child.finished.is_set():
+                return
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
             # The same order for a failure: the child's account of it first.
@@ -773,16 +799,20 @@ class RlmChildProvider:
         if child.unobserve is not None:
             child.unobserve()
             child.unobserve = None
-        if child.job_id is not None:
+        # `get`, for `_release`'s reason: a mount's unwind reaches here after the
+        # rows that provide these have gone, and there is nothing left to release.
+        jobs = self.ctx.get(JOBS)
+        if child.job_id is not None and jobs is not None:
             # Released, not abandoned: the work finished, so the entry goes
             # without the job being reported as canceled.
-            self.ctx.require(JOBS).forget(child.job_id)
-            child.job_id = None
+            jobs.forget(child.job_id)
+        child.job_id = None
         agent, child.agent, child.session = child.agent, None, None
-        if agent is None:
+        agents = self.ctx.get(AGENTS)
+        if agent is None or agents is None:
             return
         try:
-            await self.ctx.require(AGENTS).dispose(agent.id)
+            await agents.dispose(agent.id)
         except Exception:  # pragma: no cover - teardown must not mask an outcome
             log.debug("ph_rlm.subagents: disposing child %s failed", child.run.id, exc_info=True)
 
@@ -903,7 +933,7 @@ class RlmChildProvider:
         return await self._release(parent_session, run_id, reason)
 
     async def _release(self, parent_session: Session, run_id: str, reason: str) -> bool:
-        """The one teardown path, whether the model asked or the parent unwound.
+        """The one revocation path, whether the model asked or the parent unwound.
 
         **On the parent-teardown path the child's scope is already gone** (P6-27).
         `Context.dispose` unwinds `_children` before its own effects, and this runs as one
@@ -915,6 +945,14 @@ class RlmChildProvider:
         do**: the roster, the parent's log and the tombstone are live; anything needing the
         *child's* scope — flushing its session through its own services, snapshotting its
         workspace — is not, and would work when the model calls `delete()` and fail here.
+
+        **Only ever a revocation.** A mount going away reaches its children first, through
+        `suspend`, and leaves nothing here to release; so a parent's teardown that does
+        reach a child is one the mount lives on past — a settled child's own children, a
+        parent `ctx.agents` disposed — and those children really are revoked.
+
+        **A settled child is not settled again.** Its drive wrote `done` or `error`, and a
+        `canceled` written over that turned a finished child into a revoked one.
         """
         child = self._children.pop(run_id, None)
         if child is None:
@@ -929,10 +967,11 @@ class RlmChildProvider:
             self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
-        # A terminal state for the roster: a revoked child is not merely absent,
-        # and a panel that knew only `deleted` could not say whether it had run.
-        self._status(child, "canceled", reason=reason)
-        child.finished.set()
+        if child.result is None:
+            # A terminal state for the roster: a revoked child is not merely absent,
+            # and a panel that knew only `deleted` could not say whether it had run.
+            self._status(child, "canceled", reason=reason)
+        self._let_go(child)
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while
         # scopes are unwinding, and the seam's own provision may already be gone —
@@ -942,6 +981,66 @@ class RlmChildProvider:
             registry.forget(run_id)
         _LOG.append(parent_session, DELETED, {"runId": run_id, "reason": reason})
         return True
+
+    def suspend(self) -> None:
+        """Stop every child this provider holds, and revoke none of them (S1).
+
+        **This row's own disposer.** The row injects every row it uses, so it activates
+        after them and unwinds before them — before `jobs`, `subagents`, and the `agent`
+        row whose scopes hold every parent. A mount going away (a daemon stopping, a root
+        remounted on a new profile) reaches here with all of that still up, and each
+        parent's own effect then finds nothing left for `_release`. Before this, a mount's
+        unwind reached its children only through those effects, after `jobs` had gone: a
+        working child's release raised before it wrote anything, so the next start read
+        it as a crash and spent a rung of its ladder, and a settled child was tombstoned.
+
+        A suspended child keeps a live row — `queued`, saying why, and no tombstone — and
+        its inbox. Its agent is stopped keeping the inbox, and let go of rather than
+        left for the drive's teardown to dispose — disposing an agent clears what is
+        queued for it, and a drive whose model call honors the cancel wakes while this
+        row can still reach the registry. The mount's unwind takes the scope. The resume
+        sweep readmits it, and whoever waited on it is answered `queued` with the same
+        reason. A settled child is left as it ended.
+
+        `get` rather than `require` for the one case this does not cover: the row
+        deactivating while the mount lives on, because a row it injects went away.
+        """
+        jobs, registry = self.ctx.get(JOBS), self.ctx.get(SUBAGENTS)
+        for child in self._children.values():
+            if child.result is None:
+                self._status(child, "queued", detail=SUSPENDED_DETAIL)
+                child.result = SubagentResult(status="queued", error=SUSPENDED_DETAIL)
+            if child.job_id is not None and jobs is not None:
+                jobs.cancel(child.job_id)
+            if child.agent is not None:
+                child.agent.cancel(AgentCancelCause(kind="parent"), keep_inbox=True)
+                child.agent = None
+            self._let_go(child)
+            if registry is not None:
+                registry.forget(child.run.id)
+        self._children.clear()
+
+    @staticmethod
+    def _let_go(child: _Child) -> None:
+        """Mark a child ended for everyone waiting on it: the caller awaiting its
+        `result()`, and a drive still parked at the seam's gate — a child refused, or
+        released before its admission was written — which is let through to find itself
+        released (`_drive`) rather than left on an event nobody would set: `Job.cancel`
+        trips a token that `ready.wait()` never reads."""
+        child.finished.set()
+        child.run.ready.set()
+
+
+_TASK_SOURCE = PluginSource(plugin="ph_rlm.subagents", form="relay")
+"""Where a child's task comes from, as its inbox and its transcript record it."""
+
+
+def _task_pending(agent: AgentDriver) -> bool:
+    """Whether the child's task is still in its inbox, not yet taken by a step."""
+    return any(
+        message.source == _TASK_SOURCE
+        for message in (*agent.inbox.next_turn, *agent.inbox.next_step)
+    )
 
 
 def _task_text(prompt: str, restarts: int) -> str:
@@ -1012,3 +1111,5 @@ async def apply(ctx: Context, config: Config) -> None:
     provider = RlmChildProvider(ctx=ctx, config=config)
     ctx.require(SUBAGENTS).register_provider(PROVIDER_NAME, provider)
     ctx.provide(RLM_CHILDREN, provider)
+    # Registered after the provider, so it runs before the provider is withdrawn.
+    ctx.add_disposer(provider.suspend, label="rlm-children.suspend")

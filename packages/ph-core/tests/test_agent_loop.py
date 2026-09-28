@@ -11,7 +11,7 @@ So the check runs at runtime, on the request the adapter is about to receive.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import anyio
@@ -45,7 +45,7 @@ from ph.llm.types import (
     ToolCallBlock,
     create_user_message,
 )
-from ph.session import SurfaceIntent, SurfaceReplace
+from ph.session import SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import (
@@ -54,6 +54,7 @@ from ph.testing import (
     log_event,
     plugin_payload,
     simple_tool,
+    stored_events,
     user_payload,
 )
 
@@ -97,11 +98,13 @@ async def test_lifecycle_events_appear_in_order(mount: MountProfile) -> None:
     assert types[:7] == [
         "agent/inbox/spliced",
         "turn/start",
-        "agent/inbox/spliced",
         # Before the first step, because the agent's cwd has to exist before
         # anything it does resolves against one (P4-08). Once per agent, not
         # once per turn: the seam already holds it on the second pass.
         "workspace/acquired",
+        # The claim, in one batch with the step it opens and the message it
+        # becomes (S3) — after the pre-step, never before it.
+        "agent/inbox/spliced",
         "step/start",
         "user/message",
         "request/header",
@@ -165,10 +168,12 @@ async def test_pre_step_reject_blocks_the_turn(mount: MountProfile) -> None:
         return PreStepDecision(kind="reject", reason="over budget")
 
     ctx.on("agent/pre-step", deny)
-    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    await agent.prompt("hello")
 
     assert "step/start" not in [event.type for event in session.events]
     assert as_obj(session.events[-1].data["reason"])["kind"] == "blocked"
+    assert not agent.inbox.has_pending, "a rejected step still consumes its batch"
 
 
 async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:
@@ -557,7 +562,7 @@ async def test_an_inbox_splice_written_today_is_read_back_unchanged(
 
     inbox.append("next-turn", create_user_message(content=[TEXT_A], source=said))
     inbox.append("next-step", create_user_message(content=[TEXT_B], source=said))
-    inbox.claim("next-step", 1)
+    inbox.take(inbox.propose("next-step"), 1)
     inbox.clear()
 
     # `thaw_json`, because the log freezes payloads into `MappingProxyType`/tuple
@@ -883,40 +888,107 @@ async def test_context_a_compaction_took_away_is_sent_again(mount: MountProfile)
     assert "09:00" in [block_text(m.content[0]) for m in session.derive_messages()]
 
 
-async def test_an_interrupt_while_the_prompt_is_assembled_keeps_the_batch(
-    mount: MountProfile,
-) -> None:
-    """C4 — the inbox was emptied durably before anything could still fail.
+def _taken(events: Sequence[SessionEvent]) -> list[SessionEvent]:
+    """The splices that took messages out of the inbox (a claim or a clear)."""
+    return [e for e in events if e.type == "agent/inbox/spliced" and e.data.get("removedCount")]
 
-    `claim` appends `agent/inbox/spliced`, which is what takes a message out of
-    the inbox for good, and it ran *before* `assemble`. A person's stop landing
-    in that window is noticed by the `_throw_if_canceled` on the far side — so
-    the typed line was gone from the inbox and had never reached a model call:
-    not queued, not answered, not recoverable.
 
-    Cancelled from inside the assemble waterfall, which is the shape of the
-    real thing: a token does not interrupt an `await`, it is read at the next
-    check, and the next check is the one immediately after `assemble`.
+@pytest.mark.parametrize("hook", ["system-prompt/assemble", "agent/pre-step"])
+async def test_an_interrupt_before_the_step_keeps_the_batch(mount: MountProfile, hook: str) -> None:
+    """C4, and S3 one await later — the inbox was emptied before anything could fail.
 
-    `keep_inbox=True` so the cancel itself is not what preserves the batch —
-    the claim is what this is about.
+    Taking the batch appends `agent/inbox/spliced`, which is what removes a message
+    from the inbox for good. It ran before `assemble` (C4) and then before the
+    `agent/pre-step` waterfall (S3), and a person's stop landing in either await is
+    read by the check on the far side — so the typed line was gone from the inbox
+    and had never reached a model call: not queued, not answered, not recoverable.
 
-    Sabotage: claim before `assemble` again and the inbox comes back empty.
+    Canceled from inside the waterfall, which is the shape of the real thing: a
+    token does not interrupt an `await`, it is read at the next check. And
+    `keep_inbox=True` so the cancel itself is not what preserves the batch.
+
+    Sabotage: take the batch before either waterfall again, and the inbox comes
+    back empty.
     """
     ctx = await mount()
-    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
 
-    async def cancel_mid_assembly(_scope: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+    async def cancel(_arg: Any, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
         agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return await next_()
 
-    ctx.on("system-prompt/assemble", cancel_mid_assembly)
+    ctx.on(hook, cancel)
     await agent.prompt("do not lose me")
 
     pending = [*agent.inbox.next_turn, *agent.inbox.next_step]
     assert [block_text(one.content[0]) for one in pending] == ["do not lose me"], (
         "the interrupt consumed the prompt and ran nothing"
     )
+    assert not _taken(session.events), "the log says the prompt left the inbox"
+
+
+async def test_a_flush_during_pre_step_leaves_the_prompt_in_the_inbox_on_disk(
+    mount: MountProfile,
+) -> None:
+    """S3 — what a resume would be handed while a pre-step listener waits on a model.
+
+    Compaction's summary is a model call carrying the session id, so the checkpoint
+    barrier flushes the log before it. When the batch was taken before the
+    waterfall, that flush put the prompt's removal from the inbox on disk with no
+    `user/message` behind it, and a daemon killed during the summary resumed with
+    the prompt in neither place. Now nothing is taken until the step is recorded,
+    and the removal and the message it becomes are one batch.
+
+    Sabotage: take the batch before the waterfall again, and the stored log holds
+    the removal; append `step/start` outside the claim, and the batch splits.
+    """
+    ctx = await mount()
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s3")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    on_disk: list[SessionEvent] = []
+
+    async def summarize(request: PreStepRequest, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        await sessions.flush(session)
+        on_disk.extend(stored_events(ctx, "s3"))
+        return await next_()
+
+    ctx.on("agent/pre-step", summarize)
+    await agent.prompt("do not lose me")
+
+    assert [e.type for e in on_disk if e.type == "agent/inbox/spliced"], "nothing was queued"
+    assert not _taken(on_disk), "the prompt was out of the inbox on disk, and in no message"
+    (claim,) = _taken(session.events)
+    started = next(e for e in session.events if e.type == "step/start")
+    message = next(e for e in session.events if e.type == "user/message")
+    assert claim.batch is not None
+    assert claim.batch == started.batch == message.batch
+
+
+async def test_a_pre_step_that_fails_consumes_its_batch(mount: MountProfile) -> None:
+    """A failure is not a stop: the batch is taken, as it was before S3.
+
+    `run` contains a turn failure and nothing runs the turn again, so a batch
+    left pending would be taken by the next prompt's turn instead — ahead of the
+    prompt that woke it.
+
+    Sabotage: leave the batch pending on every exception, and the inbox still
+    holds the prompt.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+
+    async def fail(request: PreStepRequest, next_: object) -> PreStepDecision:
+        raise RuntimeError("pre-step broke")
+
+    ctx.on("agent/pre-step", fail)
+    await agent.prompt("first")
+
+    assert not agent.inbox.has_pending
+    assert len(_taken(session.events)) == 1
+    assert as_obj(session.events[-1].data["reason"])["kind"] == "error"
 
 
 async def test_an_unnamed_call_gets_one_id_in_both_durable_records(

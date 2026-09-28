@@ -28,9 +28,22 @@ from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
-from ph.seams.subagents import SubagentResult
-from ph.testing import FAKE_OPTIONS, MountProfile, StubSubagentProvider, run_tool
-from ph.tools.definition import Deny, ToolExecutionInput
+from ph.seams.subagents import (
+    ADMITTED,
+    STATUS,
+    SubagentRequest,
+    SubagentResult,
+    admission_payload,
+)
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    StubSubagentProvider,
+    log_event,
+    reconciled_call,
+    run_tool,
+)
+from ph.tools.definition import Deny, NotDone, ToolExecutionInput
 from ph.tools.errors import SPAWN_REFUSED, TOOL_BUDGET_SPENT
 
 pytestmark = pytest.mark.anyio
@@ -280,3 +293,52 @@ async def test_a_canceled_wait_is_an_abort_rather_than_a_tool_failure(
     assert result.error.kind == "aborted", (
         f"a person's interrupt was reported to the model as {result.error.kind}"
     )
+
+
+async def test_a_task_call_carries_its_own_id_into_the_admission(mount: MountProfile) -> None:
+    """S2 — the call that asked for a child is on the child's admission record.
+
+    It is what a resume finds the child by. Sabotage: drop `call_id` from the
+    request `delegate` builds, and the request carries none.
+    """
+    provider = StubSubagentProvider()
+    ctx = await _mounted(mount, ("stub", provider))
+    agent = _agent(ctx)
+
+    await run_tool(ctx, "task", {"prompt": "look"}, agent=agent, session=agent.session)
+
+    assert provider.last().call_id == "call-1"
+
+
+async def test_a_task_call_a_crash_cut_short_is_answered_from_the_roster(
+    mount: MountProfile,
+) -> None:
+    """S2 — a `task` call left open by a crash read as "outcome unknown".
+
+    So the model delegated the same task again, beside the child the resume had
+    already put back to work. The admission names its call and reaches disk before
+    the child runs, so the roster answers: a live child is the wait's honest ending,
+    one that ended is `Unknown` as a failed wait would read, and no admission is a
+    call that started nothing.
+
+    Sabotage: drop `callId` from `admission_payload`, and the live child is not found.
+    """
+    provider = StubSubagentProvider()
+    ctx = await _mounted(mount, ("stub", provider))
+    agent = _agent(ctx)
+    session = agent.session
+    request = SubagentRequest(prompt="look", parent=agent, call_id="call-1")
+    run = await provider.start(request)
+    log_event(session, ADMITTED, admission_payload(run, request))
+    log_event(session, STATUS, {"runId": run.id, "status": "running"})
+
+    async def reconciled(call_id: str) -> Any:  # noqa: ANN401
+        return await reconciled_call(ctx, session, "task", {"prompt": "look"}, call_id=call_id)
+
+    live = await reconciled("call-1")
+    assert isinstance(live, tuple), "the live child was not found by its call"
+    assert "do not delegate the same task again" in text_of(list(live))
+    assert isinstance(await reconciled("call-2"), NotDone)
+
+    log_event(session, STATUS, {"runId": run.id, "status": "error", "detail": "fell over"})
+    assert await reconciled("call-1") is None, "an ended child is not an answer"

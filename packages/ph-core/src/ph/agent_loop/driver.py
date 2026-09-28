@@ -7,13 +7,13 @@ these seams rather than to the loop itself (D12):
 
 ```
 turn/start
-  ├ inbox.claim               → agent/inbox/claimed
   ├ system_prompt.assemble    → system-prompt/assemble
+  ├ inbox.propose             (nothing taken yet)
   ├ agent/pre-step            → reject | enter(messages)
-  │    reject         → turn/end{blocked}
-  │    enter, empty, first step → turn/end{completed}
-  ├ step/start
-  │    user/message*          (the claimed batch, surface: append)
+  │    reject         → agent/inbox/spliced, turn/end{blocked}
+  │    enter, empty, first step → agent/inbox/spliced, turn/end{completed}
+  ├ step/start                (one batch with the splice → agent/inbox/claimed)
+  │    user/message*          (the batch, surface: append)
   │    agent/request          → LlmCallConfig
   │    request/header         (appended only when it changed — A12)
   │    request/context        (appended only when the route changed)
@@ -48,7 +48,7 @@ from typing import Any
 
 import anyio
 
-from ..agent.inbox import Inbox, InboxNotifications, InboxTarget
+from ..agent.inbox import Inbox, InboxBatch, InboxNotifications, InboxTarget
 from ..agent.types import (
     AgentCancelCause,
     AgentOptions,
@@ -125,6 +125,8 @@ class _Phase:
 @dataclass(frozen=True, slots=True)
 class _PreparedStep:
     kind: str
+    held: InboxBatch
+    """The inbox batch the step was proposed with, still pending until it is taken."""
     messages: tuple[Message, ...] = ()
     assembly: PromptAssembly | None = None
 
@@ -287,21 +289,22 @@ class ReactLoopAgent:
 
     async def _pre_step(self, target: InboxTarget, turn: int, step: int) -> _PreparedStep:
         self._throw_if_canceled()
-        # **Assembled before the batch is claimed** (C4). `claim` is durable —
-        # it appends `agent/inbox/spliced`, which is what takes the messages out
-        # of the inbox for good — and `assemble` is an await that a person's
-        # interrupt can land in. Claimed first, a cancel there consumed the
-        # prompt and ran nothing: the typed line was gone from the inbox and
-        # never reached a model call. Nothing here needs the batch, so the
-        # ordering costs nothing and the claim now happens on the far side of
-        # the last cancel check before the step is proposed.
+        # **Proposed, not taken** (C4, S3). Taking the batch appends
+        # `agent/inbox/spliced`, which is what removes the messages from the
+        # inbox for good, and both `assemble` and `agent/pre-step` are awaits:
+        # a person's interrupt can land in either, and a pre-step listener may
+        # make a model call — compaction's summary does — whose checkpoint
+        # barrier flushes the log. Taken first, an interrupt consumed the prompt
+        # and ran nothing, and a crash during that call left it out of the inbox
+        # on disk and nowhere in the conversation. So the batch is only
+        # proposed here; `_turn` takes it in the batch that records the step.
         assembly = await self.ctx.require(SYSTEM_PROMPT).assemble(self.ctx, agent=self)
         self._throw_if_canceled()
-        claimed = self.inbox.claim(target, turn)
+        held = self.inbox.propose(target)
         # Only when the conversation the model is shown lacks it (C12) — see
         # `context_message`.
         context = context_message(assembly, self.session.derive_messages())
-        messages = (*claimed, context) if context is not None else tuple(claimed)
+        messages = (*held.messages, context) if context is not None else held.messages
 
         async def inner(request: PreStepRequest) -> PreStepDecision:
             return PreStepDecision(kind="enter", messages=request.messages)
@@ -309,12 +312,24 @@ class ReactLoopAgent:
         request = PreStepRequest(
             agent=self, session=self.session, messages=messages, turn=turn, step=step
         )
-        answered = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
+        try:
+            answered = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
+        except Exception:
+            # **A pre-step that fails still consumes its batch**, as it did when
+            # the batch was taken first: `run` contains a turn failure and nothing
+            # runs the turn again (the daemon's `_drive` says why), so a batch left
+            # pending would be taken by the *next* prompt's turn, ahead of the
+            # prompt that woke it. A stop is not a failure, and leaves it pending.
+            if self._phase.canceled is None:
+                self.inbox.take(held, turn)
+            raise
         self._throw_if_canceled()
         decision = settled("agent/pre-step", answered, PreStepDecision)
         if decision.kind == "reject":
-            return _PreparedStep(kind="reject")
-        return _PreparedStep(kind="enter", messages=decision.messages, assembly=assembly)
+            # Refused, as a failure is: consumed, and reaching no model call.
+            self.inbox.take(held, turn)
+            return _PreparedStep(kind="reject", held=held)
+        return _PreparedStep(kind="enter", held=held, messages=decision.messages, assembly=assembly)
 
     async def _turn(self) -> bool:
         phase = self._phase
@@ -341,22 +356,25 @@ class ReactLoopAgent:
                 if decision.kind == "reject":
                     turn_ends = TurnEndReason(kind="blocked")
                     return False
-                if turn_ends is not None and not decision.messages:
-                    break
-                # A removed waking message, or an `enter` rewritten to empty,
-                # still owns the turn boundary it opened — it just spends no
-                # model call.
-                if phase.step == 0 and not decision.messages:
+                if not decision.messages and (turn_ends is not None or phase.step == 0):
+                    # Emptied by its pre-step, so it opens no step and consumes what
+                    # it was proposed with. On the first step — a removed waking
+                    # message, an `enter` rewritten to empty — it still owns the
+                    # turn boundary it opened; it just spends no model call.
+                    self.inbox.take(decision.held, turn)
+                    if turn_ends is not None:
+                        break
                     turn_ends = TurnEndReason(kind="completed")
                     return False
                 self._throw_if_canceled()
-                _LOG.append(self.session, "step/start", {"turn": turn, "step": step})
-                phase.step = step
-                try:
+                with self.inbox.claim(decision.held, turn) as batch:
+                    _LOG.append(batch, "step/start", {"turn": turn, "step": step})
                     for message in decision.messages:
                         _LOG.append(
-                            self.session, "user/message", message.to_wire(), SurfaceIntent("append")
+                            batch, "user/message", message.to_wire(), SurfaceIntent("append")
                         )
+                phase.step = step
+                try:
                     assert decision.assembly is not None
                     step_end = await self._step(decision.assembly)
                     # **The outcome is sticky; the stopping is not.** A step that

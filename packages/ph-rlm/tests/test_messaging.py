@@ -18,19 +18,19 @@ import pytest
 from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime, logs_after_a_crash
 
 from ph.agent.types import AgentDriver
-from ph.cordis import DEPLOYMENT, Context
-from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS, TOOLS
+from ph.cordis import Context
+from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.llm.types import text_of
 from ph.persistence import resume_session
 from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
-from ph.session import Session, SessionEvent, SessionHeader, outcome_of
-from ph.session.json import freeze_json_value
+from ph.session import Session, SessionHeader, outcome_of
 from ph.session.kinds import TOOL_DISPATCH
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
     log_interrupted_call,
     not_none,
+    reconciled_call,
     result_text,
     run_tool,
     stored_events,
@@ -275,15 +275,7 @@ async def _reconciled(
     ctx: Context, session: Session, call_id: str, arguments: dict[str, Any]
 ) -> Any:  # noqa: ANN401
     """What the send tool says, as a resume would ask it, about the call `call_id`."""
-    record = SessionEvent(
-        type="tool/call",
-        seq=0,
-        time=0,
-        data=freeze_json_value(
-            {"callId": call_id, "name": SEND_TOOL, "arguments": json.dumps(arguments)}
-        ),
-    )
-    return await ctx.require(TOOLS).reconciled(record, session, scope=DEPLOYMENT)
+    return await reconciled_call(ctx, session, SEND_TOOL, arguments, call_id=call_id)
 
 
 async def test_a_send_is_found_in_its_receivers_log_or_ruled_out(

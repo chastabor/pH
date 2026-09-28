@@ -38,18 +38,19 @@ from typing import Any
 
 import anyio
 import pytest
-from rlm_fixtures import PROVIDER_ROW, MountedRuntime, logs_after_a_crash
+from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW, MountedRuntime, logs_after_a_crash
 
 from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, CREDENTIALS, LLM, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.adapter import ResolvedModel
 from ph.llm.fake import FakeAdapter, text_script
-from ph.llm.types import text_of
+from ph.llm.types import text_of, user_text
 from ph.persistence import SessionBusy, open_session, resume_session
 from ph.seams.credentials import waiting_for
 from ph.seams.subagents import (
     STATUS,
+    SUSPENDED_DETAIL,
     UNRECOVERABLE_DETAIL,
     USAGE,
     SubagentRequest,
@@ -59,11 +60,17 @@ from ph.seams.subagents import (
     exhausted_detail,
     family_reach,
     restarts_since_progress,
+    roster_of,
     subagent_roster,
 )
 from ph.seams.token_meter import reported_usage
 from ph.seams.workspace import workspace_survivors
-from ph.session import Session, SessionEvent, SurfaceIntent, derive_event_message
+from ph.session import (
+    Session,
+    SessionEvent,
+    SurfaceIntent,
+    derive_event_message,
+)
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -71,22 +78,28 @@ from ph.testing import (
     assistant_payload,
     log_event,
     not_none,
+    reconciled_call,
+    run_tool,
     skill,
+    stored_events,
     stored_types,
 )
 from ph.testing.git import WORKTREE_ROWS, git_repo
+from ph.tools.definition import NotDone
+from ph_rlm.bindings import RUN_TOOL
 from ph_rlm.keys import RLM_CHILDREN
-from ph_rlm.subagents import PROVIDER_NAME, TASK_PREFIX, delegation_depth
+from ph_rlm.subagents import PARENT_TEARDOWN, PROVIDER_NAME, TASK_PREFIX, delegation_depth
 
 pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
 def delegating(mount: MountProfile) -> Callable[..., Any]:
-    """`await delegating()` → `(ctx, parent_session, parent)` with the provider on."""
+    """`await delegating(*rows)` → `(ctx, parent_session, parent)` with the provider on,
+    and any further rows beside it."""
 
-    async def build(**config: object) -> tuple[Any, Any, Any]:
-        rows = [dict(PROVIDER_ROW)]
+    async def build(*extra: dict[str, Any], **config: object) -> tuple[Any, Any, Any]:
+        rows = [dict(PROVIDER_ROW), *extra]
         if config:
             rows[0]["config"] = config
         ctx = await mount(*rows)
@@ -144,6 +157,82 @@ async def test_the_admission_is_logged_before_any_status(delegating: MountedRunt
     kinds = [event.type for event in session.events if event.type.startswith("subagent/")]
     assert kinds[0] == "subagent/admitted"
     assert "subagent/status" in kinds
+
+
+async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
+    delegating: MountedRuntime, gate: _Gate
+) -> None:
+    """S2 — the admission is the one record a resume finds a child by.
+
+    It rode the parent's log in memory for the child's whole run, and a child's
+    flushes never write its parent (a subagent inherits no prefix), so a crash
+    mid-run left a child with a log and a tree that no roster on disk named. Now
+    the gate opens only once the parent's log holds the admission.
+
+    Sabotage: open the gate in `SubagentService.start` before `session_written`,
+    and the stored parent log names no child while one is at the model.
+    """
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "work")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+
+    assert run.id in roster_of(stored_events(ctx, session.id)), (
+        "a child is working and its parent's log on disk does not name it"
+    )
+
+
+async def test_a_child_whose_admission_cannot_be_written_is_not_started(
+    delegating: MountedRuntime, gate: _Gate
+) -> None:
+    """Fail-closed, as a durable intent is: no admission on disk, no child.
+
+    The refusal reaches the caller, the child never reaches the model, and its row
+    ends — so nothing holds the parent out of passivation for a child that never
+    ran.
+
+    Sabotage: open the gate whether or not the write worked, and the child runs.
+    """
+    ctx, session, parent = await delegating()
+
+    def refuse(target: Session) -> None:
+        if target.id == session.id:
+            raise OSError("the disk is full")
+
+    ctx.on("session/flush", refuse)
+    with pytest.raises(SubagentSpawnError, match="could not be written"):
+        await _spawn(ctx, parent, "never")
+    await ctx.drain()
+
+    assert gate.arrived == 0, "the child ran without its admission on disk"
+    (row,) = subagent_roster(session).values()
+    assert row["status"] == "error"
+    assert not child_is_live(row)
+
+
+async def test_an_interrupted_spawn_is_answered_with_the_handle_it_admitted(
+    delegating: MountedRuntime,
+) -> None:
+    """S2 — an `rlm.run` a crash cut short is found in the roster by its call.
+
+    Its whole value is the admission handle, and the admission is on disk before the
+    child runs, so a resume can show the program the handle it would have had —
+    rather than "outcome unknown", on which a model spawns the same child beside the
+    one the resume has already put back to work. No admission under the call is a
+    spawn that never happened.
+
+    Sabotage: drop `call_id` from the request `run_child` builds, and the admitted
+    child is not found.
+    """
+    ctx, session, parent = await delegating(dict(BINDINGS_ROW))
+    arguments = {"prompt": "scout the repo"}
+    spawned = await run_tool(ctx, RUN_TOOL, arguments, agent=parent, session=session)
+    assert spawned.is_error is False
+
+    found = await reconciled_call(ctx, session, RUN_TOOL, arguments)
+    assert isinstance(found, tuple), "the admitted child was not found by its call"
+    assert "admitted" in text_of(list(found))
+    never = await reconciled_call(ctx, session, RUN_TOOL, arguments, call_id="call-2")
+    assert isinstance(never, NotDone), "a call that admitted nothing started nothing"
 
 
 async def test_eight_children_are_all_admitted_without_waiting(delegating: MountedRuntime) -> None:
@@ -324,10 +413,11 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Gate]:
     held.release_all()
 
 
-def _statuses(session: Session, run_id: str) -> list[str]:
-    """Every status this child reached, in order. One spelling, three readers."""
+def _statuses(session: Session, run_id: str, field: str = "status") -> list[str]:
+    """Every status this child reached, in order — or another `field` of the same
+    records. One spelling, four readers."""
     return [
-        str(event.data["status"])
+        str(event.data.get(field))
         for event in session.events
         if event.type == STATUS and event.data.get("runId") == run_id
     ]
@@ -537,7 +627,7 @@ async def test_disposing_the_parent_unwinds_its_children(delegating: MountedRunt
     await ctx.require(AGENTS).dispose(parent.id)
     assert ctx.require(SUBAGENTS).get(run.id) is None
     tombstones = [event for event in session.events if event.type == "subagent/deleted"]
-    assert [event.data["reason"] for event in tombstones] == ["parent-teardown"]
+    assert [event.data["reason"] for event in tombstones] == [PARENT_TEARDOWN]
 
 
 async def test_the_status_and_usage_records_are_ignorable(delegating: MountedRuntime) -> None:
@@ -1136,6 +1226,121 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     assert len(tasks) == 2, "the task was not presented again, so the retry answers nothing"
     assert "the harness stopped while you were working on this" in tasks[-1]
     assert "this is attempt 2" in tasks[-1]
+
+
+async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_them(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """S1 — a clean stop tombstoned every child, so a restart brought none back.
+
+    A daemon stopping, or a root remounted on a new profile, unwinds the parent's
+    scope, and each child's release wrote `canceled` and `subagent/deleted` as it
+    went: `resume_children` skips a deleted row, so an ordinary restart abandoned
+    every delegation in flight. The mount going away now suspends its children —
+    `queued`, saying why, and no tombstone — and the next mount readmits them.
+
+    Sabotage: drop the `suspend` disposer from `apply`, and the release raises on
+    the way down and writes nothing, so the restart reads the child as crashed.
+    """
+    ctx, session, parent = await delegating()
+    working = await _spawn(ctx, parent, "keep going")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+
+    await ctx.root.dispose()
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    row = subagent_roster(revived)[working.id]
+    assert not row.get("deleted"), "the stop revoked the child"
+    assert SUSPENDED_DETAIL in _statuses(revived, working.id, "detail"), (
+        "the log does not say why the child stopped"
+    )
+    assert working.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
+    await _until(gate.twice, "the resumed child to reach the model again")
+
+
+async def test_a_suspended_child_keeps_what_was_queued_for_it(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """A child coming back comes back to its inbox, not an empty one.
+
+    `suspend` stops the child's agent keeping its inbox, where a revocation clears
+    it — so a message steered to a working child and not yet taken is still pending
+    when the next mount readmits it.
+
+    Sabotage: cancel the agent in `suspend` without `keep_inbox`, and the message is
+    canceled in the child's log.
+    """
+    ctx, _session, parent = await delegating()
+    working = await _spawn(ctx, parent, "keep going")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    child = not_none(ctx.require(AGENTS).get(working.session_id))
+    child.steer(user_text("also this"))
+
+    await ctx.root.dispose()
+    revived_ctx, _revived, _parent = await _restart(mount, parent.id)
+    await _until(gate.twice, "the resumed child to reach the model again")
+
+    log = not_none(revived_ctx.require(SESSIONS).get(working.session_id)).events
+    assert not [
+        event
+        for event in log
+        if event.type == "agent/inbox/spliced" and event.data.get("outcome") == "canceled"
+    ], "what was queued for the child was canceled as it stopped"
+    assert "also this" in repr([event.data for event in log if event.type == "agent/inbox/spliced"])
+
+
+async def test_a_child_suspended_before_its_first_step_is_handed_its_task_once(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """A child that never took a step still has its task, in its own log.
+
+    The inbox gives up a batch only in the step that records it (S3), so a child
+    queued behind a sibling when its mount unwound comes back with the task still
+    pending — and presenting it again on readmit handed it the same work twice.
+
+    Sabotage: present the task in `_admit` whatever the inbox holds, and the
+    child's log inserts it twice.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    await _spawn(ctx, parent, "first")
+    waiting = await _spawn(ctx, parent, "second")
+    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+
+    await ctx.root.dispose()
+    revived_ctx, _revived, _parent = await _restart(mount, session.id, concurrent=2)
+    await _until(lambda: gate.arrived >= 3, "both children to reach the model again")
+
+    child = revived_ctx.require(SESSIONS).get(waiting.session_id)
+    assert child is not None
+    presented = [
+        event
+        for event in child.events
+        if event.type == "agent/inbox/spliced" and TASK_PREFIX in repr(event.data.get("inserted"))
+    ]
+    assert len(presented) == 1, "the readmit handed the child its task a second time"
+
+
+async def test_a_settled_child_is_not_canceled_when_its_parent_goes(
+    delegating: MountedRuntime,
+) -> None:
+    """A child that finished keeps its ending.
+
+    Its parent's teardown released it with `canceled`, written over the `done` its
+    drive had recorded, so every finished child read as a revoked one once its
+    parent was gone.
+
+    Sabotage: write `canceled` in `_release` whatever the child's result, and the
+    roster says canceled.
+    """
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "finish first")
+    await ctx.drain()
+
+    await ctx.require(AGENTS).dispose(parent.id)
+
+    row = subagent_roster(session)[run.id]
+    assert row["status"] == "done"
+    assert row["deleted"] is True, "released with its parent all the same"
 
 
 def _resumed(session: Session, run_id: str, times: int) -> None:

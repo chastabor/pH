@@ -62,10 +62,10 @@ from ..keys import (
     SYSTEM_PROMPT,
     TOOLS,
 )
-from ..session import Session, SessionEvent, SessionFoldCache
+from ..session import Session, SessionEvent, SessionFoldCache, session_written
 from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
-from ..tools.definition import Deny
+from ..tools.definition import Deny, call_id_of
 from ..tools.errors import (
     SPAWN_REFUSED,
     TOOL_BUDGET_SPENT,
@@ -85,11 +85,13 @@ from .subagent_profiles import narrowing
 _LOG = log_writer(__name__)
 
 __all__ = [
+    "ACCESS_LEVELS",
     "ADMITTED",
     "DELETED",
     "INTERRUPTED_DETAIL",
     "SETTLED_STATUSES",
     "STATUS",
+    "SUSPENDED_DETAIL",
     "UNRECOVERABLE_DETAIL",
     "USAGE",
     "Access",
@@ -110,6 +112,7 @@ __all__ = [
     "SubagentSpawnError",
     "SubagentStatus",
     "admission_payload",
+    "admitted_by",
     "apply",
     "child_is_live",
     "child_model_key",
@@ -178,6 +181,19 @@ INTERRUPTED_DETAIL = "the harness stopped while this child was running; it did n
 
 A sentence rather than a code, because its reader is a person or a model looking
 at a roster and asking what happened to a child that never answered."""
+
+
+SUSPENDED_DETAIL = (
+    "the harness stopped while this child was working; it is started again when its parent is"
+)
+"""Why a child is `queued` after its whole mount unwound under it (S1).
+
+Written by a provider in place of a tombstone: a daemon stopping, or a root remounted
+on a new profile, is not a revocation, so the row stays live and the resume sweep
+readmits it. `queued` rather than left `running`, because nothing crashed: the sweep
+readmits a `queued` row without asking the ladder whether it may. Its next start is
+still a restart (`cause: resumed`), since it was one, so a child that then crashes
+without having answered carries that start onto the ladder."""
 
 
 def exhausted_detail(limit: int) -> str:
@@ -263,6 +279,8 @@ first attempt."""
 
 DowngradeReason: TypeAlias = Literal["workspace-not-mounted"]
 """Why a granted access is narrower than the one requested."""
+
+_DOWNGRADE_REASONS: Mapping[str, DowngradeReason] = literal_lookup(DowngradeReason)
 
 _DOWNGRADE_TEXT: dict[str, str] = {
     "workspace-not-mounted": (
@@ -437,6 +455,17 @@ class SubagentRequest:
     (`resolve_profile`) and applied as a limit (`SandboxSeam.restrict_paths`), which
     can only subtract.
     """
+    call_id: str | None = None
+    """The tool call that asked for this child: a `task` call, or the dispatch of an
+    `rlm.run` inside a cell (S2).
+
+    Recorded on the admission so the call can be answered from the roster after a
+    restart (`admitted_by`) — the admission is on disk before the child runs, so a
+    call with no admission started no child, and one with an admission started this
+    one. Without it, a delegating call cut short by a crash could only be answered
+    "unknown", and the model delegated the same task again beside the child the
+    resume had already put back to work.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,8 +564,9 @@ class SubagentRun(WireForm):
     seam bound it (`_enforce` needs `scope`), so without this a child ran ahead of
     its own ceiling. Set once the child is bounded; for a readmitted child, once its
     own children have been swept as well (L5b), so the roster its first prompt
-    describes is the reconciled one. A child the seam refuses is released with the
-    event unset, and its drive is canceled without having run."""
+    describes is the reconciled one. A child released before this is set — refused,
+    or its admission unwritten — has it set by the release, and its drive, let
+    through, finds itself released and runs nothing."""
 
     def to_wire(self) -> dict[str, JsonValue]:
         """The admission facts, for an event or a roster row.
@@ -557,6 +587,26 @@ class SubagentRun(WireForm):
         if self.downgrade_reason is not None:
             wire["downgradeReason"] = self.downgrade_reason
         return wire
+
+    @classmethod
+    def of(cls, row: Mapping[str, Any]) -> SubagentRun:
+        """The admission facts back off a roster row — `to_wire`, read back.
+
+        For a caller that answers from the log what the live path answers from the
+        handle: a delegating tool's `reconcile` builds the value its `execute` would
+        have, from one reader of these keys rather than its own copy of them.
+        """
+        return cls(
+            id=as_str(row.get("runId")),
+            name=as_str(row.get("name")),
+            session_id=as_str(row.get("sessionId")),
+            parent_id=as_str(row.get("parentId")),
+            model_provider=as_str(row.get("modelProvider")),
+            model=as_str(row.get("model")),
+            requested_access=ACCESS_LEVELS.get(as_str(row.get("requestedAccess")), "read"),
+            granted_access=ACCESS_LEVELS.get(as_str(row.get("grantedAccess")), "read"),
+            downgrade_reason=_DOWNGRADE_REASONS.get(as_str(row.get("downgradeReason"))),
+        )
 
 
 def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, JsonValue]:
@@ -594,7 +644,27 @@ def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, J
         payload["paths"] = list(request.paths)
     if request.reasoning_effort is not None:
         payload["reasoningEffort"] = request.reasoning_effort
+    if request.call_id is not None:
+        payload["callId"] = request.call_id
     return payload
+
+
+def admitted_by(
+    roster: Mapping[str, Mapping[str, Any]], call: SessionEvent
+) -> Mapping[str, Any] | None:
+    """The roster row of the child a call record admitted, or `None` if it admitted none.
+
+    For a delegating tool's `reconcile` (S2): `call` is the record a crash left
+    unanswered — a `tool/call`, or a Code Mode dispatch's
+    `tool/code-dispatch-start` — and `roster` is the parent's. The admission reaches
+    disk before the child takes a step (`SubagentService.start`), so no row means no
+    child ran, and the call is safe to make again.
+    """
+    call_id = call_id_of(call)
+    if not call_id:
+        return None
+    # One at most: a readmit writes no second admission.
+    return next((row for row in roster.values() if row.get("callId") == call_id), None)
 
 
 @runtime_checkable
@@ -1098,6 +1168,7 @@ class SubagentService:
         boundary: Context,
         session: Session | None,
         session_id: JsonValue = None,
+        written: bool = False,
     ) -> SubagentRun:
         """Bind a child a provider has already started, or release it (K3, L6).
 
@@ -1118,6 +1189,14 @@ class SubagentService:
         `session_id` because a readmitted child has a transcript somebody may
         want to read, and the ending is the only place left to name it.
 
+        `written` is `start`'s: the provider has just appended the admission, and it
+        is the one record a resume finds a child by (S2). It rode the parent's log in
+        memory while the child ran — a child's flushes never write its parent, since
+        a subagent inherits no prefix — so a crash mid-run left a child with a log, a
+        tree and a branch that no roster named. So it reaches disk before the gate
+        opens, fail-closed as a durable intent is: one that cannot be written is a
+        refusal like the ceiling's. A readmit writes no admission, and asks nothing.
+
         The caller opens the child's gate (`SubagentRun.ready`) once this returns:
         `start` at once, a readmission after its own children are swept.
         """
@@ -1127,6 +1206,11 @@ class SubagentService:
         run.owner = owner
         try:
             self._enforce(grant, run, held, boundary)
+            if written and session is not None and not await session_written(self.ctx, session):
+                raise SubagentSpawnError(
+                    f"subagent {run.name}: its admission could not be written to the "
+                    "parent's log, so it was not started"
+                )
         except SubagentSpawnError as refused:
             await self._abandon(run)
             self._settle_unadmitted(session, run.id, str(refused), session_id=session_id)
@@ -1216,6 +1300,7 @@ class SubagentService:
             held=held,
             boundary=boundary,
             session=request.parent.session,
+            written=True,
         )
         admitted.ready.set()
         return admitted

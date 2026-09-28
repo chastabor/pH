@@ -1116,7 +1116,7 @@ class TuiEventAdapter:
 
         The count and not the content, because the splice event carries neither:
         it records coordinates, and the messages it removed are recoverable only
-        by an observer synchronous with the mutation (`Inbox._mutate` says so).
+        by an observer synchronous with the mutation (`Inbox.splice` says so).
         """
         inserted = len(as_seq(event.data.get("inserted")))
         removed = as_int(event.data.get("removedCount"))

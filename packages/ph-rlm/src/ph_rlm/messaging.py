@@ -62,6 +62,7 @@ from ph.tools import (
     ToolOutput,
     ToolRunContext,
     Unknown,
+    call_id_of,
     define_tool,
     text_content,
 )
@@ -492,7 +493,7 @@ async def apply(ctx: Context, config: Config) -> None:
         from all of them, it did not happen. Any log that could not be read, or a
         list of receivers that is not everyone, leaves it unknown.
         """
-        call_id = as_str(opened.data.get("subCallId")) or as_str(opened.data.get("callId"))
+        call_id = call_id_of(opened)
         try:
             asked = SendArgs.model_validate(arguments)
         except ValidationError:

@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Boundary, Context, Running, maybe_await
-from ..json import JsonObject, JsonValue, as_obj
+from ..json import JsonObject, JsonValue, as_obj, as_str
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session, SessionEvent
 
@@ -318,6 +318,13 @@ class Unknown:
 
 Reconciled: TypeAlias = Done | NotDone | Unknown
 """What a tool says about a call a crash left unresolved (`ToolDefinition.reconcile`)."""
+
+
+def call_id_of(record: SessionEvent) -> str:
+    """The call a record `ToolDefinition.reconcile` is handed names: a `tool/call`'s
+    `callId`, or a Code Mode dispatch's `subCallId` — the id the call's own body saw
+    as `ToolRunContext.call_id`. Empty when the record names neither."""
+    return as_str(record.data.get("subCallId")) or as_str(record.data.get("callId"))
 
 
 @dataclass(slots=True)

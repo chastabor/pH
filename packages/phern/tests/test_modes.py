@@ -48,7 +48,18 @@ from ph_app.protocol import PROTOCOL_VERSION
 
 pytestmark = pytest.mark.anyio
 
-ENVELOPE_FIELDS = {"type", "seq", "time", "data", "ignorable", "sourceEventSeqs", "surfaceOp"}
+ENVELOPE_FIELDS = {
+    "type",
+    "seq",
+    "time",
+    "data",
+    "ignorable",
+    "sourceEventSeqs",
+    "surfaceOp",
+    # Batch membership (log format 2, P10-15): a prompt's claim, its step and its
+    # message are one batch (S3), so every run carries it.
+    "batch",
+}
 
 
 @pytest.fixture

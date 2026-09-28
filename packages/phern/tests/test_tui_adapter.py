@@ -596,7 +596,9 @@ async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(
 
     # A claim removes messages too, and is not a loss: the model got them.
     inbox.append("next-step", create_user_message(content=[TextBlock(text="second")], source=relay))
-    assert inbox.claim("next-step", 1), "consumed, not dropped"
+    held = inbox.propose("next-step")
+    assert held.messages, "there is a message to consume"
+    inbox.take(held, 1)
     assert len([item for item in _replay(session).visible_items() if item.role == "notice"]) == 1
 
 

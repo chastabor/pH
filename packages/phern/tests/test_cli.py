@@ -701,7 +701,8 @@ def test_print_mode_answers_and_writes_a_readable_log(
 
     events = records[1:]
     # dsh's envelope, byte-for-byte: `{type, seq, time, data}` plus the optional
-    # camelCase surface fields (D2, Q2).
+    # camelCase surface fields (D2, Q2), and batch membership since log format 2
+    # (P10-15) — a prompt's claim, step and message are one batch (S3).
     assert [event["seq"] for event in events] == list(range(len(events)))
     for event in events:
         assert set(event) <= {
@@ -712,6 +713,7 @@ def test_print_mode_answers_and_writes_a_readable_log(
             "ignorable",
             "sourceEventSeqs",
             "surfaceOp",
+            "batch",
         }
     user = next(e for e in events if e["type"] == "user/message")
     assert user["surfaceOp"] == "append"

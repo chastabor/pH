@@ -26,6 +26,7 @@ from ..host import host_config_path, load_host_config
 from ..json import JsonValue, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
 from ..llm.types import (
+    ContentBlock,
     ContextForm,
     PluginSource,
     ReasoningBlock,
@@ -60,6 +61,7 @@ from ..session import (
     SessionKind,
     SurfaceIntent,
     derive_event_message,
+    freeze_json_value,
     intents,
 )
 from ..session import kinds as core_kinds
@@ -786,6 +788,29 @@ def log_interrupted_call(
                 "arguments": tool_arguments,
             },
         )
+
+
+async def reconciled_call(
+    ctx: Context,
+    session: Session,
+    name: str,
+    arguments: Mapping[str, JsonValue],
+    *,
+    call_id: str = "call-1",
+) -> tuple[ContentBlock, ...] | NotDone | None:
+    """What tool `name` says, as a resume would ask it, about one call a crash left open.
+
+    The `tool/call` record `log_interrupted_call` writes, handed to
+    `ToolRuntime.reconciled` as `resume_session` hands it: the rendered result for
+    `Done`, `NotDone`, or `None` for `Unknown`.
+    """
+    record = SessionEvent(
+        type="tool/call",
+        seq=0,
+        time=0,
+        data=freeze_json_value({"callId": call_id, "name": name, "arguments": dumps(arguments)}),
+    )
+    return await ctx.require(TOOLS).reconciled(record, session, scope=DEPLOYMENT)
 
 
 def result_text(session: Session, call_id: str) -> str:
