@@ -57,6 +57,7 @@ from ..cordis import (
     settled_or_none,
 )
 from ..keys import FS, PROJECT_ROOT
+from ..paths import write_atomic
 from ..session import Session
 from ..session.writers import log_writer
 from ..tools.errors import FailureKind, HarnessError
@@ -1235,13 +1236,19 @@ def _greppable(path: Path) -> bool:
 def _write_text(target: Path, content: str) -> int:
     """Write the file and report its size in bytes.
 
+    **Replaced, not overwritten** (S5). `write_bytes` truncated the person's file
+    and then wrote it, so a full disk, an `EIO` or a power cut mid-`edit` left a
+    prefix of the new text where their file had been — and `write`'s reconcile then
+    read "it did not happen" off a file whose original was gone. Through
+    `write_atomic` the file is the old one or the new one, and `fsync`ed; `preserve`
+    keeps what a replace would otherwise change (a link, the mode bits).
+
     Encoded here rather than by `write_text`, because the caller wants the byte
     count and `write_text` returns *characters* — so the count was a second full
     encode of the same string, 30 µs on a megabyte. One pass, on this thread.
     """
     data = content.encode("utf-8")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
+    write_atomic(target, data, preserve=True)
     return len(data)
 
 

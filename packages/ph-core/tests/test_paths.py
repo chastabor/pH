@@ -413,10 +413,59 @@ def test_a_content_addressed_write_does_not_rewrite_what_is_there(tmp_path: Path
     write_atomic(target, b"first", skip_if_present=True)
     written_at = target.stat().st_mtime_ns
 
-    write_atomic(target, b"second", skip_if_present=True)
+    # The same length, as the same digest's bytes always are.
+    write_atomic(target, b"FIRST", skip_if_present=True)
 
     assert target.read_bytes() == b"first"
     assert target.stat().st_mtime_ns == written_at, "the file was rewritten"
+
+
+def test_a_content_addressed_file_that_came_back_torn_is_written_again(tmp_path: Path) -> None:
+    """S6 — a digest-named file of the wrong size is not the blob its name promises.
+
+    Skipped because its name was there, a file a power cut left empty or short —
+    written by a build that did not sync — stayed that way for good, and the log
+    kept pointing a reader at it.
+
+    Sabotage: skip on `path.exists()` alone, and the torn file is kept.
+    """
+    target = tmp_path / "digest-name"
+    target.write_bytes(b"")
+
+    write_atomic(target, b"the whole blob", skip_if_present=True)
+
+    assert target.read_bytes() == b"the whole blob"
+
+
+def test_an_atomic_write_is_on_disk_before_its_name_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S6 — the bytes are synced before the rename, and the rename after it.
+
+    A rename alone can reach disk ahead of the bytes it names, and the blobs written
+    here are the ones a session log points at, whose log is synced at the next
+    barrier: the log could survive a power cut naming a file that came back empty.
+
+    Sabotage: drop either `fsync`, and the order below is missing a step.
+    """
+    import stat
+
+    order: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        order.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        real_fsync(fd)
+
+    def replace(source: Path, target: Path) -> None:
+        order.append("rename")
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    write_atomic(tmp_path / "blob", b"bytes")
+
+    assert order == ["file", "rename", "dir"]
 
 
 def test_a_write_atomic_temp_is_recognized_by_its_own_name(
@@ -428,13 +477,13 @@ def test_a_write_atomic_temp_is_recognized_by_its_own_name(
     a sweep that failed to recognize it would delete a write in flight.
     """
     seen: list[Path] = []
-    rename = Path.replace
+    rename = os.replace
 
-    def recording(self: Path, target: Path) -> Path:
-        seen.append(self)
-        return rename(self, target)
+    def recording(source: Path, target: Path) -> None:
+        seen.append(Path(source))
+        rename(source, target)
 
-    monkeypatch.setattr(Path, "replace", recording)
+    monkeypatch.setattr(os, "replace", recording)
     write_atomic(tmp_path / "blob.md", b"x")
 
     (temporary,) = seen

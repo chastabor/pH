@@ -31,7 +31,7 @@ from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonObject, JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import Claim, IntentNotDurable, Session, intents_of
+from ..session import Claim, IntentNotDurable, Session, intents_of, session_written
 from ..session.kinds import APPROVAL_ASK, INTERRUPTED, approval_decided
 from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
@@ -165,6 +165,12 @@ ApprovalAnswer: TypeAlias = "ApprovalOutcome | Edited | Responded"
 The four bare outcomes stay strings so the fail-closed reading is unchanged and
 every existing answerer keeps working; the two that carry data are objects
 because they have data to carry."""
+
+
+def _proceeds(answer: ApprovalAnswer) -> bool:
+    """Whether the caller acts on `answer`: runs the call, as asked or as edited. A
+    `Responded` runs nothing — the model is handed the person's text instead."""
+    return answer == "allowed-once" or isinstance(answer, Edited)
 
 
 def answer_from_wire(raw: object) -> ApprovalAnswer:
@@ -363,7 +369,6 @@ class ApprovalService:
         outcome: ApprovalAnswer = "canceled"
         try:
             outcome = await self._route(request, cancel if cancel is not None else agent.signal)
-            return outcome
         finally:
             if session is not None and held is not None:
                 journal.settle(
@@ -371,6 +376,23 @@ class ApprovalService:
                     held,
                     self._decided_data(request, outcome, automatic=False, ask_seq=held.opened.seq),
                 )
+        # **A decision that lets something happen is on disk before it does** (S8).
+        # The ask was, and the decision rode in memory: a tool call's own barrier
+        # flushed it for the ask the pipeline makes, but an ask from *inside* a body
+        # — `permissions-fs` gating a write — is acted on the moment this returns,
+        # and nothing had to remember a barrier of its own. A host that died next left
+        # a write that happened beside a log that says, once repaired, nobody
+        # approved it.
+        # Fail-closed, as the ask's own barrier is: undecidable on disk, it is not
+        # allowed.
+        if (
+            held is not None
+            and session is not None
+            and _proceeds(outcome)
+            and not await session_written(self.ctx, session)
+        ):
+            return "unavailable"
+        return outcome
 
     async def _route(self, request: ApprovalRequest, cancel: Cancellation | None) -> ApprovalAnswer:
         if is_canceled(cancel):

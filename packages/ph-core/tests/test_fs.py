@@ -204,6 +204,71 @@ async def test_an_allowed_write_reaches_disk_and_announces_itself(tmp_path: Path
     assert (written.created, written.bytes) == (True, 5)
 
 
+async def test_an_edit_replaces_the_file_rather_than_truncating_it(tmp_path: Path) -> None:
+    """S5 — the person's file was cut to nothing, then written.
+
+    A full disk, an `EIO` or a power cut between the two left a prefix of the new
+    text where their file had been. Asserted on the inode, which is what tells a
+    replace from an in-place write deterministically, as `write_atomic`'s own test
+    does — and on the bits and the link, which a replace must not lose.
+
+    Sabotage: `target.write_bytes(data)` in `_write_text` again, and the inode is
+    unchanged.
+    """
+    _root, fs = _fs(tmp_path)
+    script = tmp_path / "run.sh"
+    script.write_text("echo one\n")
+    script.chmod(0o755)
+    link = tmp_path / "latest.sh"
+    link.symlink_to(script.name)
+    before = script.stat().st_ino
+
+    await fs.edit("latest.sh", "one", "two", scope=DEPLOYMENT)
+
+    assert script.read_text() == "echo two\n"
+    assert script.stat().st_ino != before, "the file was written in place"
+    assert script.stat().st_mode & 0o777 == 0o755, "the replace lost the file's mode"
+    assert link.is_symlink(), "the edit replaced the link instead of the file it names"
+    assert sorted(one.name for one in tmp_path.iterdir()) == ["latest.sh", "run.sh"]
+
+
+async def test_a_write_is_covered_by_a_restore_only_when_it_stays_in_the_tree(
+    mount: MountProfile, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """S4 — `write` and `edit` declared a flat "confined", and a path need not be.
+
+    An absolute path passes `resolve` untouched, and a link inside the tree can lead
+    out of it, so the checkpoint policy skipped the barrier for a nested write a
+    restore would never take back. Asked per call now, where the path really goes.
+
+    Sabotage: declare `effects_confined_to_workspace=True` on `write` again, and the
+    two writes that leave the tree read as covered.
+    """
+    from ph.keys import TOOLS
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    await agent.prompt("hello")  # the lifecycle acquires the workspace on the first step
+    root = ctx.require(FS).root_for(agent)
+    outside = tmp_path_factory.mktemp("elsewhere")
+    assert not is_under(outside, root), "the other directory must be outside the tree"
+    (root / "out").symlink_to(outside)
+    tools = ctx.require(TOOLS)
+
+    def covered(path: str) -> bool:
+        arguments = {"path": path, "content": "x"}
+        return tools.restore_covers("write", arguments, scope=DEPLOYMENT, agent=agent)
+
+    assert covered("notes/a.txt"), "a relative path in the tree is one a restore covers"
+    assert not covered(str(outside / "a.txt")), "an absolute path out of the tree is not"
+    assert not covered("out/a.txt"), "nor is a path a link inside the tree leads out by"
+    assert not covered("../a.txt"), "nor one that climbs out"
+    assert not tools.restore_covers(
+        "write", {"path": "notes/a.txt"}, scope=DEPLOYMENT, agent=None
+    ), "with no agent there is no workspace, and nothing a restore would reset"
+
+
 async def test_reads_record_an_observation(tmp_path: Path) -> None:
     _root, fs = _fs(tmp_path)
     (tmp_path / "a.txt").write_text("one\ntwo\nthree\n")

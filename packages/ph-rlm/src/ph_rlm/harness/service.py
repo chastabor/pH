@@ -34,6 +34,7 @@ import logging
 import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -493,7 +494,8 @@ class HarnessService:
         """
         path = self.projection_path(session)
         payload = dumps(self.state(session).to_wire())
-        await anyio.to_thread.run_sync(write_atomic, path, f"{payload}\n")
+        # Not durable: nothing reads it back — the log is the state, and this restates it.
+        await anyio.to_thread.run_sync(partial(write_atomic, path, f"{payload}\n", durable=False))
         return path
 
     def stale_projections(self) -> list[str]:

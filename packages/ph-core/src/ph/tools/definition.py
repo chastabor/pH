@@ -73,6 +73,7 @@ __all__ = [
     "ToolRunContext",
     "TransportPresentation",
     "Unknown",
+    "WorkspaceConfinement",
     "aborted_result",
     "budget_result",
     "concluded_result",
@@ -318,6 +319,11 @@ class Unknown:
 
 Reconciled: TypeAlias = Done | NotDone | Unknown
 """What a tool says about a call a crash left unresolved (`ToolDefinition.reconcile`)."""
+
+WorkspaceConfinement: TypeAlias = Callable[[JsonValue, AgentHandle | None], bool]
+"""Whether one call's every effect is a file in the agent's workspace, given the call's
+arguments (plain JSON, as they will run or as the log recorded them) and the agent
+making it — the per-call form of `ToolDefinition.effects_confined_to_workspace`."""
 
 
 def call_id_of(record: SessionEvent) -> str:
@@ -647,27 +653,39 @@ class ToolDefinition:
     cannot know. The distinction is real and narrow — a long `run_code` cell is
     exactly the argument a model re-reads, so it stays.
     """
-    effects_confined_to_workspace: bool = False
+    effects_confined_to_workspace: bool | WorkspaceConfinement = False
     """Every effect of this call is a file inside the agent's workspace (E7, N3).
 
     Named for what the *tool* knows rather than for what a consumer does with it:
     `/revert` derives "a workspace restore undoes this" from it, but that is the
     row's inference.
 
-    True for a tool whose entire effect is a file inside the workspace, and for one
-    with no effect at all. False, the default, for anything that can reach past the
-    tree — a shell command that published a package, a spawn, a message. **Git
-    restores the tree, not the world.**
+    True for a tool whose entire effect is a file inside the workspace. False, the
+    default, for anything that can reach past the tree — a shell command that
+    published a package, a spawn, a message. **Git restores the tree, not the
+    world.** A tool with no effect at all says `effect_free` instead.
 
-    **Coarser than the truth, and stated so.** `ctx.fs.resolve` passes an absolute
-    path through untouched, so `write`/`edit` — which declare this — can land outside
-    the workspace and be reported as covered when they were not. What stops that is a
-    permission row prompting on a write leaving the tree (P4-10).
+    **Per call, where a tool can say** (S4). `ctx.fs.resolve` passes an absolute path
+    through untouched, and a link or an allowance can lead out of the tree, so a flat
+    `True` on `write`/`edit` reported a write outside the workspace as covered — and
+    the checkpoint policy skipped the barrier a crash needed. A `WorkspaceConfinement`
+    is asked with the call's arguments and the agent making it; `confined` is the one
+    reader, and a predicate that raises answers not confined.
 
     Declared here rather than matched by name in the command: these are *registered
     plugins*, so a deployment renames them and an MCP server adds its own. The
     default is the safe direction — a tool that says nothing is reported as *not*
     undone.
+    """
+    effect_free: bool = False
+    """This call changes nothing — no file, no process, no message (S4).
+
+    So there is nothing a crash mid-call could leave half done, and nothing a restore
+    would have to take back: the checkpoint policy lets a nested dispatch of it skip
+    its barrier whether or not the run took a restore point, and `/revert` never
+    lists it. Apart from `effects_confined_to_workspace`, whose effects are real and
+    covered only by a restore that exists — a `read` must not pay a barrier on a
+    profile whose workspace takes no restore points, where every `write` has to.
     """
     is_concurrency_safe: Callable[[Any], bool] | None = None
     """Only `True` opts a call into a parallel group. Omission, a raise, and any
@@ -775,6 +793,11 @@ class ToolDefinition:
         """Whether this call declares itself hard to take back (P6-16)."""
         return _answers_true(self.is_irreversible, args)
 
+    def confined(self, args: JsonValue, agent: AgentHandle | None) -> bool:
+        """Whether every effect of this call is a file in `agent`'s workspace (S4)."""
+        declared = self.effects_confined_to_workspace
+        return declared if isinstance(declared, bool) else _answers_true(declared, args, agent)
+
 
 @dataclass(frozen=True, slots=True)
 class TransportPresentation:
@@ -825,7 +848,8 @@ def define_tool[A: BaseModel](
     reads_paths: bool = False,
     searches_paths: bool = False,
     arguments_disposable: bool = False,
-    effects_confined_to_workspace: bool = False,
+    effects_confined_to_workspace: bool | WorkspaceConfinement = False,
+    effect_free: bool = False,
     is_concurrency_safe: Callable[[Any], bool] | bool | None = None,
     is_irreversible: Callable[[Any], bool] | bool | None = None,
     idempotency_key: Callable[[Any], str | None] | None = None,
@@ -884,6 +908,7 @@ def define_tool[A: BaseModel](
         searches_paths=searches_paths,
         arguments_disposable=arguments_disposable,
         effects_confined_to_workspace=effects_confined_to_workspace,
+        effect_free=effect_free,
         is_concurrency_safe=_classifier(is_concurrency_safe),
         is_irreversible=_classifier(is_irreversible),
         idempotency_key=idempotency_key,
@@ -900,14 +925,14 @@ def _classifier(flag: Callable[[Any], bool] | bool | None) -> Callable[[Any], bo
     return flag if callable(flag) else None
 
 
-def _answers_true(classifier: Callable[[Any], bool] | None, args: object) -> bool:
+def _answers_true(classifier: Callable[..., bool] | None, *args: object) -> bool:
     """Only `True` counts. Omission, a non-`True` return and a **raise** all mean
     "not declared": a predicate that throws did not answer, and turning silence
     into a claim would make one buggy classifier claim on every call."""
     if classifier is None:
         return False
     try:
-        return classifier(args) is True
+        return classifier(*args) is True
     except Exception:
         return False
 

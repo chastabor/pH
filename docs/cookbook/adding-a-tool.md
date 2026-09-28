@@ -54,7 +54,7 @@ async def apply(ctx: Context, config: None) -> None:
             execute=read,
             is_concurrency_safe=True,
             self_limits=True,
-            effects_confined_to_workspace=True,
+            effect_free=True,
             **simple_views("read", "Read", "path"),
         )
     )
@@ -89,7 +89,8 @@ These flags are read by policy rows that must not need a list of your tool names
 |---|---|---|
 | `is_concurrency_safe` | two of these may overlap in one batch | the scheduler (B6) |
 | `is_irreversible` | a per-call predicate over the arguments | the approval gate (P6-16) |
-| `effects_confined_to_workspace` | every effect is a file inside the tree | `/revert` (N3) |
+| `effect_free` | the call changes nothing at all | `/revert` (N3), the checkpoint policy (S4) |
+| `effects_confined_to_workspace` | every effect is a file inside the tree — a flag, or a per-call predicate over the arguments and the agent | `/revert` (N3), the checkpoint policy (S4) |
 | `self_limits` | bounds its own output and offers paging | the offload row (G2) |
 | `arguments_disposable` | the model need not re-read the arguments | compaction |
 | `timeout_ms` | a bound on the body | the pipeline |

@@ -841,5 +841,5 @@ async def test_revert_still_lists_an_orphaned_dispatch_as_not_undone() -> None:
         session.admit(closer)
 
     assert session.latest("tool/code-dispatch") is not None, "repair settled it"
-    listed = "\n".join(_not_undone(root, root, session, "c1"))
+    listed = "\n".join(_not_undone(root, session, "c1", scope=root, agent=None))
     assert "publish(" in listed

@@ -30,20 +30,23 @@ dispatches by type in a single pass and runs the whole sweep on a worker thread:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import anyio.from_thread
 import pytest
 
 from ph.cordis import Context
+from ph.seams import spill as spill_module
 from ph.seams.spill import SpillClaim, SpillStore
-from ph.session import Session
+from ph.session import Session, SessionStore
 from ph.testing import log_event
 
 pytestmark = pytest.mark.anyio
 
 SPILLED = "offload/spilled"
 INPUT = "offload/input-spilled"
+KERNEL = "kernel/snapshot"
 
 
 def _store(tmp_path: Path) -> SpillStore:
@@ -86,6 +89,128 @@ async def test_two_producers_sharing_an_owner_do_not_collect_each_other(
     assert Path(mine.locator).exists() and Path(yours.locator).exists()
 
 
+async def test_a_producer_this_profile_does_not_mount_keeps_its_blobs(tmp_path: Path) -> None:
+    """S7 — the reference set was only as wide as the claims mounted *now*.
+
+    A session resumed under a profile that drops `input-offload` but keeps
+    `tool-result-offload` swept the directory the two share, found the paste's blob
+    named by no mounted claim, and deleted it — while the log still pointed the model
+    at it. The seam's own locator convention names a blob whoever wrote it.
+
+    Sabotage: fold only the mounted claims' readers, and the paste's blob is gone.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    mounted = await store.save_text(owner=session.id, source="a", suggested_name="a", content="a")
+    unmounted = await store.save_text(owner=session.id, source="b", suggested_name="b", content="b")
+    orphan = await store.save_text(owner=session.id, source="c", suggested_name="c", content="c")
+    _named(session, SPILLED, mounted.locator)
+    _named(session, INPUT, unmounted.locator)
+    store.claim(_claim("tool-result-offload", session.id, SPILLED))
+
+    removed = await store.sweep_session(session)
+
+    assert removed == [orphan.locator]
+    assert Path(unmounted.locator).exists(), "a blob the log still names was deleted"
+
+
+async def test_a_fork_does_not_sweep_a_directory_it_only_inherited(tmp_path: Path) -> None:
+    """S7 — owners were folded from the whole log, the seeded prefix included.
+
+    A kernel's blobs live under `kernel/<namespace>`, owned by whichever records name
+    it. A fork's prefix names its parent's, so the fork's open-time sweep visited the
+    parent's directory and deleted every blob the parent wrote after the fork point:
+    variables the parent's next kernel start could no longer restore.
+
+    Sabotage: take owners from every record the fork holds, and the parent's later
+    blob is gone.
+    """
+    spill = _store(tmp_path)
+    sessions = SessionStore(ctx=Context())
+    parent = sessions.create("parent")
+    spill.claim(
+        SpillClaim(
+            label="rlm-kernel-snapshot",
+            event_type=KERNEL,
+            owner=lambda data: str(data["namespace"]),
+            locator=lambda data: str(data["locator"]),
+        )
+    )
+    early = await spill.save_text(owner="kernel/ns", source="v", suggested_name="a", content="a")
+    log_event(parent, KERNEL, {"namespace": "kernel/ns", "locator": early.locator})
+    child = sessions.fork(parent, parent.events[-1].seq, "child")
+    later = await spill.save_text(owner="kernel/ns", source="v", suggested_name="b", content="b")
+    log_event(parent, KERNEL, {"namespace": "kernel/ns", "locator": later.locator})
+
+    assert await spill.sweep_session(child) == []
+    assert Path(later.locator).exists(), "the fork deleted its parent's blob"
+
+
+async def test_a_blob_committed_while_the_sweep_runs_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S7 — the log was folded once and the directory listed later.
+
+    The sweep runs off the loop while producers go on appending, so a blob reserved,
+    named and committed between the two was in the listing and not in the fold, and
+    was deleted under the record naming it. Reproduced exactly: the commit lands
+    after the fold and before the listing.
+
+    Sabotage: fold only the snapshot taken before the listing, and the blob is gone.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("tool-result-offload", session.id, SPILLED))
+    late = store.locator_for(owner=session.id, suggested_name="late", content=b"late")
+    listing = spill_module._collectable
+
+    def committed_then_listed(directory: Path) -> list[Path]:
+        _named(session, SPILLED, str(late))
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_bytes(b"late")
+        return listing(directory)
+
+    monkeypatch.setattr(spill_module, "_collectable", committed_then_listed)
+
+    assert await store.sweep_session(session) == []
+    assert late.exists(), "the sweep deleted a blob the log named by the time it looked"
+
+
+async def test_a_directory_first_named_while_the_sweep_runs_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail read after the listing adds references, never owners.
+
+    A record appended while the sweep lists can name a directory the listing never
+    visited — a kernel's first snapshot in a new namespace — and there is nothing of
+    it to collect this time round. Adding it as an owner asked for a listing that
+    was never taken, and the sweep failed.
+
+    Sabotage: let the tail fold add owners, and the sweep raises `KeyError`.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(
+        SpillClaim(
+            label="rlm-kernel-snapshot",
+            event_type=KERNEL,
+            owner=lambda data: str(data["namespace"]),
+            locator=lambda data: str(data["locator"]),
+        )
+    )
+    first = await store.save_text(owner="kernel/a", source="v", suggested_name="a", content="a")
+    log_event(session, KERNEL, {"namespace": "kernel/a", "locator": first.locator})
+    listing = spill_module._collectable
+
+    def named_a_new_owner_then_listed(directory: Path) -> list[Path]:
+        log_event(session, KERNEL, {"namespace": "kernel/b", "locator": "unwritten"})
+        return listing(directory)
+
+    monkeypatch.setattr(spill_module, "_collectable", named_a_new_owner_then_listed)
+
+    assert await store.sweep_session(session) == []
+
+
 async def test_a_write_in_flight_survives_a_sweep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -99,21 +224,21 @@ async def test_a_write_in_flight_survives_a_sweep(
     variable that would not restore. Reproduced here exactly: the sweep runs
     between the temp's write and its rename.
 
-    Sabotage: drop the `is_atomic_temp` guard from `_remove_unreferenced` and
+    Sabotage: drop the `is_atomic_temp` guard from `_collectable` and
     the write raises.
     """
     store = _store(tmp_path)
     session = Session("s1")
     store.claim(_claim("ours", session.id))
-    rename = Path.replace
+    rename = os.replace
     swept: list[list[str]] = []
 
-    def sweep_then_rename(self: Path, target: Path) -> Path:
-        if self.name.endswith(".tmp"):
+    def sweep_then_rename(source: Path, target: Path) -> None:
+        if str(source).endswith(".tmp"):
             swept.append(anyio.from_thread.run(store.sweep_session, session))
-        return rename(self, target)
+        rename(source, target)
 
-    monkeypatch.setattr(Path, "replace", sweep_then_rename)
+    monkeypatch.setattr(os, "replace", sweep_then_rename)
 
     ref = await store.save_text(owner=session.id, source="x", suggested_name="x", content="kept")
 
@@ -173,12 +298,23 @@ async def test_a_withdrawn_claim_stops_contributing(tmp_path: Path) -> None:
     the owner is still visited — the second claim names it — and the file it
     alone referenced is collected. A `release()` that did nothing would leave the
     file in place and fail here.
+
+    Its reference is in a field of its own, as a kernel snapshot's is: one in the
+    seam's `locator` convention names its blob whether or not a claim is mounted
+    (S7), so only a claim's own reader can stop contributing.
     """
     store = _store(tmp_path)
     session = Session("s1")
     ref = await store.save_text(owner=session.id, source="a", suggested_name="a", content="x")
-    _named(session, SPILLED, ref.locator)
-    release = store.claim(_claim("temporary", session.id, SPILLED))
+    log_event(session, KERNEL, {"record": {"locator": ref.locator}})
+    release = store.claim(
+        SpillClaim(
+            label="temporary",
+            event_type=KERNEL,
+            owners=lambda _session: {session.id},
+            locator=lambda data: str(data["record"]["locator"]),
+        )
+    )
     store.claim(_claim("permanent", session.id, INPUT))
 
     assert await store.sweep_session(session) == []

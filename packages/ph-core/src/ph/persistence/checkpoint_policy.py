@@ -14,11 +14,14 @@ Two barriers, and a third that turns out to be one of the first two:
    `TOOL_OUTCOME_UNKNOWN` rather than invisible. For a nested Code Mode
    dispatch the record is `tool/code-dispatch-start` — `TOOL_DISPATCH`, whose
    declared `tools-execute` barrier is this one, placed here because it must run
-   after every pre-execute gate — and it is flushed **unless
-   a workspace restore covers the dispatched tool** (F4) —
-   `ToolRuntime.restore_covers`, the rule `/revert` lists by, and so an unknown
-   tool is flushed. One barrier per cell used to cover every dispatch
-   in it, and under the `rlm` profile *every* tool the model calls is nested: a
+   after every pre-execute gate — and it is flushed **unless the dispatched
+   call has nothing to recover** (F4, S4): it changes nothing (`effect_free`),
+   or the run took a restore point (`has_restore_point`) and the call's every
+   effect is a file in the workspace (`ToolRuntime.restore_covers`, the rule
+   `/revert` lists by, asked of this call's own arguments). So an unknown tool
+   is flushed, and so is a write whose path leaves the tree. One barrier per
+   cell used to cover every dispatch in it, and under the `rlm` profile
+   *every* tool the model calls is nested: a
    crash mid-cell left the outer call and none of what the cell did, so
    `/revert`'s list of what a restore does not undo came back empty;
 3. **at step end** — on the request path this *is* barrier 1: the next
@@ -43,6 +46,7 @@ from ..cancel import is_canceled
 from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS, TOOLS
 from ..llm.types import GenerateOptions, StreamChunk
+from ..seams.workspace import has_restore_point
 from ..tools.definition import ToolExecution, ToolExecutionResult, aborted_result
 
 __all__ = ["apply"]
@@ -70,12 +74,23 @@ async def apply(ctx: Context, config: None) -> None:
     ) -> ToolExecutionResult:
         if execution.session is None:
             return await next_()
-        if execution.parent is not None and ctx.require(TOOLS).restore_covers(
-            execution.name, scope=execution.scope
+        tools = ctx.require(TOOLS)
+        if execution.parent is not None and (
+            tools.effect_free(execution.name, scope=execution.scope)
+            or (
+                has_restore_point(execution.session, execution.root_call_id)
+                and tools.restore_covers(
+                    execution.name,
+                    execution.arguments,
+                    scope=execution.scope,
+                    agent=execution.agent,
+                )
+            )
         ):
-            # A dispatch whose every effect is a file in the workspace: the cell's
-            # own barrier and its restore point cover it, and a cell of reads and
-            # edits should not pay one fsync per call.
+            # Nothing a crash could leave half done: a read changes nothing, and an
+            # edit in a run that took a restore point is one the restore takes back.
+            # A cell of reads and edits should not pay one fsync per call — but
+            # without the restore point, nothing would take the edits back.
             return await next_()
         await ctx.require(SESSIONS).flush(execution.session)
         if is_canceled(execution.signal):

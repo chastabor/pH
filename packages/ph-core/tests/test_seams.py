@@ -32,7 +32,7 @@ from ph.agent.types import AgentHandle
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
 from ph.json import as_str
 from ph.seams._names import SLUG_CHARACTERS
-from ph.seams.approval import ApprovalRequest, ApprovalService, Edited
+from ph.seams.approval import ApprovalAnswer, ApprovalRequest, ApprovalService, Edited
 from ph.seams.code_runtime import (
     CodeBindingNamespace,
     CodeRuntimeSeam,
@@ -157,6 +157,64 @@ async def test_an_ask_is_on_disk_before_anybody_is_asked(mount: MountProfile) ->
     )
     assert outcome == "allowed-once"
     assert held == [["approval/asked"]]
+
+
+@pytest.mark.parametrize(
+    ("answer", "written"),
+    [("allowed-once", True), (Edited(arguments={"path": "b"}), True), ("rejected", False)],
+)
+async def test_a_decision_that_lets_something_happen_is_on_disk_when_it_returns(
+    mount: MountProfile, answer: ApprovalAnswer, written: bool
+) -> None:
+    """S8 — an ask from inside a body is acted on the moment `request` returns.
+
+    `permissions-fs` gating a write and the harness gating a refinement do the thing
+    at once, and the decision rode in memory: a crash next left an effect beside a
+    log that repair then said nobody approved. A refusal acts on nothing, so it
+    waits for the next barrier like any record.
+
+    Sabotage: drop the flush after the settle, and the stored log has the ask alone.
+    """
+    from ph.keys import APPROVAL, SESSIONS
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+
+    async def answerer(request: ApprovalRequest, next_: object) -> ApprovalAnswer:
+        return answer
+
+    ctx.require(APPROVAL).register_answerer(answerer)
+    outcome = await ctx.require(APPROVAL).request(
+        agent=_agent(session), tool_name="fs.write", call_id="c1"
+    )
+    assert outcome == answer
+    assert ("approval/decided" in stored_types(ctx, "s")) is written
+
+
+async def test_an_allowing_decision_that_cannot_be_written_allows_nothing(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed, as the ask's own barrier is: a person said yes, and the log could
+    not hold it, so the caller is told `unavailable` and does not act.
+
+    Sabotage: return the outcome whether or not the write worked.
+    """
+    from ph.keys import APPROVAL, SESSIONS
+    from ph.session import SessionStore
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+
+    async def answerer(request: ApprovalRequest, next_: object) -> str:
+        # The ask is on disk by now; the decision's write is the one that fails.
+        monkeypatch.setattr(SessionStore, "flush", raising(OSError("the disk is full")))
+        return "allowed-once"
+
+    ctx.require(APPROVAL).register_answerer(answerer)
+    outcome = await ctx.require(APPROVAL).request(
+        agent=_agent(session), tool_name="fs.write", call_id="c1"
+    )
+    assert outcome == "unavailable"
 
 
 async def test_an_ask_that_cannot_be_written_is_not_put_to_anybody(

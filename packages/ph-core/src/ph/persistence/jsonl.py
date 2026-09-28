@@ -29,7 +29,6 @@ import json
 import logging
 import os
 from collections.abc import Iterator, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -41,7 +40,7 @@ from pydantic import ValidationError
 from ..cordis import DEPLOYMENT, Context, plugin
 from ..json import JsonObject, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SESSIONS, TOOLS
-from ..paths import resolve_roots
+from ..paths import resolve_roots, sync_directory, write_all
 from ..session import (
     BatchRef,
     Session,
@@ -602,7 +601,7 @@ def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) 
     try:
         start = os.fstat(fd).st_size
         try:
-            _write_all(fd, payload)
+            write_all(fd, payload)
             os.fsync(fd)
         except BaseException:
             _take_back(fd, start, path)
@@ -610,21 +609,7 @@ def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) 
     finally:
         os.close(fd)
     if fresh:
-        # Best effort: a filesystem that refuses a directory handle (some
-        # networked ones do) has already given us the file's own durability.
-        with suppress(OSError):
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-
-
-def _write_all(fd: int, payload: bytes) -> None:
-    """Write every byte, however many calls that takes. A short write is not an error."""
-    view = memoryview(payload)
-    while view:
-        view = view[os.write(fd, view) :]
+        sync_directory(path.parent)
 
 
 def _take_back(fd: int, length: int, path: Path) -> None:

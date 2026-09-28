@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,8 +24,8 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import default_home_path, is_atomic_temp, write_atomic
-from ..session import Session
+from ..paths import default_home_path, is_atomic_temp, replace_durably, write_atomic
+from ..session import Session, SessionEvent
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -178,7 +177,7 @@ class SpillStore:
 
         Under the owner's own directory so the rename that publishes it cannot
         cross a filesystem, and in a *subdirectory* so the sweep walks past it:
-        `_remove_unreferenced` collects files, and this is a directory.
+        `_collectable` lists files, and this is a directory.
         """
         final = Path(locator)
         return final.parent / STAGING / final.name
@@ -247,14 +246,16 @@ class SpillStore:
         """Publish a reserved blob at its locator. Call it *after* the append.
 
         A rename within one directory, so the blob appears whole or not at all
-        and never appears unreferenced. `False` rather than a raise for the same
-        reason `_write_blob` in `ph_rlm.snapshot` accepts this shape: by now the
-        log names the locator, so the recoverable answer is a reader reporting a
-        blob it cannot find, not a turn that fails after the fact.
+        and never appears unreferenced — and a durable one (`replace_durably`),
+        since the log naming the locator is `fsync`ed at the next barrier and the
+        rename must not be the half a power cut loses (S6). `False` rather than a
+        raise for the same reason `_write_blob` in `ph_rlm.snapshot` accepts this
+        shape: by now the log names the locator, so the recoverable answer is a
+        reader reporting a blob it cannot find, not a turn that fails after the fact.
         """
         staged = self._staging_for(ref.locator)
         try:
-            await anyio.to_thread.run_sync(os.replace, staged, Path(ref.locator))
+            await anyio.to_thread.run_sync(replace_durably, staged, Path(ref.locator))
         except OSError:
             log.warning("ph.seams.spill: could not publish %s", ref.locator, exc_info=True)
             return False
@@ -304,6 +305,7 @@ class SpillStore:
         `SpillClaim` already describes, one file per run that died mid-write.
         """
         claims = self.claims
+        seed = session.header.seed_length or 0
 
         def run() -> list[str]:
             owners: set[str] = set()
@@ -315,23 +317,53 @@ class SpillStore:
                 except Exception:
                     return _abort(claim, session)
                 by_type.setdefault(claim.event_type, []).append(claim)
-            for event in session.events:
-                for claim in by_type.get(event.type, ()):
-                    try:
-                        locator = claim.locator(event.data)
-                        owner = claim.owner(event.data)
-                    except Exception:
-                        return _abort(claim, session)
-                    if locator is not None:
-                        referenced.add(locator)
-                    if owner is not None:
-                        owners.add(owner)
+
+            def fold(events: Iterable[SessionEvent], *, owning: bool) -> bool:
+                """Fold `events` into the references — and, `owning`, the owners too.
+                `False` when a claim raised, which has already aborted the sweep."""
+                for event in events:
+                    # **The seam's own convention names a blob whoever wrote it**
+                    # (S7): a producer this profile does not mount has no claim, so
+                    # its blobs were unreferenced to a sweep of the directory it
+                    # shares with one that is — and deleted, while the log still
+                    # pointed the model at them.
+                    plain = _plain_locator(event.data)
+                    if plain is not None:
+                        referenced.add(plain)
+                    for claim in by_type.get(event.type, ()):
+                        try:
+                            locator = claim.locator(event.data)
+                            owner = claim.owner(event.data)
+                        except Exception:
+                            _abort(claim, session)
+                            return False
+                        if locator is not None:
+                            referenced.add(locator)
+                        # **Only the session's own records own a directory** (S7): a
+                        # fork's seeded prefix names its parent's, where the parent
+                        # went on writing blobs this log never saw.
+                        if owning and owner is not None and event.seq >= seed:
+                            owners.add(owner)
+                return True
+
+            events = session.events
+            if not fold(events, owning=True):
+                return []
+            listed = {owner: _collectable(self.owner_root(owner)) for owner in owners}
+            # **The log again, from where the fold stopped, after the listing** (S7).
+            # This runs off the loop while producers go on appending, and a blob is
+            # referenced before it appears (write-ahead); so a file the listing found
+            # was named by the log by then, and a fold of the tail read now includes
+            # it. Folded once and listed later, a blob committed in between was
+            # deleted under the record naming it. References only: a directory the
+            # tail names was not listed, so there is nothing of it to collect.
+            if not fold(session.events_from(len(events)), owning=False):
+                return []
             removed: list[str] = []
-            for owner in sorted(owners):
-                directory = self.owner_root(owner)
-                for completed in _complete_staged(directory, referenced):
+            for owner, files in sorted(listed.items()):
+                for completed in _complete_staged(self.owner_root(owner), referenced):
                     log.info("ph.seams.spill: completed an interrupted write of %s", completed)
-                removed.extend(_remove_unreferenced(directory, referenced))
+                removed.extend(_remove_unreferenced(files, referenced))
             for absent in sorted(one for one in referenced if not Path(one).exists()):
                 log.warning(
                     "ph.seams.spill: session %s names a blob that is not there: %s",
@@ -370,15 +402,15 @@ def _complete_staged(directory: Path, referenced: set[str]) -> list[str]:
     for path in sorted(waiting.iterdir()):
         final = directory / path.name
         if path.is_file() and str(final) in referenced and not final.exists():
-            os.replace(path, final)
+            replace_durably(path, final)
             completed.append(str(final))
     return completed
 
 
-def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
-    """Delete the files in one owner directory that no claim references.
+def _collectable(directory: Path) -> list[Path]:
+    """The files in one owner directory a sweep may collect, if nothing names them.
 
-    `.staging` is passed over because it is a directory and this collects files.
+    `.staging` is passed over because it is a directory and this lists files.
     Nothing in it is ever deleted; `sweep_session` says why.
 
     **Nor is a `write_atomic` temp** (D17), for `.staging`'s reason one level up.
@@ -390,9 +422,16 @@ def _remove_unreferenced(directory: Path, referenced: set[str]) -> list[str]:
     """
     if not directory.is_dir():
         return []
+    return [
+        path for path in sorted(directory.iterdir()) if path.is_file() and not is_atomic_temp(path)
+    ]
+
+
+def _remove_unreferenced(files: Iterable[Path], referenced: set[str]) -> list[str]:
+    """Delete the listed files that nothing references."""
     gone: list[str] = []
-    for path in sorted(directory.iterdir()):
-        if path.is_file() and str(path) not in referenced and not is_atomic_temp(path):
+    for path in files:
+        if str(path) not in referenced:
             path.unlink(missing_ok=True)
             gone.append(str(path))
     return gone
@@ -409,7 +448,7 @@ def _write(path: Path, payload: bytes) -> None:
 
     **Both callers, including the staging one.** `_staging_for` keeps the
     locator's name, so the digest promises the contents there too. It is the
-    path that needed this most: `_finish_staged` republishes a staged file whose
+    path that needed this most: `_complete_staged` republishes a staged file whose
     locator the log names, so a torn reservation used to be renamed into the
     locator as a complete blob. Through the temp there is no torn file to
     publish — only, after a kill the `except` cannot reach, a `<name>.<hex>.tmp`

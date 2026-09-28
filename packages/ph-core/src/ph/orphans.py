@@ -272,7 +272,9 @@ class OrphanJournal:
         the lifetime of the installation.
         """
         try:
-            write_atomic(self.path, "".join(dumps(record) + "\n" for record in keep))
+            # Not durable: `$PH_RUNTIME` does not outlive the reboot a sync would
+            # guard against — the reason `_append` gives for not syncing either.
+            write_atomic(self.path, "".join(dumps(record) + "\n" for record in keep), durable=False)
         except OSError:
             log.warning("ph.orphans: could not compact the orphan journal", exc_info=True)
 

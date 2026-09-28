@@ -30,6 +30,7 @@ from typing import Any
 
 import pytest
 
+from ph import paths
 from ph.cordis import Context
 from ph.keys import ATTACHMENTS, SPILL_STORE
 from ph.llm.types import AttachmentRef, MediaBlock, Message, create_user_message
@@ -246,26 +247,27 @@ async def test_the_row_provides_the_store(mount: MountProfile, tmp_path: Path) -
 async def test_an_interrupted_write_does_not_become_the_stored_blob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """K5 — `_write` says why; this is what makes the damage *permanent*.
+    """K5 — `_write` says why: an interrupted write leaves nothing at the blob's name.
 
-    The retry at the end is the half worth a test of its own. A truncated blob is
-    bad; a truncated blob that every later save of the same bytes walks past —
-    because `exists()` is what makes this store cheap — is a session reading a
-    short file for an attachment it wrote correctly twice.
+    The retry at the end is the half worth a test of its own. A truncated blob at a
+    digest's name is one a later save of the same bytes could walk past — the name
+    says it is already there — so a session would read a short file for an
+    attachment it wrote correctly twice. The write goes through a temp, so there is
+    no such blob to walk past; `write_atomic`'s own size check is the second line.
 
-    The failure is injected at `write_bytes` rather than by killing anything,
+    The failure is injected at the write rather than by killing anything,
     because "interrupted between the first byte and the last" is the whole
     hypothesis and a signal would only reach it by luck.
     """
     store = _store(tmp_path)
     ref = AttachmentRef(attachment_id=digest_of(PNG), mime="image/png", bytes=len(PNG))
-    whole = Path.write_bytes
+    whole = paths.write_all
 
-    def truncated(self: Path, data: bytes) -> int:
-        whole(self, data[: len(data) // 2])
+    def truncated(fd: int, data: bytes) -> None:
+        whole(fd, data[: len(data) // 2])
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(Path, "write_bytes", truncated)
+    monkeypatch.setattr(paths, "write_all", truncated)
     with pytest.raises(OSError, match="No space"):
         await store.save_bytes(content=PNG, mime="image/png")
     monkeypatch.undo()

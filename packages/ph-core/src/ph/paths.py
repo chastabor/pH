@@ -41,6 +41,7 @@ import re
 import secrets
 import stat
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -55,7 +56,10 @@ __all__ = [
     "default_home_path",
     "is_atomic_temp",
     "is_under",
+    "replace_durably",
     "resolve_roots",
+    "sync_directory",
+    "write_all",
     "write_atomic",
     "write_text_under",
 ]
@@ -411,24 +415,41 @@ def is_atomic_temp(path: Path) -> bool:
     return _ATOMIC_TEMP.fullmatch(path.name) is not None
 
 
-def write_atomic(path: Path, payload: bytes | str, *, skip_if_present: bool = False) -> None:
-    """Write `payload` to `path` so a reader sees all of it or none of it (L7).
+def write_atomic(
+    path: Path,
+    payload: bytes | str,
+    *,
+    skip_if_present: bool = False,
+    durable: bool = True,
+    preserve: bool = False,
+) -> None:
+    """Write `payload` to `path` so a reader sees all of it or none of it (L7), and so
+    what a reader saw survives a power loss (S6).
 
     **Temp-and-rename, because a torn file is worse than a missing one here.**
-    Every caller of this writes something another process reads without
-    coordination: a content-addressed blob whose name promises its sha256, a
-    JSON index read on a daemon tick, a handle cache. `write_bytes` truncates
-    and then writes, so an interrupted write leaves a prefix under the final
-    name — and for the content-addressed writers that prefix is *permanent*,
-    since the digest says the file is already correct and nothing ever rewrites
-    it. This is atomicity against a concurrent *reader*, not durability against
-    power loss: `replace` without an `fsync` of the file and its directory can
-    land the rename with the bytes still in flight.
+    Every caller of this writes something another reader takes whole without
+    coordination: a content-addressed blob whose name promises its sha256, a JSON
+    index read on a daemon tick, a handle cache, a person's own file an agent
+    edited. `write_bytes` truncates and then writes, so an interrupted write leaves
+    a prefix under the final name — and for the content-addressed writers that
+    prefix is *permanent*, since the digest says the file is already correct and
+    nothing ever rewrites it.
 
-    Six sites had derived this independently, in five spellings of the temp
-    name — two of them a fixed string, which any two concurrent writers collide
-    on — and only one of the six removed the temp when the write failed. The
-    seventh, `spill._write`, had not derived it at all.
+    **And durable: the file is `fsync`ed before the rename, and its directory
+    after.** A rename alone is atomic against a reader but not against the
+    machine: it can reach disk ahead of the bytes it names, and the blobs written
+    here are the ones a session log points at — a spilled result, an attachment,
+    a kernel variable — whose log *is* `fsync`ed at the next barrier. So a log
+    could survive a power cut naming a file that came back empty. Every durable
+    caller runs off the event loop or on a person's own save, where the syncs are
+    not felt. `durable=False` is for a file nothing outlives a reboot for, or
+    nothing reads back — `$PH_RUNTIME`'s orphan journal, a harness projection —
+    which keeps the atomicity and skips both syncs.
+
+    Six sites had derived temp-and-rename independently, in five spellings of the
+    temp name — two of them a fixed string, which any two concurrent writers
+    collide on — and only one of the six removed the temp when the write failed.
+    The seventh, `spill._write`, had not derived it at all.
 
     **A random suffix, not the pid**, because the colliding writers can be
     inside one process: `ph_rlm.harness.service` writes a projection per
@@ -442,23 +463,83 @@ def write_atomic(path: Path, payload: bytes | str, *, skip_if_present: bool = Fa
     `skip_if_present` is the content-addressed callers' half, and only theirs:
     where the name *is* the sha256 of the bytes, a file already at that name
     already holds them, so rewriting it is one more chance to truncate
-    something a live reader holds, for no gain. It is not safe anywhere the
-    name does not promise the contents.
+    something a live reader holds, for no gain. **Unless it is the wrong size**:
+    a file torn before this synced — by a build that did not, or a disk that lied —
+    is not the blob its name promises, and skipping it would keep it that way. It
+    is not safe anywhere the name does not promise the contents.
 
-    Parents are created at the default mode. A path under a directory whose
-    mode matters — `$PH_RUNTIME` at 0700 — is ensured by its owner first;
+    `preserve` is for replacing a file that is somebody's (`FsService`'s `write` and
+    `edit`, S5): a link is written *through*, by replacing the file it names rather
+    than the link, and the file's permission bits survive, so an executable script
+    stays one. A hard link does not — its other names keep the old bytes, as they do
+    after any editor that saves by rename. Off by default, because a runtime or blob
+    writer must not follow a link somebody planted at its path.
+
+    Parents are created at the default mode. A path under a directory whose mode
+    matters — `$PH_RUNTIME` at 0700 — is ensured by its owner first;
     `PathRoots.ensure()` is still the one place that happens.
     """
-    if skip_if_present and path.exists():
+    data = payload.encode("utf-8") if isinstance(payload, str) else payload
+    mode: int | None = None
+    if preserve:
+        path = canonical(path)
+        with suppress(FileNotFoundError):
+            mode = stat.S_IMODE(path.stat().st_mode)
+    if skip_if_present and _holds(path, len(data)):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{secrets.token_hex(_TEMP_SUFFIX_BYTES)}.tmp")
     try:
-        if isinstance(payload, str):
-            temporary.write_text(payload, encoding="utf-8")
-        else:
-            temporary.write_bytes(payload)
-        temporary.replace(path)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        try:
+            write_all(fd, data)
+            if mode is not None:
+                os.fchmod(fd, mode)
+            if durable:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+    if durable:
+        sync_directory(path.parent)
+
+
+def replace_durably(source: Path, target: Path) -> None:
+    """`os.replace`, with the rename itself made durable: `target`'s directory is
+    synced after it. For a file already durable under another name — a spill
+    staged, then published — whose new name is what a log points at."""
+    os.replace(source, target)
+    sync_directory(target.parent)
+
+
+def write_all(fd: int, payload: bytes) -> None:
+    """Write every byte, however many calls that takes. A short write is not an error."""
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
+def sync_directory(directory: Path) -> None:
+    """Make the entries in `directory` durable — a name just created or renamed into it.
+
+    Best effort: a filesystem that refuses a directory handle (some networked ones
+    do) has already given the file its own durability, and that is all it can give.
+    """
+    with suppress(OSError):
+        handle = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+
+
+def _holds(path: Path, size: int) -> bool:
+    """Whether `path` is a regular file of exactly `size` bytes."""
+    try:
+        found = path.stat()
+    except OSError:
+        return False
+    return stat.S_ISREG(found.st_mode) and found.st_size == size

@@ -106,6 +106,7 @@ __all__ = [
     "discover_provisioning",
     "family_survivors",
     "fresh_root",
+    "has_restore_point",
     "latest_checkpoint",
     "lifecycle",
     "measure_strays",
@@ -1809,6 +1810,20 @@ def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
     know that a reason means leave the directory alone.
     """
     return [one for one in workspace_survivors(session) if not one.closed]
+
+
+def has_restore_point(session: Session, call_id: str) -> bool:
+    """Whether the run `call_id` took a restore point — the latest this session
+    recorded is its own (S4).
+
+    The checkpoint policy asks before it lets a nested dispatch skip its barrier on
+    the strength of a restore: one that does not exist covers nothing, and there is
+    none on a profile whose tier cannot take one, nor for a run whose capture failed
+    (the `workspace-checkpoint` row only warns). The latest, because that row records
+    it immediately before the run it covers, and a session's cells run one at a time.
+    """
+    latest = session.latest(CHECKPOINT)
+    return latest is not None and as_str(latest.data.get("callId")) == call_id
 
 
 def checkpoints(session: Session) -> dict[int, dict[str, Any]]:

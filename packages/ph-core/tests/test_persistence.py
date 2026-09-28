@@ -331,8 +331,9 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
     assert flushed_before_body == [True]
 
 
+@pytest.mark.parametrize("restore_point", [True, False])
 async def test_a_nested_dispatch_that_reaches_past_the_tree_is_preceded_by_a_barrier(
-    mount: MountProfile, tmp_path: Path
+    mount: MountProfile, tmp_path: Path, restore_point: bool
 ) -> None:
     """Barrier 2 for a Code Mode dispatch (F4): durable before it can escape.
 
@@ -347,12 +348,20 @@ async def test_a_nested_dispatch_that_reaches_past_the_tree_is_preceded_by_a_bar
     says its effects stay in the workspace and runs unflushed, which keeps a cell
     of reads and edits at one fsync; `publish` says nothing, so it is not covered.
 
+    **Only when the run took a restore point** (S4). Without one — no tier that can
+    take it, or a capture that failed — nothing would take `note`'s edits back
+    either, so it is flushed like anything else.
+
     Sabotage: restore the `execution.parent is not None` early return and
-    `publish` runs with its record still in memory.
+    `publish` runs with its record still in memory; drop `has_restore_point` from
+    the skip and `note` runs unflushed with no restore point to cover it. `look`
+    changes nothing (`effect_free`), so it never needs one: drop that branch, and a
+    read pays a barrier on every profile whose workspace takes no restore points.
     """
     from collections.abc import Callable, Mapping
 
     from ph.keys import CODE_RUNTIME_STUB
+    from ph.seams.workspace import CHECKPOINT
     from ph.testing import code_mode_stub, run_tool, simple_tool
     from ph.tools.registry import RUN_CODE
 
@@ -368,19 +377,24 @@ async def test_a_nested_dispatch_that_reaches_past_the_tree_is_preceded_by_a_bar
 
     tools = ctx.require(TOOLS)
     tools.register(simple_tool("note", body("note"), effects_confined_to_workspace=True))
+    tools.register(simple_tool("look", body("look"), effect_free=True))
     tools.register(simple_tool("publish", body("publish")))
 
     async def program(ns: Mapping[str, object], _emit: Callable[[str], None]) -> str:
         await ns["tools"].note()  # type: ignore[attr-defined]
+        await ns["tools"].look()  # type: ignore[attr-defined]
         await ns["tools"].publish()  # type: ignore[attr-defined]
         return "done"
 
     ctx.require(CODE_RUNTIME_STUB).register_program("cell", program)
     session = ctx.require(SESSIONS).create("s")
     agent = ctx.require(AGENTS).create(session, FAKE)
+    if restore_point:
+        # What `workspace-checkpoint` records for the run it is about to let start.
+        log_event(session, CHECKPOINT, {"agentId": agent.id, "tree": "t", "callId": "call-1"})
     result = await run_tool(ctx, RUN_CODE, {"program": "cell"}, agent=agent, session=session)
     assert result.is_error is False
-    assert durable_at_body == {"note": False, "publish": True}
+    assert durable_at_body == {"note": not restore_point, "look": False, "publish": True}
 
 
 def test_events_survive_a_wire_round_trip() -> None:
@@ -513,7 +527,7 @@ async def test_a_write_that_fails_part_way_takes_its_bytes_back(
     log_event(session, "step/start", {"turn": 1, "step": 1})
     log_event(session, "step/end", {"turn": 1, "step": 1})
     with monkeypatch.context() as patch:
-        patch.setattr(jsonl, "_write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "write_all", _half_then_full_disk)
         with pytest.raises(OSError, match="No space left"):
             await store.flush(session)
     assert path.stat().st_size == before, "the failed write left its partial bytes behind"
@@ -552,7 +566,7 @@ def test_a_record_log_outside_the_store_is_synced_and_takes_a_failed_write_back(
 
     before = path.stat().st_size
     with monkeypatch.context() as patch:
-        patch.setattr(jsonl, "_write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "write_all", _half_then_full_disk)
         with pytest.raises(OSError, match="No space left"):
             append_records(path, [{"n": 2}])
     assert path.stat().st_size == before, "the failed write left its partial bytes behind"
@@ -579,7 +593,7 @@ async def test_a_retry_behind_a_write_nobody_took_back_still_appends_cleanly(
     await store.flush(session)
     log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     with monkeypatch.context() as patch:
-        patch.setattr(jsonl, "_write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "write_all", _half_then_full_disk)
         patch.setattr(jsonl, "_take_back", lambda *_args: None)
         with pytest.raises(OSError):
             await store.flush(session)

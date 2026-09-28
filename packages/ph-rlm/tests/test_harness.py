@@ -509,9 +509,9 @@ async def test_a_local_refinement_is_on_disk_before_its_projection(
     ctx, session, agent = await harnessed()
     refined_then: list[bool] = []
 
-    def probe(path: Path, payload: str) -> None:
+    def probe(path: Path, payload: str, *, durable: bool = True) -> None:
         refined_then.append(any(event.type == REFINED for event in stored_events(ctx, session.id)))
-        write_atomic(path, payload)
+        write_atomic(path, payload, durable=durable)
 
     monkeypatch.setattr("ph_rlm.harness.service.write_atomic", probe)
     await ctx.require(HARNESS).apply(

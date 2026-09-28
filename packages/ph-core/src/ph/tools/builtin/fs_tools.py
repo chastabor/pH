@@ -25,11 +25,13 @@ from typing import Any
 import anyio
 from pydantic import Field
 
+from ...agent.types import AgentHandle
 from ...cordis import Context, plugin
-from ...json import JsonObject, as_obj
+from ...json import JsonObject, JsonValue, as_obj
 from ...keys import FS, TOOLS
 from ...llm.types import ContentBlock
-from ...seams.workspace import workspace_leaks
+from ...paths import canonical, is_under
+from ...seams.workspace import workspace_leaks, workspace_of
 from ...session import Session, SessionEvent
 from ...text import count_of
 from ..definition import (
@@ -229,6 +231,22 @@ async def apply(ctx: Context, config: None) -> None:
             return NotDone()
         return Done({"path": fs.named(target, root=root), "bytes": len(expected), "created": False})
 
+    def inside_workspace(args: JsonValue, agent: AgentHandle | None) -> bool:
+        """Whether a `write` or an `edit` lands in the agent's workspace (S4).
+
+        Where its path really resolves, links followed as the write follows them,
+        against the tree a restore resets — the agent's workspace, not merely its
+        cwd, which are one only where the lifecycle rebases `ctx.fs`. An absolute
+        path, an allowance or a link out of that tree is a write a restore does not
+        take back, so it is not covered: the checkpoint policy makes its record
+        durable first, and `/revert` lists it as not undone. No workspace, no tree.
+        """
+        path = as_obj(args).get("path")
+        workspace = workspace_of(ctx, agent)
+        if not isinstance(path, str) or not path or workspace is None:
+            return False
+        return is_under(canonical(fs.resolve(path, agent=agent)), canonical(workspace.root))
+
     async def edit(args: EditArgs, run: ToolRunContext) -> dict[str, Any]:
         count = await fs.edit(
             args.path,
@@ -267,18 +285,17 @@ async def apply(ctx: Context, config: None) -> None:
     # the offload row (G2) can leave their results inline without another
     # package keeping a list of this package's tool names.
     for definition in (
-        # `effects_confined_to_workspace` on all five: every effect these have is a
-        # file inside the agent's workspace, or — for the three that only look —
-        # no effect at all. `/revert` therefore does not list them as things it
-        # failed to undo, which is what keeps the listing about the calls that
-        # actually reached past the tree (N3).
+        # The three that only look are `effect_free`; the two that write answer
+        # `effects_confined_to_workspace` per call (S4), since their path can leave
+        # the tree. `/revert` therefore lists none of them as things it failed to
+        # undo unless one did reach past the tree (N3).
         define_tool(
             "read",
             "Read a file, or a window of one. Prefer this over shelling out to cat.",
             parameters=ReadArgs,
             output=ToolOutput(schema=ReadValue, render=_render_read),
             execute=read,
-            effects_confined_to_workspace=True,
+            effect_free=True,
             self_limits=True,
             reads_paths=True,
             is_concurrency_safe=True,
@@ -291,7 +308,7 @@ async def apply(ctx: Context, config: None) -> None:
             output=ToolOutput(schema=WriteValue, render=_render_write),
             execute=write,
             reconcile=reconciled_write,
-            effects_confined_to_workspace=True,
+            effects_confined_to_workspace=inside_workspace,
             self_limits=True,
             # The file body is a payload this call delivered, not an instruction
             # the model refers back to — and the file is on disk, where `read`
@@ -305,7 +322,7 @@ async def apply(ctx: Context, config: None) -> None:
             parameters=EditArgs,
             output=ToolOutput(schema=EditValue, render=_render_edit),
             execute=edit,
-            effects_confined_to_workspace=True,
+            effects_confined_to_workspace=inside_workspace,
             self_limits=True,
             arguments_disposable=True,
             **simple_views("diff", "Edit", "path"),
@@ -316,7 +333,7 @@ async def apply(ctx: Context, config: None) -> None:
             parameters=GlobArgs,
             output=ToolOutput(schema=GlobValue, render=_render_glob),
             execute=glob_tool,
-            effects_confined_to_workspace=True,
+            effect_free=True,
             self_limits=True,
             searches_paths=True,
             is_concurrency_safe=True,
@@ -328,7 +345,7 @@ async def apply(ctx: Context, config: None) -> None:
             parameters=GrepArgs,
             output=ToolOutput(schema=GrepValue, render=_render_grep),
             execute=grep_tool,
-            effects_confined_to_workspace=True,
+            effect_free=True,
             self_limits=True,
             searches_paths=True,
             is_concurrency_safe=True,
