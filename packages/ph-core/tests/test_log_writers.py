@@ -309,8 +309,19 @@ def test_a_declared_type_is_written_only_by_its_owner() -> None:
 def test_the_walk_follows_an_imported_constant() -> None:
     """The resolution the table depends on, held on its own: these sites name a
     constant another module defines, never a literal."""
-    assert "ph_rlm.subagents" in WALK.static["subagent/status"]
+    assert "ph_rlm.subagents" in WALK.static["subagent/admitted"]
     assert "ph_app.daemon.supervisor" in WALK.static["supervisor/retry"]
+
+
+def test_a_childs_status_has_one_writer() -> None:
+    """S10: a provider reports its child's status through `ph.seams.subagents`' doors
+    — `record_started` flushes a restart before the attempt it counts, and
+    `record_settled` writes the child's log before its ending — so no provider
+    appends one of its own and none can skip the rule a status carries.
+
+    Sabotage: append a `subagent/status` from `ph_rlm.subagents` again.
+    """
+    assert set(WALK.static["subagent/status"]) == {"ph.seams.subagents"}
 
 
 # --------------------------------------------------------------- at runtime --

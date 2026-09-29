@@ -53,7 +53,7 @@ from pathlib import Path
 
 from ..cordis import Context, plugin
 from ..keys import COMMANDS, FS, SESSION_PERSISTENCE, WORKSPACE
-from ..seams.commands import CommandContext, CommandDefinition
+from ..seams.commands import CommandContext, CommandDefinition, reading_verbs
 from ..seams.workspace import BRANCH_PREFIX as PREFIX
 from ..seams.workspace import stored_survivors
 
@@ -133,6 +133,7 @@ async def apply(ctx: Context, config: None) -> None:
             summary="List, export, merge or remove the branches agents left behind.",
             argument_hint=HINT,
             run=workspaces,
+            reads=reading_verbs("", "list"),
         ),
         scope=ctx,
     )

@@ -33,7 +33,7 @@ from pathlib import Path
 from ..cordis import Context, Row, plugin
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
 from ..seams._registry import contribute_item
-from ..seams.commands import CommandContext, CommandDefinition
+from ..seams.commands import CommandContext, CommandDefinition, reading_verbs
 from ..seams.invariants import contribute_fold_cache
 from ..seams.sandbox import DENIED, NETWORK_MODES, Allowances, NetworkAllowance
 from ..seams.sandbox_allow import describe
@@ -324,6 +324,7 @@ async def apply(ctx: Context, config: None) -> None:
             summary="Show what confined commands may reach, and change it without a restart.",
             argument_hint=HINT,
             run=sandbox,
+            reads=reading_verbs("", "show", "list"),
         ),
         scope=ctx,
     )

@@ -48,6 +48,7 @@ from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
 from ..seams.workspace import (
     ACQUIRED,
+    ACQUIRING,
     DISPOSED,
     RETAINED,
     SharedWorkspaceProvider,
@@ -102,6 +103,7 @@ __all__ = [
     "tool_runtime",
     "user_payload",
     "workspace_acquired",
+    "workspace_acquiring",
     "workspace_disposed",
     "workspace_log",
     "workspace_retained",
@@ -509,6 +511,13 @@ def workspace_acquired(
 ) -> tuple[str, dict[str, Any]]:
     """The opening half of the durable workspace pair (P4-14, P6-28)."""
     return (ACQUIRED, {"agentId": agent_id, "kind": kind, "root": root, "ref": ref})
+
+
+def workspace_acquiring(
+    agent_id: str, root: str, *, kind: str = "worktree", ref: str = "ph/s/a"
+) -> tuple[str, dict[str, Any]]:
+    """Where a tier is about to put a tree, recorded before it makes one (S12)."""
+    return (ACQUIRING, {"agentId": agent_id, "kind": kind, "root": root, "ref": ref})
 
 
 def workspace_retained(agent_id: str, reason: str) -> tuple[str, dict[str, Any]]:

@@ -70,8 +70,8 @@ def trees(tmp_path: Path) -> tuple[Path, Path]:
 
 @pytest.mark.parametrize(
     "raw",
-    ["/etc/passwd", "~/.ssh/id_rsa", ""],
-    ids=["absolute", "home-relative", "empty"],
+    ["/etc/passwd", "~/.ssh/id_rsa", "", "../outside.txt", "deps/../../escape"],
+    ids=["absolute", "home-relative", "empty", "parent-traversal", "traversal-after-descent"],
 )
 @pytest.mark.parametrize("field", ["source", "dest"])
 def test_a_path_that_is_not_relative_is_refused_at_config_load(field: str, raw: str) -> None:
@@ -93,11 +93,6 @@ def test_a_path_that_is_not_relative_is_refused_at_config_load(field: str, raw: 
 @pytest.mark.parametrize(
     ("entry", "because"),
     [
-        (ProvisionEntry(source="../outside.txt"), "a parent traversal leaves the project"),
-        (
-            ProvisionEntry(source=".env", dest="../../escape"),
-            "a destination may not leave the root",
-        ),
         (ProvisionEntry(source=".git/config"), "git's own state is not a material"),
         (ProvisionEntry(source=".env", dest=".git/hooks/pre-commit"), "a planted hook is code"),
     ],
@@ -107,7 +102,8 @@ def test_a_path_that_leaves_its_base_is_refused(
 ) -> None:
     """The *contextual* half — whether these relative paths, resolved, are still
     inside the trees they belong to. It needs `base` and `root`, so it can only
-    be answered here.
+    be answered here. A `..` that climbs out lexically never gets this far: the
+    validator refuses it at config load. A symlink out does, and is the next test.
 
     The `.git` pair is the one that is not merely about reading and writing:
     a `dest` under `.git/hooks/` is **code that runs on the agent's next
@@ -144,7 +140,7 @@ async def test_a_refusal_is_reported_and_the_rest_still_arrive(trees: tuple[Path
     base, root = trees
 
     report = await provision(
-        [ProvisionEntry(source="../escape"), ProvisionEntry(source=".env")],
+        [ProvisionEntry(source=".git/config"), ProvisionEntry(source=".env")],
         base=base,
         root=root,
     )

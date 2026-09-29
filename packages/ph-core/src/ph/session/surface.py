@@ -264,6 +264,18 @@ def _plan(
     return _ReplacePlan(seq=event.seq, shadowed_seqs=shadowed)
 
 
+def _replace_reads_the_batch(events: Sequence[SessionEvent]) -> bool:
+    """Whether a replace in `events` follows a member that moved the surface — the
+    one case whose plan depends on the batch's own effects (`validate_batch`)."""
+    moved = False
+    for event in events:
+        op = _surface_op_of(event)
+        if isinstance(op, SurfaceReplace) and moved:
+            return True
+        moved = moved or op is not None
+    return False
+
+
 def _apply(
     state: _FoldState, plan: _AppendPlan | _ReplacePlan | None
 ) -> SurfaceFoldReplacement | None:
@@ -340,18 +352,22 @@ class SurfaceManager:
         was. `validate_next` needs no copy because it plans one event and applies
         nothing; a batch has to apply each plan to plan the next.
 
-        **No copy for a batch with no replace in it**, which is every step's: the
-        driver takes a prompt from the inbox in one batch with `step/start` and its
-        `user/message` (S3). An append or a record off the surface reads neither the
-        fold state nor the log, so each is planned where it stands — O(members)
-        rather than O(nodes + events), which a batch per step would otherwise pay on
-        a log that grows by one `assistant/chunk` per token. Only a replace needs
-        the scratch copy: O(nodes) for the state, O(events) for the log its rewrite
-        check may index into.
+        **No copy unless a replace can see the batch's own effects**, which almost no
+        batch has. Every step's has no replace at all: the driver takes a prompt from
+        the inbox in one batch with `step/start` and its `user/message` (S3). An
+        append or a record off the surface reads neither the fold state nor the log,
+        so each is planned where it stands — O(members) rather than O(nodes +
+        events), which a batch per step would otherwise pay on a log that grows by
+        one `assistant/chunk` per token. And a replace with nothing ahead of it that
+        moved the surface — the overflow clip's `offload/spilled` beside its
+        rewrite, an elided paste beside its accounting — shadows only committed
+        nodes, so the live state and log answer it exactly as the copy would.
+        Only a replace behind an append or another replace needs the scratch copy:
+        O(nodes) for the state, O(events) for the log its rewrite check may index.
         """
         self._process_delta()
         base = len(self._log)
-        if not any(isinstance(_surface_op_of(event), SurfaceReplace) for event in events):
+        if not _replace_reads_the_batch(events):
             for offset, event in enumerate(events):
                 _plan(self._state, event, base + offset, self._log)
             return

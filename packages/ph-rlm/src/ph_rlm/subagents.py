@@ -60,22 +60,24 @@ from ph.persistence import open_session
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
-    STATUS,
     SUSPENDED_DETAIL,
     USAGE,
     Access,
     DowngradeReason,
+    PlainStatus,
     StatusCause,
     SubagentAwaiter,
     SubagentRequest,
     SubagentResult,
     SubagentRun,
     SubagentSpawnError,
-    SubagentStatus,
     admission_payload,
     child_model_key,
     child_route,
     default_child_name,
+    record_settled,
+    record_started,
+    record_status,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import (
@@ -84,7 +86,6 @@ from ph.session import (
     SessionEvent,
     SessionObserver,
     derive_event_message,
-    session_written,
 )
 from ph.session.writers import log_writer
 from ph.wire import WireModel
@@ -675,7 +676,7 @@ class RlmChildProvider:
     def _status(
         self,
         child: _Child,
-        status: SubagentStatus,
+        status: PlainStatus,
         *,
         into: SessionBatch | None = None,
         **extra: Any,  # noqa: ANN401
@@ -683,9 +684,9 @@ class RlmChildProvider:
         # Only the event, and only from the child's own parent log — or a batch of
         # it, when the status has to land with another record. A copy on the handle
         # would be a second source of truth for a fact the roster folds, frozen at
-        # the last in-process update.
-        log = child.parent_session if into is None else into
-        _LOG.append(log, STATUS, {"runId": child.run.id, "status": status, **extra})
+        # the last in-process update. Through the seam's one writer, as every
+        # provider's status is.
+        record_status(child.parent_session if into is None else into, child.run.id, status, **extra)
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
@@ -704,17 +705,9 @@ class RlmChildProvider:
                 return
             # `running` either way; `cause` says *why* it is running, because the
             # roster folds status last-write-wins and a woken child that is
-            # working must not read as not-running.
-            why: dict[str, Any] = {"cause": cause} if cause else {}
-            self._status(child, "running", **why)
-            if cause == "resumed":
-                # **A restart is on disk before the attempt it counts** (S10). The
-                # ladder folds these records, and a child that took the daemon down
-                # again before the parent's next flush left its restart in memory
-                # only — so a crash loop never advanced the count on disk, and
-                # `CHILD_RETRY_LIMIT` never tripped. Best effort: a parent whose log
-                # cannot be written has bigger problems than this count.
-                await session_written(self.ctx, parent_session)
+            # working must not read as not-running. A restart is on disk before
+            # the attempt it counts (S10) — the seam's door keeps that rule.
+            await record_started(self.ctx, parent_session, run.id, cause=cause)
             agent = child.agent
             assert agent is not None, "a child runs only after it has an agent"
             await agent.run()
@@ -722,15 +715,15 @@ class RlmChildProvider:
                 return
             answer = _last_assistant_text(child.session)
             child.result = SubagentResult(status="done", answer=answer)
-            # The child's own outcome is on disk before its parent says so (F1).
-            # Nothing else flushed it: the child's last barrier was *before* its
-            # last model request, and a parent's flush walks ancestors, never
-            # children — so a parent read "done, here is a preview" while the
-            # child's log ended before the answer, and repair called it
-            # interrupted on the next open.
-            await self._write_log(child.session)
-            self._status(
-                child, "done", answerPreview=answer[: self.config.answer_preview_chars] or None
+            # The child's own outcome is on disk before its parent says so (F1):
+            # `record_settled` writes the child's log, then the parent's status.
+            await record_settled(
+                self.ctx,
+                parent_session,
+                run.id,
+                "done",
+                child=child.session,
+                answerPreview=answer[: self.config.answer_preview_chars] or None,
             )
             # The other half of retain-by-default (P6-28): a child that finished
             # is a child whose checkout is not evidence of anything, so the mark
@@ -755,8 +748,9 @@ class RlmChildProvider:
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
             # The same order for a failure: the child's account of it first.
-            await self._write_log(child.session)
-            self._status(child, "error", detail=message)
+            await record_settled(
+                self.ctx, parent_session, run.id, "error", child=child.session, detail=message
+            )
             self._inject(
                 parent_session,
                 f"[rlm child {run.name} ({run.id}) failed: {message}{self._evidence(child)}]",
@@ -838,12 +832,6 @@ class RlmChildProvider:
             await agents.dispose(agent.id)
         except Exception:  # pragma: no cover - teardown must not mask an outcome
             log.debug("ph_rlm.subagents: disposing child %s failed", child.run.id, exc_info=True)
-
-    async def _write_log(self, session: Session | None) -> None:
-        """Flush one child's log, and never raise: a disk that refuses the write
-        must not turn a child that finished into one that failed."""
-        if session is not None:
-            await session_written(self.ctx, session)
 
     def _inject(self, parent_session: Session, text: str, summary: str) -> None:
         """Put one notice in the parent's inbox — and only if it is still there.

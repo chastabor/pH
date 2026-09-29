@@ -16,15 +16,17 @@ different things while appearing to test one.
 from __future__ import annotations
 
 import shutil
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS
+from ph.llm.fake import FakeAdapter
 from ph.orphans import OrphanJournal
 from ph.paths import resolve_roots
 from ph.persistence.lease import LEASES
@@ -257,3 +259,63 @@ def mounted_runtime(mount: MountProfile, guest_coverage: None) -> MountedRuntime
         return ctx, session, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     return build
+
+
+# ------------------------------------------------------------ a held model --
+
+
+class ModelGate:
+    """Holds every child's model call until the test lets one through.
+
+    Patched over the fake adapter's `stream`, so a child is "running" for as long
+    as the test says and no timing is guessed. `arrived` counts calls, since the
+    held list shrinks as they are released.
+
+    The `gate` fixture below is what opens it again, and that is not tidiness: a
+    child left parked here makes the mount's `drain()` wait forever, so one failed
+    assertion becomes a hung suite. Written as a `finally` in each test, that is a
+    rule the fourth test has to remember — so it lives here, beside the fixtures
+    every rlm suite shares.
+    """
+
+    def __init__(self) -> None:
+        self.held: list[anyio.Event] = []
+        self.arrived = 0
+        self.open = False
+
+    def release_one(self) -> None:
+        self.held.pop(0).set()
+
+    def twice(self) -> bool:
+        """Whether a second child has reached the model — the readmit's proof."""
+        return self.arrived >= 2
+
+    def release_all(self) -> None:
+        self.open = True
+        for event in self.held:
+            event.set()
+        self.held.clear()
+
+    def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        original = FakeAdapter.stream
+        gate = self
+
+        async def gated(self: Any, options: Any) -> Any:  # noqa: ANN401
+            gate.arrived += 1
+            if not gate.open:
+                event = anyio.Event()
+                gate.held.append(event)
+                await event.wait()
+            async for chunk in original(self, options):
+                yield chunk
+
+        monkeypatch.setattr(FakeAdapter, "stream", gated)
+
+
+@pytest.fixture
+def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModelGate]:
+    """A held model, released whatever the test does — see `ModelGate`."""
+    held = ModelGate()
+    held.patch(monkeypatch)
+    yield held
+    held.release_all()

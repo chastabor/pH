@@ -34,7 +34,7 @@ from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
-from ..seams.commands import CommandContext, CommandDefinition
+from ..seams.commands import CommandContext, CommandDefinition, reading_verbs
 from ..seams.workspace import checkpoints, workspace_of
 from ..session import Session
 from ..text import brief_value
@@ -115,6 +115,7 @@ async def apply(ctx: Context, config: None) -> None:
             summary="Restore this agent's workspace to a per-run checkpoint.",
             argument_hint="<seq>",
             run=revert,
+            reads=reading_verbs(""),
         ),
         scope=ctx,
     )

@@ -137,7 +137,11 @@ class ProvisionEntry(WireModel):
         """
         if value is None:
             return None
-        if not value or value.startswith("~") or Path(value).is_absolute():
+        # A `..` that climbs out is the same typo in relative clothing, and just as
+        # answerable without a tree: `a/../..` leaves whatever it is joined to. What
+        # still needs `base` and `root` is a *symlink* out, which `_contained` catches.
+        climbs_out = Path(os.path.normpath(value)).parts[:1] == ("..",)
+        if not value or value.startswith("~") or Path(value).is_absolute() or climbs_out:
             raise ValueError(
                 f"{value!r} must be relative to the workspace; provisioning may not "
                 "name anything outside it"

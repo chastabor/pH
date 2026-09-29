@@ -153,21 +153,24 @@ from daemon_helpers import (
 from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context, Profile
+from ph.json import as_str
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
 from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
-from ph.testing import ReapedHost, log_event, stored_log
+from ph.testing import ReapedHost, log_event, not_none, stored_log, stored_types
 from ph_app import runtime as runtime_module
 from ph_app.daemon import recovery, server
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import Root, RootStartAbandoned, Supervisor
+from ph_app.kinds import SUPERVISOR_RESTORE
 from ph_app.protocol import DaemonError
 from ph_app.runtime import mounted
 
+RESTORING, RESTORED = SUPERVISOR_RESTORE.opened, SUPERVISOR_RESTORE.settled
 pytestmark = pytest.mark.anyio
 
 
@@ -1047,8 +1050,7 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
     is the selection and the best-effort contract, and standing up a real git
     worktree would test P4-09's capture again instead.
     """
-    async with running(tmp_path) as daemon:
-        supervisor = daemon.running.supervisor
+    async with supervised(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("restores")
         log_event(root.session, "workspace/checkpoint", {"agentId": root.agent.id, "tree": "older"})
         log_event(
@@ -1076,8 +1078,9 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
         workspace, tree = supervisor._restore_point(root)
         assert tree == "newest", "the retry went back to a stale restore point"
         assert workspace is not None
-        assert await supervisor._restore(root, workspace, tree) is True
+        await supervisor._restore(root, workspace, tree)
         assert asked == ["newest"]
+        assert not_none(root.session.latest(RESTORED)).data["ok"] is True
 
         # Best-effort: a restore that fails must not cost the retry, and must
         # not claim a rollback that did not happen.
@@ -1089,20 +1092,20 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
             raise RuntimeError("the tier said no")
 
         monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", angry_restore)
-        assert await supervisor._restore(root, workspace, tree) is False
+        await supervisor._restore(root, workspace, tree)
+        assert not_none(root.session.latest(RESTORED)).data["ok"] is False
 
 
 async def test_a_root_with_no_workspace_restores_nothing_and_says_so(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ordinary case: an advisory-tier root has no worktree to put back.
 
-    No `restoreTo` in the record, rather than one that names nothing — a
+    No restore is opened at all, rather than one that names nothing — a
     transcript that implied a rollback nobody performed would misread the
     attempt that follows.
     """
-    async with running(tmp_path) as daemon:
-        supervisor = daemon.running.supervisor
+    async with supervised(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("advisory")
         assert supervisor._restore_point(root) == (None, "")
 
@@ -1114,39 +1117,41 @@ async def test_a_retry_is_on_disk_before_its_restore_runs(
 
     It ran first and the retry was written after, so a daemon that died while
     restoring had rewritten the tree with no record of the attempt — and a crash
-    loop there never advanced the count. The retry now names the restore point
-    and reaches disk before the restore starts; a restore that then fails is
-    corrected by `unrestored`, so the transcript claims no rollback.
+    loop there never advanced the count. The retry reaches disk first, then the
+    restore's own opening record (`SUPERVISOR_RESTORE`); a restore that fails is
+    settled `ok: false`, so the transcript claims no rollback.
 
-    Sabotage: restore before recording again, and the restore finds no retry on
-    disk.
+    Sabotage: restore before recording again, and the restore finds neither record
+    on disk.
     """
-    async with running(tmp_path) as daemon:
-        client = await daemon.client()
-        await client.call("session/new", sessionId="restores")
-        root = daemon.running.supervisor.roots["restores"]
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("restores")
         log_event(root.session, "workspace/checkpoint", {"agentId": root.agent.id, "tree": "t1"})
-        written = stored_log(tmp_path / "sessions", "restores")
-        seen: list[bool] = []
+        seen: list[tuple[bool, bool]] = []
+
+        def written() -> list[str]:
+            return stored_types(root.ctx, root.id)
 
         async def refused(_seam: object, workspace: object, token: str) -> tuple[str, ...]:
-            seen.append(_on_disk(written, recovery.RETRY))
+            seen.append((recovery.RETRY in written(), RESTORING in written()))
             raise RuntimeError("the tier said no")
 
         seam = type(root.ctx.require(WORKSPACE))
         monkeypatch.setattr(seam, "of", lambda self, agent_id: object())
         monkeypatch.setattr(seam, "restore", refused)
         _crash(monkeypatch, root, 1)
-        await client.prompt("restores", "hello")
-        await _until(lambda: _on_disk(written, recovery.UNRESTORED), what="the correction")
+        await supervisor.prompt("restores", "hello")
+        await until(lambda: RESTORED in written(), what="the restore's settle")
 
-        assert seen == [True], "the tree was restored before the attempt was on disk"
+        assert seen == [(True, True)], "the tree was touched before the records were on disk"
         ladder = [
-            one for one in root.session.events if one.type in {recovery.RETRY, recovery.UNRESTORED}
+            one for one in root.session.events if one.type in {recovery.RETRY, RESTORING, RESTORED}
         ]
-        assert [one.type for one in ladder] == [recovery.RETRY, recovery.UNRESTORED]
-        assert ladder[0].data["restoreTo"] == "t1"
-        assert dict(ladder[1].data) == {"attempt": 1, "restoreTo": "t1"}
+        assert [one.type for one in ladder] == [recovery.RETRY, RESTORING, RESTORED]
+        assert dict(ladder[1].data) == {"attempt": 1, "tree": "t1"}
+        assert ladder[2].data["restoringSeq"] == ladder[1].seq
+        assert ladder[2].data["ok"] is False
+        assert "the tier said no" in as_str(ladder[2].data["detail"])
 
 
 async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(

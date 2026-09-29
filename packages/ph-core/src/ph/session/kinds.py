@@ -45,7 +45,7 @@ from typing import Any, Literal, TypeAlias
 
 from ..json import JsonObject, JsonValue, as_bool, as_str
 from .events import SessionEvent
-from .intents import IntentKind, Unsettled, declare_intent
+from .intents import IntentKind, Unsettled, declare_intent, opened_seq, seq_field
 from .writers import log_writer
 
 __all__ = [
@@ -78,14 +78,9 @@ _LOG = log_writer(__name__)
 through it (T6)."""
 
 
-def _seq_key(event: SessionEvent) -> str:
-    """An intent keyed by the seq of the record that opened it: unique by construction."""
-    return str(event.seq)
-
-
 def _ask_seq(event: SessionEvent) -> str | None:
     """The ask a decision or an answer settles — its `askSeq`, as a key (T3)."""
-    return _seq_field(event, "askSeq")
+    return seq_field(event, "askSeq")
 
 
 def _key_field(event: SessionEvent) -> str:
@@ -93,17 +88,12 @@ def _key_field(event: SessionEvent) -> str:
     return as_str(event.data.get("key"))
 
 
-def _seq_field(event: SessionEvent, name: str) -> str | None:
-    seq = event.data.get(name)
-    return str(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
-
-
 # -------------------------------------------------------------------- shell --
 
 
 def _command_seq(event: SessionEvent) -> str | None:
     """The command a `shell/result` settles — its `commandSeq`, as a key."""
-    return _seq_field(event, "commandSeq")
+    return seq_field(event, "commandSeq")
 
 
 def _shell_interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
@@ -122,7 +112,7 @@ SHELL_COMMAND = declare_intent(
         opened="shell/command",
         settled="shell/result",
         # A command is keyed by its own seq: nothing else about it is unique.
-        opened_key=_seq_key,
+        opened_key=opened_seq,
         settled_key=_command_seq,
         # The child may have run: a command that takes the daemon down with it is
         # the case this pair exists for, and repair cannot know how far it got.
@@ -145,7 +135,7 @@ settle the pair on any resume that has ph-core."""
 
 def _run_seq(event: SessionEvent) -> str | None:
     """The command a `command/done` settles — its `runSeq`, as a key."""
-    return _seq_field(event, "runSeq")
+    return seq_field(event, "runSeq")
 
 
 def command_done(
@@ -179,7 +169,7 @@ COMMAND_RUN = declare_intent(
     IntentKind(
         opened="command/run",
         settled="command/done",
-        opened_key=_seq_key,
+        opened_key=opened_seq,
         settled_key=_run_seq,
         # The body may have done anything a command does — `/revert` rewrites the
         # tree — and repair cannot know how far it got.
@@ -264,7 +254,7 @@ APPROVAL_ASK = declare_intent(
         # or tool name when there was none, two asks of one tool — the Continual
         # Harness asks `tool_name="refine"` with no call id — shared a key, and the
         # first was never settled. `callId` and `toolName` stay in the payloads.
-        opened_key=_seq_key,
+        opened_key=opened_seq,
         settled_key=_ask_seq,
         # A person may have decided on a screen whose answer never reached the
         # log: the question's outcome is what is unknown.
@@ -337,7 +327,7 @@ QUESTION_ASK = declare_intent(
     IntentKind(
         opened="question/asked",
         settled="question/answered",
-        opened_key=_seq_key,
+        opened_key=opened_seq,
         settled_key=_ask_seq,
         orphan="outcome-unknown",
         # On disk before it is delivered (F8).
@@ -491,7 +481,7 @@ carries them so its settle — the live one, or repair's — can say the same.""
 
 def _upload_seq(event: SessionEvent) -> str | None:
     """The upload an `attachment/uploaded` settles — its `uploadSeq`, as a key."""
-    return _seq_field(event, "uploadSeq")
+    return seq_field(event, "uploadSeq")
 
 
 def upload_settled(opened: SessionEvent, *, expires_at: int | None = None) -> dict[str, Any]:
@@ -517,7 +507,7 @@ UPLOAD = declare_intent(
     IntentKind(
         opened="attachment/uploading",
         settled="attachment/uploaded",
-        opened_key=_seq_key,
+        opened_key=opened_seq,
         settled_key=_upload_seq,
         # The bytes may have reached the provider: a crash mid-upload is exactly
         # the case a person auditing where their data went needs told as "maybe".

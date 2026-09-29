@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,17 +25,24 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import default_home_path, is_atomic_temp, replace_durably, write_atomic
+from ..paths import (
+    default_home_path,
+    holds,
+    is_atomic_temp,
+    replace_durably,
+    sync_directory,
+    write_atomic,
+)
 from ..session import Session, SessionEvent
 from ..wire import WireModel
 from ._registry import claim_entry
 
-__all__ = ["SpillClaim", "SpillRef", "SpillStore", "apply", "handed_paths_of"]
+__all__ = ["PlannedBlob", "SpillClaim", "SpillRef", "SpillStore", "apply", "handed_paths_of"]
 
 log = logging.getLogger("ph.seams.spill")
 
 STAGING = ".staging"
-"""Where `reserve_bytes` puts a blob until the log names it. See `_staging_for`."""
+"""Where `reserve` puts a blob until the log names it. See `_staging_for`."""
 
 
 class SpillRef(WireModel):
@@ -43,6 +51,23 @@ class SpillRef(WireModel):
     locator: str
     bytes: int
     retrieval_hint: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedBlob:
+    """Bytes, and the locator the store's naming rule gives them — derived together
+    (`SpillStore.plan`), for a caller that must name a blob before storing it.
+
+    One value rather than a locator and the bytes apart, for two reasons. The digest
+    is taken **once**: `locator_for` hashes the whole payload, and a caller that
+    derived the locator for its record and then reserved the bytes hashed them
+    again — a second sha256 of a multi-megabyte tool result on the event loop. And
+    the name cannot come apart from what it names: `reserve` stages *these* bytes at
+    *this* locator, with no second derivation to disagree.
+    """
+
+    locator: Path
+    content: bytes
 
 
 def _plain_locator(data: Mapping[str, Any]) -> str | None:
@@ -163,7 +188,7 @@ class SpillStore:
         The unordered spelling, for a caller with no log entry to keep in step
         with the write — a test planting a blob, or a producer that appends
         nothing. Anything that records a locator wants `reserve_text` and
-        `commit` instead, in that order; `reserve_bytes` says why.
+        `commit` instead, in that order; `reserve` says why.
         """
         return await self.save_bytes(
             owner=owner,
@@ -182,10 +207,15 @@ class SpillStore:
         final = Path(locator)
         return final.parent / STAGING / final.name
 
-    async def reserve_bytes(
-        self, *, owner: str, source: str, suggested_name: str, content: bytes
-    ) -> SpillRef:
-        """Stage `content` and return the reference it will have once committed.
+    def plan(self, *, owner: str, suggested_name: str, content: bytes) -> PlannedBlob:
+        """Where `content` will go, held with it — `reserve` stages what this names."""
+        return PlannedBlob(
+            self.locator_for(owner=owner, suggested_name=suggested_name, content=content),
+            content,
+        )
+
+    async def reserve(self, planned: PlannedBlob, *, source: str) -> SpillRef:
+        """Stage `planned` and return the reference it will have once committed.
 
         **The write-ahead half of the ordering the sweep depends on** (§4.9). A
         blob is garbage exactly when the log does not name it, so a producer that
@@ -201,31 +231,29 @@ class SpillStore:
         that cannot proceed without durability learns it before it has logged
         anything; `commit` is a rename on the same filesystem, which is atomic
         and, having got this far, all but certain.
+
+        **Bytes already published at the locator are linked, not rewritten** (`_stage`):
+        the name carries their digest, so what is there is what would be written.
         """
-        path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
-        staged = self._staging_for(str(path))
-        await anyio.to_thread.run_sync(_write, staged, content)
+        path = planned.locator
+        await anyio.to_thread.run_sync(_stage, path, self._staging_for(str(path)), planned.content)
         return SpillRef(
             locator=str(path),
-            bytes=len(content),
+            bytes=len(planned.content),
             retrieval_hint=f'read the file at "{path}" for the full {source}',
         )
 
     async def reserve_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef:
-        """`reserve_bytes`, as UTF-8."""
-        return await self.reserve_bytes(
-            owner=owner,
-            source=source,
-            suggested_name=suggested_name,
-            content=content.encode("utf-8"),
+        """`reserve`, for text nobody planned, as UTF-8."""
+        planned = self.plan(
+            owner=owner, suggested_name=suggested_name, content=content.encode("utf-8")
         )
+        return await self.reserve(planned, source=source)
 
-    async def try_reserve_bytes(
-        self, *, owner: str, source: str, suggested_name: str, content: bytes
-    ) -> SpillRef | None:
-        """`reserve_bytes`, or `None` when the store could not take it.
+    async def try_reserve(self, planned: PlannedBlob, *, source: str) -> SpillRef | None:
+        """`reserve`, or `None` when the store could not take it.
 
         The fail-open spelling: a producer that cannot store a blob must not be the
         reason the model loses what it held — an offload keeps the text inline, a
@@ -233,17 +261,15 @@ class SpillStore:
         at `commit`, that fallback is still available: the caller has logged nothing.
         """
         return await _fail_open(
-            self.reserve_bytes(
-                owner=owner, source=source, suggested_name=suggested_name, content=content
-            ),
-            owner=owner,
-            name=suggested_name,
+            self.reserve(planned, source=source),
+            owner=planned.locator.parent.name,
+            name=planned.locator.name,
         )
 
     async def try_reserve_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef | None:
-        """`try_reserve_bytes`, as UTF-8 — a text that cannot be encoded is one the
+        """`try_reserve`, for text as UTF-8 — a text that cannot be encoded is one the
         store could not take, too."""
         return await _fail_open(
             self.reserve_text(
@@ -265,7 +291,7 @@ class SpillStore:
         """
         staged = self._staging_for(ref.locator)
         try:
-            await anyio.to_thread.run_sync(replace_durably, staged, Path(ref.locator))
+            await anyio.to_thread.run_sync(_publish, staged, Path(ref.locator), ref.bytes)
         except OSError:
             log.warning("ph.seams.spill: could not publish %s", ref.locator, exc_info=True)
             return False
@@ -307,12 +333,14 @@ class SpillStore:
         that is nowhere is reported, because the alternative is the model being
         handed a path that fails when it follows it.
 
-        Nothing is ever deleted from `.staging`. A reservation in flight is
-        indistinguishable from an abandoned one — neither is referenced yet, that
-        being the whole point of write-ahead — so collecting the second would
+        Nothing *unreferenced* is deleted from `.staging`. A reservation in flight
+        is indistinguishable from an abandoned one — neither is referenced yet,
+        that being the whole point of write-ahead — so collecting the second would
         race the first, and the bookkeeping that told them apart bought less than
         it cost. What is left behind instead is the leak this module's
-        `SpillClaim` already describes, one file per run that died mid-write.
+        `SpillClaim` already describes, one file per run that died mid-write. A
+        referenced stage is published through `_publish`, which leaves nothing in
+        `.staging` behind — including a stage whose blob is already there.
         """
         claims = self.claims
         seed = session.header.seed_length or 0
@@ -411,8 +439,16 @@ def _complete_staged(directory: Path, referenced: set[str]) -> list[str]:
     completed: list[str] = []
     for path in sorted(waiting.iterdir()):
         final = directory / path.name
-        if path.is_file() and str(final) in referenced and not final.exists():
-            replace_durably(path, final)
+        if not path.is_file() or str(final) not in referenced:
+            continue
+        # Through `commit`'s own rule, so a stage whose blob is already published —
+        # a link a dead run never dropped, or a second reservation of the same
+        # bytes — is dropped rather than kept to pin the bytes past the blob. A
+        # reservation still in flight then finds its bytes published at `commit`,
+        # which is success.
+        existed = final.exists()
+        _publish(path, final, path.stat().st_size)
+        if not existed:
             completed.append(str(final))
     return completed
 
@@ -421,7 +457,7 @@ def _collectable(directory: Path) -> list[Path]:
     """The files in one owner directory a sweep may collect, if nothing names them.
 
     `.staging` is passed over because it is a directory and this lists files.
-    Nothing in it is ever deleted; `sweep_session` says why.
+    Nothing in it is collected; `sweep_session` says why.
 
     **Nor is a `write_atomic` temp** (D17), for `.staging`'s reason one level up.
     `save_bytes` writes its temp beside the locator, and the sweep runs on every
@@ -454,6 +490,55 @@ async def _fail_open(reserving: Awaitable[SpillRef], *, owner: str, name: str) -
     except Exception:
         log.warning("ph.seams.spill: could not spill %s for %s", name, owner, exc_info=True)
         return None
+
+
+def _stage(final: Path, staged: Path, payload: bytes) -> None:
+    """Put `payload` under `.staging`, for `commit` to publish at `final`.
+
+    **Bytes already published at `final` are hard-linked, not rewritten.** The name
+    carries their digest, so the file there *is* the write this would make — a
+    kernel variable returning to earlier bytes, a tool repeating its output — and a
+    link stages it for a directory entry instead of the whole blob and its `fsync`.
+    Linked rather than skipped: a skipped stage leaves `commit` nothing of its own,
+    and the open-time sweep may delete `final` before the record naming it lands;
+    the link keeps the bytes under a name the sweep never touches.
+
+    Any failure to link — a filesystem without hard links, a stage already there,
+    `final` gone since — falls through to the write, which is always correct.
+    """
+    if holds(final, len(payload)):
+        try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            os.link(final, staged)
+        except OSError:
+            pass
+        else:
+            sync_directory(staged.parent)
+            return
+    _write(staged, payload)
+
+
+def _publish(staged: Path, final: Path, size: int) -> None:
+    """Rename a stage into place — or find its bytes there already. `commit`'s rule,
+    and the open-time sweep's (`_complete_staged`).
+
+    **Already there, nothing staged**: a second reservation of the same bytes, whose
+    one staged name the first commit took. The digest in the name says `final` holds
+    these bytes, so that is success rather than a missing stage.
+
+    **A stage linked to `final`** (`_stage`) is the same file, and `rename` between
+    two links of one file does nothing — so the staging name is dropped instead, with
+    no rename and no sync of `final`'s directory. Kept, it would pin the blob's bytes
+    after the sweep collects `final`.
+    """
+    if not staged.exists():
+        if holds(final, size):
+            return
+    elif final.exists() and os.path.samefile(staged, final):
+        staged.unlink()
+        sync_directory(staged.parent)
+        return
+    replace_durably(staged, final)
 
 
 def _write(path: Path, payload: bytes) -> None:

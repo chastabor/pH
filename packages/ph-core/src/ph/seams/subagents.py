@@ -32,7 +32,7 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, get_args, runtime_checkable
 
 import anyio
 from pydantic import Field
@@ -62,7 +62,7 @@ from ..keys import (
     SYSTEM_PROMPT,
     TOOLS,
 )
-from ..session import Session, SessionEvent, SessionFoldCache, session_written
+from ..session import Session, SessionBatch, SessionEvent, SessionFoldCache, session_written
 from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
 from ..tools.definition import Deny, call_id_of
@@ -97,8 +97,10 @@ __all__ = [
     "Access",
     "AttributingProvider",
     "FamilyRole",
+    "PlainStatus",
     "ReadmittingProvider",
     "RehydratableProvider",
+    "SettledStatus",
     "SpawnGuard",
     "StatusCause",
     "SubagentAwaiter",
@@ -124,6 +126,9 @@ __all__ = [
     "family_reach",
     "fold_subagent_event",
     "reachable_family",
+    "record_settled",
+    "record_started",
+    "record_status",
     "restarts_since_progress",
     "roster_name",
     "roster_of",
@@ -208,7 +213,10 @@ def exhausted_detail(limit: int) -> str:
     )
 
 
-SETTLED_STATUSES: frozenset[str] = frozenset({"done", "error", "canceled"})
+SettledStatus: TypeAlias = Literal["done", "error", "canceled"]
+"""A status that means a child has stopped."""
+
+SETTLED_STATUSES: frozenset[str] = frozenset(get_args(SettledStatus))
 """The statuses that mean a child has stopped. Beside the vocabulary it reads.
 
 Here rather than in the consumer, for the reason the four event names are here:
@@ -647,6 +655,90 @@ def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, J
     if request.call_id is not None:
         payload["callId"] = request.call_id
     return payload
+
+
+# -------------------------------------------------- a child's status, recorded --
+
+
+PlainStatus: TypeAlias = Literal["queued", "canceled", "error"]
+"""A status with no rule about when it reaches disk — what `record_status` takes.
+
+`running` goes through `record_started` and `done` through `record_settled`, so no
+caller can write either without its rule. `error` is plain as well as settled: the
+seam's own give-up has no drive, and no child log, behind it."""
+
+
+def record_status(
+    log: Session | SessionBatch, run_id: str, status: PlainStatus, /, **extra: JsonValue
+) -> SessionEvent:
+    """A child's status, in its parent's log — **the one module that writes
+    `subagent/status`**, and this door for the statuses no rule is attached to.
+
+    Every status the roster folds comes through here: a provider's as its child
+    moves, and the seam's own when it gives up on one. One writer, so the shape the
+    fold reads has one spelling, and so the writers-of-record table can hold a
+    provider to it — a provider that appends a status of its own fails
+    `test_log_writers`, which is what keeps the two doors below from being optional.
+
+    No barrier: `queued`, or a `canceled` landing in one batch with its tombstone,
+    rides the parent's next flush like any record. The two statuses whose place on
+    disk decides something have their own doors — `record_started` for a restart the
+    ladder counts, `record_settled` for an ending the child's own log must back.
+    """
+    return _append_status(log, run_id, status, **extra)
+
+
+def _append_status(
+    log: Session | SessionBatch, run_id: str, status: SubagentStatus, /, **extra: JsonValue
+) -> SessionEvent:
+    return _LOG.append(log, STATUS, {"runId": run_id, "status": status, **extra})
+
+
+async def record_started(
+    ctx: Context, parent: Session, run_id: str, *, cause: StatusCause | None = None
+) -> SessionEvent:
+    """`running`, for a child about to take its turn — **on disk first when it is a
+    restart** (S10). The caller starts the attempt after this returns.
+
+    The ladder counts `running` records with `cause: "resumed"`
+    (`restarts_since_progress`), and a restart that reached only memory before the
+    child took the daemon down again was never counted: a crash loop never advanced
+    the count on disk, so `CHILD_RETRY_LIMIT` never tripped. A first start counts
+    nothing, and neither does a woken (`rehydrated`) one, so those ride the parent's
+    next flush.
+
+    Best effort: a parent whose log cannot be written has bigger problems than this
+    count, and refusing the child its turn would not write the record either.
+    """
+    event = _append_status(parent, run_id, "running", **({} if cause is None else {"cause": cause}))
+    if cause == "resumed":
+        await session_written(ctx, parent)
+    return event
+
+
+async def record_settled(
+    ctx: Context,
+    parent: Session,
+    run_id: str,
+    status: SettledStatus,
+    /,
+    *,
+    child: Session | None,
+    **extra: JsonValue,
+) -> SessionEvent:
+    """A child's ending, in its parent's log — **after the child's own account of it
+    is on disk** (F1).
+
+    Nothing else writes the child's log at that point: its last barrier was *before*
+    its last model request, and a parent's flush walks ancestors, never children. So
+    a parent could read "done, here is a preview" while the child's log ended before
+    the answer, and repair called the child interrupted on the next open. `child` is
+    `None` for a child with no log of its own. Best effort, for `record_started`'s
+    reason: an ending that cannot be backed is still the ending.
+    """
+    if child is not None:
+        await session_written(ctx, child)
+    return _append_status(parent, run_id, status, **extra)
 
 
 def admitted_by(
@@ -1121,7 +1213,7 @@ class SubagentService:
         run_id: str,
         detail: str,
         *,
-        status: SubagentStatus = "error",
+        status: PlainStatus = "error",
         session_id: JsonValue = None,
     ) -> None:
         """Write the terminal status for a child the seam is giving up on.
@@ -1139,11 +1231,7 @@ class SubagentService:
         """
         if session is None:
             return
-        _LOG.append(
-            session,
-            STATUS,
-            {"runId": run_id, "status": status, "detail": detail, "sessionId": session_id},
-        )
+        record_status(session, run_id, status, detail=detail, sessionId=session_id)
 
     async def _abandon(self, run: SubagentRun) -> None:
         """Release a child this seam has decided not to admit (K3).

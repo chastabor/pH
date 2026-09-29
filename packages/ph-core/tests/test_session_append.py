@@ -29,6 +29,7 @@ from ph.session import (
     UnknownEventTypeError,
     declare_log_type,
 )
+from ph.session import surface as surface_module
 from ph.session.json import InvalidJsonValueError
 from ph.testing import check_fold_laws, log_event, prefix_of, user_payload
 
@@ -523,6 +524,40 @@ def test_a_batch_obeys_the_fold_laws() -> None:
     assert batched.derive_messages() == single.derive_messages()
     assert batched.stale() == []
     assert check_fold_laws(batched, lambda log: log.surface.nodes) == []
+
+
+def test_a_replace_that_depends_on_nothing_in_its_batch_copies_no_fold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overflow clip's shape: an accounting record off the surface, then a
+    rewrite of a committed node. Nothing ahead of the replace moved the surface, so
+    it plans against the live state — no copy of every node and every event, which
+    on a long session is a copy per clipped result, on the event loop.
+
+    Validated still: a refused replace in the same shape leaves nothing behind.
+
+    Sabotage: take the copy for every batch with a replace, and this counts one.
+    """
+    session = _conversation()
+    copies: list[int] = []
+    original = surface_module._FoldState
+
+    def counting(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        copies.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(surface_module, "_FoldState", counting)
+    with session.batch() as batch:
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [0]})
+        log_event(batch, "user/message", user_payload("summary", "m3"), _summary((0,)))
+
+    assert copies == []
+    assert session.surface.nodes == (3, 1)
+
+    with pytest.raises(SurfaceError), session.batch() as batch:
+        log_event(batch, "compaction/summarized", {"shadowedSeqs": [9]})
+        log_event(batch, "user/message", user_payload("gone", "m4"), _summary((9,)))
+    assert session.seq == 4 and session.surface.nodes == (3, 1)
 
 
 def test_a_batch_whose_log_moved_is_refused_whole() -> None:

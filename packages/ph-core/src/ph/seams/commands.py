@@ -29,6 +29,7 @@ from ..cordis import (
     running,
     settled_or_none,
 )
+from ..json import JsonObject
 from ..keys import COMMANDS
 from ..session import Claim, IntentNotDurable, Session, intents_of
 from ..session.kinds import COMMAND_RUN, command_done
@@ -43,6 +44,7 @@ __all__ = [
     "CommandSchema",
     "apply",
     "parse_command_line",
+    "reading_verbs",
 ]
 
 log = logging.getLogger("ph.seams.commands")
@@ -92,10 +94,29 @@ class CommandDefinition:
     run: CommandBody
     """The body. Returns the line to show the human, or nothing."""
     argument_hint: str = ""
+    reads: Callable[[str], bool] = field(default=lambda _argument: False)
+    """Whether this argument only *asks* — changes no tree, no setting, no record
+    beyond the command's own pair. An invocation that does runs without
+    `COMMAND_RUN`'s barrier, and is recorded after it answers.
+
+    **Per argument, not per command**, because every command that has a question
+    to answer also has a verb that acts: `/workspaces list` beside `remove`, bare
+    `/revert` beside `/revert <seq>`. A tool can declare `effect_free` whole; a
+    command cannot. Asked of the stripped argument; `reading_verbs` is the usual
+    answer. Anything unsure says `False`, which is the default: the cost of a
+    wrong `False` is a refused listing on a full disk, and of a wrong `True` an
+    act with no record ahead of it."""
 
     def schema(self) -> CommandSchema:
         """The wire-facing half. Nothing else about the command reaches a front end."""
         return CommandSchema.model_validate(declarable(self))
+
+
+def reading_verbs(*verbs: str) -> Callable[[str], bool]:
+    """A `CommandDefinition.reads` for the usual shape: the argument's first word
+    names the verb, and these verbs — `""` for a bare command — only answer."""
+    answering = frozenset(verbs)
+    return lambda argument: argument.partition(" ")[0] in answering
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,17 +237,16 @@ class CommandRegistry:
             raise KeyError(f'unknown command "/{name}"')
         definition = entry.definition
         journal = intents_of(self.ctx)
+        opening: JsonObject = {"name": name, "argument": argument}
         held: Claim | None = None
-        if session is not None:
+        if session is not None and not definition.reads(argument):
             # **On disk before the body runs** (S16) — `COMMAND_RUN`'s barrier. A
             # command's effects used to come before any durable record of it:
             # `/revert` rewrote the tree while `command/run` sat in memory, and a
             # crash mid-body left an unpaired record nothing ever closed. One whose
             # record cannot be written does not run.
             try:
-                held = await journal.open(
-                    session, COMMAND_RUN, {"name": name, "argument": argument.strip()}
-                )
+                held = await journal.open(session, COMMAND_RUN, opening)
             except IntentNotDurable:
                 return f"refusing: /{name} was not run, because the log could not record it"
         outcome = "ok"
@@ -258,7 +278,7 @@ class CommandRegistry:
             with running(entry.by, resolved):
                 result = await maybe_await(
                     definition.run(
-                        argument.strip(),
+                        argument,
                         CommandContext(
                             ctx=self.ctx,
                             session=session,
@@ -300,6 +320,19 @@ class CommandRegistry:
                     held,
                     command_done(
                         name=name, run_seq=held.opened.seq, outcome=outcome, detail=detail
+                    ),
+                )
+            elif session is not None:
+                # A question (`reads`): recorded once it is answered, as one pair and
+                # with no barrier — it changed nothing a record had to precede, and a
+                # disk that cannot take a write is exactly when a person asks what
+                # state things are in.
+                journal.open_settled(
+                    session,
+                    COMMAND_RUN,
+                    opening,
+                    lambda opened: command_done(
+                        name=name, run_seq=opened.seq, outcome=outcome, detail=detail
                     ),
                 )
 

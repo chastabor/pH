@@ -49,6 +49,7 @@ from ph.testing import (
     simple_tool,
     user_payload,
 )
+from ph_app.kinds import restore_settled
 from ph_app.shell import INTERRUPTED
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, RULES, TuiEventAdapter
 from ph_app.tui.state import Surface, TuiState
@@ -549,6 +550,35 @@ async def test_an_orphaned_dispatch_is_drawn_settled(mount: MountProfile) -> Non
     (dispatch,) = parent.dispatches
     assert dispatch.settled and dispatch.is_error
     assert DISPATCH_INTERRUPTED in dispatch.body
+
+
+@pytest.mark.parametrize(
+    ("settle", "said"),
+    [
+        ((True, None), "Restored the tree to its last restore point before attempt 1"),
+        ((False, "no"), "The tree could not be restored before attempt 1"),
+        (None, "The harness stopped while restoring the tree before attempt 1"),
+    ],
+    ids=["restored", "refused", "interrupted"],
+)
+async def test_a_retrys_restore_says_what_the_tree_is(
+    mount: MountProfile, settle: tuple[bool, str | None] | None, said: str
+) -> None:
+    """S12. The restore is its own pair, and its settle is the row: put back, left as
+    the crash left it, or — a daemon that died restoring — unknown. The last is fed
+    the closer repair actually writes, so the two cannot drift."""
+    ctx: Context = await mount()
+    session = ctx.require(SESSIONS).create("tui-restore")
+    log_event(session, "supervisor/retry", {"attempt": 1, "of": 3, "delayMs": 0, "reason": "x"})
+    opened = log_event(session, "supervisor/restoring", {"attempt": 1, "tree": "t1"})
+    if settle is None:
+        for closer in interrupted_turn_closers(session.events):
+            session.admit(closer)
+    else:
+        ok, detail = settle
+        log_event(session, "supervisor/restored", restore_settled(opened, ok=ok, detail=detail))
+
+    assert _shape(_replay(session))[-1][1].startswith(said)
 
 
 async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(

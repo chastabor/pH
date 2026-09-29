@@ -689,35 +689,38 @@ class TuiEventAdapter:
         # should not be re-narrated with today's constants.
         attempt, of = event.data.get("attempt", "?"), event.data.get("of", "?")
         seconds = as_int(event.data.get("delayMs")) / 1000
-        # What the attempt starts from, said as a plan: the record is written
-        # before the restore runs, and `supervisor/unrestored` follows if it
-        # did not happen.
-        restored = " from the last restore point" if event.data.get("restoreTo") else ""
         reason = as_str(event.data.get("reason")).strip()
         detail = f": {reason}" if reason else ""
         self._row(
             "retry",
             "notice",
-            f"This session hit a problem — retrying in {seconds:g}s{restored} "
+            f"This session hit a problem — retrying in {seconds:g}s "
             f"(attempt {attempt} of {of}){detail}",
             event,
         )
 
-    def _on_supervisor_unrestored(self, event: SessionEvent, frame: Frame) -> None:
-        """The restore point a retry named could not be put back (S12).
+    def _on_supervisor_restored(self, event: SessionEvent, frame: Frame) -> None:
+        """What the tree is before a retry: put back, left as it was, or unknown (S12).
 
-        The correction to the row above, which promised it: without this line the
-        attempt that follows reads as starting clean when it starts from whatever
-        the crashed one left.
+        A row for all three, because a retry otherwise reads as starting clean, and
+        whether it does is the one thing a person comparing the attempts needs. The
+        opening record draws nothing: this settle — the ladder's own, or repair's —
+        says everything it would.
         """
         attempt = event.data.get("attempt", "?")
-        self._row(
-            "unrestored",
-            "notice",
-            f"The tree could not be restored for attempt {attempt}; "
-            "it runs against the tree as the crash left it",
-            event,
-        )
+        if unsettled_why(event.data) is not None:
+            said = (
+                f"The harness stopped while restoring the tree before attempt {attempt}; "
+                "it may be partly restored"
+            )
+        elif event.data.get("ok"):
+            said = f"Restored the tree to its last restore point before attempt {attempt}"
+        else:
+            said = (
+                f"The tree could not be restored before attempt {attempt}; "
+                "it runs against the tree as the crash left it"
+            )
+        self._row("restored", "notice", said, event)
 
     def _on_supervisor_failed(self, event: SessionEvent, frame: Frame) -> None:
         """The ladder is spent, and this session has stopped (P5-04).
@@ -1218,7 +1221,7 @@ RULES: Mapping[str, EventRule] = {
     "credential/needed": EventRule(TuiEventAdapter._on_credential_needed),
     "credential/supplied": EventRule(TuiEventAdapter._on_credential_supplied),
     "supervisor/retry": EventRule(TuiEventAdapter._on_supervisor_retry),
-    "supervisor/unrestored": EventRule(TuiEventAdapter._on_supervisor_unrestored),
+    "supervisor/restored": EventRule(TuiEventAdapter._on_supervisor_restored),
     "supervisor/failed": EventRule(TuiEventAdapter._on_supervisor_failed),
     "supervisor/recovered": EventRule(TuiEventAdapter._on_supervisor_recovered),
     "supervisor/passivated": EventRule(TuiEventAdapter._on_supervisor_passivated),
@@ -1307,6 +1310,7 @@ RECORDLESS: frozenset[str] = frozenset(
         "approval/mode",
         "approval/policy",
         "fs/observed",
+        "workspace/acquiring",
         "workspace/acquired",
         "workspace/disposed",
         "workspace/retained",
@@ -1321,6 +1325,9 @@ RECORDLESS: frozenset[str] = frozenset(
         # An upload about to happen (S9). Its settle, `attachment/uploaded`, is the
         # row a person reads — including repair's "it may have been sent".
         "attachment/uploading",
+        # A restore about to run (S12). Its settle, `supervisor/restored`, draws the
+        # row — whether the ladder wrote it or repair did.
+        "supervisor/restoring",
         # A keyed call's effect record (P10-12). The call and its result render as
         # the tool card; that it was deduplicated rides on the result's meta.
         "tool/effect",

@@ -65,9 +65,11 @@ from .workspace import (
     WorkspaceAccess,
     WorkspaceDeclined,
     WorkspaceRecord,
+    WorkspaceSite,
     discards_writes,
     redirection_env,
     sanitize_ref,
+    tree_path,
 )
 from .workspace_git import (
     COMMIT_AS_PH,
@@ -110,16 +112,12 @@ def fs_id(session_id: str, agent_id: str) -> str:
 
 
 def store_for(root: Path, session_id: str, agent_id: str) -> Path:
-    """Where one agent's delta and mountpoint live — `<root>/<session>/<agent>`.
-
-    **`sanitize_ref`, not a second alphabet.** The worktree tier lays its
-    checkouts out exactly this way with exactly this mapping, and `/workspaces`
-    already records that the id→path mapping is lossy and cannot be inverted —
-    two different lossy rules for one layout would be two inversions to be wrong
-    about. `fs_id` next door is a genuinely different question, because AgentFS
-    refuses ids git would accept.
+    """Where one agent's delta and mountpoint live — the seam's `tree_path`, which is
+    where the worktree tiers put their checkouts too, so one lossy id→path mapping
+    serves every tier. `fs_id` next door is a genuinely different question, because
+    AgentFS refuses ids git would accept.
     """
-    return root / sanitize_ref(session_id) / sanitize_ref(agent_id)
+    return tree_path(root, session_id, agent_id)
 
 
 async def open_overlay(ctx: Context, store: Path, identifier: str, mountpoint: Path) -> str:
@@ -358,6 +356,19 @@ class AgentFsProvider:
     async def merge(self, base: Path, ref: str) -> str:
         return await merge_branch(self.ctx, base, ref)
 
+    def locate(self, *, session_id: str, agent_id: str, access: WorkspaceAccess) -> WorkspaceSite:
+        """Where this agent's overlay is mounted — `LocatingProvider`.
+
+        The mountpoint, not the store: `root` is what a record names and what
+        `reclaim` reads, and the delta is its parent. Said first because this tier's
+        acts are the ones a crash leaves worst — a FUSE mount outlives the process
+        that made it, and one no record named was never unmounted.
+        """
+        return WorkspaceSite(
+            root=store_for(self.root, session_id, agent_id) / "mnt",
+            kind="overlay-ephemeral" if access == "read" else "overlay",
+        )
+
     async def acquire(
         self,
         *,
@@ -381,10 +392,10 @@ class AgentFsProvider:
         had been written against a tree it never saw. Nothing to record when the base is
         not a repository — `export_overlay` refuses those, and says so.
         """
-        ephemeral = access == "read"
+        site = self.locate(session_id=session_id, agent_id=agent_id, access=access)
         identifier = fs_id(session_id, agent_id)
-        store = store_for(self.root, session_id, agent_id)
-        mount = store / "mnt"
+        mount = site.root
+        store = mount.parent
         await anyio.to_thread.run_sync(lambda: store.mkdir(parents=True, exist_ok=True))
 
         code, _, err = await agentfs(self.ctx, store, "init", "--base", str(base), identifier)
@@ -398,17 +409,17 @@ class AgentFsProvider:
         return Workspace(
             root=mount,
             scratch=scratch,
-            kind="overlay-ephemeral" if ephemeral else "overlay",
+            kind=site.kind,
             # True, and for `worktree-ephemeral`'s reason: the agent writes the
             # whole tree freely. That the writes reach nobody is `kind`'s job to
             # say, not this flag's — `False` here would be a confinement claim
             # only a sandbox backend can make.
             repo_writable=True,
             env=redirection_env(scratch),
-            # `discards_writes(kind)`, not the captured `ephemeral`: the seam's
-            # own predicate is what the retention policy reads, and spelling the
-            # rule a second way here is how the two come to disagree. It is also
-            # `GitWorktreeProvider`'s polarity rather than its De Morgan twin.
+            # `discards_writes(kind)`, not a flag derived from `access` again: the
+            # seam's own predicate is what the retention policy reads, and spelling
+            # the rule a second way here is how the two come to disagree. Every tier
+            # releases this way.
             release=lambda workspace: self._release(
                 store, discard=discards_writes(workspace.kind) and not workspace.retained
             ),

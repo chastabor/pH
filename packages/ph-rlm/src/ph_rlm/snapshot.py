@@ -51,7 +51,7 @@ from ph.cordis import Context, plugin
 from ph.json import as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
-from ph.seams.spill import SpillClaim, SpillRef, SpillStore
+from ph.seams.spill import PlannedBlob, SpillClaim, SpillRef, SpillStore
 from ph.session import Session
 from ph.session.writers import log_writer
 from ph.wire import WireModel
@@ -206,21 +206,16 @@ class KernelSnapshotPolicy:
         spill = self.ctx.get(SPILL_STORE)
         refs: dict[int, SpillRef | None] = {}
 
-        async def stage(store: SpillStore, index: int, var: str, payload: bytes) -> None:
-            refs[index] = await store.try_reserve_bytes(
-                owner=_owner(namespace),
-                source=f"kernel variable {var}",
-                suggested_name=f"{var}.dill",
-                content=payload,
-            )
+        async def stage(store: SpillStore, index: int, var: str, blob: PlannedBlob) -> None:
+            refs[index] = await store.try_reserve(blob, source=f"kernel variable {var}")
 
         async with anyio.create_task_group() as group:
-            for index, (record, payload) in enumerate(encoded):
-                # A payload comes back only when a store is mounted to take it.
-                if spill is not None and payload is not None:
-                    group.start_soon(stage, spill, index, record.var, payload)
+            for index, (record, blob) in enumerate(encoded):
+                # A blob comes back only when a store is mounted to take it.
+                if spill is not None and blob is not None:
+                    group.start_soon(stage, spill, index, record.var, blob)
         with session.batch() as batch:
-            for index, (record, _payload) in enumerate(encoded):
+            for index, (record, _blob) in enumerate(encoded):
                 if index in refs and refs[index] is None:
                     record = SnapshotRecord(
                         kind="clear",
@@ -240,7 +235,7 @@ class KernelSnapshotPolicy:
 
     def _encode(
         self, session: Session, namespace: str, raw: dict[str, Any]
-    ) -> tuple[SnapshotRecord, bytes | None] | None:
+    ) -> tuple[SnapshotRecord, PlannedBlob | None] | None:
         """The record to append, and the blob to stage for it — `None` for an inline
         record or a `clear`, which have nothing for the store.
 
@@ -278,20 +273,20 @@ class KernelSnapshotPolicy:
             )
         # The store derives the locator, so the event can name it *before* the
         # blob exists — write-ahead ordering (§4.9) — without this module
-        # mirroring the store's naming rule.
+        # mirroring the store's naming rule. Planned once: the locator here and
+        # the stage in `record` share one digest of the payload.
+        planned = spill.plan(
+            owner=_owner(namespace), suggested_name=f"{name}.dill", content=payload
+        )
         spilled = SnapshotRecord(
             kind="snap",
             var=name,
             digest=digest,
             bytes=len(payload),
-            locator=str(
-                spill.locator_for(
-                    owner=_owner(namespace), suggested_name=f"{name}.dill", content=payload
-                )
-            ),
+            locator=str(planned.locator),
             tag=tag,
         )
-        return spilled, payload
+        return spilled, planned
 
     # ------------------------------------------------------------ restoring --
 

@@ -27,15 +27,26 @@ import anyio
 import pytest
 
 from ph.keys import SESSIONS, WORKSPACE
-from ph.seams.workspace import WorkspaceRecord, workspace_leaks
+from ph.seams.workspace import (
+    ContainmentTier,
+    WorkspaceAccess,
+    WorkspaceRecord,
+    WorkspaceSite,
+    workspace_leaks,
+    workspace_survivors,
+)
 from ph.session import Session
 from ph.testing import (
     MountProfile,
     log_event,
+    prefix_of,
     stored_events,
 )
 from ph.testing import (
     workspace_acquired as _acquired,
+)
+from ph.testing import (
+    workspace_acquiring as _acquiring,
 )
 from ph.testing import (
     workspace_disposed as _disposed,
@@ -122,6 +133,32 @@ def test_each_agent_is_folded_separately() -> None:
     assert sorted(one.agent_id for one in workspace_leaks(session)) == ["a", "c"]
 
 
+def test_a_tree_recorded_before_it_was_made_is_a_leak() -> None:
+    """S12. `acquiring` is written before the tier acts, so one with nothing after it
+    is a crash inside `worktree add` or an overlay's mount — and the root it names is
+    the one place that tree can be."""
+    session = _log(_acquiring("a", "/trees/a", kind="overlay", ref=""))
+
+    (leak,) = workspace_leaks(session)
+
+    assert (leak.root, leak.kind) == (Path("/trees/a"), "overlay")
+
+
+def test_the_finished_tree_answers_the_one_it_was_about_to_be() -> None:
+    session = _log(_acquiring("a", "/trees/a"), _acquired("a", "/trees/a"), _disposed("a"))
+
+    assert workspace_leaks(session) == []
+
+
+def test_a_tier_that_declined_leaves_nothing_of_its_own_open() -> None:
+    """The tier named a root and then declined — not a repository, a failed mount — so
+    the seam fell back to `shared`. Nothing was made where the record said, and a leak
+    reported there would send reconcile after a tree that never existed."""
+    session = _log(_acquiring("a", "/trees/a"), _acquired("a", "/project", kind="shared"))
+
+    assert workspace_leaks(session) == []
+
+
 # ---------------------------------------------------------------------- gate --
 
 
@@ -149,6 +186,23 @@ async def test_a_crash_between_acquire_and_dispose_is_reconciled_on_the_next_ope
     assert not leaked.exists(), "the leaked worktree survived the next open"
     _code, out, _ = await git(reopened, base, "worktree", "list", "--porcelain")
     assert str(leaked) not in out, "git still has the worktree registered"
+
+
+@pytest.mark.needs_git
+async def test_a_crash_inside_the_tiers_own_act_is_reconciled(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """S12, the window `acquired` could not close: the tree exists, and the process
+    died before the tier handed it back. The log ends at `acquiring`, which is what
+    the crash leaves — and the next open reclaims the tree it names."""
+    _ctx, session, _agent, workspace = await worktree_agent(mount, tmp_path)
+    cut = next(i for i, one in enumerate(session.events) if one.type == "workspace/acquiring")
+    crashed = prefix_of(session, cut + 1)
+
+    _reopened, revived = await _reopen(mount, tmp_path / "repo", crashed)
+
+    assert not workspace.root.exists(), "a tree the log said was coming survived the open"
+    assert workspace_leaks(revived) == []
 
 
 @pytest.mark.needs_git
@@ -279,6 +333,54 @@ async def test_a_leak_no_mounted_tier_can_reclaim_is_left_alone(
 
     assert tree.exists(), "a tree no mounted tier owns was removed anyway"
     assert "no mounted tier can reclaim" in caplog.text
+
+
+@dataclass(slots=True)
+class _HalfMade:
+    """A tier that names its site, makes part of the tree there, and then raises —
+    an overlay mounted, then its base not recorded."""
+
+    root: Path
+    tier: ContainmentTier = "worktree"
+    reclaimed: list[WorkspaceRecord] = field(default_factory=list)
+
+    def locate(self, *, session_id: str, agent_id: str, access: WorkspaceAccess) -> WorkspaceSite:
+        return WorkspaceSite(root=self.root / agent_id, kind="worktree", ref=f"ph/{session_id}/a")
+
+    async def acquire(self, **kwargs: Any) -> None:  # noqa: ANN401
+        (self.root / str(kwargs["agent_id"])).mkdir(parents=True)
+        raise RuntimeError("mounted, then fell over")
+
+    async def reclaim(self, record: WorkspaceRecord) -> bool:
+        self.reclaimed.append(record)
+        return False
+
+
+async def test_a_tier_that_raised_part_way_is_taken_back_at_once(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A tier that raised falls back to `shared`, and the `shared` acquire supersedes
+    the `acquiring` record — so nothing named the root any more, and whatever the
+    tier had made there (a live mount) was left for nobody to find. The seam
+    reclaims the recorded site then and there, as reconcile would after a crash.
+
+    Sabotage: drop `_take_back` from the seam's `except Exception`, and nothing is
+    reclaimed.
+    """
+    ctx = await mount()
+    tier = _HalfMade(root=tmp_path / "trees")
+    ctx.require(WORKSPACE).register_provider(tier)
+    session = ctx.require(SESSIONS).create("s")
+
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s", agent_id="a", base=tmp_path, session=session
+    )
+
+    assert workspace.kind == "shared"
+    assert [(one.root, one.kind) for one in tier.reclaimed] == [
+        (tmp_path / "trees" / "a", "worktree")
+    ]
+    assert workspace_survivors(session) == []
 
 
 # -------------------------------------------- reconciling while an agent arrives --

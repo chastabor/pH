@@ -54,6 +54,7 @@ __all__ = [
     "canonical",
     "default_cache_path",
     "default_home_path",
+    "holds",
     "is_atomic_temp",
     "is_under",
     "replace_durably",
@@ -485,7 +486,7 @@ def write_atomic(
         path = canonical(path)
         with suppress(FileNotFoundError):
             mode = stat.S_IMODE(path.stat().st_mode)
-    if skip_if_present and _holds(path, len(data)):
+    if skip_if_present and holds(path, len(data)):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{secrets.token_hex(_TEMP_SUFFIX_BYTES)}.tmp")
@@ -536,8 +537,9 @@ def sync_directory(directory: Path) -> None:
             os.close(handle)
 
 
-def _holds(path: Path, size: int) -> bool:
-    """Whether `path` is a regular file of exactly `size` bytes."""
+def holds(path: Path, size: int) -> bool:
+    """Whether `path` is a regular file of exactly `size` bytes — for a
+    content-addressed name, whether it already holds the bytes it names."""
     try:
         found = path.stat()
     except OSError:

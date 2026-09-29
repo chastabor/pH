@@ -38,7 +38,7 @@ import pytest
 
 from ph.cordis import Context
 from ph.seams import spill as spill_module
-from ph.seams.spill import SpillClaim, SpillStore
+from ph.seams.spill import SpillClaim, SpillRef, SpillStore
 from ph.session import Session, SessionStore
 from ph.testing import log_event
 
@@ -51,6 +51,12 @@ KERNEL = "kernel/snapshot"
 
 def _store(tmp_path: Path) -> SpillStore:
     return SpillStore(ctx=Context(), root=tmp_path / "spill")
+
+
+async def _reserve(store: SpillStore, content: bytes) -> SpillRef:
+    return await store.reserve(
+        store.plan(owner="s1", suggested_name="a", content=content), source="a"
+    )
 
 
 def _claim(label: str, owner: str, event_type: str = SPILLED) -> SpillClaim:
@@ -336,7 +342,7 @@ async def test_a_reserved_blob_is_not_collected_before_its_event_lands(
     writes first and appends second is indistinguishable from a leak for as long
     as that takes — and the open-time sweep folds the log on another task. This
     is not hypothetical: it deleted the input offload's own history file often
-    enough to fail its test under load, before `reserve_bytes` existed.
+    enough to fail its test under load, before `reserve` existed.
 
     `reserve` is the write and `commit` is the rename, so the blob never exists
     at its locator unreferenced: the sweep either finds nothing there, or finds
@@ -437,3 +443,89 @@ async def test_a_staged_blob_no_run_will_commit_is_left_alone(
     assert await store.sweep_session(session) == []
 
     assert staged.exists(), "an unreferenced staged blob is nobody's to judge"
+
+
+# ------------------------------------------------------- planned once, linked --
+
+
+async def test_a_planned_blob_is_hashed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The locator a record names and the stage that fills it share one digest.
+
+    A producer that must name a blob before storing it used to derive the locator
+    for its record and then reserve the bytes, which derived it again: a second
+    sha256 of a multi-megabyte result, on the event loop, for an answer it had.
+
+    Sabotage: derive the locator again in `reserve`, and this counts two.
+    """
+    store = _store(tmp_path)
+    derived: list[str] = []
+    original = SpillStore.locator_for
+
+    def counting(self: SpillStore, **kwargs: object) -> Path:
+        derived.append(str(kwargs["suggested_name"]))
+        return original(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SpillStore, "locator_for", counting)
+    planned = store.plan(owner="s1", suggested_name="a", content=b"x" * 64)
+    ref = await store.reserve(planned, source="a")
+
+    assert derived == ["a"]
+    assert ref.locator == str(planned.locator)
+
+
+async def test_bytes_already_published_are_linked_rather_than_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blob whose digest is already at its locator costs a link, not a write.
+
+    The name carries the digest, so the file there is the write a reservation would
+    make — a kernel variable back at earlier bytes, a tool repeating its output.
+    Linked rather than skipped, so the sweep deleting the published copy before the
+    record lands cannot take the bytes; and the link is gone once committed, or it
+    would pin them after the sweep collects the blob.
+    """
+    store = _store(tmp_path)
+    first = await _reserve(store, b"same")
+    assert await store.commit(first)
+    written: list[Path] = []
+    monkeypatch.setattr(spill_module, "_write", lambda path, _payload: written.append(path))
+
+    again = await _reserve(store, b"same")
+    staged = store._staging_for(again.locator)
+
+    assert written == [], "the published bytes were written a second time"
+    assert os.path.samefile(staged, again.locator)
+    assert await store.commit(again)
+    assert not staged.exists(), "the staging link was left to pin the blob"
+    assert Path(again.locator).read_bytes() == b"same"
+
+
+async def test_two_reservations_of_the_same_bytes_both_commit(tmp_path: Path) -> None:
+    """They share one staged name, so the first commit takes it — and the second
+    finds its bytes published, which is success rather than a missing stage."""
+    store = _store(tmp_path)
+    one = await _reserve(store, b"same")
+    two = await _reserve(store, b"same")
+
+    assert await store.commit(one) and await store.commit(two)
+    assert Path(two.locator).read_bytes() == b"same"
+
+
+async def test_a_redundant_stage_the_log_names_is_dropped(tmp_path: Path) -> None:
+    """A dead run that linked a stage and appended its record, then died before the
+    commit that would have dropped the link: the blob is published and named, so
+    the stage is redundant — and kept, it would pin the bytes past the blob."""
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("producer", session.id))
+    first = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
+    await store.commit(first)
+    again = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
+    _named(session, SPILLED, again.locator)
+
+    assert await store.sweep_session(session) == []
+
+    assert not store._staging_for(again.locator).exists()
+    assert Path(again.locator).read_text(encoding="utf-8") == "x"

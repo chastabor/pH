@@ -89,10 +89,11 @@ from .workspace import (
     WorkspaceAccess,
     WorkspaceDeclined,
     WorkspaceRecord,
+    WorkspaceSite,
+    checkout_site,
     discards_writes,
     measure_strays,
     redirection_env,
-    sanitize_ref,
 )
 
 __all__ = ["JjWorkspaceProvider", "apply", "auto_track", "jj"]
@@ -302,6 +303,18 @@ class JjWorkspaceProvider:
             ),
         )
 
+    def locate(self, *, session_id: str, agent_id: str, access: WorkspaceAccess) -> WorkspaceSite:
+        """Where this agent's workspace goes, and its bookmark — `LocatingProvider`.
+
+        **One name, two uses**, so neither can be derived wrongly from the other:
+        the workspace is named what the bookmark says after its prefix, and
+        `reclaim` recovers the name from the ref, having nothing else left after a
+        crash. jj accepts `/` in a workspace name and resolves `<name>@` as that
+        workspace's working copy, so the shapes can match. `acquire` derives its
+        own from here, so the `workspace/acquiring` written first names this path.
+        """
+        return checkout_site(self.root, session_id, agent_id, access)
+
     async def acquire(
         self,
         *,
@@ -330,13 +343,10 @@ class JjWorkspaceProvider:
             raise WorkspaceDeclined(
                 "not-a-repository", f"{base} is not inside a workspace jj manages"
             )
-        # One name, two uses, so neither can be derived wrongly from the other:
-        # `reclaim` recovers the workspace name from the ref, having nothing else
-        # left after a crash. jj accepts `/` in a workspace name and resolves
-        # `<name>@` as that workspace's working copy, so the shapes can match.
-        name = f"{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}"
-        ref = f"{BRANCH_PREFIX}{name}"
-        path = self.root / sanitize_ref(session_id) / sanitize_ref(agent_id)
+        site = self.locate(session_id=session_id, agent_id=agent_id, access=access)
+        path, ref = site.root, site.ref
+        assert ref is not None, "a jj workspace is always bookmarked"
+        name = ref.removeprefix(BRANCH_PREFIX)
         fork = await self._add(managed, base, name, path)
 
         # Through `_in` like every other call made in a directory that is not ours:
@@ -355,11 +365,10 @@ class JjWorkspaceProvider:
                 first_line(err) or f"jj exited {code}",
             )
 
-        ephemeral = access == "read"
         return Workspace(
             root=path,
             scratch=scratch,
-            kind="worktree-ephemeral" if ephemeral else "worktree",
+            kind=site.kind,
             # True for both, deliberately, and for the git tier's reason: an
             # ephemeral child writes freely and its writes simply reach nobody.
             # `False` would be a confinement claim only a sandbox can make.
@@ -373,7 +382,7 @@ class JjWorkspaceProvider:
                 name,
                 path,
                 ref,
-                discard=ephemeral and not workspace.retained,
+                discard=discards_writes(workspace.kind) and not workspace.retained,
                 provisioned=workspace.provisioned,
                 fork=fork,
                 repo=managed,

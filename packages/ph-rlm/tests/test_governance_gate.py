@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from rlm_fixtures import ShippedProfile
+from rlm_fixtures import ModelGate, ShippedProfile
 from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
 
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS
@@ -248,7 +248,9 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
 # ------------------------------------------------------------------- (d) --
 
 
-async def test_d_a_non_family_send_cannot_be_re_permitted(shipped_profile: ShippedProfile) -> None:
+async def test_d_a_non_family_send_cannot_be_re_permitted(
+    shipped_profile: ShippedProfile, gate: ModelGate
+) -> None:
     """C7: the family boundary is a monotonic guard, not a policy listener.
 
     Guards run *last* and are deny-only, so there is no ordering in which a
@@ -258,6 +260,12 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(shipped_profile: Shipp
     The target is a **grandchild** — genuinely one generation too far. Two roots
     would be siblings under the rule, and an empty roster refuses for the wrong
     reason, so neither would exercise the boundary.
+
+    **The children are held on their first model call** (`gate`), so the family is
+    still there when the send is refused. A child whose fake model answers at once
+    settles at an unpredictable await point, and one that settled while the
+    grandchild was being admitted under it tore the grandchild's scope down
+    mid-admission — which a real child, spawning from its own running turn, cannot.
     """
     ctx, session, parent = await shipped_profile()
     child_run = await ctx.require(SUBAGENTS).start(

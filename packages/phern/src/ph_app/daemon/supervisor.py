@@ -73,8 +73,10 @@ from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
 from ph.seams.workspace import Workspace, latest_checkpoint, workspace_of
 from ph.session import (
+    IntentNotDurable,
     Session,
     SessionEvent,
+    intents_of,
     now_ms,
     session_written,
 )
@@ -92,6 +94,7 @@ from ph.text import count_of
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
+from ..kinds import SUPERVISOR_RESTORE, restore_settled
 from ..payloads import (
     ProfileAsk,
     ProfileAskReply,
@@ -125,7 +128,6 @@ from .recovery import (
     RECOVERED,
     RETRY,
     UNREACHABLE,
-    UNRESTORED,
     VIOLATED,
     WAKE_WITHIN,
     Recovery,
@@ -557,7 +559,7 @@ class Root:
         """
         return str(self.session.header.created_at)
 
-    def retry(self, *, reason: str, restore_to: str) -> None:
+    def retry(self, *, reason: str) -> None:
         """Record that a failed turn is being run again (P5-04).
 
         Written *before* the attempt, not after it: a daemon that died during
@@ -568,31 +570,20 @@ class Root:
         **Before the restore too** (S12), which is part of the attempt: it used to
         run first, so a daemon that died restoring had rewritten the tree with no
         record of the attempt, and a crash loop there never advanced the count.
-        So the record names the restore point it is *about to* use, and
-        `unrestored` is the correction when that does not happen.
-        """
-        data: dict[str, JsonValue] = {
-            "attempt": self.recovery.attempts + 1,
-            "of": self.recovery.total,
-            "delayMs": int(self.recovery.delay * 1000),
-            "reason": reason,
-        }
-        if restore_to:
-            data["restoreTo"] = restore_to
-        _LOG.append(self.session, RETRY, data)
-        self.recovery = replace(self.recovery, attempts=self.recovery.attempts + 1)
-        self.publish(SessionStatusNotice(session_id=self.id, status="retrying"))
-
-    def unrestored(self, tree: str) -> None:
-        """The restore the last `retry` named did not happen.
-
-        Its own record because the retry is already on disk: a transcript that
-        read `restoreTo` and nothing after it would claim a rollback the tier
-        refused, and the attempt that follows would be misread.
+        The restore is recorded as its own pair (`SUPERVISOR_RESTORE`).
         """
         _LOG.append(
-            self.session, UNRESTORED, {"attempt": self.recovery.attempts, "restoreTo": tree}
+            self.session,
+            RETRY,
+            {
+                "attempt": self.recovery.attempts + 1,
+                "of": self.recovery.total,
+                "delayMs": int(self.recovery.delay * 1000),
+                "reason": reason,
+            },
         )
+        self.recovery = replace(self.recovery, attempts=self.recovery.attempts + 1)
+        self.publish(SessionStatusNotice(session_id=self.id, status="retrying"))
 
     def recovered(self) -> None:
         """A retry worked, so the ladder clears — and says so in the log.
@@ -1576,16 +1567,16 @@ class Supervisor:
                     # forgets it was spent is one that starts over forever.
                     await self._flush(root)
                     return
+                root.retry(reason=error_message(error))
                 workspace, tree = self._restore_point(root)
-                root.retry(reason=error_message(error), restore_to=tree)
+                if workspace is not None and tree:
+                    # Its durable opening writes this log — the retry with it —
+                    # before the tree is touched.
+                    await self._restore(root, workspace, tree)
+                # The retry, or the restore's settle: either way the attempt's own
+                # records follow a ladder the log already has — not a restore repair
+                # would call unknown.
                 await self._flush(root)
-                if (
-                    workspace is not None
-                    and tree
-                    and not await self._restore(root, workspace, tree)
-                ):
-                    root.unrestored(tree)
-                    await self._flush(root)
                 await anyio.sleep(state.delay)
 
     def _schedule_seam(self, root: Root) -> ScheduleService:
@@ -2042,24 +2033,47 @@ class Supervisor:
             return None, ""
         return workspace, latest_checkpoint(root.session, root.agent.id)
 
-    async def _restore(self, root: Root, workspace: Workspace, tree: str) -> bool:
-        """Put the root's tree back to `tree`, answering whether it worked.
+    async def _restore(self, root: Root, workspace: Workspace, tree: str) -> None:
+        """Put the root's tree back to `tree` under `SUPERVISOR_RESTORE` — whose settle,
+        `supervisor/restored`, is the answer to whether it worked.
+
+        **Recorded before the tree is touched, and settled after** (S12): a restore
+        rewrites and deletes files, and one the daemon died inside leaves a tree that
+        is neither the checkpoint nor what the crash left — repair closes that pair
+        `outcome-unknown`, which is what a reader is owed. The retry is already on
+        disk ahead of this, so the attempt is counted whatever happens here.
 
         Best-effort by construction: a failed restore must not cost the retry. The
-        attempt goes ahead against the tree as it stands, and the caller records
-        `supervisor/unrestored` so the transcript does not imply a rollback that did
-        not happen.
+        attempt goes ahead against the tree as it stands, and `supervisor/restored`
+        says `ok: false` so the transcript does not imply a rollback that did not
+        happen. A restore the log cannot record is not run, for the same reason.
         """
+        journal = intents_of(root.ctx)
+        opening: dict[str, JsonValue] = {"attempt": root.recovery.attempts, "tree": tree}
         try:
-            # Through the seam, which is safe here for the reason `_restore_point`'s
-            # lookup is *not*: it found a workspace, so the row is mounted.
-            await root.ctx.require(WORKSPACE).restore(workspace, tree)
-        except Exception:
+            async with journal.claim(root.session, SUPERVISOR_RESTORE, opening) as held:
+                try:
+                    # Through the seam, which is safe here for the reason
+                    # `_restore_point`'s lookup is *not*: it found a workspace, so the
+                    # row is mounted.
+                    await root.ctx.require(WORKSPACE).restore(workspace, tree)
+                    settled = restore_settled(held.opened, ok=True)
+                except Exception as error:
+                    log.warning(
+                        "ph_app.daemon: root %s could not be restored to %s",
+                        root.id,
+                        tree,
+                        exc_info=True,
+                    )
+                    settled = restore_settled(held.opened, ok=False, detail=error_message(error))
+                journal.settle(root.session, held, settled)
+        except IntentNotDurable:
             log.warning(
-                "ph_app.daemon: root %s could not be restored to %s", root.id, tree, exc_info=True
+                "ph_app.daemon: root %s was not restored to %s, because the log could not "
+                "record it",
+                root.id,
+                tree,
             )
-            return False
-        return True
 
     async def prompt(
         self,

@@ -53,7 +53,7 @@ from dataclasses import dataclass, replace
 from ph.cordis import DEPLOYMENT, Boundary, Context, Next, plugin
 from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import ContentBlock, text_of
-from ph.seams.spill import SpillClaim
+from ph.seams.spill import PlannedBlob, SpillClaim
 from ph.session import Session, SessionBatch
 from ph.session.writers import log_writer
 from ph.tools.definition import (
@@ -232,7 +232,9 @@ class ResultSpill:
     call_id: str
     source: str
     """Becomes `SpillRef.retrieval_hint`."""
-    text: str
+    blob: PlannedBlob
+    """The result's bytes and their locator, hashed once for both the wording and
+    the stage."""
     replacement: str
     """Names the locator the store will derive — which is why it can be built first."""
 
@@ -263,20 +265,18 @@ def plan_tool_result_spill(
     therefore the *sentence the model is given*. One relocation described two
     ways depending on which row did it is exactly the drift this prevents.
     """
-    locator = str(
-        ctx.require(SPILL_STORE).locator_for(
-            owner=session.id, suggested_name=_result_name(call_id), content=text.encode("utf-8")
-        )
+    blob = ctx.require(SPILL_STORE).plan(
+        owner=session.id, suggested_name=_result_name(call_id), content=text.encode("utf-8")
     )
     replacement = spill_wording(
         ctx,
         scope,
         TOO_LARGE_TOOL_MSG,
         tool_call_id=call_id,
-        file_path=locator,
+        file_path=str(blob.locator),
         content_sample=content_preview(text),
     )
-    return ResultSpill(call_id, source, text, replacement)
+    return ResultSpill(call_id, source, blob, replacement)
 
 
 async def spill_tool_result(
@@ -297,19 +297,14 @@ async def spill_tool_result(
     the content must not be the reason the model loses it. The seam logs why.
     """
     store = ctx.require(SPILL_STORE)
-    ref = await store.try_reserve_text(
-        owner=session.id,
-        source=planned.source,
-        suggested_name=_result_name(planned.call_id),
-        content=planned.text,
-    )
+    ref = await store.try_reserve(planned.blob, source=planned.source)
     if ref is None:
         return False
     # Where the original went. Declared ignorable in the vocabulary (the property
     # is the type's, not this call site's) — a reader that skips it loses the
     # forwarding address, not the conversation, because the replacement the model
     # saw is what `tool/result` carries.
-    # Before the blob appears at `ref.locator`. See `SpillStore.reserve_bytes`:
+    # Before the blob appears at `ref.locator`. See `SpillStore.reserve`:
     # a blob the log does not name is what the sweep collects, so writing first
     # raced the sweep over this row's own output.
     with session.batch() as batch:

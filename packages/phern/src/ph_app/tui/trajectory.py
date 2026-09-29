@@ -433,6 +433,7 @@ HANDLERS: Mapping[str, Handler] = {
     "question/answered": _on_harness_event,
     "approval/mode": _on_harness_event,
     "approval/policy": _on_harness_event,
+    "workspace/acquiring": _on_harness_event,
     "workspace/acquired": _on_harness_event,
     "workspace/disposed": _on_harness_event,
     "workspace/retained": _on_harness_event,
@@ -465,7 +466,8 @@ HANDLERS: Mapping[str, Handler] = {
     # stopped working would look like one that simply went quiet. For an
     # unattended run that is the whole point of reading the trace.
     "supervisor/retry": _on_harness_event,
-    "supervisor/unrestored": _on_harness_event,
+    "supervisor/restoring": _on_harness_event,
+    "supervisor/restored": _on_harness_event,
     "supervisor/failed": _on_harness_event,
     "supervisor/recovered": _on_harness_event,
     "supervisor/passivated": _on_harness_event,

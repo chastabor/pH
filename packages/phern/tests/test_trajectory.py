@@ -134,6 +134,7 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "fs/observed",
         "session/end-seed",
         "compaction/summarized",
+        "workspace/acquiring",
         "workspace/acquired",
         "workspace/disposed",
         # P6-28: why a tree survived is the auditor's question exactly — a
@@ -168,6 +169,8 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # S9: bytes about to leave for a provider. The transcript draws the
         # upload once it settles; the auditor wants the moment it was attempted.
         "attachment/uploading",
+        # S12: a restore about to rewrite the tree. The transcript draws its settle.
+        "supervisor/restoring",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {

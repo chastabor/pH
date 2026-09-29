@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 from ph.cordis import LoaderError
 from ph.json import thaw_json
-from ph.seams.commands import CommandContext, CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition, reading_verbs
 from ph.session_profile import (
     OverrideNotRecorded,
     ProfileBase,
@@ -99,6 +99,7 @@ def profile_command(root: Root) -> CommandDefinition:
         summary="Show this session's profile, how it moved, and save or switch it.",
         argument_hint=HINT,
         run=run,
+        reads=reading_verbs("", "show", "diff"),
     )
 
 

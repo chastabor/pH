@@ -35,7 +35,6 @@ Invariants this seam holds:
 from __future__ import annotations
 
 import logging
-import os
 import re
 from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -43,18 +42,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 import anyio
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, running, safe_yaml_load
 from ..json import JsonValue, as_seq, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
-from ..paths import canonical, default_home_path, is_under
+from ..paths import canonical, default_home_path
 from ..session import Session, SessionEvent, session_written
 from ..session.writers import log_writer
 from ..tools.definition import ToolExecution, ToolExecutionResult
 from ..tools.errors import HarnessError
-from ..wire import WireModel, literal_lookup
+from ..wire import WireModel, literal_lookup, validation_summary
 
 if TYPE_CHECKING:
     # Annotation-only. `ph/persistence/__init__.py` imports the JSONL backend, so
@@ -87,6 +86,7 @@ __all__ = [
     "EnumeratingProvider",
     "ExportingProvider",
     "LifecycleConfig",
+    "LocatingProvider",
     "ReclaimingProvider",
     "SharedWorkspaceProvider",
     "SnapshottingProvider",
@@ -100,7 +100,9 @@ __all__ = [
     "WorkspaceProvider",
     "WorkspaceRecord",
     "WorkspaceSeam",
+    "WorkspaceSite",
     "apply",
+    "checkout_site",
     "checkpoint_policy",
     "checkpoints",
     "discards_writes",
@@ -115,6 +117,7 @@ __all__ = [
     "redirection_env",
     "sanitize_ref",
     "stored_survivors",
+    "tree_path",
     "workspace_leaks",
     "workspace_of",
     "workspace_policy",
@@ -536,6 +539,59 @@ class WorkspaceProvider(Protocol):
         scratch: Path,
         access: WorkspaceAccess = "write",
     ) -> Workspace | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceSite:
+    """Where a tier will put an agent's tree, said before it makes one (S12)."""
+
+    root: Path
+    kind: WorkspaceKind
+    ref: str | None = None
+
+
+@runtime_checkable
+class LocatingProvider(Protocol):
+    """A tier that can say where a tree will go before making it (S12).
+
+    **What lets the record come first.** The seam writes `workspace/acquiring` from
+    this and flushes it before the tier acts, so a crash inside `worktree add`, an
+    overlay's init, or its mount leaves a record naming the root — which reconcile
+    then reclaims. Without it the act ran with nothing in the log, and a mounted
+    overlay that nothing named was never unmounted.
+
+    `acquire` must put the tree exactly here, which is why every tier that
+    implements this derives its own `acquire` from it rather than a second time.
+    Pure: no I/O, so a tier that is about to decline has cost a record, not a
+    subprocess. An optional capability, `ReclaimingProvider`'s shape and reason.
+    """
+
+    def locate(
+        self, *, session_id: str, agent_id: str, access: WorkspaceAccess
+    ) -> WorkspaceSite: ...
+
+
+def tree_path(root: Path, session_id: str, agent_id: str) -> Path:
+    """Where a tier puts one agent's tree under its own `root`: `<root>/<session>/<agent>`.
+
+    **One lossy id→path mapping for every tier**, through `sanitize_ref`: reconcile
+    and `/workspaces` invert it, and a second spelling in a second tier is a second
+    inversion to be wrong about.
+    """
+    return root / sanitize_ref(session_id) / sanitize_ref(agent_id)
+
+
+def checkout_site(
+    root: Path, session_id: str, agent_id: str, access: WorkspaceAccess
+) -> WorkspaceSite:
+    """A version-controlled tier's site: a checkout at `tree_path`, on the branch named
+    the same way, and ephemeral when only reading was asked for — the git tier's and
+    jj's alike, so a record either writes names what the other would."""
+    return WorkspaceSite(
+        root=tree_path(root, session_id, agent_id),
+        kind="worktree-ephemeral" if access == "read" else "worktree",
+        ref=f"{BRANCH_PREFIX}{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}",
+    )
 
 
 @runtime_checkable
@@ -1046,7 +1102,9 @@ class WorkspaceSeam:
         chosen = self._chosen_tier(session) if tier is None else tier
         workspace = None
         declined: DeclineReason | None = None
+        site: WorkspaceSite | None = None
         if self.provider is not None and chosen != "advisory":
+            site = await self._acquiring(session, session_id, agent_id, access)
             try:
                 with running(self.provider_by):
                     workspace = await self.provider.acquire(
@@ -1081,6 +1139,8 @@ class WorkspaceSeam:
                     agent_id=agent_id,
                     base=str(base),
                 )
+                if site is not None:
+                    await self._take_back(site, agent_id, session_id)
             else:
                 if workspace is None:
                     # No reason is fabricated: a provider that declined without
@@ -1109,7 +1169,14 @@ class WorkspaceSeam:
         fresh = fresh_root(workspace.kind)
         materials = self._provisioning if fresh else []
         self._log(workspace, agent_id, session, declined, materials)
-        if session is not None and fresh:
+        # The `acquiring` already on disk names this tree, and what is about to be
+        # provisioned into it, whenever the tier made the tree where it said it would.
+        covered = site is not None and (site.root, site.kind, site.ref) == (
+            workspace.root,
+            workspace.kind,
+            workspace.ref,
+        )
+        if session is not None and fresh and not covered:
             # **On disk before the seam provisions into the tree** (S12), and so
             # before the agent is handed it: the copy is thousands of syscalls, and
             # a crash inside it used to leave a tree no record named — reconcile
@@ -1127,6 +1194,58 @@ class WorkspaceSeam:
                 {"agentId": agent_id, "failed": list(held.workspace.provision_failures)},
             )
         return held.workspace
+
+    async def _acquiring(
+        self,
+        session: Session | None,
+        session_id: str,
+        agent_id: str,
+        access: WorkspaceAccess,
+    ) -> WorkspaceSite | None:
+        """Record where the tier is about to put a fresh tree, on disk before it does.
+
+        The opening half of the pair, moved ahead of the tier's own act (S12) —
+        `worktree add`, an overlay's `init` and FUSE mount — which used to run with
+        nothing in the log, so a crash inside it left a tree reconcile could not
+        find. `workspace/acquired` still follows and supersedes it, carrying what
+        only the finished tree knows; a decline supersedes it with a `shared` one.
+
+        Best effort, as the flush after `acquired` is: a log that cannot take this
+        loses the pre-record, not the agent's workspace.
+
+        It names what is about to be provisioned, too — the list `acquired` repeats —
+        so once it is on disk, a tree the tier made where it said needs no second
+        flush before provisioning. Returns the site it recorded, or `None`.
+        """
+        provider = self.provider
+        if session is None or not isinstance(provider, LocatingProvider):
+            return None
+        site = provider.locate(session_id=session_id, agent_id=agent_id, access=access)
+        if not fresh_root(site.kind):
+            return None
+        data = pair_payload(agent_id, site.ref, kind=site.kind, root=str(site.root))
+        if self._provisioning:
+            data["provisioned"] = [entry.target for entry in self._provisioning]
+        _LOG.append(session, ACQUIRING, data)
+        await session_written(self.ctx, session)
+        return site
+
+    async def _take_back(self, site: WorkspaceSite, agent_id: str, session_id: str) -> None:
+        """Reclaim whatever a tier that *raised* made at the site it named.
+
+        The `shared` acquire that follows supersedes the `acquiring` record, so after
+        it nothing names this root — and a tier can raise part-way through: an
+        overlay mounted, then its base not recorded. So the seam does now what
+        reconcile would do after a crash, through the tier's own reclaim. Not for a
+        tier that *declined*: a decline is decided before the tree is made, and
+        `path-exists` names a directory that is not this agent's to remove.
+        """
+        record = WorkspaceRecord(
+            agent_id=agent_id, kind=site.kind, root=site.root, ref=site.ref, session_id=session_id
+        )
+        provider = self._reclaimer([record], "reclaim")
+        if provider is not None:
+            await self._reclaim(provider, record, "reclaim")
 
     async def _provision(
         self, workspace: Workspace, base: Path, materials: Sequence[ProvisionEntry]
@@ -1248,11 +1367,9 @@ class WorkspaceSeam:
         if one place owns both, and a provider that forgot the second would leave every
         workspace looking leaked.
 
-        **Still after the tier's own act** — `worktree add`, an overlay's init and
-        mount — which S12 leaves open. Both tiers derive the root from the session and
-        agent ids before acting, so the record *could* precede it; that needs the
-        provider to say where a tree will go before making it, which is a Protocol
-        change of its own.
+        The tier's own act — `worktree add`, an overlay's init and mount — is already
+        on record by now, as `workspace/acquiring` (`_acquiring`); this supersedes it
+        with what only the finished tree knows.
         """
         if session is None:
             return
@@ -1276,14 +1393,10 @@ class WorkspaceSeam:
             # What is *about* to be provisioned, since the copy has not run yet —
             # so a crash mid-copy still names every path it may have written, and
             # a material that never arrived keeps its path off the branch too.
-            # A target that climbs out lexically is left off: provisioning will
-            # refuse it, and git exits 128 on the whole pathspec that names it.
-            root = workspace.root
-            data["provisioned"] = [
-                entry.target
-                for entry in materials
-                if is_under(Path(os.path.normpath(root / entry.target)), root)
-            ]
+            # No target here climbs out of the tree: `ProvisionEntry` refuses one at
+            # config load, which matters beyond tidiness — git exits 128 on a
+            # pathspec that names a path outside the repository.
+            data["provisioned"] = [entry.target for entry in materials]
         _LOG.append(session, ACQUIRED, data)
 
     def retain(self, agent_id: str, reason: str) -> bool:
@@ -1811,6 +1924,11 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
     Only kinds with a fresh root can leave a directory behind: a `shared`
     workspace's root *is* the base, so an unclosed pair there records a crash and no
     stray.
+
+    **`acquiring` opens a record as `acquired` does** (S12): it is written before the
+    tier makes the tree, so one with nothing after it names a tree a crash may have
+    left half-made. The `acquired` that follows supersedes it — a `shared` one too,
+    which is a tier that declined and made nothing where it said.
     """
     open_records: dict[str, WorkspaceRecord] = {}
     closed: list[WorkspaceRecord] = []
@@ -1853,6 +1971,9 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
         # `get_args` is not memoized and rebuilds its tuple on every call.
         kind = _WORKSPACE_KINDS.get(as_str(data.get("kind")), "shared")
         if not fresh_root(kind):
+            # A `shared` acquire answers an `acquiring` the tier then declined:
+            # nothing was made where it said, so nothing there is this agent's.
+            open_records.pop(agent_id, None)
             continue
         ref = data.get("ref")
         open_records[agent_id] = WorkspaceRecord(
@@ -2056,6 +2177,9 @@ def pair_payload(agent_id: str, ref: str | None, **extra: JsonValue) -> dict[str
     return data
 
 
+ACQUIRING = "workspace/acquiring"
+"""Where a tier is about to put a fresh tree, before it makes one (S12). Opens the
+pair as `ACQUIRED` does; an `ACQUIRED` for the same agent supersedes it."""
 ACQUIRED = "workspace/acquired"
 DISPOSED = "workspace/disposed"
 """The durable pair, named once: the fold below and both producers have to agree on
@@ -2086,7 +2210,7 @@ nothing, and a fold over the pair must ignore it.
 """
 
 
-_SURVIVOR_TYPES = frozenset({ACQUIRED, DISPOSED, RETAINED})
+_SURVIVOR_TYPES = frozenset({ACQUIRING, ACQUIRED, DISPOSED, RETAINED})
 
 _WORKSPACE_KINDS: Mapping[str, WorkspaceKind] = literal_lookup(WorkspaceKind)
 """Every `WorkspaceKind` by its own spelling — the read-side check for a kind
@@ -2207,8 +2331,9 @@ def discover_provisioning(start: Path) -> list[ProvisionEntry]:
 
     **Every failure is a shrug**: a malformed file, an unknown key, a `source`
     naming somewhere outside the tree. Refusing to start because a repository's
-    optional config is wrong would make this list load-bearing, and `resolve_entry`
-    refuses the dangerous entries individually anyway.
+    optional config is wrong would make this list load-bearing. **Per entry**, the
+    way `resolve_entry` refuses at use: one line naming `../../etc/passwd` is
+    dropped, and the `.env` beside it still arrives.
     """
     for directory in (start, *start.parents):
         candidate = directory / PROJECT_PROVISION_FILE
@@ -2218,12 +2343,28 @@ def discover_provisioning(start: Path) -> list[ProvisionEntry]:
             document = (
                 safe_yaml_load(candidate.read_text(encoding="utf-8"), origin=str(candidate)) or {}
             )
-            raw = document.get("provision", []) if isinstance(document, dict) else []
-            return [ProvisionEntry.model_validate(item) for item in raw]
         except Exception:
             log.warning("ph.seams.workspace: ignoring %s", candidate, exc_info=True)
             return []
+        raw = document.get("provision", []) if isinstance(document, dict) else []
+        if not isinstance(raw, list):
+            log.warning("ph.seams.workspace: ignoring %s: `provision` is not a list", candidate)
+            return []
+        return [entry for item in raw if (entry := _discovered(item, candidate)) is not None]
     return []
+
+
+def _discovered(item: object, candidate: Path) -> ProvisionEntry | None:
+    """One entry of a project's list, or `None` having said why it was dropped."""
+    try:
+        return ProvisionEntry.model_validate(item)
+    except ValidationError as refused:
+        log.warning(
+            "ph.seams.workspace: ignoring an entry of %s: %s",
+            candidate,
+            validation_summary(refused, root="entry"),
+        )
+        return None
 
 
 class Config(WireModel):

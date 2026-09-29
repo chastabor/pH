@@ -64,7 +64,9 @@ __all__ = [
     "is_declared",
     "key_of",
     "open_intents",
+    "opened_seq",
     "outcome_of",
+    "seq_field",
     "unsettled",
     "unsettled_why",
 ]
@@ -350,6 +352,23 @@ def _fold(index: dict[str, IntentRecord], event: SessionEvent, kind: IntentKind)
         record = None if key is None else index.get(key)
         if key is not None and record is not None:
             index[key] = IntentRecord(opened=record.opened, settled=event)
+
+
+def opened_seq(event: SessionEvent) -> str:
+    """An intent keyed by the seq of the record that opened it: unique by construction.
+
+    Here rather than in a kinds leaf, because every leaf keys some kind this way and
+    a leaf may not import another (T4) — two copies of a key rule are two chances
+    for a settle to stop matching the record it closes.
+    """
+    return str(event.seq)
+
+
+def seq_field(event: SessionEvent, name: str) -> str | None:
+    """The opening record's seq a settle carries under `name`, as a key — `None`
+    when it carries none (a `bool` is not a seq, though Python calls it an `int`)."""
+    seq = event.data.get(name)
+    return str(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
 
 
 def key_of(

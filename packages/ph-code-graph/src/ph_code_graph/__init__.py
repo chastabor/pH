@@ -59,7 +59,7 @@ from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
-from ph.seams.commands import CommandContext, CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition, reading_verbs
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
 from ph.seams.skills import discover_skills
@@ -839,6 +839,7 @@ async def apply(ctx: Context, config: Config) -> None:
         summary="Make the tree-sitter grammars ready, or report whether they are.",
         argument_hint="[install|status]",
         run=install,
+        reads=reading_verbs("", "status"),
     )
     contribute_item(
         ctx,

@@ -32,13 +32,19 @@ than a degradation.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW, MountedRuntime, logs_after_a_crash
+from rlm_fixtures import (
+    BINDINGS_ROW,
+    PROVIDER_ROW,
+    ModelGate,
+    MountedRuntime,
+    logs_after_a_crash,
+)
 
 from ph.cordis import Context
 from ph.json import as_obj
@@ -160,7 +166,7 @@ async def test_the_admission_is_logged_before_any_status(delegating: MountedRunt
 
 
 async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
-    delegating: MountedRuntime, gate: _Gate
+    delegating: MountedRuntime, gate: ModelGate
 ) -> None:
     """S2 — the admission is the one record a resume finds a child by.
 
@@ -182,7 +188,7 @@ async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
 
 
 async def test_a_child_whose_admission_cannot_be_written_is_not_started(
-    delegating: MountedRuntime, gate: _Gate
+    delegating: MountedRuntime, gate: ModelGate
 ) -> None:
     """Fail-closed, as a durable intent is: no admission on disk, no child.
 
@@ -404,15 +410,6 @@ async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Mou
 # ------------------------------------------------------- what the parent hears --
 
 
-@pytest.fixture
-def gate(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Gate]:
-    """A held model, released whatever the test does — see `_Gate`."""
-    held = _Gate()
-    held.patch(monkeypatch)
-    yield held
-    held.release_all()
-
-
 def _statuses(session: Session, run_id: str, field: str = "status") -> list[str]:
     """Every status this child reached, in order — or another `field` of the same
     records. One spelling, four readers."""
@@ -511,7 +508,7 @@ async def test_a_childs_outcome_is_on_disk_before_its_parent_says_done(
     Asked of the store at the moment the parent's record lands, through the
     Protocol: what it would hand a resume, not what is in memory.
 
-    Sabotage: drop the `_write_log` ahead of `_status(child, "done", ...)` and the
+    Sabotage: drop the child's flush from `ph.seams.subagents.record_settled` and the
     child's stored log is missing its answer when the parent reports it.
     """
     ctx, session, parent = await delegating()
@@ -922,55 +919,6 @@ async def test_a_child_with_no_tree_is_announced_without_naming_one(
 # ---------------------------------------------------------------- the queue --
 
 
-class _Gate:
-    """Holds every child's model call until the test lets one through.
-
-    Patched over the fake adapter's `stream`, so a child is "running" for as long
-    as the test says and no timing is guessed. `arrived` counts calls, since the
-    held list shrinks as they are released.
-
-    The `gate` fixture below is what opens it again, and that is not tidiness: a
-    child left parked here makes the mount's `drain()` wait forever, so one failed
-    assertion becomes a hung suite. Written as a `finally` in each test, that is a
-    rule the fourth test has to remember.
-    """
-
-    def __init__(self) -> None:
-        self.held: list[anyio.Event] = []
-        self.arrived = 0
-        self.open = False
-
-    def release_one(self) -> None:
-        self.held.pop(0).set()
-
-    def twice(self) -> bool:
-        """Whether a second child has reached the model — the readmit's proof."""
-        return self.arrived >= 2
-
-    def release_all(self) -> None:
-        self.open = True
-        for event in self.held:
-            event.set()
-        self.held.clear()
-
-    def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from ph.llm.fake import FakeAdapter
-
-        original = FakeAdapter.stream
-        gate = self
-
-        async def gated(self: Any, options: Any) -> Any:  # noqa: ANN401
-            gate.arrived += 1
-            if not gate.open:
-                event = anyio.Event()
-                gate.held.append(event)
-                await event.wait()
-            async for chunk in original(self, options):
-                yield chunk
-
-        monkeypatch.setattr(FakeAdapter, "stream", gated)
-
-
 async def _until(predicate: Callable[[], bool], what: str) -> None:
     """Poll until `predicate()`, or fail saying what was being waited for.
 
@@ -988,7 +936,7 @@ async def _until(predicate: Callable[[], bool], what: str) -> None:
 
 
 async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
-    delegating: MountedRuntime, gate: _Gate
+    delegating: MountedRuntime, gate: ModelGate
 ) -> None:
     """`maxConcurrent` is a queue: the parent gets every child it asked for, one
     slot at a time, in admission order — and never a refusal."""
@@ -1013,7 +961,7 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
 
 
 async def test_a_child_that_failed_frees_its_slot(
-    delegating: MountedRuntime, gate: _Gate, monkeypatch: pytest.MonkeyPatch
+    delegating: MountedRuntime, gate: ModelGate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The queue cannot wedge on a failure: the provider's `error` path releases
     the slot exactly as `done` does.
@@ -1050,7 +998,7 @@ async def test_a_child_that_failed_frees_its_slot(
 
 
 async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
-    delegating: MountedRuntime, gate: _Gate
+    delegating: MountedRuntime, gate: ModelGate
 ) -> None:
     """A child revoked before it ran is canceled where it waits, and the slot it
     never held is not leaked — the next child still gets it."""
@@ -1137,7 +1085,7 @@ async def _restart(
 
 
 async def test_a_live_childs_log_refuses_a_second_opener(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """L2. A child's log is a session of its own, openable by its id — `phern -p
     --session <child>`, a daemon's `session/new` naming it — so while this harness
@@ -1157,7 +1105,7 @@ async def test_a_live_childs_log_refuses_a_second_opener(
 
 
 async def test_a_queued_child_is_re_driven_after_a_restart(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """The work was described in the parent's log and running nowhere (P5-04).
 
@@ -1193,7 +1141,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
 
 
 async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presented(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """The ladder, and the thing that makes it a real attempt rather than a lie.
 
@@ -1237,7 +1185,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
 
 
 async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_them(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """S1 — a clean stop tombstoned every child, so a restart brought none back.
 
@@ -1267,7 +1215,7 @@ async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_t
 
 
 async def test_a_suspended_child_keeps_what_was_queued_for_it(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """A child coming back comes back to its inbox, not an empty one.
 
@@ -1298,7 +1246,7 @@ async def test_a_suspended_child_keeps_what_was_queued_for_it(
 
 
 async def test_a_child_suspended_before_its_first_step_is_handed_its_task_once(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """A child that never took a step still has its task, in its own log.
 
@@ -1352,7 +1300,7 @@ async def test_a_settled_child_is_not_canceled_when_its_parent_goes(
 
 
 async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """S10 — the ladder counts `running{cause: resumed}`, and that rode in memory.
 
@@ -1360,7 +1308,7 @@ async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
     a child that took the daemon down again left its restart unrecorded on disk: a
     crash loop never advanced the count, and the ladder never gave up.
 
-    Sabotage: drop the flush after the resumed `running` in `_drive`, and the stored
+    Sabotage: drop the flush from `ph.seams.subagents.record_started`, and the stored
     roster has no restart while the resumed child is at the model.
     """
     ctx, session, parent = await delegating()
@@ -1390,7 +1338,7 @@ async def _stalled(
     ctx: Context,
     session: Session,
     parent: object,
-    gate: _Gate,
+    gate: ModelGate,
     *,
     restarts: int,
 ) -> Any:  # noqa: ANN401
@@ -1402,7 +1350,7 @@ async def _stalled(
 
 
 async def test_the_ladder_gives_up_and_says_so(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """Three restarts with nothing achieved between them is not bad luck.
 
@@ -1425,7 +1373,7 @@ async def test_the_ladder_gives_up_and_says_so(
 
 
 async def test_progress_since_the_last_restart_clears_the_ladder(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """A child stopped, working an hour, then stopped again met two incidents.
 
@@ -1482,7 +1430,7 @@ def _attributed(session: Session, run_id: str) -> list[SessionEvent]:
 
 
 async def test_an_answer_only_the_childs_log_kept_is_counted_after_a_restart(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """L5. The resume reconciles the parent's account of a child's answers from the
     child's own log before the ladder reads it.
@@ -1518,7 +1466,7 @@ async def test_an_answer_only_the_childs_log_kept_is_counted_after_a_restart(
 
 
 async def test_a_restart_attributes_nothing_the_parent_already_counted(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """L5's other half: the reconcile adds only answers past the parent's last one.
 
@@ -1541,7 +1489,7 @@ async def test_a_restart_attributes_nothing_the_parent_already_counted(
 async def _grandchild(
     ctx: Context,
     parent: Any,  # noqa: ANN401
-    gate: _Gate,
+    gate: ModelGate,
     **leaf: Any,  # noqa: ANN401
 ) -> tuple[Any, Any]:
     """A child and the child it delegated to, both at the model, both logs written."""
@@ -1556,7 +1504,7 @@ async def _grandchild(
 
 
 async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """L5b. A readmitted child's own children are swept the way the root's are.
 
@@ -1611,7 +1559,10 @@ def _keyed(ctx: Context) -> None:
 
 
 async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+    delegating: MountedRuntime,
+    gate: ModelGate,
+    mount: MountProfile,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """L5b, the credential half. A grandchild waiting for a name is released by it.
 
@@ -1643,7 +1594,7 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
 
 
 async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """§6.5 across a power cut, which is why the narrowing is in the record.
 
@@ -1682,7 +1633,7 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
 
 
 async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """A `queued` row nothing will pick up is worse than an honest failure.
 
@@ -1709,7 +1660,7 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 
 
 async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
-    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
     """K4 — a readmit that *raises* used to be logged and then dropped.
 

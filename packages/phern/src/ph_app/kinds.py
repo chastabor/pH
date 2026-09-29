@@ -1,7 +1,11 @@
 """`ph_app`'s intent kinds: every pair the app writes through `ctx.intents`, in one leaf (T4).
 
-One kind today, `CLIENT_COMMAND` — the record that makes a daemon verb idempotent
-(P5-02), and its outcome (P10-10) — with its key and its closer.
+Two kinds, each with its keys and its closer:
+
+* `CLIENT_COMMAND` — the record that makes a daemon verb idempotent (P5-02), and its
+  outcome (P10-10);
+* `SUPERVISOR_RESTORE` — a retry putting a root's tree back to its last restore
+  point, and whether it did (S12).
 
 **Why a leaf.** Repair settles the kinds declared in the process doing the resume, and a
 kind is declared when its module is imported. ph-core cannot import the app, so the
@@ -27,12 +31,14 @@ declares.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ph.json import JsonObject, as_str
 from ph.session.events import SessionEvent
-from ph.session.intents import IntentKind, Unsettled, declare_intent
+from ph.session.intents import IntentKind, Unsettled, declare_intent, opened_seq, seq_field
 from ph.session.writers import log_writer
 
-__all__ = ["CLIENT_COMMAND", "command_settled"]
+__all__ = ["CLIENT_COMMAND", "SUPERVISOR_RESTORE", "command_settled", "restore_settled"]
 
 
 _LOG = log_writer(__name__)
@@ -82,3 +88,53 @@ CLIENT_COMMAND = declare_intent(
 )
 """The record that makes a mutating command idempotent (P5-02), and its outcome
 (P10-10). Keyed by `clientId:commandId`; filled by `ph_app.daemon.server`."""
+
+
+# ------------------------------------------------------------------ restore --
+
+
+def _restoring_seq(event: SessionEvent) -> str | None:
+    """The restore a `supervisor/restored` settles — its `restoringSeq`, as a key."""
+    return seq_field(event, "restoringSeq")
+
+
+def restore_settled(opened: SessionEvent, *, ok: bool, detail: str | None = None) -> dict[str, Any]:
+    """A `supervisor/restored` payload — the ladder's and repair's alike: which
+    attempt, which tree, and whether the tree is now that tree."""
+    data: dict[str, Any] = {
+        "restoringSeq": opened.seq,
+        "attempt": opened.data.get("attempt"),
+        "tree": opened.data.get("tree"),
+        "ok": ok,
+    }
+    if detail is not None:
+        data["detail"] = detail
+    return data
+
+
+def _restore_interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """A restore nobody saw finish: not `ok`, and — in the `unsettled` marker whoever
+    writes this merges in — that the tree may be part-way between the two states."""
+    return restore_settled(opened, ok=False)
+
+
+SUPERVISOR_RESTORE = declare_intent(
+    IntentKind(
+        opened="supervisor/restoring",
+        settled="supervisor/restored",
+        opened_key=opened_seq,
+        settled_key=_restoring_seq,
+        # A restore rewrites and deletes files, so one cut short leaves a tree that
+        # is neither the checkpoint nor what the crashed attempt left: a reader is
+        # owed "maybe", not the rollback the retry set out to make.
+        orphan="outcome-unknown",
+        # On disk before the tree is touched (S12). The retry used to restore first
+        # and record after, so a daemon that died restoring had rewritten the tree
+        # with nothing in the log saying so. One the log cannot record is not run.
+        barrier="durable",
+        closer=_restore_interrupted,
+        writer=_LOG,
+    )
+)
+"""A retry putting a root's tree back to its last restore point, then whether it did
+(S12). Keyed by the opening record's seq; filled by `ph_app.daemon.supervisor`."""

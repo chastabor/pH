@@ -86,11 +86,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # *about* an agent rather than the agent's own. `agent/failed` also sat
         # one letter from `agent/error`, which means something else entirely.
         "supervisor/retry",
-        # The restore a retry named did not happen (S12). The retry is written
-        # before the restore, so the attempt is counted on disk before any of it
-        # runs — and this is what keeps the transcript from claiming a rollback
-        # the tier refused.
-        "supervisor/unrestored",
+        # A retry putting the tree back to its last restore point, and whether it
+        # did (S12) — `SUPERVISOR_RESTORE`, `ph_app.kinds`. A pair rather than a
+        # line on the retry, because the restore is an act of its own: one cut
+        # short leaves a tree that is neither the checkpoint nor what the crash left.
+        "supervisor/restoring",
+        "supervisor/restored",
         "supervisor/failed",
         "supervisor/recovered",
         # A root released for being idle (P5-05). Its own record because the
@@ -223,6 +224,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # which only works if both halves are in the vocabulary.
         "workspace/acquired",
         "workspace/disposed",
+        # Where a tier is *about to* put a fresh tree, written before it makes one
+        # (S12): an `acquiring` with nothing after it is a tree a crash may have left
+        # half-made — a checkout, or a mounted overlay — and reconcile needs the
+        # root to find it.
+        "workspace/acquiring",
         # A tree marked as evidence, written when the mark is made rather than
         # only on the closing half (P6-28). A retention is decided because a run
         # went wrong, and the most complete way for one to go wrong writes no
@@ -411,7 +417,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # hard-refusing a whole session over two records carrying no
         # conversational content.
         "supervisor/retry",
-        "supervisor/unrestored",
+        "supervisor/restoring",
+        "supervisor/restored",
         "supervisor/failed",
         "supervisor/recovered",
         "supervisor/passivated",
@@ -446,6 +453,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "limits/exceeded",
         "limits/breaker-tripped",
         "sandbox/denied",
+        "workspace/acquiring",
         "workspace/acquired",
         "workspace/disposed",
         "workspace/retained",
@@ -496,6 +504,7 @@ INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
         "attachment/uploading": IntentPair("attachment/uploaded", "ph.session.kinds"),
         "question/asked": IntentPair("question/answered", "ph.session.kinds"),
         "shell/command": IntentPair("shell/result", "ph.session.kinds"),
+        "supervisor/restoring": IntentPair("supervisor/restored", "ph_app.kinds"),
         "tool/code-dispatch-start": IntentPair("tool/code-dispatch", "ph.session.kinds"),
         "tool/effect": IntentPair("tool/effect-settled", "ph.session.kinds"),
     }
@@ -568,6 +577,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.seams.workspace": frozenset(
             {
                 "workspace/acquired",
+                "workspace/acquiring",
                 "workspace/checkpoint",
                 "workspace/disposed",
                 "workspace/provisioned",
@@ -595,7 +605,6 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "supervisor/recovered",
                 "supervisor/retry",
                 "supervisor/unreachable",
-                "supervisor/unrestored",
                 "supervisor/violated",
             }
         ),
@@ -603,11 +612,13 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
         "ph_rlm.harness.service": frozenset({"harness/refined"}),
         "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
+        # Not `subagent/status`: a provider reports its child's status through
+        # `ph.seams.subagents`' doors (`record_status`, `record_started`,
+        # `record_settled`), which keep the durability rules a status carries.
         "ph_rlm.subagents": frozenset(
             {
                 "subagent/admitted",
                 "subagent/deleted",
-                "subagent/status",
                 "subagent/usage-attributed",
             }
         ),

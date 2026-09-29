@@ -324,6 +324,8 @@ async def apply(ctx: Context, config: Config) -> None:
             summary="Refine the Continual Harness, or roll a refinement back.",
             run=command,
             argument_hint="[--global] [--show] [--rollback <id>] [instructions]",
+            # `--show` answers whatever else the line says; nothing else only asks.
+            reads=lambda argument: "--show" in argument.split(),
         )
     )
 

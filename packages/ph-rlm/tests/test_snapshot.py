@@ -261,10 +261,10 @@ async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
     )
     store = type(ctx.require(SPILL_STORE))
 
-    async def refuse(_self: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+    async def refuse(_self: Any, *_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
         raise OSError("the disk is full")
 
-    with patch.object(store, "reserve_bytes", refuse):
+    with patch.object(store, "reserve", refuse):
         await run_cell(ctx, "big = 'q' * 20_000", agent=agent, session=session)
 
     [record] = [record for record in _snapshots(session) if record["var"] == "big"]

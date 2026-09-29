@@ -52,7 +52,6 @@ from ..paths import canonical, default_home_path, is_under
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec
 from .workspace import (
-    BRANCH_PREFIX,
     EXCLUDE,
     Backend,
     ContainmentTier,
@@ -62,6 +61,8 @@ from .workspace import (
     WorkspaceAccess,
     WorkspaceDeclined,
     WorkspaceRecord,
+    WorkspaceSite,
+    checkout_site,
     discards_writes,
     fresh_root,
     measure_strays,
@@ -299,6 +300,14 @@ class GitWorktreeProvider:
     profile that declines pays for the tier it is not using.
     """
 
+    def locate(self, *, session_id: str, agent_id: str, access: WorkspaceAccess) -> WorkspaceSite:
+        """Where this agent's checkout goes, and on which branch — `LocatingProvider`.
+
+        The one derivation `acquire` uses too, so the `workspace/acquiring` the seam
+        writes before `worktree add` names the directory that command then makes.
+        """
+        return checkout_site(self.root, session_id, agent_id, access)
+
     async def acquire(
         self,
         *,
@@ -321,15 +330,15 @@ class GitWorktreeProvider:
         if toplevel is None:
             raise WorkspaceDeclined("not-a-repository", f"{base} is not a git repository")
 
-        ref = f"{BRANCH_PREFIX}{sanitize_ref(session_id)}/{sanitize_ref(agent_id)}"
-        path = self.root / sanitize_ref(session_id) / sanitize_ref(agent_id)
+        site = self.locate(session_id=session_id, agent_id=agent_id, access=access)
+        path, ref = site.root, site.ref
+        assert ref is not None, "a checkout is always on a branch"
         await self._add(toplevel, path, ref)
 
-        ephemeral = access == "read"
         return Workspace(
             root=path,
             scratch=scratch,
-            kind="worktree-ephemeral" if ephemeral else "worktree",
+            kind=site.kind,
             # True for both, and deliberately: an ephemeral child writes freely,
             # its writes simply reach nobody. `False` here would be a
             # confinement claim only the sandbox tier can make.
@@ -343,7 +352,7 @@ class GitWorktreeProvider:
                 toplevel,
                 path,
                 ref,
-                discard=ephemeral and not workspace.retained,
+                discard=discards_writes(workspace.kind) and not workspace.retained,
                 pathspec=workspace.agent_work_pathspec(),
             ),
         )

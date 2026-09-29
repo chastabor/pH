@@ -387,18 +387,25 @@ async def test_the_project_list_is_guarded_like_any_other(
     A repository may state what its worktrees need and may **not** name anything
     outside its own tree, in either direction. The guards do not care where an
     entry came from — a discovered one is checked exactly like a profile's — and
-    the refusal is per entry, so the workspace is still handed over.
+    the refusal is per entry, so the material beside it still arrives.
+
+    A `..` is refused as the list is *read*, before any tree exists to resolve it
+    against, and so never reaches the agent's prompt line as a provisioning failure.
     """
     ctx = await mount()
     base = tmp_path / "project"
     base.mkdir()
+    (base / ".env").write_text("SECRET=1\n", encoding="utf-8")
     (base / PROJECT_PROVISION_FILE).write_text(
-        "provision: [{source: ../../etc/passwd, dest: stolen}]", encoding="utf-8"
+        "provision: [{source: ../../etc/passwd, dest: stolen}, {source: .env}]", encoding="utf-8"
     )
-    ctx.require(WORKSPACE).provision(discover_provisioning(base))
+    materials = discover_provisioning(base)
+    assert [one.target for one in materials] == [".env"], "one bad line cost the others"
+    ctx.require(WORKSPACE).provision(materials)
     ctx.require(WORKSPACE).register_provider(_tier(tmp_path))
 
     workspace = await ctx.require(WORKSPACE).acquire(session_id="s", agent_id="a1", base=base)
 
     assert not (workspace.root / "stolen").exists()
-    assert len(workspace.provision_failures) == 1
+    assert (workspace.root / ".env").exists()
+    assert workspace.provision_failures == ()

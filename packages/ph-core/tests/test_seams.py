@@ -39,7 +39,7 @@ from ph.seams.code_runtime import (
     PersistenceObligationError,
     validate_binding_name,
 )
-from ph.seams.commands import CommandDefinition, CommandRegistry
+from ph.seams.commands import CommandDefinition, CommandRegistry, reading_verbs
 from ph.seams.compaction import (
     CompactionError,
     CompactionNote,
@@ -1045,6 +1045,44 @@ async def test_a_command_the_log_cannot_record_does_not_run(
 
     assert ran == [], "the body ran with no record of it on disk"
     assert said is not None and said.startswith("refusing:")
+
+
+async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reads`: the question is answered, and recorded after, whole.
+
+    A durable record in front of every command made the one someone reaches for
+    on a full disk — what state are things in? — refuse along with the rest. An
+    argument the command says only asks takes no barrier; the verb beside it that
+    acts still does.
+
+    Sabotage: ignore `reads` in the dispatch, and the listing is refused too.
+    """
+    from ph.keys import COMMANDS, SESSIONS
+    from ph.session import SessionStore
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    ran: list[str] = []
+
+    def body(arg: str, _ctx: object) -> str:
+        ran.append(arg)
+        return f"did {arg}"
+
+    ctx.require(COMMANDS).register(
+        CommandDefinition(name="trees", summary="t", run=body, reads=reading_verbs("", "list"))
+    )
+    monkeypatch.setattr(SessionStore, "flush", raising(OSError("read-only file system")))
+
+    assert await ctx.require(COMMANDS).dispatch("/trees list", session=session) == "did list"
+    said = await ctx.require(COMMANDS).dispatch("/trees remove a", session=session)
+
+    assert ran == ["list"], "only the question ran"
+    assert said is not None and said.startswith("refusing:")
+    run, done = [one for one in session.events if one.type.startswith("command/")][:2]
+    assert (run.data["argument"], done.data["outcome"]) == ("list", "ok")
+    assert done.data["runSeq"] == run.seq and run.batch is not None and done.batch == run.batch
 
 
 async def test_a_failing_command_still_records_its_outcome() -> None:

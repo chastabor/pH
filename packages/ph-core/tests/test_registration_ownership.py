@@ -1530,6 +1530,7 @@ UNBOUND: dict[str, str] = {
     # --- policy and presentation, called for an answer rather than for effect --
     # These are asked a question and expected to return one. None of them has a
     # reason to register, and two of them run outside any pipeline at all.
+    "CommandDefinition.reads": "a policy answer about an argument, asked before the body runs",
     "ToolDefinition.present_call": "TUI presentation, outside the pipeline",
     "ToolDefinition.present_result": "TUI presentation, outside the pipeline",
     "TransportPresentation.present_call": "TUI presentation, outside the pipeline",

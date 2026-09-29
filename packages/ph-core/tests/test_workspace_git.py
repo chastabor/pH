@@ -569,7 +569,11 @@ async def test_a_material_that_does_not_arrive_reaches_the_agent(
     why the tests fail (E14)."""
     ctx = await mount(
         TIER_ROW,
-        {"id": "workspace-lifecycle", "config": {"provision": [{"source": "../outside"}]}},
+        # Required and absent: the project has no such file, so it cannot arrive.
+        {
+            "id": "workspace-lifecycle",
+            "config": {"provision": [{"source": "missing.env", "optional": False}]},
+        },
     )
     base = await git_repo(ctx, tmp_path / "repo")
     session = ctx.require(SESSIONS).create("s1")
@@ -945,10 +949,12 @@ async def test_an_acquire_is_on_disk_before_the_seam_provisions_into_it(
 
     Provisioning is the seam's own act, and it ran before `workspace/acquired` was
     even appended — so reconcile, which reads only recorded pairs, never reclaimed
-    the tree. The record is on disk by the time the copy starts, and it already
-    names what the copy is about to write.
+    the tree. A record is on disk by the time the copy starts, and it already names
+    what the copy is about to write: here `workspace/acquiring`, which the seam
+    wrote before the tier made the tree at all.
 
-    Sabotage: record after provisioning again, and the copy finds no record.
+    Sabotage: drop `provisioned` from `acquiring`, and the copy finds a record that
+    does not say what it is about to write.
     """
     ctx, base, session = await _with_a_secret(mount, tmp_path)
     seen: list[object] = []
@@ -958,7 +964,7 @@ async def test_an_acquire_is_on_disk_before_the_seam_provisions_into_it(
         seen.extend(
             one.data.get("provisioned")
             for one in stored_events(ctx, "s1")
-            if one.type == "workspace/acquired"
+            if one.type in ("workspace/acquiring", "workspace/acquired")
         )
         return await original(*args, **kwargs)
 
@@ -969,6 +975,28 @@ async def test_an_acquire_is_on_disk_before_the_seam_provisions_into_it(
 
     # A tuple: an event read back is frozen JSON.
     assert seen == [("secret.env",)], "the tree was provisioned before any record of it"
+
+
+async def test_a_tree_made_where_it_was_named_costs_one_write(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The `acquiring` written before `worktree add` already names the tree and what
+    will be provisioned into it, so once the checkout lands where it said, the
+    `acquired` beside it waits for the step's own barrier — one fsync per child, not
+    two.
+
+    Sabotage: flush after `acquired` whether or not `acquiring` covers it.
+    """
+    ctx, base, session = await _with_a_secret(mount, tmp_path)
+    flushes: list[int] = []
+    ctx.on("session/flush", lambda target: flushes.append(len(target.events)))
+
+    await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+
+    assert len(flushes) == 1
+    assert stored_types(ctx, "s1") == ["workspace/acquiring"]
 
 
 async def test_a_child_its_parent_tears_down_writes_its_disposal(
@@ -996,7 +1024,37 @@ async def test_a_child_its_parent_tears_down_writes_its_disposal(
     await agents.dispose(parent.id)
 
     written = [one for one in stored_types(ctx, "child") if one.startswith("workspace/")]
-    assert written == ["workspace/acquired", "workspace/disposed"]
+    assert written == ["workspace/acquiring", "workspace/acquired", "workspace/disposed"]
+
+
+async def test_a_checkout_is_on_disk_before_it_is_made(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S12: `worktree add` ran with nothing in the log, so a crash inside it left a
+    checkout no record named. `locate` says where the tree will go, the seam records
+    it, and the record is on disk before git is asked to make anything there.
+
+    Sabotage: drop the seam's `_acquiring` call, and `worktree add` finds nothing.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
+    seen: list[tuple[object, object]] = []
+    original = workspace_git.GitWorktreeProvider._add
+
+    async def watched(self: Any, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        seen.extend(
+            (one.data.get("root"), one.data.get("kind"))
+            for one in stored_events(ctx, "s1")
+            if one.type == "workspace/acquiring"
+        )
+        await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_git.GitWorktreeProvider, "_add", watched)
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="read", session=session
+    )
+
+    assert seen == [(str(workspace.root), "worktree-ephemeral")]
 
 
 async def test_a_crash_reclaim_keeps_a_provisioned_secret_off_the_branch(
