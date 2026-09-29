@@ -30,12 +30,13 @@ from unittest.mock import patch
 import pytest
 
 from ph.cordis import Context
-from ph.keys import SESSIONS, SUBPROCESS, WORKSPACE
-from ph.seams import workspace_git
+from ph.keys import AGENTS, SESSIONS, SUBPROCESS, WORKSPACE
+from ph.seams import workspace_git, workspace_provision
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
-from ph.seams.workspace import redirection_env, workspace_survivors
+from ph.seams.workspace import ReclaimingProvider, redirection_env, workspace_survivors
 from ph.seams.workspace_git import sanitize_ref, tree_hash
-from ph.testing import MountProfile
+from ph.session import Session
+from ph.testing import FAKE_OPTIONS, MountProfile, stored_events, stored_types
 from ph.testing.git import git, git_repo
 
 pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
@@ -58,6 +59,18 @@ async def _tiered(mount: MountProfile, tmp_path: Path) -> tuple[Any, Path]:
     """
     ctx = await mount(TIER_ROW)
     return ctx, await git_repo(ctx, tmp_path / "repo")
+
+
+async def _with_a_secret(mount: MountProfile, tmp_path: Path) -> tuple[Context, Path, Session]:
+    """`_tiered`, with a `secret.env` in the repository that the seam provisions into
+    every tree — the material no branch may carry — and a session to acquire under."""
+    ctx = await mount(
+        TIER_ROW,
+        {"id": "workspace-lifecycle", "config": {"provision": [{"source": "secret.env"}]}},
+    )
+    base = await git_repo(ctx, tmp_path / "repo")
+    (base / "secret.env").write_text("TOKEN=shhh\n", encoding="utf-8")
+    return ctx, base, ctx.require(SESSIONS).create("s1")
 
 
 # ------------------------------------------------------------------ acquire --
@@ -910,13 +923,7 @@ async def test_a_provisioned_secret_is_not_committed_to_the_branch(
     `git show` on the ref rather than a `status` count, because what is being pinned
     is the content of the artifact — the one thing a person merges.
     """
-    ctx = await mount(
-        TIER_ROW,
-        {"id": "workspace-lifecycle", "config": {"provision": [{"source": "secret.env"}]}},
-    )
-    base = await git_repo(ctx, tmp_path / "repo")
-    (base / "secret.env").write_text("TOKEN=shhh\n", encoding="utf-8")
-    session = ctx.require(SESSIONS).create("s1")
+    ctx, base, session = await _with_a_secret(mount, tmp_path)
     workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write", session=session
     )
@@ -929,6 +936,94 @@ async def test_a_provisioned_secret_is_not_committed_to_the_branch(
     assert code == 0 and out == "the agent did this\n", "the work was not committed"
     code, _, _ = await git(ctx, base, "show", "ph/s1/a1:secret.env")
     assert code != 0, "a provisioned credential was committed to a branch somebody merges"
+
+
+async def test_an_acquire_is_on_disk_before_the_seam_provisions_into_it(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S12: a crash mid-copy left a tree nobody's record named.
+
+    Provisioning is the seam's own act, and it ran before `workspace/acquired` was
+    even appended — so reconcile, which reads only recorded pairs, never reclaimed
+    the tree. The record is on disk by the time the copy starts, and it already
+    names what the copy is about to write.
+
+    Sabotage: record after provisioning again, and the copy finds no record.
+    """
+    ctx, base, session = await _with_a_secret(mount, tmp_path)
+    seen: list[object] = []
+    original = workspace_provision.provision
+
+    async def watched(*args: Any, **kwargs: Any) -> workspace_provision.ProvisionReport:  # noqa: ANN401
+        seen.extend(
+            one.data.get("provisioned")
+            for one in stored_events(ctx, "s1")
+            if one.type == "workspace/acquired"
+        )
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_provision, "provision", watched)
+    await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+
+    # A tuple: an event read back is frozen JSON.
+    assert seen == [("secret.env",)], "the tree was provisioned before any record of it"
+
+
+async def test_a_child_its_parent_tears_down_writes_its_disposal(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """S12: a child's closing records waited for a flush that never came.
+
+    `AgentRegistry.dispose` flushed the log it had just torn down, but a parent's
+    disposal cascades into a nested child's scope without calling it, and a child
+    is never reopened for reconcile to close the pair — so a crash left the tree
+    reading as leaked for good. The flush is the child scope's own last disposer.
+
+    Sabotage: flush after `dispose(agent_id)` again, and the child's `disposed` is
+    not on disk.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    agents = ctx.require(AGENTS)
+    parent = agents.create(ctx.require(SESSIONS).create("parent"), FAKE_OPTIONS)
+    session = ctx.require(SESSIONS).create("child")
+    child = agents.create(session, FAKE_OPTIONS, parent=parent)
+    await ctx.require(WORKSPACE).acquire(
+        session_id="child", agent_id=child.id, base=base, access="read", session=session
+    )
+
+    await agents.dispose(parent.id)
+
+    written = [one for one in stored_types(ctx, "child") if one.startswith("workspace/")]
+    assert written == ["workspace/acquired", "workspace/disposed"]
+
+
+async def test_a_crash_reclaim_keeps_a_provisioned_secret_off_the_branch(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """S13: the same property on the path with nobody watching.
+
+    Reclaim has no `Workspace` — only the log — so what was provisioned has to be
+    on `workspace/acquired` or the crash path stages the secret as the agent's work.
+    The record here is the one the log folds to, not one built by hand, because
+    the bug was the log not saying it.
+    """
+    ctx, base, session = await _with_a_secret(mount, tmp_path)
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    (workspace.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
+    (record,) = workspace_survivors(session)
+    provider = ctx.require(WORKSPACE).provider
+    assert isinstance(provider, ReclaimingProvider)
+
+    assert await provider.reclaim(record) is True
+
+    code, out, _ = await git(ctx, base, "show", "ph/s1/a1:real-work.txt")
+    assert code == 0 and out == "the agent did this\n", "the crash path lost the work"
+    code, _, _ = await git(ctx, base, "show", "ph/s1/a1:secret.env")
+    assert code != 0, "a crash committed a provisioned credential to the agent's branch"
 
 
 # ------------------------------------------ what git is told, and where it looks --

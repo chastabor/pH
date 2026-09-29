@@ -1073,8 +1073,11 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
         )
         monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", fake_restore)
 
-        assert await supervisor._restore(root) is True
-        assert asked == ["newest"], "the retry went back to a stale restore point"
+        workspace, tree = supervisor._restore_point(root)
+        assert tree == "newest", "the retry went back to a stale restore point"
+        assert workspace is not None
+        assert await supervisor._restore(root, workspace, tree) is True
+        assert asked == ["newest"]
 
         # Best-effort: a restore that fails must not cost the retry, and must
         # not claim a rollback that did not happen.
@@ -1086,7 +1089,7 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
             raise RuntimeError("the tier said no")
 
         monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", angry_restore)
-        assert await supervisor._restore(root) is False
+        assert await supervisor._restore(root, workspace, tree) is False
 
 
 async def test_a_root_with_no_workspace_restores_nothing_and_says_so(
@@ -1094,13 +1097,56 @@ async def test_a_root_with_no_workspace_restores_nothing_and_says_so(
 ) -> None:
     """The ordinary case: an advisory-tier root has no worktree to put back.
 
-    `restored: false` in the record, rather than silence — a transcript that
-    implied a rollback nobody performed would misread the attempt that follows.
+    No `restoreTo` in the record, rather than one that names nothing — a
+    transcript that implied a rollback nobody performed would misread the
+    attempt that follows.
     """
     async with running(tmp_path) as daemon:
         supervisor = daemon.running.supervisor
         root = await supervisor.start("advisory")
-        assert await supervisor._restore(root) is False
+        assert supervisor._restore_point(root) == (None, "")
+
+
+async def test_a_retry_is_on_disk_before_its_restore_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
+) -> None:
+    """S12: the restore is part of the attempt, and it used to run unrecorded.
+
+    It ran first and the retry was written after, so a daemon that died while
+    restoring had rewritten the tree with no record of the attempt — and a crash
+    loop there never advanced the count. The retry now names the restore point
+    and reaches disk before the restore starts; a restore that then fails is
+    corrected by `unrestored`, so the transcript claims no rollback.
+
+    Sabotage: restore before recording again, and the restore finds no retry on
+    disk.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call("session/new", sessionId="restores")
+        root = daemon.running.supervisor.roots["restores"]
+        log_event(root.session, "workspace/checkpoint", {"agentId": root.agent.id, "tree": "t1"})
+        written = stored_log(tmp_path / "sessions", "restores")
+        seen: list[bool] = []
+
+        async def refused(_seam: object, workspace: object, token: str) -> tuple[str, ...]:
+            seen.append(_on_disk(written, recovery.RETRY))
+            raise RuntimeError("the tier said no")
+
+        seam = type(root.ctx.require(WORKSPACE))
+        monkeypatch.setattr(seam, "of", lambda self, agent_id: object())
+        monkeypatch.setattr(seam, "restore", refused)
+        _crash(monkeypatch, root, 1)
+        await client.prompt("restores", "hello")
+        await _until(lambda: _on_disk(written, recovery.UNRESTORED), what="the correction")
+
+        assert seen == [True], "the tree was restored before the attempt was on disk"
+        ladder = [
+            one for one in root.session.events if one.type in {recovery.RETRY, recovery.UNRESTORED}
+        ]
+        assert [one.type for one in ladder] == [recovery.RETRY, recovery.UNRESTORED]
+        assert ladder[0].data["restoreTo"] == "t1"
+        assert dict(ladder[1].data) == {"attempt": 1, "restoreTo": "t1"}
 
 
 async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(

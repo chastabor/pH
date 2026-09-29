@@ -40,7 +40,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context, LoaderError, Profile
-from ph.json import as_obj, as_seq, as_str
+from ph.json import JsonValue, as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     COMMANDS,
@@ -71,7 +71,7 @@ from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
 from ph.seams.subagents import child_is_live
-from ph.seams.workspace import latest_checkpoint, workspace_of
+from ph.seams.workspace import Workspace, latest_checkpoint, workspace_of
 from ph.session import (
     Session,
     SessionEvent,
@@ -125,6 +125,7 @@ from .recovery import (
     RECOVERED,
     RETRY,
     UNREACHABLE,
+    UNRESTORED,
     VIOLATED,
     WAKE_WITHIN,
     Recovery,
@@ -556,30 +557,42 @@ class Root:
         """
         return str(self.session.header.created_at)
 
-    def retry(self, *, reason: str, restored: bool) -> None:
+    def retry(self, *, reason: str, restore_to: str) -> None:
         """Record that a failed turn is being run again (P5-04).
 
         Written *before* the attempt, not after it: a daemon that died during
         the retry must come back knowing the attempt was made, or it resumes
         with a shorter ladder than it had actually spent. The same write-ahead
         ordering A10 applies to blobs and `CLIENT_COMMAND` applies to commands.
+
+        **Before the restore too** (S12), which is part of the attempt: it used to
+        run first, so a daemon that died restoring had rewritten the tree with no
+        record of the attempt, and a crash loop there never advanced the count.
+        So the record names the restore point it is *about to* use, and
+        `unrestored` is the correction when that does not happen.
         """
-        _LOG.append(
-            self.session,
-            RETRY,
-            {
-                "attempt": self.recovery.attempts + 1,
-                "of": self.recovery.total,
-                "delayMs": int(self.recovery.delay * 1000),
-                "reason": reason,
-                # Said out loud, because "false" is the ordinary case for an
-                # advisory-tier root and a transcript that implied a rollback
-                # nobody performed would misread the attempt that follows.
-                "restored": restored,
-            },
-        )
+        data: dict[str, JsonValue] = {
+            "attempt": self.recovery.attempts + 1,
+            "of": self.recovery.total,
+            "delayMs": int(self.recovery.delay * 1000),
+            "reason": reason,
+        }
+        if restore_to:
+            data["restoreTo"] = restore_to
+        _LOG.append(self.session, RETRY, data)
         self.recovery = replace(self.recovery, attempts=self.recovery.attempts + 1)
         self.publish(SessionStatusNotice(session_id=self.id, status="retrying"))
+
+    def unrestored(self, tree: str) -> None:
+        """The restore the last `retry` named did not happen.
+
+        Its own record because the retry is already on disk: a transcript that
+        read `restoreTo` and nothing after it would claim a rollback the tier
+        refused, and the attempt that follows would be misread.
+        """
+        _LOG.append(
+            self.session, UNRESTORED, {"attempt": self.recovery.attempts, "restoreTo": tree}
+        )
 
     def recovered(self) -> None:
         """A retry worked, so the ladder clears — and says so in the log.
@@ -1563,9 +1576,16 @@ class Supervisor:
                     # forgets it was spent is one that starts over forever.
                     await self._flush(root)
                     return
-                restored = await self._restore(root)
-                root.retry(reason=error_message(error), restored=restored)
+                workspace, tree = self._restore_point(root)
+                root.retry(reason=error_message(error), restore_to=tree)
                 await self._flush(root)
+                if (
+                    workspace is not None
+                    and tree
+                    and not await self._restore(root, workspace, tree)
+                ):
+                    root.unrestored(tree)
+                    await self._flush(root)
                 await anyio.sleep(state.delay)
 
     def _schedule_seam(self, root: Root) -> ScheduleService:
@@ -2003,18 +2023,14 @@ class Supervisor:
         """
         await session_written(root.ctx, root.session)
 
-    async def _restore(self, root: Root) -> bool:
-        """Put the root's tree back to its last restore point, if it has one.
+    def _restore_point(self, root: Root) -> tuple[Workspace | None, str]:
+        """The root's workspace and the tree a retry starts from — `""` when it has none.
 
         A retry against a half-mutated tree would be a different turn from the one that
         failed — the model would see edits from an attempt nobody kept, and a ladder that
         compounds its own damage is worse than no ladder. `workspace/checkpoint` is
         P4-09's record and already a fold, so this asks the log rather than remembering.
-
-        Best-effort by construction: an advisory-tier root has nothing to restore, and a
-        failed restore must not cost the retry. Either way the attempt goes ahead against
-        the tree as it stands, and `agent/retry` says `restored: false` so the transcript
-        does not imply a rollback that did not happen.
+        An advisory-tier root has nothing to restore, which is the ordinary answer.
         """
         # `workspace_of`, not `ctx.workspace.of`: this runs inside `_drive`'s
         # `except`, and `ctx.workspace` *raises* on a profile that layers no
@@ -2023,13 +2039,20 @@ class Supervisor:
         # the one spelling of this question the rest of the tree uses.
         workspace = workspace_of(root.ctx, root.agent)
         if workspace is None:
-            return False
-        tree = latest_checkpoint(root.session, root.agent.id)
-        if not tree:
-            return False
+            return None, ""
+        return workspace, latest_checkpoint(root.session, root.agent.id)
+
+    async def _restore(self, root: Root, workspace: Workspace, tree: str) -> bool:
+        """Put the root's tree back to `tree`, answering whether it worked.
+
+        Best-effort by construction: a failed restore must not cost the retry. The
+        attempt goes ahead against the tree as it stands, and the caller records
+        `supervisor/unrestored` so the transcript does not imply a rollback that did
+        not happen.
+        """
         try:
-            # Through the seam, which is safe here for the reason the lookup above
-            # is *not*: `workspace_of` already answered, so the row is mounted.
+            # Through the seam, which is safe here for the reason `_restore_point`'s
+            # lookup is *not*: it found a workspace, so the row is mounted.
             await root.ctx.require(WORKSPACE).restore(workspace, tree)
         except Exception:
             log.warning(

@@ -65,7 +65,7 @@ from ..cordis import (
 from ..json import JsonValue, as_str
 from ..keys import AGENTS, SANDBOX, TUI_STATUS
 from ..paths import canonical, is_under
-from ..session import Session
+from ..session import Session, SessionBatch
 from ..session.writers import log_writer
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel, literal_lookup
@@ -692,8 +692,9 @@ class SandboxSeam:
         """The posture `agent`'s session runs in — the deployment's without one."""
         return self.resolve_mode(self._session_of(agent))
 
-    def set_mode(self, session: Session, mode: SandboxMode) -> None:
-        _LOG.append(session, "sandbox/mode", {"mode": mode})
+    def set_mode(self, log: Session | SessionBatch, mode: SandboxMode) -> None:
+        """Record a posture change — into a batch, where it is one of several (S14)."""
+        _LOG.append(log, "sandbox/mode", {"mode": mode})
 
     def mode_reading(self, session: Session) -> StatusReading:
         """`sandbox workspace-write` — what a confined command may write.

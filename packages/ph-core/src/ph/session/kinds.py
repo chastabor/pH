@@ -1,9 +1,12 @@
 """ph-core's intent kinds: every pair ph-core writes through `ctx.intents`, in one leaf (T4).
 
-Five kinds, and the pure pieces each one needs — its key functions, its closer, and the
+Every kind, and the pure pieces each one needs — its key functions, its closer, and the
 payload builders the closer and the seam's live settle both call:
 
-* `SHELL_COMMAND` — a person's `!` or `!!`: the command, then what it did;
+* `SHELL_COMMAND` — a shell command outside a tool call: a person's `!` or `!!`, or
+  an autonomous goal's gate; the command, then what it did;
+* `COMMAND_RUN` — a slash command: its line, then how it ended;
+* `UPLOAD` — a file about to leave this machine for a provider, then that it did;
 * `APPROVAL_ASK` — an approval, asked and then decided;
 * `QUESTION_ASK` — a question put to a person, and its answer;
 * `TOOL_DISPATCH` — a Code Mode sub-dispatch, started and then settled;
@@ -47,6 +50,7 @@ from .writers import log_writer
 
 __all__ = [
     "APPROVAL_ASK",
+    "COMMAND_RUN",
     "CREDENTIAL_WAIT",
     "DISPATCH_INTERRUPTED",
     "DISPATCH_NOT_DONE",
@@ -58,12 +62,15 @@ __all__ = [
     "SHELL_COMMAND",
     "TOOL_DISPATCH",
     "TOOL_EFFECT",
+    "UPLOAD",
     "AskResolution",
     "approval_decided",
+    "command_done",
     "credential_hold",
     "effect_settle",
     "hold_of",
     "question_answered",
+    "upload_settled",
 ]
 
 _LOG = log_writer(__name__)
@@ -127,9 +134,64 @@ SHELL_COMMAND = declare_intent(
         writer=_LOG,
     )
 )
-"""A person's `!` or `!!`: the command, then what it did (P10-08). Filled by
-`ph_app.shell`; declared here because repair must settle the pair on any resume
-that has ph-core, and ph-core cannot import the app."""
+"""A shell command run outside a tool call: the command, then what it did (P10-08).
+A person's `!` or `!!`, and an autonomous goal's gate (S16, `gate` on the command
+record), both through `ShellService.run_recorded`; declared here because repair must
+settle the pair on any resume that has ph-core."""
+
+
+# ------------------------------------------------------------------ command --
+
+
+def _run_seq(event: SessionEvent) -> str | None:
+    """The command a `command/done` settles — its `runSeq`, as a key."""
+    return _seq_field(event, "runSeq")
+
+
+def command_done(
+    *, name: str, run_seq: int, outcome: str, detail: str | None = None
+) -> dict[str, Any]:
+    """A `command/done` payload — the live ending's and repair's alike.
+
+    `outcome` is `ok`, `error` or `canceled`; `runSeq` names the `command/run` this
+    ends (S16), the one key two runs of one command never share.
+    """
+    data: dict[str, Any] = {"name": name, "outcome": outcome, "runSeq": run_seq}
+    if detail is not None:
+        data["detail"] = detail
+    return data
+
+
+def _command_interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """The ending of a command whose own was never written: an `error`, saying which
+    half is known — the `unsettled` marker says it again, for a reader that folds."""
+    detail = (
+        "the command's record could not be written, so it did not run"
+        if why == "not-started"
+        else "the harness stopped while this command ran; whether it finished is unknown"
+    )
+    return command_done(
+        name=as_str(opened.data.get("name")), run_seq=opened.seq, outcome="error", detail=detail
+    )
+
+
+COMMAND_RUN = declare_intent(
+    IntentKind(
+        opened="command/run",
+        settled="command/done",
+        opened_key=_seq_key,
+        settled_key=_run_seq,
+        # The body may have done anything a command does — `/revert` rewrites the
+        # tree — and repair cannot know how far it got.
+        orphan="outcome-unknown",
+        # On disk before the body runs (S16): a command's effects came before any
+        # durable record of it, and one whose record cannot be written does not run.
+        barrier="durable",
+        closer=_command_interrupted,
+        writer=_LOG,
+    )
+)
+"""A slash command: its line, then how it ended — by the command, or by repair."""
 
 
 # ----------------------------------------------------------------- approval --
@@ -420,6 +482,58 @@ TOOL_EFFECT = declare_intent(
 Keyed by tool name and effect key, for the life of the session's log."""
 
 
+# ------------------------------------------------------------------- upload --
+
+_UPLOAD_FIELDS: tuple[str, ...] = ("provider", "attachmentId", "mime", "name", "bytes")
+"""What an upload's two records share: which file, and to whom. The opening record
+carries them so its settle — the live one, or repair's — can say the same."""
+
+
+def _upload_seq(event: SessionEvent) -> str | None:
+    """The upload an `attachment/uploaded` settles — its `uploadSeq`, as a key."""
+    return _seq_field(event, "uploadSeq")
+
+
+def upload_settled(opened: SessionEvent, *, expires_at: int | None = None) -> dict[str, Any]:
+    """An `attachment/uploaded` payload — the live settle's and repair's alike.
+
+    The file and the provider copied off the opening record, and when the
+    provider said its copy stops working, if it said.
+    """
+    data: dict[str, Any] = {key: opened.data.get(key) for key in _UPLOAD_FIELDS}
+    data["uploadSeq"] = opened.seq
+    if expires_at is not None:
+        data["expiresAt"] = expires_at
+    return data
+
+
+def _upload_interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """The settle of an upload nobody saw finish: the file, the provider, and — in the
+    `unsettled` marker whoever writes this merges in — that it *may* have left."""
+    return upload_settled(opened)
+
+
+UPLOAD = declare_intent(
+    IntentKind(
+        opened="attachment/uploading",
+        settled="attachment/uploaded",
+        opened_key=_seq_key,
+        settled_key=_upload_seq,
+        # The bytes may have reached the provider: a crash mid-upload is exactly
+        # the case a person auditing where their data went needs told as "maybe".
+        orphan="outcome-unknown",
+        # On disk before the bytes leave (S9): the record of an upload came after
+        # it, so a crash between the two left the provider holding a file the log
+        # never said it was given. One the log cannot record is not uploaded.
+        barrier="durable",
+        closer=_upload_interrupted,
+        writer=_LOG,
+    )
+)
+"""A file about to leave this machine for a named provider's file API, then the fact
+that it did — or repair's "it may have" (P7-03, S9)."""
+
+
 # --------------------------------------------------------------- credential --
 
 SESSION_HOLDER = "session"
@@ -468,10 +582,12 @@ deployment cannot supply (T5) — and released when the name arrives."""
 
 KINDS: tuple[IntentKind, ...] = (
     SHELL_COMMAND,
+    COMMAND_RUN,
     APPROVAL_ASK,
     QUESTION_ASK,
     TOOL_DISPATCH,
     TOOL_EFFECT,
+    UPLOAD,
     CREDENTIAL_WAIT,
 )
 """ph-core's kinds, as this leaf declares them — what `isolated_intent_kinds` keeps."""

@@ -32,7 +32,12 @@ import pytest
 
 from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, SESSIONS, WORKSPACE
-from ph.seams.workspace import CHECKPOINT, WorkspaceRecord
+from ph.seams.workspace import (
+    CHECKPOINT,
+    ReclaimingProvider,
+    WorkspaceRecord,
+    workspace_survivors,
+)
 from ph.seams.workspace_jj import _needs_the_tree
 from ph.testing import FAKE_OPTIONS, MountProfile, not_none
 from ph.testing.git import git
@@ -1142,6 +1147,38 @@ async def test_a_provisioned_material_stays_out_of_what_an_agent_contributes(
     assert code != 0, "a provisioned material reached a ref somebody merges"
     code, _, _ = await git(ctx, base, "show", "ph/s1/child:config.env")
     assert code != 0, "the fork point carried a provisioned material into every child"
+
+
+async def test_a_crash_reclaim_keeps_a_provisioned_material_off_the_bookmark(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """S13 at this tier: the record carries what was provisioned, so reclaim's
+    snapshot leaves it untracked exactly as an orderly release does."""
+    ctx = await mount(
+        TIER_ROW,
+        {
+            "id": "workspace-lifecycle",
+            "config": {"provision": [{"source": "secret.env", "dest": "config.env"}]},
+        },
+    )
+    base = await jj_repo(ctx, tmp_path / "repo")
+    (base / "secret.env").write_text("TOKEN=shhh\n", encoding="utf-8")
+    (base / ".gitignore").write_text("secret.env\n", encoding="utf-8")
+    session = ctx.require(SESSIONS).create("s1")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write", session=session
+    )
+    (workspace.root / "real-work.txt").write_text("the agent did this\n", encoding="utf-8")
+    (record,) = workspace_survivors(session)
+    provider = ctx.require(WORKSPACE).provider
+    assert isinstance(provider, ReclaimingProvider)
+
+    assert await provider.reclaim(record) is True
+
+    code, out, _ = await git(ctx, base, "show", "ph/s1/a1:real-work.txt")
+    assert code == 0 and out == "the agent did this\n", "the crash path lost the work"
+    code, _, _ = await git(ctx, base, "show", "ph/s1/a1:config.env")
+    assert code != 0, "a crash put a provisioned material on the agent's bookmark"
 
 
 async def test_a_file_the_base_already_tracks_reaches_children_and_that_is_the_tier(

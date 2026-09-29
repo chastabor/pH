@@ -44,7 +44,7 @@ from ph.llm.types import (
 )
 from ph.seams.attachments import digest_of
 from ph.seams.credentials import CredentialService
-from ph.testing import MountProfile, as_kind, block_text
+from ph.testing import MountProfile, as_kind, block_text, live_settles
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.google import (
     MAX_TRANSFERS,
@@ -276,7 +276,9 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     assert session.events[-1].type == "turn/end"
     assert wire.referenced(wire.bodies[-1]) == [], "nothing was referenced"
     assert "inlineData" in str(wire.bodies[-1]), "the clip went inline instead"
-    assert not [one for one in session.events if one.type == "attachment/uploaded"]
+    # The failed attempt is on record as *maybe sent* (S9); what must not be
+    # there is a settled one, which would name a file nothing can use yet.
+    assert not live_settles(session, "attachment/uploaded")
 
 
 def _impatient(**config: object) -> dict[str, Any]:
@@ -326,7 +328,9 @@ async def test_a_transfer_that_ran_out_of_patience_is_resumed_not_re_sent(
 
     assert wire.uploaded == ["files/clip1"], "the second step re-sent nothing"
     assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip1"]
-    (record,) = [one for one in session.events if one.type == "attachment/uploaded"]
+    # One settled upload: the step that ran out of patience is on record as
+    # *maybe sent* (S9), and the step after it settled the transfer that happened.
+    (record,) = live_settles(session, "attachment/uploaded")
     assert record.data["mime"] == "video/mp4"
 
 

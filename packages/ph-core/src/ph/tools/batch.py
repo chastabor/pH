@@ -36,7 +36,7 @@ from ..cordis import Context
 from ..json import dumps
 from ..keys import TOOLS
 from ..llm.types import Message, ToolCallBlock, new_message_id
-from ..session import Session, SurfaceIntent
+from ..session import Session, SessionBatch, SurfaceIntent
 from ..session.writers import log_writer
 from .definition import (
     ToolExecutionInput,
@@ -280,7 +280,7 @@ async def _run_group(
 
 
 def _append_call(
-    session: Session, turn: int, step: int, block: ToolCallBlock, arguments: str
+    session: Session | SessionBatch, turn: int, step: int, block: ToolCallBlock, arguments: str
 ) -> int:
     """Log the call once the gate has decided, and return the seq its result cites.
 
@@ -306,7 +306,7 @@ def _append_call(
 
 
 def _append_result(
-    session: Session,
+    session: Session | SessionBatch,
     turn: int,
     step: int,
     block: ToolCallBlock,
@@ -357,7 +357,11 @@ def _append_skipped(
     The default is cancellation, which is what skipped a call before C13 added
     the second reason. A turn that concluded passes its own result: both mean
     "this never ran", and only one of them means somebody cancelled it.
+
+    **One batch** (S14): a torn tail that kept the call and lost its result read,
+    once repaired, as a call that may have happened — for one that never ran.
     """
-    call_seq = _append_call(session, turn, step, block, block.arguments)
     settled = aborted_result(started=False) if result is None else result
-    _append_result(session, turn, step, block, settled, call_seq)
+    with session.batch() as batch:
+        call_seq = _append_call(batch, turn, step, block, block.arguments)
+        _append_result(batch, turn, step, block, settled, call_seq)

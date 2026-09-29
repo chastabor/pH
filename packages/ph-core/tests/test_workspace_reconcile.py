@@ -32,6 +32,7 @@ from ph.session import Session
 from ph.testing import (
     MountProfile,
     log_event,
+    stored_events,
 )
 from ph.testing import (
     workspace_acquired as _acquired,
@@ -168,6 +169,26 @@ async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
     closing = [event for event in revived.events if event.type == "workspace/disposed"]
     assert closing and closing[-1].data["reconciled"] is True
     assert closing[-1].data["kept"] is False, "a tree that is gone was reported as kept"
+
+
+@pytest.mark.needs_git
+async def test_a_reconciled_close_is_on_disk_with_the_reclaim_it_records(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """S12: the reclaim is the act, and its record now reaches disk with it.
+
+    A second open after a crash here would reclaim again, find the tree gone, and
+    close the pair a second time as `kept: false` — about a branch the first
+    reclaim had just committed the work to.
+    """
+    _ctx, session, _agent, _workspace = await worktree_agent(mount, tmp_path)
+
+    reopened, revived = await _reopen(mount, tmp_path / "repo", session)
+
+    closing = [
+        one.data for one in stored_events(reopened, revived.id) if one.type == "workspace/disposed"
+    ]
+    assert [one.get("reconciled") for one in closing] == [True]
 
 
 @pytest.mark.needs_git

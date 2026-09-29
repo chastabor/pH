@@ -93,9 +93,9 @@ async def apply(ctx: Context, config: None) -> None:
         try:
             removed = await ctx.require(WORKSPACE).restore(workspace, as_str(point["tree"]))
         except FileNotFoundError as gone:
-            # The write-ahead window (A10): the event was appended before the ref
-            # that keeps the tree alive, so a crash in between leaves a restore
-            # point that names a tree git has since collected.
+            # Not a crash window any more: a restore point is pinned before it is
+            # recorded (`WorkspaceSeam.checkpoint`), so a recorded one named state
+            # that was kept alive. Gone means something removed that pin since.
             return f"restore point {raw} is no longer available: {gone}"
 
         # Not a file count. `restored 1,900 file(s)` for a cell that changed one

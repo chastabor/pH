@@ -620,13 +620,10 @@ class JjWorkspaceProvider:
         (P6-28), rather than a second rule here: two rules for one word is how a
         tree gets deleted by whichever path reached it first.
 
-        **Nothing is known to have been provisioned**, because a `WorkspaceRecord`
-        does not carry it — so on this path a material the seam put in the tree
-        counts as the agent's work and rides the bookmark. That is the git tier's
-        deliberate trade at the same point, kept rather than re-decided: the crash
-        path errs toward *keeping*, where the cost is a commit somebody can drop
-        rather than work nobody can recover. The ordinary path excludes them, which
-        is where the credential-on-a-branch case actually lives.
+        **What was provisioned comes off the record** (S13), as it does on the git
+        tier: `workspace/acquired` names it, and every command below runs with it
+        untracked, so a provisioned `.env` stays off the bookmark on the one path
+        with nobody watching.
         """
         if record.ref is None:
             return False
@@ -635,6 +632,7 @@ class JjWorkspaceProvider:
             record.root,
             record.ref,
             discard=discards_writes(record.kind) and not record.reason,
+            provisioned=record.provisioned,
         )
 
     async def _add(self, managed: Path, base: Path, name: str, path: Path) -> str:

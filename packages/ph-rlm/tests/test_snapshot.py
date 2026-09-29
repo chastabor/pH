@@ -216,6 +216,61 @@ async def test_a_spilled_variable_still_restores(mounted_runtime: MountedRuntime
     assert result.value["value"] == 20_000
 
 
+async def test_a_blob_that_is_gone_is_reported_rather_than_dropped(
+    mounted_runtime: MountedRuntime,
+) -> None:
+    """S11 — a missing blob was skipped, so it was neither restored nor failed.
+
+    And with nothing restored, no `kernel/restored` was written at all: the variable
+    was undefined after a restart with no notice. Now it is named as failed, even
+    when it was the only one.
+
+    Sabotage: skip unreadable payloads silently in `materialize` again, and nothing
+    records the loss.
+    """
+    ctx, session, agent = await mounted_runtime(
+        session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
+    )
+    await run_cell(ctx, "big = 'z' * 20_000", agent=agent, session=session, call_id="c1")
+    [record] = [record for record in _snapshots(session) if record["var"] == "big"]
+    Path(record["locator"]).unlink()
+    await ctx.require(PYTHON_RUNTIME).close_namespace(agent.id)
+
+    result = await run_cell(ctx, "'big' in dir()", agent=agent, session=session, call_id="c2")
+
+    assert result.value["value"] is False
+    restored = [event for event in session.events if event.type == "kernel/restored"]
+    assert restored, "the loss was not recorded at all"
+    assert "big" in as_seq(restored[-1].data["failed"])
+
+
+async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
+    mounted_runtime: MountedRuntime,
+) -> None:
+    """S11 — the record named a blob the store had refused.
+
+    Written after the record, a blob that failed to write left a `snap` pointing at
+    nothing. Staged first now, so the refusal is known before anything is recorded,
+    and the record says the value is gone.
+
+    Sabotage: record the `snap` whether or not the blob was staged, and the record
+    names a file that is not there.
+    """
+    ctx, session, agent = await mounted_runtime(
+        session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
+    )
+    store = type(ctx.require(SPILL_STORE))
+
+    async def refuse(_self: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+        raise OSError("the disk is full")
+
+    with patch.object(store, "reserve_bytes", refuse):
+        await run_cell(ctx, "big = 'q' * 20_000", agent=agent, session=session)
+
+    [record] = [record for record in _snapshots(session) if record["var"] == "big"]
+    assert record["kind"] == "clear" and "could not be stored" in record["reason"]
+
+
 def _kernel_locators(session: Any) -> set[str]:  # noqa: ANN401
     """The spill locators this log's `kernel/snapshot` events still name.
 

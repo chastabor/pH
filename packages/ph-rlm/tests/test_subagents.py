@@ -601,6 +601,14 @@ async def test_deleting_a_child_leaves_a_tombstone(delegating: MountedRuntime) -
     # A revoked child has a terminal state, not merely an absence — a panel that
     # knew only `deleted` could not say whether it had ever run.
     assert roster[run.id]["status"] == "canceled"
+    # And it lands with the tombstone (S14): apart, a flush between them left a
+    # child canceled and not deleted.
+    canceled = next(
+        event
+        for event in session.events
+        if event.type == STATUS and event.data.get("status") == "canceled"
+    )
+    assert canceled.batch is not None and canceled.batch == tombstones[0].batch
     # The child's log is still there — a tombstone is not a deletion.
     assert ctx.require(SESSIONS).get(run.session_id) is not None
 
@@ -1341,6 +1349,30 @@ async def test_a_settled_child_is_not_canceled_when_its_parent_goes(
     row = subagent_roster(session)[run.id]
     assert row["status"] == "done"
     assert row["deleted"] is True, "released with its parent all the same"
+
+
+async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
+    delegating: MountedRuntime, gate: _Gate, mount: MountProfile
+) -> None:
+    """S10 — the ladder counts `running{cause: resumed}`, and that rode in memory.
+
+    Nothing flushed the parent between readmitting a child and the child working, so
+    a child that took the daemon down again left its restart unrecorded on disk: a
+    crash loop never advanced the count, and the ladder never gave up.
+
+    Sabotage: drop the flush after the resumed `running` in `_drive`, and the stored
+    roster has no restart while the resumed child is at the model.
+    """
+    ctx, session, parent = await delegating()
+    interrupted = await _spawn(ctx, parent, "only")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await _persisted(ctx, session)
+
+    revived_ctx, _revived, _parent = await _restart(mount, session.id)
+    await _until(gate.twice, "the resumed child to reach the model again")
+
+    stored = roster_of(stored_events(revived_ctx, session.id))[interrupted.id]
+    assert restarts_since_progress(stored) == 1, "the restart is not on disk yet"
 
 
 def _resumed(session: Session, run_id: str, times: int) -> None:

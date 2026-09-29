@@ -289,21 +289,25 @@ class DispatchBridge:
         )
 
         async with self._limiter:
-            result = await self.tools.execute(
-                ToolExecutionInput(
-                    call_id=sub_call_id,
-                    root_call_id=self.execution.root_call_id,
-                    name=binding.name,
-                    arguments=snapshot,
-                    scope=self.execution.scope,
-                    session=self.session,
-                    agent=self.execution.agent,
-                    parent=self.execution.token,
-                    cancel=self.token,
-                ),
-                write_ahead=partial(self._log_start, ref),
-            )
-            await self._log_settle(ref, result)
+            try:
+                result = await self.tools.execute(
+                    ToolExecutionInput(
+                        call_id=sub_call_id,
+                        root_call_id=self.execution.root_call_id,
+                        name=binding.name,
+                        arguments=snapshot,
+                        scope=self.execution.scope,
+                        session=self.session,
+                        agent=self.execution.agent,
+                        parent=self.execution.token,
+                        cancel=self.token,
+                    ),
+                    write_ahead=partial(self._log_start, ref),
+                )
+                await self._log_settle(ref, result)
+            except BaseException:
+                self._abandon(ref)
+                raise
 
         failure = result.error
         # **A result that ends the turn ends the program** (D7), and it is asked
@@ -359,6 +363,19 @@ class DispatchBridge:
             TOOL_DISPATCH,
             {**ref.to_wire(), "arguments": thaw_json(prepared.run.execution.arguments)},
         )
+
+    def _abandon(self, ref: CodeDispatchRef) -> None:
+        """Settle a dispatch whose own settle will not come — a cancel, or a raise in
+        the pipeline or the log waterfall — `outcome-unknown`, as `journal.claim`
+        settles its own (S15).
+
+        Left open, the dispatch read as running in the live log, and its card with
+        it, until a restart's repair closed it. Synchronous, so it completes inside a
+        canceled scope; nothing, when the start was never recorded or is settled.
+        """
+        started = self._started.pop(ref.sub_call_id, None)
+        if started is not None and self.session is not None:
+            self._journal.abandon(self.session, started, "outcome-unknown")
 
     async def _log_settle(self, ref: CodeDispatchRef, result: ToolExecutionResult) -> None:
         async def inner(

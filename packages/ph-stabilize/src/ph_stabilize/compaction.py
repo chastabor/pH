@@ -99,6 +99,7 @@ from ph.seams.token_meter import TokenBaseline
 from ph.session import (
     EpochHeader,
     Session,
+    SessionBatch,
     SessionEvent,
     SurfaceIntent,
     derive_event_message,
@@ -109,7 +110,7 @@ from ph.session.writers import log_writer
 from ph.text import block_marker, count_of
 from ph.wire import WireModel
 
-from .offload import HISTORY_PREFIX, spill_tool_result
+from .offload import HISTORY_PREFIX, plan_tool_result_spill, spill_tool_result
 
 _LOG = log_writer(__name__)
 
@@ -1070,14 +1071,15 @@ class SummarizeEngine:
         # find it are one relocation however it was triggered. `source` becomes
         # `SpillRef.retrieval_hint` — what the model is actually told — so two
         # spellings disagree about that.
-        replacement = await spill_tool_result(
+        #
+        # **Planned, and every reason not to clip asked, before anything is
+        # written** (S14): spilled first, a clip this then declined left a blob and
+        # an `offload/spilled` record — "full text at X" in the transcript — for a
+        # result that stayed inline.
+        planned = plan_tool_result_spill(
             self.ctx, session, call_id=call_id, source=f"{call_id} result", text=text
         )
-        if replacement is None:
-            # Fail open, as everywhere else in this bundle: a clip that cannot
-            # store the content must not be the reason the model loses it.
-            return False
-        if len(replacement) >= len(text):
+        if len(planned.replacement) >= len(text):
             # Replacing a small result with a nine-hundred-character pointer
             # makes the request bigger. Upstream clips every message in an
             # over-budget batch; the batch is what must shrink, and a member
@@ -1091,17 +1093,24 @@ class SummarizeEngine:
         # Only the result block's content changes — everything else, the message
         # id included, must match: `Session._append` refuses a `tool/result`
         # replacement that touches anything but content.
-        blocks[0] = {**blocks[0], "content": [{"type": "text", "text": replacement}]}
-        _LOG.append(
-            session,
-            "tool/result",
-            payload,
-            SurfaceIntent(
-                surface_op=SurfaceReplace(replaces=(event.seq,)),
-                source_event_seqs=(event.seq,),
-            ),
-        )
-        return True
+        blocks[0] = {**blocks[0], "content": [{"type": "text", "text": planned.replacement}]}
+
+        def replace_result(batch: SessionBatch) -> None:
+            # In the spill's own batch: the accounting and the replacement it
+            # describes land together or not at all.
+            _LOG.append(
+                batch,
+                "tool/result",
+                payload,
+                SurfaceIntent(
+                    surface_op=SurfaceReplace(replaces=(event.seq,)),
+                    source_event_seqs=(event.seq,),
+                ),
+            )
+
+        # Fail open, as everywhere else in this bundle: a clip that cannot store
+        # the content must not be the reason the model loses it.
+        return await spill_tool_result(self.ctx, session, planned, beside=replace_result)
 
     def _window(self, session: Session) -> int | None:
         context = session.request_context()

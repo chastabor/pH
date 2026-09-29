@@ -63,6 +63,7 @@ from ..session import (
     derive_event_message,
     freeze_json_value,
     intents,
+    unsettled_why,
 )
 from ..session import kinds as core_kinds
 from ..session.writers import LogWriter, scaffolding_writer
@@ -87,6 +88,7 @@ __all__ = [
     "code_mode_stub",
     "external_tool",
     "isolated_intent_kinds",
+    "live_settles",
     "logged_events",
     "parked_gate",
     "plugin_payload",
@@ -745,6 +747,16 @@ def stored_events(ctx: Context, session_id: str) -> list[SessionEvent]:
 def stored_types(ctx: Context, session_id: str) -> list[str]:
     """The event types `stored_events` reads."""
     return [event.type for event in stored_events(ctx, session_id)]
+
+
+def live_settles(session: Session, event_type: str) -> list[SessionEvent]:
+    """The `event_type` records a live settle wrote — not the ones repair, or a claim
+    whose body raised, closed with an `unsettled` marker."""
+    return [
+        event
+        for event in session.events
+        if event.type == event_type and unsettled_why(event.data) is None
+    ]
 
 
 def log_interrupted_call(

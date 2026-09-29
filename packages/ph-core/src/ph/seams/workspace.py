@@ -35,6 +35,7 @@ Invariants this seam holds:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -46,10 +47,10 @@ from pydantic import Field
 
 from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, running, safe_yaml_load
-from ..json import JsonValue, as_str
+from ..json import JsonValue, as_seq, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
-from ..paths import canonical, default_home_path
-from ..session import Session, SessionEvent
+from ..paths import canonical, default_home_path, is_under
+from ..session import Session, SessionEvent, session_written
 from ..session.writers import log_writer
 from ..tools.definition import ToolExecution, ToolExecutionResult
 from ..tools.errors import HarnessError
@@ -354,6 +355,22 @@ is a secret that reaches a branch the day one of them changes.
 """
 
 
+def work_pathspec(provisioned: Sequence[str]) -> list[str]:
+    """A `git` pathspec selecting a tree *minus* what the seam put in it.
+
+    A function of the provisioned list alone, so a live `Workspace` and a
+    `WorkspaceRecord` read back after a crash build their pathspec one way: reclaim
+    staging with a pathspec of its own is how a provisioned `.env` rode the branch
+    on exactly the path that has no person watching (S13). The lists differ in one
+    direction — the record's is what was configured, the live one what arrived —
+    and excluding a configured path that never arrived is the safe side.
+
+    The positive `.` is required: exclusions alone match everything, which is the
+    opposite of what they read as.
+    """
+    return [".", *(f"{EXCLUDE}{entry}" for entry in provisioned)]
+
+
 @dataclass(frozen=True, slots=True)
 class Workspace:
     """One agent's working directory, and the truth about what it bounds.
@@ -425,12 +442,10 @@ class Workspace:
         The one definition of "the agent's work", for three consumers that must not
         disagree: the disposal policy (`workspace_git._dirty`), `/workspaces list`, and
         P4-09's `/revert` — whose "restore tracked + untracked-not-ignored" is exactly
-        the set that must not clobber a provisioned `node_modules`.
-
-        The positive `.` is required: exclusions alone match everything, which is the
-        opposite of what they read as.
+        the set that must not clobber a provisioned `node_modules`. Crash reclaim is
+        the fourth, through `work_pathspec` and the list `workspace/acquired` records.
         """
-        return [".", *(f"{EXCLUDE}{entry}" for entry in self.provisioned)]
+        return work_pathspec(self.provisioned)
 
 
 DeclineReason: TypeAlias = Literal[
@@ -1091,18 +1106,38 @@ class WorkspaceSeam:
         if scope is None:
             scope = self._agent_scope(agent_id)
         held = await self._track(workspace, agent_id, scope)
-        held.workspace = await self._provision(workspace, base)
-        self._log(held.workspace, agent_id, session, declined)
+        fresh = fresh_root(workspace.kind)
+        materials = self._provisioning if fresh else []
+        self._log(workspace, agent_id, session, declined, materials)
+        if session is not None and fresh:
+            # **On disk before the seam provisions into the tree** (S12), and so
+            # before the agent is handed it: the copy is thousands of syscalls, and
+            # a crash inside it used to leave a tree no record named — reconcile
+            # reads only recorded pairs, so it was never reclaimed. Best effort, as
+            # every flush a seam cannot refuse over: the tree already exists, and
+            # declining to hand it over would not un-make it. A `shared` root
+            # leaves no directory to reclaim, so its record waits for the step's
+            # own barrier.
+            await session_written(self.ctx, session)
+        held.workspace = await self._provision(workspace, base, materials)
+        if session is not None and held.workspace.provision_failures:
+            _LOG.append(
+                session,
+                "workspace/provisioned",
+                {"agentId": agent_id, "failed": list(held.workspace.provision_failures)},
+            )
         return held.workspace
 
-    async def _provision(self, workspace: Workspace, base: Path) -> Workspace:
+    async def _provision(
+        self, workspace: Workspace, base: Path, materials: Sequence[ProvisionEntry]
+    ) -> Workspace:
         """Put the configured materials in a *fresh* root (E14)."""
-        if not self._provisioning or not fresh_root(workspace.kind):
+        if not materials:
             return workspace
         # Qualified: `provision` on this class is the *registration*; the module
         # function is the work.
         report: ProvisionReport = await workspace_provision.provision(
-            self._provisioning, base=base, root=workspace.root
+            materials, base=base, root=workspace.root
         )
         if report.failed:
             log.warning(
@@ -1189,6 +1224,11 @@ class WorkspaceSeam:
                 current = held.workspace
                 kept = True if current.release is None else await current.release(current)
                 if held.session is not None:
+                    # After the act, which is idempotent: an open `acquired` is its
+                    # intent, and reconcile re-drives a release whose record never
+                    # landed. The agent's scope flushes its log as the last thing it
+                    # unwinds (`AgentRegistry.create`), which is what gets this to
+                    # disk on every path a child ends by (S12).
                     _LOG.append(held.session, DISPOSED, self._payload(current, agent_id, kept=kept))
 
             return release
@@ -1202,10 +1242,17 @@ class WorkspaceSeam:
         agent_id: str,
         session: Session | None,
         declined: DeclineReason | None,
+        materials: Sequence[ProvisionEntry],
     ) -> None:
         """Both halves of the durable pair are written by the seam: a pair only reconciles
         if one place owns both, and a provider that forgot the second would leave every
         workspace looking leaked.
+
+        **Still after the tier's own act** — `worktree add`, an overlay's init and
+        mount — which S12 leaves open. Both tiers derive the root from the session and
+        agent ids before acting, so the record *could* precede it; that needs the
+        provider to say where a tree will go before making it, which is a Protocol
+        change of its own.
         """
         if session is None:
             return
@@ -1222,13 +1269,22 @@ class WorkspaceSeam:
             # "no tier configured", which is a different fact and the one
             # `phern doctor` must not confuse it with (E15).
             data["declined"] = declined
+        if materials:
+            # On the opening half, because reclaim has nothing else to read it
+            # from: without it a crashed tree's provisioned secret is staged as
+            # the agent's work and committed to a branch somebody merges (S13).
+            # What is *about* to be provisioned, since the copy has not run yet —
+            # so a crash mid-copy still names every path it may have written, and
+            # a material that never arrived keeps its path off the branch too.
+            # A target that climbs out lexically is left off: provisioning will
+            # refuse it, and git exits 128 on the whole pathspec that names it.
+            root = workspace.root
+            data["provisioned"] = [
+                entry.target
+                for entry in materials
+                if is_under(Path(os.path.normpath(root / entry.target)), root)
+            ]
         _LOG.append(session, ACQUIRED, data)
-        if workspace.provision_failures:
-            _LOG.append(
-                session,
-                "workspace/provisioned",
-                {"agentId": agent_id, "failed": list(workspace.provision_failures)},
-            )
 
     def retain(self, agent_id: str, reason: str) -> bool:
         """Keep this agent's tree past disposal, and say why (P6-28).
@@ -1303,6 +1359,12 @@ class WorkspaceSeam:
         async with anyio.create_task_group() as group:
             for record in leaks:
                 group.start_soon(reclaim, record)
+        if leaks:
+            # The closing halves with the acts they record: no agent scope owns
+            # these, so nothing else flushes them, and a second reclaim of a tree
+            # the first removed can no longer tell what reached the branch — it
+            # says `kept: false`.
+            await session_written(self.ctx, session)
 
     def collectable(
         self,
@@ -1679,6 +1741,14 @@ class WorkspaceRecord:
     evidence it was told to keep; retained, and the pair never closes, so the tree
     is re-reported at every open forever.
     """
+    provisioned: tuple[str, ...] = ()
+    """What the seam provisions into the tree, as `workspace/acquired` recorded it.
+
+    The one piece of the live `Workspace` a reclaim cannot do without: every other
+    file in the tree is the agent's work, and these are the files that must stay
+    off its branch. Recorded before the copy runs, so it is what was *configured*
+    rather than what arrived — a superset, and the safe one to exclude.
+    """
     session_id: str = ""
     """Whose log this came from. Not derivable from `agent_id` — a cross-session reader
     (the family fold, the collector) needs to get back to the log, and inferring it
@@ -1790,6 +1860,7 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
             kind=kind,
             root=Path(as_str(data.get("root"))),
             ref=str(ref) if ref else None,
+            provisioned=tuple(filter(None, map(as_str, as_seq(data.get("provisioned"))))),
             session_id=session.id,
         )
     return [*open_records.values(), *closed]

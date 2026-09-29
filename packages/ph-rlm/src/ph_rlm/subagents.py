@@ -78,7 +78,14 @@ from ph.seams.subagents import (
     default_child_name,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
-from ph.session import Session, SessionEvent, SessionObserver, derive_event_message, session_written
+from ph.session import (
+    Session,
+    SessionBatch,
+    SessionEvent,
+    SessionObserver,
+    derive_event_message,
+    session_written,
+)
 from ph.session.writers import log_writer
 from ph.wire import WireModel
 
@@ -665,13 +672,20 @@ class RlmChildProvider:
                     _LOG.append(batch, USAGE, _attribution(run_id, seq, usage, "reconciled"))
         return len(missing)
 
-    def _status(self, child: _Child, status: SubagentStatus, **extra: Any) -> None:  # noqa: ANN401
-        # Only the event, and only from the child's own parent log. A copy on the
-        # handle would be a second source of truth for a fact the roster folds,
-        # frozen at the last in-process update.
-        _LOG.append(
-            child.parent_session, STATUS, {"runId": child.run.id, "status": status, **extra}
-        )
+    def _status(
+        self,
+        child: _Child,
+        status: SubagentStatus,
+        *,
+        into: SessionBatch | None = None,
+        **extra: Any,  # noqa: ANN401
+    ) -> None:
+        # Only the event, and only from the child's own parent log — or a batch of
+        # it, when the status has to land with another record. A copy on the handle
+        # would be a second source of truth for a fact the roster folds, frozen at
+        # the last in-process update.
+        log = child.parent_session if into is None else into
+        _LOG.append(log, STATUS, {"runId": child.run.id, "status": status, **extra})
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
@@ -691,7 +705,16 @@ class RlmChildProvider:
             # `running` either way; `cause` says *why* it is running, because the
             # roster folds status last-write-wins and a woken child that is
             # working must not read as not-running.
-            self._status(child, "running", **({"cause": cause} if cause else {}))
+            why: dict[str, Any] = {"cause": cause} if cause else {}
+            self._status(child, "running", **why)
+            if cause == "resumed":
+                # **A restart is on disk before the attempt it counts** (S10). The
+                # ladder folds these records, and a child that took the daemon down
+                # again before the parent's next flush left its restart in memory
+                # only — so a crash loop never advanced the count on disk, and
+                # `CHILD_RETRY_LIMIT` never tripped. Best effort: a parent whose log
+                # cannot be written has bigger problems than this count.
+                await session_written(self.ctx, parent_session)
             agent = child.agent
             assert agent is not None, "a child runs only after it has an agent"
             await agent.run()
@@ -967,10 +990,15 @@ class RlmChildProvider:
             self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
-        if child.result is None:
-            # A terminal state for the roster: a revoked child is not merely absent,
-            # and a panel that knew only `deleted` could not say whether it had run.
-            self._status(child, "canceled", reason=reason)
+        # The ending and the tombstone in one batch (S14), before anything awaits:
+        # apart, a flush between them left a child `canceled` and not deleted.
+        with parent_session.batch() as batch:
+            if child.result is None:
+                # A terminal state for the roster: a revoked child is not merely
+                # absent, and a panel that knew only `deleted` could not say whether
+                # it had run.
+                self._status(child, "canceled", into=batch, reason=reason)
+            _LOG.append(batch, DELETED, {"runId": run_id, "reason": reason})
         self._let_go(child)
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while
@@ -979,7 +1007,6 @@ class RlmChildProvider:
         registry = self.ctx.get(SUBAGENTS)
         if registry is not None:
             registry.forget(run_id)
-        _LOG.append(parent_session, DELETED, {"runId": run_id, "reason": reason})
         return True
 
     def suspend(self) -> None:

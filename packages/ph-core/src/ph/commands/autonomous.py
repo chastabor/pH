@@ -104,7 +104,12 @@ async def run_gates(
             notes.append(f"{gate}: still failing (unchanged since it last ran)")
             passed = False
             continue
-        result = await ctx.require(SHELL).run(gate, agent=agent)
+        # Recorded before it runs (S16), as a person's `!!` is: a gate that takes the
+        # daemon down still shows it was started, and one the log cannot hold does
+        # not run.
+        result, _settled = await ctx.require(SHELL).run_recorded(
+            gate, agent=agent, session=session, gate=state.goal.id
+        )
         ok = result.exit_code == 0
         goals.record_gate(session, state.goal.id, gate=gate, tree=tree, passed=ok)
         notes.append(f"{gate}: {'passed' if ok else 'failed'}")

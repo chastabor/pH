@@ -33,7 +33,7 @@ from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS, UPLOADS
 from ph.llm.types import FILE_EXPIRED, MediaBlock, Message, create_user_message
 from ph.seams.attachments import digest_of
-from ph.testing import MountProfile
+from ph.testing import MountProfile, live_settles
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.openai_compatible import _is_missing_file, _is_overflow
 
@@ -331,4 +331,6 @@ async def test_a_failed_upload_falls_back_to_the_bytes(
 
     assert session.events[-1].type == "turn/end", "a file API outage is not a lost turn"
     assert "file_data" in str(wire.bodies[-1]), "the document went inline"
-    assert not [one for one in session.events if one.type == "attachment/uploaded"]
+    # The failed attempt is on record as *maybe sent* (S9); what must not be
+    # there is a settled one, which would name a file id nothing can use.
+    assert not live_settles(session, "attachment/uploaded")

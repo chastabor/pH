@@ -345,6 +345,11 @@ async def test_a_run_whose_gates_pass_is_achieved_and_stops(mount: MountProfile)
     assert "goal/continued" not in types, "a passing run spent a continuation anyway"
     settled = next(e for e in session.events_from(0) if e.type == "goal/settled")
     assert settled.data["outcome"] == "achieved"
+    # The gate was recorded before it ran, as a person's `!!` is (S16).
+    command = next(e for e in session.events_from(0) if e.type == "shell/command")
+    result = next(e for e in session.events_from(0) if e.type == "shell/result")
+    assert command.data["command"] == "true" and command.data["gate"]
+    assert result.data["commandSeq"] == command.seq and result.data["ok"] is True
 
 
 @pytest.mark.anyio

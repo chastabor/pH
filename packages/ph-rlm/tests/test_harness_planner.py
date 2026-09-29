@@ -405,8 +405,15 @@ def test_a_recent_consideration_holds_the_next_one_off() -> None:
 
 async def test_a_refinement_itself_starts_the_cooldown(refining: Refining) -> None:
     """An explicit `/refine` should quiet the automatic pass exactly as a
-    declined review does — both are "we just looked at this"."""
-    ctx, session, agent = await refining()
+    declined review does — both are "we just looked at this".
+
+    The automatic pass is off so that `/refine` is the only pass: its durable
+    `command/run` is flushed before the body runs, and the thirty turns below
+    would otherwise start an automatic pass in that await — which the command
+    then correctly reports as already running. `due` is the automatic pass's own
+    question, so it still answers whether one would fire.
+    """
+    ctx, session, agent = await refining(autoRefine=False)
     script(ctx, planner=json.dumps(PROPOSAL))
     for index in range(30):
         turn(session, index)

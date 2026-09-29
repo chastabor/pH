@@ -211,17 +211,23 @@ class UserQuestionService:
         # kind's barrier does it; one that cannot be written is not asked, and
         # the journal closes it `failed`.
         #
-        # `open` and not `claim`: a question canceled while somebody is looking
-        # at it — a root passivated while parked on a person — **stays pending**,
-        # so the next resume re-poses it. `claim` would settle it on the way out,
-        # and the fold would say a released root had been answered.
+        # **`claim`, so the pair closes even when the wait does not return** (S15).
+        # A question canceled while somebody was looking at it used to stay pending
+        # on the premise that the next resume re-poses it — but nothing does across
+        # a restart (`AskDesk` re-poses only while the daemon runs, and repair
+        # settles what is left), so it sat open in the live log, read as still
+        # waiting. `claim` settles it on the way out with the kind's own closer —
+        # the record repair would have written, `outcome-unknown` and by the
+        # process — which pointedly says nobody *declined* it.
         journal = intents_of(self.ctx)
         try:
-            held = await journal.open(session, QUESTION_ASK, asked.to_wire())
+            async with journal.claim(session, QUESTION_ASK, asked.to_wire()) as held:
+                outcome = await self._deliver(asked)
+                journal.settle(
+                    session, held, self._answered_data(asked, outcome, ask_seq=held.opened.seq)
+                )
         except IntentNotDurable:
             return AskOutcome("failed")
-        outcome = await self._deliver(asked)
-        journal.settle(session, held, self._answered_data(asked, outcome, ask_seq=held.opened.seq))
         return outcome
 
     async def _deliver(self, asked: UserQuestion) -> AskOutcome:

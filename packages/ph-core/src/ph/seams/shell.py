@@ -23,14 +23,33 @@ from pathlib import Path
 from ..agent.types import AgentHandle
 from ..cancel import Cancellation
 from ..cordis import Context, plugin
+from ..json import JsonObject, JsonValue
 from ..keys import FS, SANDBOX, SHELL, SUBPROCESS
+from ..session import Session, SessionEvent, intents_of
+from ..session.kinds import SHELL_COMMAND
 from .sandbox import ConfinedArgv, SandboxPolicy
 from .subprocess import SubprocessSpawnSpec, platform_shell
 from .workspace import workspace_of, workspace_policy
 
 log = logging.getLogger("ph.seams.shell")
 
-__all__ = ["ShellResult", "ShellService", "apply"]
+__all__ = ["SHELL_OUTPUT", "ShellResult", "ShellService", "apply"]
+
+SHELL_OUTPUT = 64 * 1024
+"""How much of one stream a recorded command's `shell/result` keeps.
+
+Bounded because the log is durable and `!!find /` is one keystroke; generous
+because the reason a person runs a command is to read what it said. Applied per
+stream, and truncation is recorded on the event rather than left to be inferred
+from a suspiciously round length.
+
+**A display clip on top of a bound that already held.** `ctx.subprocess` caps
+what it *keeps* from a child (P7-13), so by the time this runs the string is
+bounded; this decides how much of it a durable log should carry, which is a much
+smaller number and a different question. Both can apply to one command, and the
+event records them apart: `dropped` is what the seam threw away, `clipped` is
+what this kept back.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +91,75 @@ class ShellResult:
     """The backend that bounded this run; `None` means nothing did."""
 
 
+def _shell_settled(command_seq: int, result: ShellResult) -> JsonObject:
+    """The `shell/result` that settles the command recorded at `command_seq`."""
+    return {
+        # The command this settles, so a fold can pair them and a front end need not
+        # assume only one is ever in flight — two attached UIs can each be running
+        # one, and the log is what tells them apart.
+        "commandSeq": command_seq,
+        "exitCode": result.exit_code,
+        "ok": result.exit_code == 0,
+        "cwd": result.cwd,
+        "confinedBy": result.confined_by,
+        "stdout": result.stdout[:SHELL_OUTPUT],
+        "stderr": result.stderr[:SHELL_OUTPUT],
+        # **Two bounds, two keys.** A fold that wants to know why a person is looking
+        # at a prefix wants to tell "the seam threw 37 MB away" from "we kept 64 KiB
+        # of what survived" — one `truncated` bool lost that. Compared on the
+        # originals, which is O(1) and *before* anything is concatenated.
+        "dropped": result.dropped,
+        "cap": result.cap,
+        "timedOut": result.timed_out,
+        "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
+    }
+
+
 @dataclass(slots=True)
 class ShellService:
     """The service published as `ctx.shell`."""
 
     ctx: Context
+
+    async def run_recorded(
+        self,
+        command: str,
+        *,
+        agent: AgentHandle,
+        session: Session,
+        surface: bool = False,
+        gate: str | None = None,
+    ) -> tuple[ShellResult, SessionEvent]:
+        """Run `command` as `SHELL_COMMAND`: recorded, run, settled. Returns what ran
+        and the settle.
+
+        **On disk before the child starts** (F9) — the kind's `durable` barrier: a
+        command that hangs, or takes the daemon down with it, still shows in the log
+        what was started, and a command whose record could not be written does not
+        run (`IntentNotDurable`). A `run` that raises is settled `outcome-unknown` by
+        `claim` rather than left open.
+
+        One recipe for the two that run a shell command outside a tool call (S16): a
+        person's `!`/`!!` (`surface` says which), and an autonomous goal's gate
+        (`gate` names the goal, so a front end can label the card). The gate ran with
+        nothing recorded first, so a crash mid-gate left no trace it had run.
+        """
+        intents = intents_of(self.ctx)
+        # `surface` on the *command* event, not the result: it is what the person
+        # asked for, it is known before the child starts, and a front end draws the
+        # card from this event. Without it `!make` and `!!make` render identically
+        # and nobody can see which one is about to put output in front of the model.
+        #
+        # Written on every command, `False` included, rather than only when true:
+        # one shape for every `shell/command` means no reader has to know that an
+        # absent key encodes the quiet half.
+        opened: dict[str, JsonValue] = {"command": command, "surface": surface}
+        if gate is not None:
+            opened["gate"] = gate
+        async with intents.claim(session, SHELL_COMMAND, opened) as held:
+            result = await self.run(command, agent=agent)
+            settled = intents.settle(session, held, _shell_settled(held.opened.seq, result))
+        return result, settled
 
     async def run(
         self,

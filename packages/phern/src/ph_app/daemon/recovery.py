@@ -48,13 +48,19 @@ __all__ = [
     "RETRY",
     "RETRY_DELAYS",
     "UNREACHABLE",
+    "UNRESTORED",
     "VIOLATED",
     "Recovery",
     "recovery_of",
 ]
 
 RETRY = "supervisor/retry"
-"""A crashed task is being run again — attempt, delay, and what was restored."""
+"""A crashed task is being run again — attempt, delay, and the restore point it
+starts from. Written before any of the attempt runs, the restore included."""
+
+UNRESTORED = "supervisor/unrestored"
+"""The restore point a `RETRY` named could not be put back, so the attempt runs
+against the tree as it stands. Only ever written after one, and only on failure."""
 
 FAILED = "supervisor/failed"
 """The ladder is spent. This root is not working, and did not stop quietly."""

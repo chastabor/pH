@@ -41,11 +41,10 @@ from collections.abc import Mapping
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import JsonObject, as_int, as_str
-from ph.keys import INTENTS, SHELL
+from ph.keys import SHELL
 from ph.llm.types import PluginSource, TextBlock, create_user_message
-from ph.seams.shell import ShellResult, ShellService
+from ph.seams.shell import SHELL_OUTPUT, ShellResult, ShellService
 from ph.session import Session, Unsettled, unsettled_why
-from ph.session.kinds import SHELL_COMMAND
 from ph.text import NO_OUTPUT, truncation_marker
 from ph.tools.builtin.bash_tool import TIMED_OUT
 
@@ -60,23 +59,6 @@ __all__ = [
     "shell_message",
     "shell_of",
 ]
-
-SHELL_OUTPUT = 64 * 1024
-"""How much of one stream the log keeps.
-
-Bounded because the log is durable and `!!find /` is one keystroke; generous
-because the reason a person runs a command is to read what it said. Applied per
-stream, and truncation is recorded on the event rather than left to be inferred
-from a suspiciously round length.
-
-**A display clip on top of a bound that already held.** `ctx.subprocess` caps
-what it *keeps* from a child (P7-13), so by the time this runs the string is
-bounded; this decides how much of it a durable log should carry, which is a much
-smaller number and a different question. Both can apply to one command, and the
-event records them apart: `dropped` is what the seam threw away, `clipped` is
-what this kept back.
-"""
-
 
 SURFACE_OUTPUT = 4 * 1024
 """How much of that a `!` puts in front of the model.
@@ -175,7 +157,8 @@ async def run_shell(
     *,
     surface: bool = False,
 ) -> ShellResult:
-    """Append, run, append. Returns what ran, for a caller that must reply.
+    """Run a person's command as a recorded pair (`ShellService.run_recorded`).
+    Returns what ran, for a caller that must reply.
 
     **`surface` is the difference between `!` and `!!`.** Both run the person's
     command in the session's workspace and log it in full; only `!` puts the
@@ -186,7 +169,7 @@ async def run_shell(
     running a command is telling the model something, not asking it to act.
 
     An `AgentDriver` rather than the handle, because the splice is composed from
-    the event *this function just appended* and so cannot disagree with it. The
+    the settle `run_recorded` hands back and so cannot disagree with it. The
     caller holds the driver too, and could do it there — at the price of
     re-deriving the rendering from `ShellResult`, which is the same second
     derivation the `cwd` paragraph below refuses for the same reason.
@@ -197,55 +180,9 @@ async def run_shell(
     to record. It is written on the result event, once the child has actually
     run somewhere.
     """
-    # `surface` on the *command* event, not the result: it is what the person
-    # asked for, it is known before the child starts, and a front end draws the
-    # card from this event. Without it `!make` and `!!make` render identically
-    # and nobody can see which one is about to put output in front of the model.
-    #
-    # Written on every command, `False` included, rather than only when true.
-    # `InboxSplice` argues the opposite for `removedCount` — but that argument is
-    # about not changing the shape of logs already written, and it does not reach
-    # here: one shape for every `shell/command` means no reader has to know that
-    # an absent key encodes the quiet half.
-    intents = agent.ctx.require(INTENTS)
-    # **On disk before the child starts** (F9) — the kind's `durable` barrier: a
-    # command that hangs, or takes the daemon down with it, still shows in the
-    # log what was started, and a command whose record could not be written
-    # does not run (`IntentNotDurable`). A `shell.run` that raises is settled
-    # `outcome-unknown` by `claim` rather than left open.
-    async with intents.claim(
-        session, SHELL_COMMAND, {"command": command, "surface": surface}
-    ) as held:
-        result = await shell.run(command, agent=agent)
-        settled = intents.settle(
-            session,
-            held,
-            {
-                # The command this settles, so a fold can pair them and a front
-                # end need not assume only one is ever in flight — two attached
-                # UIs can each be running one, and the log is what tells them
-                # apart.
-                "commandSeq": held.opened.seq,
-                "exitCode": result.exit_code,
-                "ok": result.exit_code == 0,
-                "cwd": result.cwd,
-                "confinedBy": result.confined_by,
-                "stdout": result.stdout[:SHELL_OUTPUT],
-                "stderr": result.stderr[:SHELL_OUTPUT],
-                # **Two bounds, two keys.** A fold that wants to know why a person
-                # is looking at a prefix wants to tell "the seam threw 37 MB away"
-                # from "we kept 64 KiB of what survived" — one `truncated` bool
-                # lost that. Compared on the originals, which is O(1) and *before*
-                # anything is concatenated: the first draft joined both streams in
-                # full to keep 64 KiB, which on a 50 MB output was three
-                # full-size copies and ~100 ms of memcpy inside the daemon's
-                # event loop.
-                "dropped": result.dropped,
-                "cap": result.cap,
-                "timedOut": result.timed_out,
-                "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
-            },
-        )
+    result, settled = await shell.run_recorded(
+        command, agent=agent, session=session, surface=surface
+    )
     if surface:
         agent.inject(
             create_user_message(

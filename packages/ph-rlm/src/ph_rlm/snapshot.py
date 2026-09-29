@@ -12,11 +12,13 @@ because its digest did not move. Snapshotting the namespace as one blob would
 append it again on every cell that touched anything at all, and the log would grow
 with the *size of the namespace* rather than the size of the change.
 
-**The event is appended before the blob is written.** Write-ahead ordering (§4.9):
-a death between the two yields an event whose blob is missing — which
-`kernel/restored` reports as a failed variable — rather than a blob nothing
-references, which nothing would ever find or collect. The orphan case is swept at
-session open (F7); the dangling-reference case is self-describing.
+**Staged, recorded, then published.** Write-ahead ordering (§4.9), through the spill
+store's `reserve`/`commit` pair (S11): a blob is durable, where the sweep does not
+look, before the event naming it is appended, and is renamed to where the event
+says only after. A death between the two leaves a staged blob the log names — which
+the open-time sweep publishes — or one it does not, which is one leaked file; a blob
+that could not be staged is recorded as a `clear`, and one that cannot be read on
+restore is reported by `kernel/restored` as failed. Nothing is dropped in silence.
 
 **`patch` is deliberately absent.** D17 allows a `bsdiff4` delta chain against an
 anchor *and* says to benchmark first, because `dill` output is not byte-stable
@@ -43,11 +45,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeAlias
 
+import anyio
+
 from ph.cordis import Context, plugin
 from ph.json import as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
-from ph.seams.spill import SpillClaim
+from ph.seams.spill import SpillClaim, SpillRef, SpillStore
 from ph.session import Session
 from ph.session.writers import log_writer
 from ph.wire import WireModel
@@ -174,27 +178,71 @@ class KernelSnapshotPolicy:
     # ------------------------------------------------------------- recording --
 
     async def record(self, namespace: str, run_id: int, variables: list[dict[str, Any]]) -> None:
-        """Append one `kernel/snapshot` per changed variable."""
+        """Append one `kernel/snapshot` per changed variable, and put their blobs where
+        the records say they are.
+
+        **Through the spill store's `reserve`/`commit` pair** (S11), the ordering every
+        other producer keeps: each blob is staged — durably, where the sweep does not
+        look — then the records are appended, **one batch for the cell**, then the
+        blobs are published. Written after the records instead, a blob the store could
+        not take was a `snap` naming nothing, dropped in silence on the next restore;
+        now one that cannot be staged is recorded as a `clear` saying so, which is
+        what a restore tells the model.
+
+        In the log, not yet on disk: the next request's barrier puts the records on
+        disk before the model reads the cell's result, and a blob is durable before
+        any record naming it is. The blobs are staged, and later published,
+        concurrently: each is a thread hop and an `fsync` or two, and the guest's
+        `done` waits on all of them.
+        """
         session = self._session(namespace)
         if session is None:
             return
-        for raw in variables:
-            encoded = self._encode(session, namespace, raw)
-            if encoded is None:
-                continue
-            record, payload = encoded
-            _LOG.append(
-                session,
-                "kernel/snapshot",
-                {"namespace": namespace, "run": run_id, "record": record.to_wire()},
+        encoded = [
+            one for raw in variables if (one := self._encode(session, namespace, raw)) is not None
+        ]
+        if not encoded:
+            return
+        spill = self.ctx.get(SPILL_STORE)
+        refs: dict[int, SpillRef | None] = {}
+
+        async def stage(store: SpillStore, index: int, var: str, payload: bytes) -> None:
+            refs[index] = await store.try_reserve_bytes(
+                owner=_owner(namespace),
+                source=f"kernel variable {var}",
+                suggested_name=f"{var}.dill",
+                content=payload,
             )
-            if record.locator is not None and payload is not None:
-                await self._write_blob(namespace, record, payload)
+
+        async with anyio.create_task_group() as group:
+            for index, (record, payload) in enumerate(encoded):
+                # A payload comes back only when a store is mounted to take it.
+                if spill is not None and payload is not None:
+                    group.start_soon(stage, spill, index, record.var, payload)
+        with session.batch() as batch:
+            for index, (record, _payload) in enumerate(encoded):
+                if index in refs and refs[index] is None:
+                    record = SnapshotRecord(
+                        kind="clear",
+                        var=record.var,
+                        reason="too-large (the blob could not be stored)",
+                    )
+                _LOG.append(
+                    batch,
+                    "kernel/snapshot",
+                    {"namespace": namespace, "run": run_id, "record": record.to_wire()},
+                )
+        if spill is not None:
+            async with anyio.create_task_group() as group:
+                for ref in refs.values():
+                    if ref is not None:
+                        group.start_soon(spill.commit, ref)
 
     def _encode(
         self, session: Session, namespace: str, raw: dict[str, Any]
     ) -> tuple[SnapshotRecord, bytes | None] | None:
-        """The record to append, and the payload to write after appending it.
+        """The record to append, and the blob to stage for it — `None` for an inline
+        record or a `clear`, which have nothing for the store.
 
         The payload is decoded **once** and handed on: base64-decoding it for the
         tag, again to write the blob, and hashing it a third time to derive the path
@@ -245,37 +293,31 @@ class KernelSnapshotPolicy:
         )
         return spilled, payload
 
-    async def _write_blob(self, namespace: str, record: SnapshotRecord, payload: bytes) -> None:
-        spill = self.ctx.get(SPILL_STORE)
-        if spill is None:
-            return
-        try:
-            await spill.save_bytes(
-                owner=_owner(namespace),
-                source=f"kernel variable {record.var}",
-                suggested_name=f"{record.var}.dill",
-                content=payload,
-            )
-        except OSError:
-            # The event is already durable and names a blob that is not there;
-            # `kernel/restored` will report the variable as failed, which is the
-            # recoverable half of the ordering choice.
-            log.warning("ph_rlm.snapshot: could not write the blob for %s", record.var)
-
     # ------------------------------------------------------------ restoring --
 
-    async def materialize(self, namespace: str) -> list[dict[str, Any]]:
-        """The payloads to hand a freshly started kernel."""
+    async def materialize(self, namespace: str) -> tuple[list[dict[str, Any]], list[str]]:
+        """The payloads to hand a freshly started kernel, and the names whose payload
+        could not be read.
+
+        **The second half is the one that was missing** (S11). A blob that was gone,
+        torn, or not this session's was skipped, so it appeared nowhere — not
+        restored and not failed — and when every variable dropped, nothing at all
+        was recorded: `df` was undefined after a restart, with no notice. Now each
+        is named, so `kernel/restored` reports it as failed.
+        """
         session = self._session(namespace)
         if session is None:
-            return []
+            return [], []
         variables: list[dict[str, Any]] = []
+        unreadable: list[str] = []
         for record in fold_namespace(session, namespace).values():
             payload = await self._payload(session, record)
             if payload is None:
+                if record.kind == "snap":
+                    unreadable.append(record.var)
                 continue
             variables.append({"var": record.var, "blob": base64.b64encode(payload).decode("ascii")})
-        return variables
+        return variables, unreadable
 
     async def _payload(self, session: Session, record: SnapshotRecord) -> bytes | None:
         if record.blob is not None:

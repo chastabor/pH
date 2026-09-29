@@ -120,6 +120,11 @@ async def test_reading_a_skill_turns_its_steps_into_work(
 
     todos = todos_of(session)
     assert steps_of(todos) == ["survey the callers", "port the row", "gate it"]
+    # The list and the budget that governs it land together (S14).
+    seeded = session.latest("todo/write")
+    budget = session.latest("skill-steps/budget")
+    assert seeded is not None and budget is not None
+    assert seeded.batch is not None and seeded.batch == budget.batch
     assert [one["requires"] for one in todos] == [[], ["survey the callers"], ["port the row"]]
     assert startable(todos) == ["survey the callers"], "one at a time, in the declared order"
 

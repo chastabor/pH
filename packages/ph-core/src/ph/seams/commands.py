@@ -29,14 +29,11 @@ from ..cordis import (
     running,
     settled_or_none,
 )
-from ..json import JsonValue
 from ..keys import COMMANDS
-from ..session import Session
-from ..session.writers import log_writer
+from ..session import Claim, IntentNotDurable, Session, intents_of
+from ..session.kinds import COMMAND_RUN, command_done
 from ..wire import WireModel, declarable
 from ._registry import claim_key
-
-_LOG = log_writer(__name__)
 
 __all__ = [
     "CommandBody",
@@ -218,8 +215,20 @@ class CommandRegistry:
         if entry is None:
             raise KeyError(f'unknown command "/{name}"')
         definition = entry.definition
+        journal = intents_of(self.ctx)
+        held: Claim | None = None
         if session is not None:
-            _LOG.append(session, "command/run", {"name": name, "argument": argument.strip()})
+            # **On disk before the body runs** (S16) — `COMMAND_RUN`'s barrier. A
+            # command's effects used to come before any durable record of it:
+            # `/revert` rewrote the tree while `command/run` sat in memory, and a
+            # crash mid-body left an unpaired record nothing ever closed. One whose
+            # record cannot be written does not run.
+            try:
+                held = await journal.open(
+                    session, COMMAND_RUN, {"name": name, "argument": argument.strip()}
+                )
+            except IntentNotDurable:
+                return f"refusing: /{name} was not run, because the log could not record it"
         outcome = "ok"
         detail: str | None = None
         try:
@@ -285,11 +294,14 @@ class CommandRegistry:
             detail = str(error) or type(error).__name__
             raise
         finally:
-            if session is not None:
-                data: dict[str, JsonValue] = {"name": name, "outcome": outcome}
-                if detail is not None:
-                    data["detail"] = detail
-                _LOG.append(session, "command/done", data)
+            if session is not None and held is not None:
+                journal.settle(
+                    session,
+                    held,
+                    command_done(
+                        name=name, run_seq=held.opened.seq, outcome=outcome, detail=detail
+                    ),
+                )
 
 
 @plugin("commands", affects="environment")

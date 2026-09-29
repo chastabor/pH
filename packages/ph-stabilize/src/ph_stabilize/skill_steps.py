@@ -273,14 +273,17 @@ async def apply(ctx: Context, config: Config) -> None:
         # The same event the tool writes, because it means one thing — "the list
         # is now this" — and a second type would give `todos_of` two things to
         # fold and the sidebar two things to draw.
-        _LOG.append(session, "todo/write", {"todos": grown})
-        # Recorded even when `null`: that is what hands a later procedure back
-        # to the profile's budget rather than the previous skill's.
-        _LOG.append(
-            session,
-            BUDGET,
-            {"skill": payload["skill"].name, "maxNudges": payload.get("max_nudges")},
-        )
+        # The budget is recorded even when `null`: that is what hands a later
+        # procedure back to the profile's budget rather than the previous
+        # skill's. One batch with the list it governs (S14), so a torn tail
+        # cannot seed the steps under the last skill's budget.
+        with session.batch() as batch:
+            _LOG.append(batch, "todo/write", {"todos": grown})
+            _LOG.append(
+                batch,
+                BUDGET,
+                {"skill": payload["skill"].name, "maxNudges": payload.get("max_nudges")},
+            )
 
     async def keep_going(agent: AgentDriver, turn: int) -> None:
         session = agent.session

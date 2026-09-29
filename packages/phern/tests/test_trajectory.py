@@ -165,6 +165,9 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "skill-steps/budget",
         # P1: a retried call is accounting to a reader, evidence to an auditor.
         "step/retry",
+        # S9: bytes about to leave for a provider. The transcript draws the
+        # upload once it settles; the auditor wants the moment it was attempted.
+        "attachment/uploading",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {

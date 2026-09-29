@@ -130,13 +130,15 @@ class PermissionPresetService:
         preset = PRESETS[name]
         self.active = name
         if session is not None:
-            _LOG.append(session, "permission/preset", {"preset": name})
-            sandbox = self.ctx.get(SANDBOX)
-            if sandbox is not None:
-                sandbox.set_mode(session, preset.sandbox_mode)
-            approval = self.ctx.get(APPROVAL)
-            if approval is not None:
-                approval.set_policy(session, preset.approval_policy)
+            sandbox, approval = self.ctx.get(SANDBOX), self.ctx.get(APPROVAL)
+            # **One posture, one batch** (S14): a torn tail that kept the preset
+            # and lost its sandbox mode read as one preset and ran as another.
+            with session.batch() as batch:
+                _LOG.append(batch, "permission/preset", {"preset": name})
+                if sandbox is not None:
+                    sandbox.set_mode(batch, preset.sandbox_mode)
+                if approval is not None:
+                    approval.set_policy(batch, preset.approval_policy)
         return preset
 
     def schemas(self, session: Session | None = None) -> tuple[PresetSchema, ...]:

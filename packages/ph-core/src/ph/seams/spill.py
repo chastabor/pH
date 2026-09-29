@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -222,25 +222,36 @@ class SpillStore:
             content=content.encode("utf-8"),
         )
 
+    async def try_reserve_bytes(
+        self, *, owner: str, source: str, suggested_name: str, content: bytes
+    ) -> SpillRef | None:
+        """`reserve_bytes`, or `None` when the store could not take it.
+
+        The fail-open spelling: a producer that cannot store a blob must not be the
+        reason the model loses what it held — an offload keeps the text inline, a
+        kernel snapshot records a `clear`. Because the write happens here rather than
+        at `commit`, that fallback is still available: the caller has logged nothing.
+        """
+        return await _fail_open(
+            self.reserve_bytes(
+                owner=owner, source=source, suggested_name=suggested_name, content=content
+            ),
+            owner=owner,
+            name=suggested_name,
+        )
+
     async def try_reserve_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef | None:
-        """`reserve_text`, or `None` when the store could not take it.
-
-        The fail-open spelling, for `try_save_text`'s reason and audience: an
-        offload that cannot store the text must not be the reason the model loses
-        it. Because the write happens here rather than at `commit`, that fallback
-        is still available — the caller has logged nothing yet.
-        """
-        try:
-            return await self.reserve_text(
+        """`try_reserve_bytes`, as UTF-8 — a text that cannot be encoded is one the
+        store could not take, too."""
+        return await _fail_open(
+            self.reserve_text(
                 owner=owner, source=source, suggested_name=suggested_name, content=content
-            )
-        except Exception:
-            log.warning(
-                "ph.seams.spill: could not spill %s for %s", suggested_name, owner, exc_info=True
-            )
-            return None
+            ),
+            owner=owner,
+            name=suggested_name,
+        )
 
     async def commit(self, ref: SpillRef) -> bool:
         """Publish a reserved blob at its locator. Call it *after* the append.
@@ -249,8 +260,7 @@ class SpillStore:
         and never appears unreferenced — and a durable one (`replace_durably`),
         since the log naming the locator is `fsync`ed at the next barrier and the
         rename must not be the half a power cut loses (S6). `False` rather than a
-        raise for the same reason `_write_blob` in `ph_rlm.snapshot` accepts this
-        shape: by now the log names the locator, so the recoverable answer is a
+        raise: by now the log names the locator, so the recoverable answer is a
         reader reporting a blob it cannot find, not a turn that fails after the fact.
         """
         staged = self._staging_for(ref.locator)
@@ -435,6 +445,15 @@ def _remove_unreferenced(files: Iterable[Path], referenced: set[str]) -> list[st
             path.unlink(missing_ok=True)
             gone.append(str(path))
     return gone
+
+
+async def _fail_open(reserving: Awaitable[SpillRef], *, owner: str, name: str) -> SpillRef | None:
+    """`reserving`'s ref, or `None` having said why — the `try_reserve_*` rule, once."""
+    try:
+        return await reserving
+    except Exception:
+        log.warning("ph.seams.spill: could not spill %s for %s", name, owner, exc_info=True)
+        return None
 
 
 def _write(path: Path, payload: bytes) -> None:

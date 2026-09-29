@@ -84,6 +84,10 @@ async def test_one_character_over_is_offloaded(mount: MountProfile) -> None:
 
     (spilled,) = [e for e in session.events if e.type == "offload/input-spilled"]
     assert Path(str(spilled.data["locator"])).is_file()
+    # The accounting and the replacement it describes, in one batch (S14).
+    preview = session.events[spilled.seq + 1]
+    assert preview.type == "user/message" and preview.surface_op is not None
+    assert spilled.batch is not None and preview.batch == spilled.batch
 
 
 # ---------------------------------------------------- the split, which is (c) --

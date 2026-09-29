@@ -849,6 +849,31 @@ async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: Mou
         assert body not in _derived_text(session)
 
 
+async def test_a_result_the_clip_would_grow_is_not_spilled(mount: MountProfile) -> None:
+    """S14 — `_clip_one` spilled, recorded and published before it decided.
+
+    A result shorter than its pointer is left inline, and it used to be left inline
+    *after* its blob was written and an `offload/spilled` record appended — "full
+    text at X" in the transcript for text that never moved. Decided first now, so a
+    declined clip leaves nothing behind; and a clip that does happen lands its
+    accounting and its replacement in one batch.
+
+    Sabotage: spill before the length check again, and the short result has a record.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = _tool_batch_session("clip-short", 30_000, 40)
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+
+    clipped = await _engine(ctx).clip_overflow_tail(agent)
+
+    assert len(clipped) == 1
+    (spilled,) = _events(session, "offload/spilled")
+    assert spilled.data["callId"] == "c0", "the short result was spilled and left inline"
+    replaced = session.events[spilled.seq + 1]
+    assert replaced.type == "tool/result" and replaced.batch == spilled.batch
+    assert spilled.batch is not None
+
+
 async def test_the_clip_changes_only_the_result_content(mount: MountProfile) -> None:
     """`Session.append` refuses a `tool/result` replacement that touches anything
     but content, so this is really a test that the payload is rebuilt from the

@@ -137,6 +137,35 @@ async def test_three_binding_calls_produce_three_durable_dispatch_pairs(
     assert all(e.data["parentCallId"] == "root-1" for e in settles)
 
 
+async def test_a_dispatch_whose_settle_raises_is_closed_rather_than_left_running(
+    mount: MountProfile,
+) -> None:
+    """S15 — nothing wrapped the dispatch's run and its settle.
+
+    A cancel, or a `tools/code-dispatch-log` listener that raised, unwound past the
+    settle, and the dispatch read as running in the live log — its card with it —
+    until a restart's repair closed it. Closed on the way out now, `outcome-unknown`,
+    as `journal.claim` closes its own.
+
+    Sabotage: drop the `except BaseException` around `execute` and `_log_settle`, and
+    the start has no settle.
+    """
+    ctx = await _code_ctx(mount)
+    ctx.require(TOOLS).register(_recorder("touch", []))
+
+    ctx.on("tools/code-dispatch-log", raising(RuntimeError("the log listener fell over")))
+
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
+        await ns["tools"].touch(n=1)
+        return "done"
+
+    _result, session = await _run(ctx, "broken-log", program)
+    (start,) = [e for e in session.events if e.type == "tool/code-dispatch-start"]
+    (settle,) = [e for e in session.events if e.type == "tool/code-dispatch"]
+    assert settle.data["subCallId"] == start.data["subCallId"]
+    assert unsettled_why(settle.data) == "outcome-unknown"
+
+
 async def test_dispatch_records_stay_out_of_model_context(mount: MountProfile) -> None:
     ctx = await _code_ctx(mount)
     ctx.require(TOOLS).register(_recorder("touch", []))

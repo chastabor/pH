@@ -1431,6 +1431,10 @@ class SubagentService:
                 status="queued" if resumable else "error",
                 session_id=row.get("sessionId"),
             )
+        # The sweep's decisions reach disk before any child is driven again (S10): a
+        # child failed for a spent ladder must not read as still `running` to the
+        # next start, which would weigh it all over again.
+        await session_written(self.ctx, session)
         return await self._readmit_children(parent, roster, retry_limit=retry_limit)
 
     async def _reconcile_answers(self, session: Session, roster: Mapping[str, Any]) -> int:

@@ -70,17 +70,16 @@ from typing import Protocol
 import anyio
 
 from ..cordis import Context, Disposer, Running, plugin, running
+from ..json import JsonValue
 from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
 from ..paths import resolve_roots, write_atomic
-from ..session import Session, now_ms, session_written
-from ..session.writers import log_writer
+from ..session import IntentNotDurable, Session, intents_of, now_ms, session_written
+from ..session.kinds import UPLOAD, upload_settled
 from ..wire import WireModel
 from ._registry import claim_key
 
-_LOG = log_writer(__name__)
-
-__all__ = ["FileHandle", "UploadRegistry", "Uploader", "apply", "record_uploaded"]
+__all__ = ["FileHandle", "UploadRegistry", "Uploader", "apply"]
 
 log = logging.getLogger("ph.seams.uploads")
 
@@ -122,25 +121,20 @@ class _Registered:
     by: Running
 
 
-def record_uploaded(session: Session, handle: FileHandle, ref: AttachmentRef) -> None:
-    """Append the fact that bytes left this machine.
+def _uploading(provider: str, ref: AttachmentRef) -> dict[str, JsonValue]:
+    """The `attachment/uploading` record: which file is about to go, and to whom.
 
-    The half of this row that *is* the log's business: not the handle, which
-    expires, but that a named provider was given this file. A person auditing
-    where their data went reads this; nothing reads it back to find a handle.
+    Not the handle, which expires, but that a named provider is being given this
+    file — the half of this row that *is* the log's business. A person auditing
+    where their data went reads the pair; nothing reads it back to find a handle.
     """
-    _LOG.append(
-        session,
-        "attachment/uploaded",
-        {
-            "provider": handle.provider,
-            "attachmentId": ref.attachment_id,
-            "mime": ref.mime,
-            "name": ref.name,
-            "bytes": ref.bytes,
-            "expiresAt": handle.expires_at,
-        },
-    )
+    return {
+        "provider": provider,
+        "attachmentId": ref.attachment_id,
+        "mime": ref.mime,
+        "name": ref.name,
+        "bytes": ref.bytes,
+    }
 
 
 class Config(WireModel):
@@ -266,21 +260,51 @@ class UploadRegistry:
         if entry is None or store is None:
             return None
         content = await store.load_bytes(ref)
-        with running(entry.by):
-            handle = await entry.uploader.upload(ref, content)
         session = self._session(session_id)
-        if session is not None:
-            record_uploaded(session, handle, ref)
-            # **The record is durable before the cache is** (F10). The cache is
-            # what makes every later request skip this branch, so caching first
-            # meant a crash before the next barrier kept the handle and lost the
-            # fact — for good, since nothing ever uploads, or records, that file
-            # for that provider again. Not cached when the record cannot be
-            # written: the next request uploads again and records again, which is
-            # the direction a person auditing their data needs this to fail in.
-            if not await session_written(self.ctx, session):
-                return handle
+        if session is None:
+            with running(entry.by):
+                handle = await entry.uploader.upload(ref, content)
+        else:
+            recorded = await self._recorded(session, provider, entry, ref, content)
+            # **The settle is durable before the cache is** (F10). The cache is what
+            # makes every later request skip this branch, so caching first meant a
+            # crash before the next barrier kept the handle and lost the fact — for
+            # good, since nothing ever uploads, or records, that file for that
+            # provider again. Not cached when the record cannot be written: the next
+            # request uploads again and records again, which is the direction a
+            # person auditing their data needs this to fail in.
+            if recorded is None or not await session_written(self.ctx, session):
+                return recorded
+            handle = recorded
         await self._store(handle)
+        return handle
+
+    async def _recorded(
+        self,
+        session: Session,
+        provider: str,
+        entry: _Registered,
+        ref: AttachmentRef,
+        content: bytes,
+    ) -> FileHandle | None:
+        """Upload under `UPLOAD`: **on disk before the bytes leave** (S9).
+
+        The record used to follow the upload, so a crash between the two left the
+        provider holding a file this log never said it was given. `claim` settles an
+        upload that raised `outcome-unknown`: the bytes may have gone. One the log
+        cannot record is not uploaded — `None`, and the caller sends the bytes inline,
+        in the request its own barrier has recorded.
+        """
+        journal = intents_of(self.ctx)
+        try:
+            async with journal.claim(session, UPLOAD, _uploading(provider, ref)) as held:
+                with running(entry.by):
+                    handle = await entry.uploader.upload(ref, content)
+                journal.settle(
+                    session, held, upload_settled(held.opened, expires_at=handle.expires_at)
+                )
+        except IntentNotDurable:
+            return None
         return handle
 
     def _session(self, session_id: str | None) -> Session | None:

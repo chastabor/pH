@@ -521,12 +521,20 @@ class TuiEventAdapter:
         cannot tell whether the agent is about to read what they just ran.
         """
         command = as_str(event.data.get("command"))
+        # An autonomous goal's gate is recorded as the same pair (S16); the harness
+        # ran it, not the person, and the title says so.
+        if event.data.get("gate"):
+            title = "Gate"
+        elif as_bool(event.data.get("surface")):
+            title = "Shell → agent"
+        else:
+            title = "Shell"
         self._card_row(
             ToolCard(
                 call_id=f"shell-{event.seq}",
                 name="shell",
                 arguments="",
-                title="Shell → agent" if as_bool(event.data.get("surface")) else "Shell",
+                title=title,
                 subtitle=command,
                 card="terminal",
                 input_text=command,
@@ -681,7 +689,10 @@ class TuiEventAdapter:
         # should not be re-narrated with today's constants.
         attempt, of = event.data.get("attempt", "?"), event.data.get("of", "?")
         seconds = as_int(event.data.get("delayMs")) / 1000
-        restored = " after restoring the tree" if event.data.get("restored") else ""
+        # What the attempt starts from, said as a plan: the record is written
+        # before the restore runs, and `supervisor/unrestored` follows if it
+        # did not happen.
+        restored = " from the last restore point" if event.data.get("restoreTo") else ""
         reason = as_str(event.data.get("reason")).strip()
         detail = f": {reason}" if reason else ""
         self._row(
@@ -689,6 +700,22 @@ class TuiEventAdapter:
             "notice",
             f"This session hit a problem — retrying in {seconds:g}s{restored} "
             f"(attempt {attempt} of {of}){detail}",
+            event,
+        )
+
+    def _on_supervisor_unrestored(self, event: SessionEvent, frame: Frame) -> None:
+        """The restore point a retry named could not be put back (S12).
+
+        The correction to the row above, which promised it: without this line the
+        attempt that follows reads as starting clean when it starts from whatever
+        the crashed one left.
+        """
+        attempt = event.data.get("attempt", "?")
+        self._row(
+            "unrestored",
+            "notice",
+            f"The tree could not be restored for attempt {attempt}; "
+            "it runs against the tree as the crash left it",
             event,
         )
 
@@ -987,12 +1014,14 @@ class TuiEventAdapter:
         expires, and it would read as something to keep.
         """
         name = as_str(event.data.get("name") or event.data.get("attachmentId"), "?")
-        self._row(
-            "attachment",
-            "notice",
-            f"Uploaded to {event.data.get('provider')}: {name}.",
-            event,
+        # Settled by repair (S9): the harness stopped mid-upload, so the provider
+        # may or may not hold the file — and a person auditing it is owed "maybe".
+        said = (
+            f"An upload to {event.data.get('provider')} was interrupted: {name} may have been sent."
+            if unsettled_why(event.data) is not None
+            else f"Uploaded to {event.data.get('provider')}: {name}."
         )
+        self._row("attachment", "notice", said, event)
 
     def _on_compaction_declined(self, event: SessionEvent, frame: Frame) -> None:
         """An automatic compaction that changed nothing, and why (P4-03).
@@ -1189,6 +1218,7 @@ RULES: Mapping[str, EventRule] = {
     "credential/needed": EventRule(TuiEventAdapter._on_credential_needed),
     "credential/supplied": EventRule(TuiEventAdapter._on_credential_supplied),
     "supervisor/retry": EventRule(TuiEventAdapter._on_supervisor_retry),
+    "supervisor/unrestored": EventRule(TuiEventAdapter._on_supervisor_unrestored),
     "supervisor/failed": EventRule(TuiEventAdapter._on_supervisor_failed),
     "supervisor/recovered": EventRule(TuiEventAdapter._on_supervisor_recovered),
     "supervisor/passivated": EventRule(TuiEventAdapter._on_supervisor_passivated),
@@ -1288,6 +1318,9 @@ RECORDLESS: frozenset[str] = frozenset(
         # conversation.
         "client/command",
         "client/command-settled",
+        # An upload about to happen (S9). Its settle, `attachment/uploaded`, is the
+        # row a person reads — including repair's "it may have been sent".
+        "attachment/uploading",
         # A keyed call's effect record (P10-12). The call and its result render as
         # the tool card; that it was deduplicated rides on the result's meta.
         "tool/effect",

@@ -38,9 +38,10 @@ from ph.agent.types import RequestProposal
 from ph.cordis import Context, Next, plugin
 from ph.keys import SPILL_STORE
 from ph.llm.types import LlmCallConfig, PluginSource, UserSource, create_user_message, text_of
-from ph.seams.spill import SpillClaim
+from ph.seams.spill import SpillClaim, SpillRef
 from ph.session import (
     Session,
+    SessionBatch,
     SessionEvent,
     SurfaceIntent,
     derive_event_message,
@@ -163,17 +164,6 @@ async def apply(ctx: Context, config: Config) -> None:
             # the content must not be the reason the model loses it. The seam
             # logs why.
             return await next_(proposal)
-        # Appended before the blob appears at `ref.locator`, which is the
-        # ordering the open-time sweep depends on: a file on disk that the log
-        # does not name is garbage by definition, so writing first left this
-        # blob indistinguishable from garbage for as long as it took to get
-        # here — and the sweep runs on another task.
-        _LOG.append(
-            session,
-            "offload/input-spilled",
-            {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
-        )
-        await store.commit(ref)
         preview = spill_wording(
             ctx,
             proposal.agent.ctx,
@@ -181,27 +171,20 @@ async def apply(ctx: Context, config: Config) -> None:
             file_path=ref.locator,
             content_sample=content_preview(text),
         )
-        _LOG.append(
-            session,
-            "user/message",
-            create_user_message(
-                content=[{"type": "text", "text": preview}],
-                # A plugin's notice, not the person's words. Attributing the
-                # preview to `user` would be the same lie one layer down from
-                # the one this design rejected — and `PluginSource` is the
-                # repo's idiom for injected context, so the transcript already
-                # renders it as such.
-                source=PluginSource(
-                    plugin="input-offload",
-                    form="notice",
-                    summary=f"{count_of(ref.bytes, 'byte')} offloaded to {Path(ref.locator).name}",
-                ),
-            ).to_wire(),
-            SurfaceIntent(
-                surface_op=SurfaceReplace(replaces=(event.seq,)),
-                source_event_seqs=(event.seq,),
-            ),
-        )
+        # **The accounting and the replacement it describes, in one batch**
+        # (S14), and both before the blob appears at `ref.locator` — the ordering
+        # the open-time sweep depends on: a file on disk that the log does not
+        # name is garbage by definition, and the sweep runs on another task.
+        # Apart, a flush between them landed the record with no replacement, and
+        # a resumed session never offloaded the paste again.
+        with session.batch() as batch:
+            _LOG.append(
+                batch,
+                "offload/input-spilled",
+                {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
+            )
+            _append_preview(batch, event, ref, preview)
+        await store.commit(ref)
         # The config is returned untouched. `_build_request` calls
         # `derive_messages()` *after* this waterfall, so the loop picks the
         # replacement up on its own — which is what keeps one statement of the
@@ -209,3 +192,27 @@ async def apply(ctx: Context, config: Config) -> None:
         return await next_(proposal)
 
     ctx.on("agent/request", offload)
+
+
+def _append_preview(batch: SessionBatch, event: SessionEvent, ref: SpillRef, preview: str) -> None:
+    """The notice that stands in for a spilled paste, on the surface where it was."""
+    _LOG.append(
+        batch,
+        "user/message",
+        create_user_message(
+            content=[{"type": "text", "text": preview}],
+            # A plugin's notice, not the person's words. Attributing the preview
+            # to `user` would be the same lie one layer down from the one this
+            # design rejected — and `PluginSource` is the repo's idiom for
+            # injected context, so the transcript already renders it as such.
+            source=PluginSource(
+                plugin="input-offload",
+                form="notice",
+                summary=f"{count_of(ref.bytes, 'byte')} offloaded to {Path(ref.locator).name}",
+            ),
+        ).to_wire(),
+        SurfaceIntent(
+            surface_op=SurfaceReplace(replaces=(event.seq,)),
+            source_event_seqs=(event.seq,),
+        ),
+    )

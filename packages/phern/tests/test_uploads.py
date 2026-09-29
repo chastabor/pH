@@ -38,7 +38,8 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS, UPLOADS
 from ph.llm.types import FILE_EXPIRED, MediaBlock, Message, create_user_message
-from ph.testing import MountProfile, anthropic_reply, stored_types
+from ph.session import unsettled_why
+from ph.testing import MountProfile, anthropic_reply, raising, stored_types
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.anthropic import _is_missing_file, _is_overflow
 
@@ -180,8 +181,8 @@ async def test_the_upload_is_on_disk_before_its_handle_is_cached(
     between the two kept the handle and lost the fact, and every later request
     hit the cache, so nothing ever recorded that this file went to this provider.
 
-    Sabotage: move `self._store(handle)` back above `record_uploaded` and the
-    record is not on disk when the handle is.
+    Sabotage: move `self._store(handle)` above the settle's `session_written` and
+    the record is not on disk when the handle is.
     """
     ctx: Context = await mount(ROUTE, profile=PROFILE)
     session = ctx.require(SESSIONS).create("audited")
@@ -199,6 +200,56 @@ async def test_the_upload_is_on_disk_before_its_handle_is_cached(
     await agent.run()
 
     assert at_cache == [True]
+
+
+async def test_an_upload_is_on_disk_before_the_bytes_leave(
+    mount: MountProfile, wire: _FileApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S9 — the record of an upload came after it.
+
+    A crash between the provider taking the bytes and the record left the provider
+    holding a file the log never said it was given — the one fact this row exists
+    to keep. `UPLOAD` is durable: `attachment/uploading` is on disk when the
+    provider is called, and `attachment/uploaded` names it.
+
+    Sabotage: append the record after the upload again, and the provider is called
+    with nothing on disk.
+    """
+    ctx: Context = await mount(ROUTE, profile=PROFILE)
+    session = ctx.require(SESSIONS).create("write-ahead")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+    issue = wire.issue
+    on_disk: list[list[str]] = []
+
+    def watched() -> str:
+        on_disk.append(stored_types(ctx, session.id))
+        return issue()
+
+    monkeypatch.setattr(wire, "issue", watched)
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    assert on_disk and "attachment/uploading" in on_disk[0]
+    uploading = next(e for e in session.events if e.type == "attachment/uploading")
+    uploaded = next(e for e in session.events if e.type == "attachment/uploaded")
+    assert uploaded.data["uploadSeq"] == uploading.seq
+
+
+async def test_an_upload_that_raised_is_settled_as_maybe_sent(
+    mount: MountProfile, wire: _FileApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bytes may have reached the provider before the call failed, so the pair is
+    closed as "it may have": not left open, and not recorded as done."""
+    ctx: Context = await mount(ROUTE, profile=PROFILE)
+    session = ctx.require(SESSIONS).create("maybe-sent")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+
+    monkeypatch.setattr(wire, "issue", raising(RuntimeError("the connection dropped mid-upload")))
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    uploaded = next(e for e in session.events if e.type == "attachment/uploaded")
+    assert unsettled_why(uploaded.data) == "outcome-unknown"
 
 
 async def test_the_second_turn_reuses_the_handle(mount: MountProfile, wire: _FileApi) -> None:

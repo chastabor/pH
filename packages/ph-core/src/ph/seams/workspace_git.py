@@ -67,6 +67,7 @@ from .workspace import (
     measure_strays,
     redirection_env,
     sanitize_ref,
+    work_pathspec,
 )
 
 __all__ = [
@@ -462,9 +463,11 @@ class GitWorktreeProvider:
         resolves the wrong toplevel. A linked worktree knows its own common directory, so
         the tree answers the question about itself.
 
-        There is no `Workspace`, so nothing is known to have been *provisioned* and every
-        file counts as the agent's work — which errs toward committing, where the cost
-        is a commit somebody can drop rather than work nobody can recover.
+        **What was provisioned comes off the record** (S13), which is the one fact of
+        the live `Workspace` a crash would otherwise take with it. Everything else in
+        the tree counts as the agent's work and is committed, which errs toward
+        keeping; a provisioned `.env` is the exception, because the branch is
+        something somebody merges.
 
         **A retention is an exception to `discard`, exactly as it is at release**
         (P6-28), rather than a rule of its own here: two rules for one word is how a tree
@@ -486,7 +489,7 @@ class GitWorktreeProvider:
             record.root,
             record.ref,
             discard=discards_writes(record.kind) and not record.reason,
-            pathspec=(),
+            pathspec=work_pathspec(record.provisioned),
         )
 
     async def _common_root(self, tree: Path) -> Path | None:
@@ -721,14 +724,13 @@ class GitWorktreeProvider:
         here, because `/workspaces list` and `/revert` ask the same question and when
         they each built their own they disagreed about the same tree.
 
-        An **empty** pathspec is the reconciliation case (F6): a crash leaves a log record
-        and no `Workspace`, so every file counts as the agent's work. The caller states
-        that rather than the callee decoding a sentinel — and with no exclusion to refine,
-        `--untracked-files=normal` is the right mode, because the answer is a boolean and
-        `all` enumerates every file under a provisioned `node_modules` to say what one
-        `?? node_modules/` line says.
+        `--untracked-files=all` only when there is an **exclusion** to refine: `normal`
+        reports a directory as one `?? node_modules/` line, which hides an agent's file
+        inside a provisioned directory behind the entry the pathspec removes. With
+        nothing excluded the answer is a boolean either way, and `all` would enumerate
+        every file under that `node_modules` to say what one line says.
         """
-        untracked = "all" if pathspec else "normal"
+        untracked = "all" if any(one.startswith(EXCLUDE) for one in pathspec) else "normal"
         code, out, _ = await self._git(
             path,
             "status",

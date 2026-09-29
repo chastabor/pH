@@ -492,6 +492,9 @@ async def test_a_permission_preset_sets_both_knobs() -> None:
     presets.apply_preset("workspace-write", session)
     types = [event.type for event in session.events]
     assert types == ["permission/preset", "sandbox/mode", "approval/policy"]
+    # One posture, one batch (S14): a torn tail cannot keep half of it.
+    (batch,) = {event.batch for event in session.events}
+    assert batch is not None and batch.count == 3
     assert presets.resolve(session).name == "workspace-write"
 
 
@@ -994,6 +997,54 @@ async def test_a_command_dispatches_without_opening_a_turn() -> None:
     # A command is something the human did; routing it through a model turn
     # would make the log say the model decided it.
     assert not any(event_type.startswith("turn/") for event_type in types)
+
+
+async def test_a_command_is_on_disk_before_its_body_runs(mount: MountProfile) -> None:
+    """S16 — a command's effects came before any durable record of it.
+
+    `/revert` rewrote the tree while `command/run` sat in memory, and a crash
+    mid-body left an unpaired record nothing ever closed. `COMMAND_RUN` is durable:
+    the record is on disk before the body runs, and its ending names it.
+
+    Sabotage: append `command/run` directly again, and the body finds nothing on disk.
+    """
+    from ph.keys import COMMANDS, SESSIONS
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    seen: list[list[str]] = []
+
+    def body(_arg: str, _ctx: object) -> str:
+        seen.append(stored_types(ctx, "s"))
+        return "done"
+
+    ctx.require(COMMANDS).register(CommandDefinition(name="act", summary="acts", run=body))
+    assert await ctx.require(COMMANDS).dispatch("/act", session=session) == "done"
+
+    assert seen == [["command/run"]]
+    run, done = (event for event in session.events if event.type.startswith("command/"))
+    assert done.data["runSeq"] == run.seq
+
+
+async def test_a_command_the_log_cannot_record_does_not_run(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed, as a durable intent is: no record on disk, no body."""
+    from ph.keys import COMMANDS, SESSIONS
+    from ph.session import SessionStore
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    ran: list[str] = []
+    ctx.require(COMMANDS).register(
+        CommandDefinition(name="act", summary="acts", run=lambda arg, _ctx: ran.append(arg))
+    )
+    monkeypatch.setattr(SessionStore, "flush", raising(OSError("read-only file system")))
+
+    said = await ctx.require(COMMANDS).dispatch("/act now", session=session)
+
+    assert ran == [], "the body ran with no record of it on disk"
+    assert said is not None and said.startswith("refusing:")
 
 
 async def test_a_failing_command_still_records_its_outcome() -> None:

@@ -299,8 +299,9 @@ class SnapshotPolicy(Protocol):
         """Persist the changed variables of one settled run."""
         ...
 
-    async def materialize(self, namespace: str) -> list[dict[str, Any]]:
-        """The payloads a freshly started kernel should be given back."""
+    async def materialize(self, namespace: str) -> tuple[list[dict[str, Any]], list[str]]:
+        """The payloads a freshly started kernel should be given back, and the names
+        whose payload could not be read — which a restore reports as failed."""
         ...
 
     async def restored(self, namespace: str, outcome: dict[str, Any]) -> None:
@@ -605,11 +606,14 @@ class Kernel:
         """
         if self.snapshots is None or self._reset_notice:
             return
-        variables = await self.snapshots.materialize(self.namespace)
-        if not variables:
+        variables, unreadable = await self.snapshots.materialize(self.namespace)
+        if not variables and not unreadable:
             return
         outcome = await self._restore(variables)
-        await self.snapshots.restored(self.namespace, outcome)
+        # Recorded even when nothing came back (S11): a namespace whose every blob
+        # was unreadable is exactly the one the model most needs told about.
+        failed = [*outcome.get("failed", []), *unreadable]
+        await self.snapshots.restored(self.namespace, {**outcome, "failed": failed})
 
     async def _await_boot_ack(self) -> str | None:
         """Read the child's first frame. Returns a fault message, or `None`.
@@ -970,13 +974,12 @@ class Kernel:
         if not self._alive:
             return {"restored": [], "failed": [record.get("var") for record in variables]}
         if not variables:
-            # `_rehydrate` already declines an empty namespace, so this is not
-            # reachable today — but the loop below sends one frame per variable
-            # and none for none, and the guest answers a restore by *counting*
-            # frames to the one with `more` unset. A caller that ever did reach
-            # here with nothing would wait out `boot_timeout` for an answer that
-            # was never asked for, so the precondition says so where the loop
-            # relies on it rather than a call site away.
+            # Reached when every blob a namespace named was unreadable (S11):
+            # `_rehydrate` still reports those, with nothing to send. The loop
+            # below sends one frame per variable and none for none, and the guest
+            # answers a restore by *counting* frames to the one with `more` unset —
+            # so a restore of nothing would wait out `boot_timeout` for an answer
+            # that was never asked for.
             return {"restored": [], "failed": []}
         self._run_seq += 1
         active = _ActiveRun(run_id=self._run_seq, bindings={})
@@ -1029,9 +1032,9 @@ class Kernel:
             active.displays.append(dict(frame))
         elif frame["type"] == "snapshot":
             # Awaited, not spawned: the guest sends this *before* `done`, so the
-            # namespace is durable before the model is told the cell finished.
-            # The same rule as the checkpoint barriers (A4) — a side effect whose
-            # record could not be written is worse than one that did not happen.
+            # namespace is in the log — its blobs already on disk — before the
+            # cell's result is, and the next request's barrier writes both before
+            # the model reads it (S11).
             if frame["id"] == active.run_id and self.snapshots is not None:
                 await self.snapshots.record(self.namespace, frame["id"], frame["variables"])
         elif frame["type"] == "pong":

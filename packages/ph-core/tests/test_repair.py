@@ -59,10 +59,12 @@ from ph.session import (
 from ph.session import kinds as core_kinds
 from ph.session.kinds import (
     APPROVAL_ASK,
+    COMMAND_RUN,
     QUESTION_ASK,
     SHELL_COMMAND,
     TOOL_DISPATCH,
     TOOL_EFFECT,
+    UPLOAD,
     credential_hold,
 )
 from ph.session.store import SessionStore
@@ -1009,6 +1011,8 @@ def _core_samples() -> dict[IntentKind, JsonObject]:
     kind added without a sample fails here rather than escaping the gate."""
     return {
         SHELL_COMMAND: {"command": "make", "surface": False},
+        COMMAND_RUN: {"name": "revert", "argument": "12"},
+        UPLOAD: {"provider": "anthropic", "attachmentId": "a1", "mime": "image/png", "bytes": 3},
         APPROVAL_ASK: {"toolName": "edit", "callId": "c1"},
         QUESTION_ASK: {"askId": "q1", "question": "which?"},
         TOOL_DISPATCH: {

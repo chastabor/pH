@@ -47,14 +47,14 @@ caps are per stream, so one cell can still emit twice the threshold.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 
 from ph.cordis import DEPLOYMENT, Boundary, Context, Next, plugin
 from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import ContentBlock, text_of
 from ph.seams.spill import SpillClaim
-from ph.session import Session
+from ph.session import Session, SessionBatch
 from ph.session.writers import log_writer
 from ph.tools.definition import (
     Accept,
@@ -223,7 +223,21 @@ rename silently splits.
 """
 
 
-async def spill_tool_result(
+@dataclass(frozen=True, slots=True)
+class ResultSpill:
+    """One tool result's relocation, decided and not yet made: where it will go and
+    the text that stands in for it (`plan_tool_result_spill`), for `spill_tool_result`
+    to make."""
+
+    call_id: str
+    source: str
+    """Becomes `SpillRef.retrieval_hint`."""
+    text: str
+    replacement: str
+    """Names the locator the store will derive — which is why it can be built first."""
+
+
+def plan_tool_result_spill(
     ctx: Context,
     session: Session,
     *,
@@ -231,29 +245,66 @@ async def spill_tool_result(
     source: str,
     text: str,
     scope: Boundary | None = None,
-) -> str | None:
-    """Relocate one tool result and return the text that stands in for it.
+) -> ResultSpill:
+    """Where one tool result would go, and what the model would read instead.
 
-    The whole recipe in one place: where the file goes, the `offload/spilled`
-    accounting, and the wording the model reads to find it. Two rows perform this
+    **Decided before anything is written** (S14). The locator is derived rather than
+    reserved — the store's naming rule is a function of the content — so a caller can
+    refuse the spill on the replacement's own terms (the overflow clip, when the
+    pointer would be longer than the result) before the store holds a byte of it
+    and the log a record describing a relocation that did not happen.
+
+    One recipe in two halves: where the file goes and the wording the model reads
+    to find it here, the staging and the `offload/spilled` accounting in
+    `spill_tool_result`. Two rows perform this
     — this one when a result is oversized on arrival (G2), and the overflow clip
     when a retained batch has to shrink (§7.4 item 7) — and the second had
     already drifted on `source`, which becomes `SpillRef.retrieval_hint` and is
     therefore the *sentence the model is given*. One relocation described two
     ways depending on which row did it is exactly the drift this prevents.
+    """
+    locator = str(
+        ctx.require(SPILL_STORE).locator_for(
+            owner=session.id, suggested_name=_result_name(call_id), content=text.encode("utf-8")
+        )
+    )
+    replacement = spill_wording(
+        ctx,
+        scope,
+        TOO_LARGE_TOOL_MSG,
+        tool_call_id=call_id,
+        file_path=locator,
+        content_sample=content_preview(text),
+    )
+    return ResultSpill(call_id, source, text, replacement)
 
-    `None` is the fail-open path both callers need: an offload that cannot store
+
+async def spill_tool_result(
+    ctx: Context,
+    session: Session,
+    planned: ResultSpill,
+    *,
+    beside: Callable[[SessionBatch], object] | None = None,
+) -> bool:
+    """Make a planned relocation: stage the blob, record it, publish it.
+
+    `beside` appends into the batch that holds the `offload/spilled` record — the
+    overflow clip's `tool/result` replace, which is the other half of the same
+    relocation (S14): apart, a refused replace or a torn tail left an accounting
+    record describing a replacement that never landed.
+
+    `False` is the fail-open path both callers need: an offload that cannot store
     the content must not be the reason the model loses it. The seam logs why.
     """
     store = ctx.require(SPILL_STORE)
     ref = await store.try_reserve_text(
         owner=session.id,
-        source=source,
-        suggested_name=f"large_tool_results/{call_id}",
-        content=text,
+        source=planned.source,
+        suggested_name=_result_name(planned.call_id),
+        content=planned.text,
     )
     if ref is None:
-        return None
+        return False
     # Where the original went. Declared ignorable in the vocabulary (the property
     # is the type's, not this call site's) — a reader that skips it loses the
     # forwarding address, not the conversation, because the replacement the model
@@ -261,20 +312,21 @@ async def spill_tool_result(
     # Before the blob appears at `ref.locator`. See `SpillStore.reserve_bytes`:
     # a blob the log does not name is what the sweep collects, so writing first
     # raced the sweep over this row's own output.
-    _LOG.append(
-        session,
-        "offload/spilled",
-        {"callId": call_id, "locator": ref.locator, "bytes": ref.bytes},
-    )
+    with session.batch() as batch:
+        _LOG.append(
+            batch,
+            "offload/spilled",
+            {"callId": planned.call_id, "locator": ref.locator, "bytes": ref.bytes},
+        )
+        if beside is not None:
+            beside(batch)
     await store.commit(ref)
-    return spill_wording(
-        ctx,
-        scope,
-        TOO_LARGE_TOOL_MSG,
-        tool_call_id=call_id,
-        file_path=ref.locator,
-        content_sample=content_preview(text),
-    )
+    return True
+
+
+def _result_name(call_id: str) -> str:
+    """The name a tool result is spilled under — the half of its locator it chooses."""
+    return f"large_tool_results/{call_id}"
 
 
 def spill_wording(ctx: Context, scope: Boundary | None, template: str, **fields: str) -> str:
@@ -332,7 +384,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # value this row already rendered to measure it — the one case where
             # `projected`'s "not paid twice" would not have held.
             return replace(decision, content=content) if decision.has_value else decision
-        replacement = await spill_tool_result(
+        planned = plan_tool_result_spill(
             ctx,
             session,
             call_id=execution.call_id,
@@ -342,7 +394,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # call, and a tool can be registered for one agent.
             scope=execution.scope,
         )
-        if replacement is None:
+        if not await spill_tool_result(ctx, session, planned):
             # Fail open, as upstream: an offload that cannot store the content
             # must not be the reason the model loses it.
             return decision
@@ -352,7 +404,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # transcript. Under native tool calling nothing reads it, so passing it
         # on costs nothing either. One rule for both transports: spill the
         # render, leave the value alone.
-        return replace(decision, content=text_content(replacement))
+        return replace(decision, content=text_content(planned.replacement))
 
     def _projection(
         execution: ToolExecution, decision: Accept, result: ToolExecutionResult

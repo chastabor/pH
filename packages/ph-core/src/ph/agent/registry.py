@@ -126,6 +126,17 @@ class AgentRegistry:
             raise RuntimeError("no agent driver is registered; mount an agent-loop row")
         base = parent.ctx if parent is not None else self.ctx
         scope = base.scope(f"agent:{session.id}")
+        # **The agent's log is written as the last thing its scope unwinds**, whoever
+        # unwinds it. Registered first so it runs last: the teardown ahead of it
+        # appends — a workspace records `workspace/disposed` as it lets go — and a
+        # settled child is never reopened for anything to write those later. On
+        # the scope rather than after `dispose(agent_id)`, which a parent's
+        # `Context.dispose` cascading into a nested child never calls (S12). A
+        # mount's own unwind is `write_on_unwind`'s (F2); by then this finds
+        # nothing owed.
+        scope.add_disposer(
+            lambda: session_written(self.ctx, session), label=f"agents.written({session.id})"
+        )
         agent = self.driver_factory(scope, session, options or AgentOptions())
         scope.provide(AGENT, agent)
         self._agents[agent.id] = agent
@@ -176,14 +187,9 @@ class AgentRegistry:
             return
         await agent.dispose()
         # `_forget` rides the scope's own teardown, so the announcement and the
-        # roster drop happen exactly once whichever way the scope goes.
+        # roster drop happen exactly once whichever way the scope goes — and so
+        # does writing the log the teardown appended to (`create`).
         await agent.ctx.dispose()
-        # The teardown just appended to this agent's log — its workspace records
-        # `workspace/disposed` as it lets go — so written here, while the
-        # persistence row is still mounted, rather than whenever the mount
-        # unwinds. A mount's own unwind is `write_on_unwind`'s (F2).
-        if agent.session is not None:
-            await session_written(self.ctx, agent.session)
 
 
 @plugin("agent", affects="environment", inject=[SESSIONS])

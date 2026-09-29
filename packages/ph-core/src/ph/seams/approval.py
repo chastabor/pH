@@ -31,7 +31,14 @@ from ..cancel import Cancellation, is_canceled
 from ..cordis import Context, Disposer, events, plugin
 from ..json import JsonObject, JsonValue, as_str
 from ..keys import APPROVAL
-from ..session import Claim, IntentNotDurable, Session, intents_of, session_written
+from ..session import (
+    Claim,
+    IntentNotDurable,
+    Session,
+    SessionBatch,
+    intents_of,
+    session_written,
+)
 from ..session.kinds import APPROVAL_ASK, INTERRUPTED, approval_decided
 from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
@@ -487,9 +494,9 @@ class ApprovalService:
             answer=answer,
         )
 
-    def set_policy(self, session: Session, policy: ApprovalPolicy) -> None:
+    def set_policy(self, log: Session | SessionBatch, policy: ApprovalPolicy) -> None:
         """Record a policy change. The last one recorded is the one in force."""
-        _LOG.append(session, "approval/policy", {"policy": policy})
+        _LOG.append(log, "approval/policy", {"policy": policy})
 
 
 @plugin("approval", affects="environment")

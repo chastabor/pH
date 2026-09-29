@@ -28,7 +28,7 @@ from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, TOOLS, USER_QUESTIONS
 from ph.llm.types import text_of
 from ph.seams.user_questions import AskResolution, UserQuestion
-from ph.session import Session, open_intents
+from ph.session import Session, open_intents, unsettled_why
 from ph.session.kinds import QUESTION_ASK
 from ph.testing import FAKE_OPTIONS, MountProfile, run_tool
 from ph.tools.builtin.ask_user import DECLINED, FAILED, UNATTENDED, _rendered
@@ -222,18 +222,23 @@ async def test_a_declined_question_is_recorded_and_stops_being_pending(
 # ------------------------------------------------------------- the pending --
 
 
-async def test_a_question_canceled_mid_answer_stays_pending(mount: MountProfile) -> None:
-    """The pending state is the log, not a table somebody remembered to keep.
+async def test_a_question_canceled_mid_answer_is_closed_as_nobody_answering(
+    mount: MountProfile,
+) -> None:
+    """S15 — a canceled ask used to stay open in the live log, as if still waiting.
 
-    A real interruption, not a doctored log: the turn is canceled while a person
-    is still looking at the question — which is precisely what an ephemeral
-    daemon passivating a root parked on a human does. The ask is already
-    committed, the answer half never runs, and the fold reports the question.
+    A real interruption, not a doctored log: the turn is canceled while a person is
+    still looking at the question. It stayed pending on the premise that the next
+    resume re-poses it, and nothing does across a restart — so the fold showed a
+    question nobody would ever be asked again. Now the pair closes on the way out,
+    with the record repair would have written: its outcome unknown, settled by the
+    process.
 
-    It also pins the shape of the `except Exception` in `ask`: cancellation is
-    **not** an answerer failing. Widening that to `BaseException` would record
-    `declined: true` for a question nobody ever dismissed, and the fold would
-    then say a released root had been answered.
+    It also pins the shape of the `except Exception` in `_deliver`: cancellation is
+    **not** an answerer failing, and nothing may record `declined: true` for a
+    question nobody ever dismissed.
+
+    Sabotage: `open` in place of `claim` in `ask`, and the question stays pending.
     """
     ctx = await mount(ROW)
     session = ctx.require(SESSIONS).create("interrupted")
@@ -251,15 +256,13 @@ async def test_a_question_canceled_mid_answer_stays_pending(mount: MountProfile)
         await posed.wait()
         tasks.cancel_scope.cancel()
 
-    pending = [
-        UserQuestion.model_validate(one.opened.data)
-        for one in open_intents(session.events, QUESTION_ASK)
-    ]
-
-    assert [one.question for one in pending] == ["which port?"]
-    assert pending[0].options == ["8080"]
-    assert pending[0].header == "Port"
-    assert session.latest("question/answered") is None, "nobody answered, so nothing says they did"
+    assert open_intents(session.events, QUESTION_ASK) == (), "the canceled ask is still open"
+    closed = session.latest("question/answered")
+    assert closed is not None
+    assert unsettled_why(closed.data) == "outcome-unknown"
+    assert "declined" not in closed.data and "answer" not in closed.data, (
+        "nobody answered or declined, so nothing says they did"
+    )
 
 
 async def test_the_ask_id_is_the_call_id_the_rest_of_the_log_already_uses(

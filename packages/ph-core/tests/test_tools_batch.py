@@ -323,6 +323,11 @@ async def test_a_group_that_ends_the_turn_stops_the_ones_behind_it() -> None:
     assert TOOL_TURN_CONCLUDED in str(skipped.data.get("error")), (
         "the skipped call reads as a cancellation nobody performed"
     )
+    # Its call and its result in one batch (S14): a torn tail that kept the call
+    # alone repaired to "may have happened" for a call that never ran.
+    call = session_of(agent).events[skipped.seq - 1]
+    assert call.type == "tool/call"
+    assert skipped.batch is not None and call.batch == skipped.batch
 
 
 def test_malformed_arguments_survive_as_text() -> None:

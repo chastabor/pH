@@ -86,6 +86,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # *about* an agent rather than the agent's own. `agent/failed` also sat
         # one letter from `agent/error`, which means something else entirely.
         "supervisor/retry",
+        # The restore a retry named did not happen (S12). The retry is written
+        # before the restore, so the attempt is counted on disk before any of it
+        # runs — and this is what keeps the transcript from claiming a rollback
+        # the tier refused.
+        "supervisor/unrestored",
         "supervisor/failed",
         "supervisor/recovered",
         # A root released for being idle (P5-05). Its own record because the
@@ -170,6 +175,9 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # someone switches preset. Listed here because the reader that refuses an
         # unknown type is ph-core's.
         "approval/mode",
+        # A slash command, on disk before its body runs and settled after (S16):
+        # `COMMAND_RUN`, whose orphan repair closes, since a body may do anything a
+        # command does — `/revert` rewrites the tree.
         "command/done",
         "command/run",
         # The environment a session started in, in full (session profiles, S3):
@@ -355,8 +363,10 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # a prediction with an expiry, and an append-only log cannot take one
         # back — but that a file was uploaded is a fact, it is privacy-relevant,
         # and it is what a person auditing where their data went comes for.
-        # Ignorable: the model reads the same attachment either way.
+        # Ignorable: the model reads the same attachment either way. Opened by
+        # `attachment/uploading` (`UPLOAD`, S9), on disk before the bytes leave.
         "attachment/uploaded",
+        "attachment/uploading",
         # The context loader's recipe (P3-17): which corpus a session was told
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.
@@ -388,6 +398,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "attachment/degraded",
         "attachment/oversized",
         "attachment/uploaded",
+        "attachment/uploading",
         # Protocol bookkeeping a reader can skip without misreading anything
         # else: the turn it deduplicated is in the log either way.
         "client/command",
@@ -400,6 +411,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # hard-refusing a whole session over two records carrying no
         # conversational content.
         "supervisor/retry",
+        "supervisor/unrestored",
         "supervisor/failed",
         "supervisor/recovered",
         "supervisor/passivated",
@@ -480,6 +492,8 @@ INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
         "approval/asked": IntentPair("approval/decided", "ph.session.kinds"),
         "credential/needed": IntentPair("credential/supplied", "ph.session.kinds"),
         "client/command": IntentPair("client/command-settled", "ph_app.kinds"),
+        "command/run": IntentPair("command/done", "ph.session.kinds"),
+        "attachment/uploading": IntentPair("attachment/uploaded", "ph.session.kinds"),
         "question/asked": IntentPair("question/answered", "ph.session.kinds"),
         "shell/command": IntentPair("shell/result", "ph.session.kinds"),
         "tool/code-dispatch-start": IntentPair("tool/code-dispatch", "ph.session.kinds"),
@@ -540,7 +554,6 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.llm.retry": frozenset({"llm/retry"}),
         "ph.persistence.jsonl": frozenset({"session/resumed"}),
         "ph.seams.approval": frozenset({"approval/policy"}),
-        "ph.seams.commands": frozenset({"command/done", "command/run"}),
         "ph.seams.fs": frozenset({"fs/observed"}),
         "ph.seams.goals": frozenset({"goal/continued", "goal/gate", "goal/set", "goal/settled"}),
         "ph.seams.permission_presets": frozenset({"permission/preset"}),
@@ -552,7 +565,6 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         # The seam writes the terminal status for a child it gave up on — one the
         # provider admitted and can no longer end — so the roster row closes.
         "ph.seams.subagents": frozenset({"subagent/status"}),
-        "ph.seams.uploads": frozenset({"attachment/uploaded"}),
         "ph.seams.workspace": frozenset(
             {
                 "workspace/acquired",
@@ -583,6 +595,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "supervisor/recovered",
                 "supervisor/retry",
                 "supervisor/unreachable",
+                "supervisor/unrestored",
                 "supervisor/violated",
             }
         ),
