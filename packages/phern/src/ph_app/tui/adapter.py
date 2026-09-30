@@ -699,26 +699,22 @@ class TuiEventAdapter:
             event,
         )
 
-    def _on_supervisor_restored(self, event: SessionEvent, frame: Frame) -> None:
-        """What the tree is before a retry: put back, left as it was, or unknown (S12).
+    def _on_workspace_restored(self, event: SessionEvent, frame: Frame) -> None:
+        """What the tree is after a restore: put back, left as it was, or unknown (S12).
 
-        A row for all three, because a retry otherwise reads as starting clean, and
-        whether it does is the one thing a person comparing the attempts needs. The
-        opening record draws nothing: this settle — the ladder's own, or repair's —
-        says everything it would.
+        A row for all three, whoever asked — `/revert`, or a retry, whose row just
+        above says which attempt this is — because work that follows otherwise reads
+        as starting from the restore point. The opening record draws nothing: this
+        settle, the seam's own or repair's, says everything it would.
         """
-        attempt = event.data.get("attempt", "?")
         if unsettled_why(event.data) is not None:
-            said = (
-                f"The harness stopped while restoring the tree before attempt {attempt}; "
-                "it may be partly restored"
-            )
+            said = "The harness stopped while restoring the tree; it may be partly restored"
         elif event.data.get("ok"):
-            said = f"Restored the tree to its last restore point before attempt {attempt}"
+            said = "Restored the tree to its restore point"
         else:
-            said = (
-                f"The tree could not be restored before attempt {attempt}; "
-                "it runs against the tree as the crash left it"
+            detail = as_str(event.data.get("detail")).strip()
+            said = "The tree could not be restored; it stays as it was" + (
+                f": {detail}" if detail else ""
             )
         self._row("restored", "notice", said, event)
 
@@ -1221,7 +1217,7 @@ RULES: Mapping[str, EventRule] = {
     "credential/needed": EventRule(TuiEventAdapter._on_credential_needed),
     "credential/supplied": EventRule(TuiEventAdapter._on_credential_supplied),
     "supervisor/retry": EventRule(TuiEventAdapter._on_supervisor_retry),
-    "supervisor/restored": EventRule(TuiEventAdapter._on_supervisor_restored),
+    "workspace/restored": EventRule(TuiEventAdapter._on_workspace_restored),
     "supervisor/failed": EventRule(TuiEventAdapter._on_supervisor_failed),
     "supervisor/recovered": EventRule(TuiEventAdapter._on_supervisor_recovered),
     "supervisor/passivated": EventRule(TuiEventAdapter._on_supervisor_passivated),
@@ -1325,9 +1321,9 @@ RECORDLESS: frozenset[str] = frozenset(
         # An upload about to happen (S9). Its settle, `attachment/uploaded`, is the
         # row a person reads — including repair's "it may have been sent".
         "attachment/uploading",
-        # A restore about to run (S12). Its settle, `supervisor/restored`, draws the
-        # row — whether the ladder wrote it or repair did.
-        "supervisor/restoring",
+        # A restore about to run (S12). Its settle, `workspace/restored`, draws the
+        # row — whether the seam wrote it or repair did.
+        "workspace/restoring",
         # A keyed call's effect record (P10-12). The call and its result render as
         # the tool card; that it was deduplicated rides on the result's meta.
         "tool/effect",

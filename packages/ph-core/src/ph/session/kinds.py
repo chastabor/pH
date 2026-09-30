@@ -11,7 +11,8 @@ payload builders the closer and the seam's live settle both call:
 * `QUESTION_ASK` — a question put to a person, and its answer;
 * `TOOL_DISPATCH` — a Code Mode sub-dispatch, started and then settled;
 * `TOOL_EFFECT` — a call whose tool names its effect, opened and then settled;
-* `CREDENTIAL_WAIT` — a session or a child held for a credential, then released.
+* `CREDENTIAL_WAIT` — a session or a child held for a credential, then released;
+* `WORKSPACE_RESTORE` — a workspace put back to a restore point, then whether it was.
 
 **Why a leaf, and not the seam that fills each pair.** Repair settles only the kinds
 that are declared in the process doing the resume, and a kind is declared when its
@@ -63,6 +64,7 @@ __all__ = [
     "TOOL_DISPATCH",
     "TOOL_EFFECT",
     "UPLOAD",
+    "WORKSPACE_RESTORE",
     "AskResolution",
     "approval_decided",
     "command_done",
@@ -70,6 +72,7 @@ __all__ = [
     "effect_settle",
     "hold_of",
     "question_answered",
+    "restore_settled",
     "upload_settled",
 ]
 
@@ -570,6 +573,56 @@ CREDENTIAL_WAIT = declare_intent(
 deployment cannot supply (T5) — and released when the name arrives."""
 
 
+# ------------------------------------------------------------------ restore --
+
+
+def _restoring_seq(event: SessionEvent) -> str | None:
+    """The restore a `workspace/restored` settles — its `restoringSeq`, as a key."""
+    return seq_field(event, "restoringSeq")
+
+
+def restore_settled(opened: SessionEvent, *, ok: bool, detail: str | None = None) -> dict[str, Any]:
+    """A `workspace/restored` payload — the live settle's and repair's alike: whose
+    workspace, which restore point, and whether the tree is now that point."""
+    data: dict[str, Any] = {
+        "restoringSeq": opened.seq,
+        "agentId": opened.data.get("agentId"),
+        "tree": opened.data.get("tree"),
+        "ok": ok,
+    }
+    if detail is not None:
+        data["detail"] = detail
+    return data
+
+
+def _restore_interrupted(opened: SessionEvent, why: Unsettled) -> JsonObject:
+    """A restore nobody saw finish: not `ok`, and — in the `unsettled` marker whoever
+    writes this merges in — that the tree may be part-way between the two states."""
+    return restore_settled(opened, ok=False)
+
+
+WORKSPACE_RESTORE = declare_intent(
+    IntentKind(
+        opened="workspace/restoring",
+        settled="workspace/restored",
+        opened_key=opened_seq,
+        settled_key=_restoring_seq,
+        # A restore rewrites and deletes files, so one cut short leaves a tree that
+        # is neither the restore point nor what was there: a reader is owed "maybe",
+        # not the rollback the caller set out to make.
+        orphan="outcome-unknown",
+        # On disk before the tree is touched (S12). One the log cannot record is
+        # not run.
+        barrier="durable",
+        closer=_restore_interrupted,
+        writer=_LOG,
+    )
+)
+"""A workspace put back to a restore point, then whether it was (S12). Opened inside
+`WorkspaceSeam.restore`, so every caller — `/revert`, a supervisor's retry — records
+it one way. Keyed by the opening record's seq."""
+
+
 KINDS: tuple[IntentKind, ...] = (
     SHELL_COMMAND,
     COMMAND_RUN,
@@ -579,5 +632,6 @@ KINDS: tuple[IntentKind, ...] = (
     TOOL_EFFECT,
     UPLOAD,
     CREDENTIAL_WAIT,
+    WORKSPACE_RESTORE,
 )
 """ph-core's kinds, as this leaf declares them — what `isolated_intent_kinds` keeps."""

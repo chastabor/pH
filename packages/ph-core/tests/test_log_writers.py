@@ -18,8 +18,8 @@ A call `<writer>.append(log, type, data, …)` where `<writer>` is the module's 
 binding of `log_writer(__name__)`, and an `IntentKind(opened=…, settled=…,
 writer=<writer>)` declaration — whose pair the journal writes through that writer, so
 the leaf that declares a kind is the writer of record of both its types. The type is
-read from a literal, a module constant, or a constant imported by name
-(`ph_rlm.subagents` writes `ph.seams.subagents.STATUS`).
+read from a literal, a module constant, or a constant imported by name from another
+module.
 
 ## Why a site whose type is a variable is a listed decision
 
@@ -309,19 +309,24 @@ def test_a_declared_type_is_written_only_by_its_owner() -> None:
 def test_the_walk_follows_an_imported_constant() -> None:
     """The resolution the table depends on, held on its own: these sites name a
     constant another module defines, never a literal."""
-    assert "ph_rlm.subagents" in WALK.static["subagent/admitted"]
     assert "ph_app.daemon.supervisor" in WALK.static["supervisor/retry"]
 
 
-def test_a_childs_status_has_one_writer() -> None:
-    """S10: a provider reports its child's status through `ph.seams.subagents`' doors
-    — `record_started` flushes a restart before the attempt it counts, and
-    `record_settled` writes the child's log before its ending — so no provider
-    appends one of its own and none can skip the rule a status carries.
+@pytest.mark.parametrize(
+    "record",
+    ["subagent/admitted", "subagent/status", "subagent/deleted", "subagent/usage-attributed"],
+)
+def test_a_childs_roster_has_one_writer(record: str) -> None:
+    """S10 and after: a provider reports its child through `ph.seams.subagents`' doors
+    — `record_started` flushes a restart before the attempt it counts,
+    `record_settled` writes the child's log before its ending, `record_deleted`
+    lands a tombstone with its ending in one batch, and the service flushes an
+    admission before the child's gate opens — so no provider appends a roster record
+    of its own, and none can skip the rule the record carries.
 
-    Sabotage: append a `subagent/status` from `ph_rlm.subagents` again.
+    Sabotage: append any of these from `ph_rlm.subagents` again.
     """
-    assert set(WALK.static["subagent/status"]) == {"ph.seams.subagents"}
+    assert set(WALK.static[record]) == {"ph.seams.subagents"}
 
 
 # --------------------------------------------------------------- at runtime --

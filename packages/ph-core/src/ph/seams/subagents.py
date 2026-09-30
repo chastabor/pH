@@ -42,6 +42,7 @@ from ..cordis import (
     ChildReach,
     Context,
     Disposer,
+    InactiveScopeError,
     LoaderError,
     NarrowingRefused,
     Running,
@@ -50,11 +51,12 @@ from ..cordis import (
     releasing,
     running,
 )
-from ..json import JsonValue, as_int, as_str
+from ..json import JsonValue, as_int, as_str, thaw_json
 from ..keys import (
     AGENTS,
     NAMED_PROFILES,
     SANDBOX,
+    SESSION_PERSISTENCE,
     SESSIONS,
     SKILLS,
     SUBAGENT_PRESETS,
@@ -62,7 +64,14 @@ from ..keys import (
     SYSTEM_PROMPT,
     TOOLS,
 )
-from ..session import Session, SessionBatch, SessionEvent, SessionFoldCache, session_written
+from ..session import (
+    Session,
+    SessionBatch,
+    SessionEvent,
+    SessionFoldCache,
+    SessionObserver,
+    session_written,
+)
 from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
 from ..tools.definition import Deny, call_id_of
@@ -125,7 +134,11 @@ __all__ = [
     "exhausted_detail",
     "family_reach",
     "fold_subagent_event",
+    "parent_went_away",
     "reachable_family",
+    "reconcile_usage",
+    "record_admitted",
+    "record_deleted",
     "record_settled",
     "record_started",
     "record_status",
@@ -133,6 +146,7 @@ __all__ = [
     "roster_name",
     "roster_of",
     "subagent_roster",
+    "usage_mirror",
 ]
 
 log = logging.getLogger("ph.seams.subagents")
@@ -660,17 +674,16 @@ def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, J
 # -------------------------------------------------- a child's status, recorded --
 
 
-PlainStatus: TypeAlias = Literal["queued", "canceled", "error"]
+PlainStatus: TypeAlias = Literal["queued", "error"]
 """A status with no rule about when it reaches disk — what `record_status` takes.
 
-`running` goes through `record_started` and `done` through `record_settled`, so no
-caller can write either without its rule. `error` is plain as well as settled: the
-seam's own give-up has no drive, and no child log, behind it."""
+`running` goes through `record_started`, `done` through `record_settled` and
+`canceled` through `record_deleted`, so no caller can write any of them without its
+rule. `error` is plain as well as settled: the seam's own give-up has no drive, and
+no child log, behind it."""
 
 
-def record_status(
-    log: Session | SessionBatch, run_id: str, status: PlainStatus, /, **extra: JsonValue
-) -> SessionEvent:
+def record_status(parent: Session, run_id: str, status: PlainStatus, /, **extra: JsonValue) -> None:
     """A child's status, in its parent's log — **the one module that writes
     `subagent/status`**, and this door for the statuses no rule is attached to.
 
@@ -678,14 +691,15 @@ def record_status(
     moves, and the seam's own when it gives up on one. One writer, so the shape the
     fold reads has one spelling, and so the writers-of-record table can hold a
     provider to it — a provider that appends a status of its own fails
-    `test_log_writers`, which is what keeps the two doors below from being optional.
+    `test_log_writers`, which is what keeps the doors below — `record_started`,
+    `record_settled`, `record_deleted` — from being optional.
 
-    No barrier: `queued`, or a `canceled` landing in one batch with its tombstone,
-    rides the parent's next flush like any record. The two statuses whose place on
+    No barrier: `queued`, or the seam's own `error` for a child it gives up on, rides
+    the parent's next flush like any record. The two statuses whose place on
     disk decides something have their own doors — `record_started` for a restart the
     ladder counts, `record_settled` for an ending the child's own log must back.
     """
-    return _append_status(log, run_id, status, **extra)
+    _append_status(parent, run_id, status, **extra)
 
 
 def _append_status(
@@ -739,6 +753,116 @@ async def record_settled(
     if child is not None:
         await session_written(ctx, child)
     return _append_status(parent, run_id, status, **extra)
+
+
+def record_admitted(parent: Session, run: SubagentRun, request: SubagentRequest) -> SessionEvent:
+    """A child's admission, in its parent's log — the record a resume finds it by (S2).
+
+    Appended by the provider once its child exists and can be named, so a child that
+    could not be built leaves no phantom row. `SubagentService.start` makes it durable
+    before the child's gate opens, and refuses the child when it cannot; the payload
+    is `admission_payload`'s, which readmission reads back.
+    """
+    return _LOG.append(parent, ADMITTED, admission_payload(run, request))
+
+
+def record_deleted(parent: Session, run_id: str, reason: str, *, ended: bool) -> None:
+    """A child's tombstone — with the `canceled` that ends it, for a child that had not
+    ended — **in one batch** (S14): apart, a flush between them left a child
+    `canceled` and not deleted. A child that already settled is not settled again: a
+    `canceled` over its `done` turned a finished child into a revoked one."""
+    with parent.batch() as batch:
+        if not ended:
+            _append_status(batch, run_id, "canceled", reason=reason)
+        _LOG.append(batch, DELETED, {"runId": run_id, "reason": reason})
+
+
+_UsageOrigin: TypeAlias = Literal["spawn_task", "reconciled"]
+"""How an answer came to be charged: as the child made it, or by the resume's
+reconcile from the child's stored log (L5)."""
+
+
+def _answer_usage(event: SessionEvent) -> Mapping[str, object] | None:
+    """What an answer spent: a child's `assistant/message` that reports usage, or `None`.
+
+    The one test of "this is an answer", for the live mirror and the resume reconcile
+    both, so the two cannot count different things. `Mapping`, not `dict`: a committed
+    event's data is frozen into `MappingProxyType`, which is a Mapping and is *not* a
+    dict instance, so an `isinstance(..., dict)` guard silently attributed nothing.
+    """
+    if event.type != "assistant/message":
+        return None
+    usage = event.data.get("usage")
+    return usage if isinstance(usage, Mapping) else None
+
+
+def _record_usage(
+    log: Session | SessionBatch,
+    run_id: str,
+    seq: int,
+    usage: Mapping[str, object],
+    origin: _UsageOrigin = "spawn_task",
+) -> SessionEvent:
+    """One child answer charged to its parent — the one writer of `USAGE`, for the live
+    mirror and the resume reconcile alike."""
+    return _LOG.append(
+        log,
+        USAGE,
+        {"runId": run_id, "targetSeq": seq, "childUsage": thaw_json(usage), "origin": origin},
+    )
+
+
+def usage_mirror(parent: Session, run_id: str) -> SessionObserver:
+    """An observer for a child's session that charges each answer to `parent` as the
+    child makes it. Holds the two names it needs and nothing else."""
+
+    def observer(_source: Session, event: SessionEvent) -> None:
+        usage = _answer_usage(event)
+        if usage is not None:
+            _record_usage(parent, run_id, event.seq, usage)
+
+    return observer
+
+
+async def reconcile_usage(
+    ctx: Context, parent: Session, run_id: str, *, session_id: str, through: int
+) -> int:
+    """Charge the answers the child's *stored* log holds past `through` (L5). Returns
+    how many were added.
+
+    The mirror charges each answer as the child makes it, into the parent's log in
+    memory, while the child's own log reaches disk before each request. A crash
+    between the two left the answer on the child's disk and missing from the
+    parent's, so the goal budget did not count it and the ladder read the restart as
+    fruitless. Read from the store, which is what the child's log holds after a
+    crash, and written in one batch, so the parent's account moves all at once or not
+    at all. Marked `reconciled` so a reader can tell them from the live ones.
+    """
+    persistence = ctx.get(SESSION_PERSISTENCE)
+    if persistence is None:
+        return 0
+
+    def stored() -> list[SessionEvent]:
+        return persistence.read(session_id)[1] if persistence.exists(session_id) else []
+
+    events = await anyio.to_thread.run_sync(stored)
+    missing = [
+        (event.seq, usage)
+        for event in events
+        if event.seq > through and (usage := _answer_usage(event)) is not None
+    ]
+    if missing:
+        with parent.batch() as batch:
+            for seq, usage in missing:
+                _record_usage(batch, run_id, seq, usage, "reconciled")
+    return len(missing)
+
+
+def parent_went_away(name: str) -> SubagentSpawnError:
+    """A spawn refused because its parent's scope was disposed mid-admission."""
+    return SubagentSpawnError(
+        f"subagent {name}: its parent went away while it was being admitted, so it was not started"
+    )
 
 
 def admitted_by(
@@ -1293,7 +1417,12 @@ class SubagentService:
         # to find its way back to the same provider.
         run.owner = owner
         try:
-            self._enforce(grant, run, held, boundary)
+            try:
+                self._enforce(grant, run, held, boundary)
+            except InactiveScopeError as gone:
+                # The ceiling registers on the child's scope, which a parent that went
+                # away took with it: the same refusal a provider's own builds get.
+                raise parent_went_away(run.name) from gone
             if written and session is not None and not await session_written(self.ctx, session):
                 raise SubagentSpawnError(
                     f"subagent {run.name}: its admission could not be written to the "
@@ -1379,8 +1508,16 @@ class SubagentService:
         # (`request.parent`) but reading it means another copy of P6-24's
         # `getattr(agent, "ctx", None)`, and the child's own containment is
         # `Grant`'s subject rather than this binding's.
-        with running(entry.by):
-            run = await entry.provider.start(request)
+        try:
+            with running(entry.by):
+                run = await entry.provider.start(request)
+        except InactiveScopeError as gone:
+            # **A spawn whose parent's scope died under it is a refusal**, whichever
+            # provider was building it: every registration a child needs — its
+            # workspace, its release, its job — is on a scope inside the parent's.
+            # The provider releases what it built and lets this through; the caller
+            # is owed the spawn's own answer, with a code, not a raw scope error.
+            raise parent_went_away(request.name or "a child") from gone
         admitted = await self._admit(
             run,
             owner=name,

@@ -40,7 +40,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context, LoaderError, Profile
-from ph.json import JsonValue, as_obj, as_seq, as_str
+from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     COMMANDS,
@@ -76,7 +76,6 @@ from ph.session import (
     IntentNotDurable,
     Session,
     SessionEvent,
-    intents_of,
     now_ms,
     session_written,
 )
@@ -94,7 +93,6 @@ from ph.text import count_of
 from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
-from ..kinds import SUPERVISOR_RESTORE, restore_settled
 from ..payloads import (
     ProfileAsk,
     ProfileAskReply,
@@ -570,7 +568,7 @@ class Root:
         **Before the restore too** (S12), which is part of the attempt: it used to
         run first, so a daemon that died restoring had rewritten the tree with no
         record of the attempt, and a crash loop there never advanced the count.
-        The restore is recorded as its own pair (`SUPERVISOR_RESTORE`).
+        The restore is recorded as its own pair (`WORKSPACE_RESTORE`, by the seam).
         """
         _LOG.append(
             self.session,
@@ -2034,45 +2032,33 @@ class Supervisor:
         return workspace, latest_checkpoint(root.session, root.agent.id)
 
     async def _restore(self, root: Root, workspace: Workspace, tree: str) -> None:
-        """Put the root's tree back to `tree` under `SUPERVISOR_RESTORE` — whose settle,
-        `supervisor/restored`, is the answer to whether it worked.
+        """Put the root's tree back to `tree`, through the seam that records it.
 
-        **Recorded before the tree is touched, and settled after** (S12): a restore
-        rewrites and deletes files, and one the daemon died inside leaves a tree that
-        is neither the checkpoint nor what the crash left — repair closes that pair
-        `outcome-unknown`, which is what a reader is owed. The retry is already on
-        disk ahead of this, so the attempt is counted whatever happens here.
+        **The record is the seam's** (`WORKSPACE_RESTORE`, opened inside
+        `WorkspaceSeam.restore`): on disk before the tree is touched, settled after —
+        and a restore the daemon died inside is closed by repair as "may be partly
+        restored". The retry is already in the log ahead of it, and the restore's
+        durable opening writes both, so the attempt is counted whatever happens here.
 
         Best-effort by construction: a failed restore must not cost the retry. The
-        attempt goes ahead against the tree as it stands, and `supervisor/restored`
+        attempt goes ahead against the tree as it stands, and `workspace/restored`
         says `ok: false` so the transcript does not imply a rollback that did not
         happen. A restore the log cannot record is not run, for the same reason.
         """
-        journal = intents_of(root.ctx)
-        opening: dict[str, JsonValue] = {"attempt": root.recovery.attempts, "tree": tree}
         try:
-            async with journal.claim(root.session, SUPERVISOR_RESTORE, opening) as held:
-                try:
-                    # Through the seam, which is safe here for the reason
-                    # `_restore_point`'s lookup is *not*: it found a workspace, so the
-                    # row is mounted.
-                    await root.ctx.require(WORKSPACE).restore(workspace, tree)
-                    settled = restore_settled(held.opened, ok=True)
-                except Exception as error:
-                    log.warning(
-                        "ph_app.daemon: root %s could not be restored to %s",
-                        root.id,
-                        tree,
-                        exc_info=True,
-                    )
-                    settled = restore_settled(held.opened, ok=False, detail=error_message(error))
-                journal.settle(root.session, held, settled)
+            # Through the seam, which is safe here for the reason `_restore_point`'s
+            # lookup is *not*: it found a workspace, so the row is mounted.
+            await root.ctx.require(WORKSPACE).restore(root.agent.id, tree, session=root.session)
         except IntentNotDurable:
             log.warning(
                 "ph_app.daemon: root %s was not restored to %s, because the log could not "
                 "record it",
                 root.id,
                 tree,
+            )
+        except Exception:
+            log.warning(
+                "ph_app.daemon: root %s could not be restored to %s", root.id, tree, exc_info=True
             )
 
     async def prompt(

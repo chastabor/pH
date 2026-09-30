@@ -37,7 +37,7 @@ import logging
 from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
-from ph.seams.commands import CommandContext, CommandDefinition
+from ph.seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
 from ph.seams.jobs import Job
 from ph.session import Session, SessionEvent
 from ph.session.writers import log_writer
@@ -276,6 +276,16 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # -------------------------------------------------------- the command --
 
+    def show(_rest: str, invocation: CommandContext) -> str:
+        """`/refine --show`: the whole harness, whichever scope was named."""
+        # Unbounded, unlike the prompt section: a human auditing the harness wants
+        # the entries the bound hides, which are exactly the ones they cannot see
+        # any other way.
+        state = service.state(invocation.session)
+        entries = sum(len(rows) for rows in state.entries.values())
+        shown = render_state(state, per_kind=entries or 1, refinements=len(state.refinements))
+        return shown or "the harness is empty"
+
     async def command(argument: str, invocation: CommandContext) -> str:
         """`/refine [--global] [--show] [--rollback <id>] [instructions]`."""
         words = argument.split()
@@ -283,13 +293,7 @@ async def apply(ctx: Context, config: Config) -> None:
         rest = [word for word in words if word != "--global"]
         session, agent = invocation.session, invocation.agent
         if "--show" in rest:
-            # Unbounded, unlike the prompt section: a human auditing the harness
-            # wants the entries the bound hides, which are exactly the ones they
-            # cannot see any other way.
-            state = service.state(session)
-            entries = sum(len(rows) for rows in state.entries.values())
-            shown = render_state(state, per_kind=entries or 1, refinements=len(state.refinements))
-            return shown or "the harness is empty"
+            return show("", invocation)
         if rest and rest[0] == "--rollback":
             if len(rest) < 2:
                 return "usage: /refine --rollback <refine-id>"
@@ -322,10 +326,12 @@ async def apply(ctx: Context, config: Config) -> None:
         CommandDefinition(
             name="refine",
             summary="Refine the Continual Harness, or roll a refinement back.",
-            run=command,
+            # `--show` leading the line only asks — `--show --global` included, since
+            # the show is the whole harness either way; everything else, instructions
+            # and a rollback, acts. A `--show` behind `--global` is still shown, through
+            # the durable path an act takes: unsure is the safe side.
+            run=Verbs({"--show": CommandVerb(show, reads=True)}, otherwise=command),
             argument_hint="[--global] [--show] [--rollback <id>] [instructions]",
-            # `--show` answers whatever else the line says; nothing else only asks.
-            reads=lambda argument: "--show" in argument.split(),
         )
     )
 

@@ -56,7 +56,7 @@ __all__ = [
 RETRY = "supervisor/retry"
 """A crashed task is being run again — attempt, delay and reason. Written before any
 of the attempt runs; the restore that may follow is its own pair
-(`ph_app.kinds.SUPERVISOR_RESTORE`)."""
+(`WORKSPACE_RESTORE`, opened by the seam that restores)."""
 
 FAILED = "supervisor/failed"
 """The ladder is spent. This root is not working, and did not stop quietly."""

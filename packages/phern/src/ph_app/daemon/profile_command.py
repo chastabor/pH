@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 from ph.cordis import LoaderError
 from ph.json import thaw_json
-from ph.seams.commands import CommandContext, CommandDefinition, reading_verbs
+from ph.seams.commands import CommandDefinition, CommandVerb, Verbs
 from ph.session_profile import (
     OverrideNotRecorded,
     ProfileBase,
@@ -75,31 +75,43 @@ class _Refused(Exception):
 def profile_command(root: Root) -> CommandDefinition:
     """`/profile` for one root, bound to it: what it reads and what it restarts."""
 
-    async def run(argument: str, _invocation: CommandContext) -> str:
-        verb, _, rest = argument.strip().partition(" ")
-        words = rest.split()
-        line = f"/profile {argument.strip()}".rstrip()
-        try:
-            if verb in ("", "show"):
-                return _show(root, full="--full" in words)
-            if verb == "diff":
-                return _diff(root)
-            if verb == "save" and words:
-                return await _save(root, words[0], line, replace="--replace" in words)
-            if verb == "use" and words:
-                return await _use(root, words[0], clear="--clear" in words)
-            if verb == "clear":
-                return await _clear(root, words[0] if words else None, line)
-        except (_Refused, SaveRefused, OverrideNotRecorded) as refusal:
-            return str(refusal)
-        return USAGE
+    def named(rest: str) -> str:
+        """The profile a verb acts on — the word after it — or the usage line, refused."""
+        if not rest:
+            raise _Refused(USAGE)
+        return rest.split()[0]
+
+    showing = CommandVerb(
+        lambda rest, _invocation: _show(root, full="--full" in rest.split()), reads=True
+    )
+    run = Verbs(
+        {
+            "": showing,
+            "show": showing,
+            "diff": CommandVerb(lambda _rest, _invocation: _diff(root), reads=True),
+            "save": CommandVerb(
+                lambda rest, invocation: _save(
+                    root, named(rest), invocation.line, replace="--replace" in rest.split()
+                )
+            ),
+            "use": CommandVerb(
+                lambda rest, _invocation: _use(root, named(rest), clear="--clear" in rest.split())
+            ),
+            "clear": CommandVerb(
+                lambda rest, invocation: _clear(
+                    root, rest.split()[0] if rest else None, invocation.line
+                )
+            ),
+        },
+        otherwise=USAGE,
+        refused=(_Refused, SaveRefused, OverrideNotRecorded),
+    )
 
     return CommandDefinition(
         name="profile",
         summary="Show this session's profile, how it moved, and save or switch it.",
         argument_hint=HINT,
         run=run,
-        reads=reading_verbs("", "show", "diff"),
     )
 
 

@@ -65,6 +65,7 @@ from ph.session.kinds import (
     TOOL_DISPATCH,
     TOOL_EFFECT,
     UPLOAD,
+    WORKSPACE_RESTORE,
     credential_hold,
 )
 from ph.session.store import SessionStore
@@ -1023,6 +1024,7 @@ def _core_samples() -> dict[IntentKind, JsonObject]:
             "arguments": {},
         },
         TOOL_EFFECT: {"key": "send:m1", "tool": "send", "callId": "c1"},
+        WORKSPACE_RESTORE: {"agentId": "a1", "tree": "t1"},
     }
 
 

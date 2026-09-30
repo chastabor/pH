@@ -47,16 +47,26 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
+from ph.seams import workspace_git
 from ph.seams.workspace import CHECKPOINT, checkpoints, latest_checkpoint
 from ph.seams.workspace_git import pre_run_ref
-from ph.session import Session
-from ph.testing import MountProfile, code_mode_stub, log_event, not_none, run_tool, stored_types
+from ph.session import Session, unsettled_why
+from ph.testing import (
+    MountProfile,
+    code_mode_stub,
+    log_event,
+    not_none,
+    raising,
+    run_tool,
+    stored_types,
+)
 from ph.testing.git import git, git_repo, worktree_agent
 from ph.tools.registry import RUN_CODE
 
@@ -200,7 +210,7 @@ async def test_a_denied_run_reverts_exactly(mount: MountProfile, tmp_path: Path)
     (root / "new").mkdir()
     (root / "new" / "spilled.txt").write_text("partial\n", encoding="utf-8")
 
-    removed = await ctx.require(WORKSPACE).restore(workspace, tree)
+    removed = await ctx.require(WORKSPACE).restore(agent.id, tree, session=session)
 
     assert (root / "tracked.txt").read_text(encoding="utf-8") == "original\n"
     assert (root / "untracked.txt").read_text(encoding="utf-8") == "before\n"
@@ -226,7 +236,7 @@ async def test_ignored_paths_are_never_touched(mount: MountProfile, tmp_path: Pa
     (root / "build.log").write_text("cached, then some\n", encoding="utf-8")
     (root / "after.log").write_text("also ignored\n", encoding="utf-8")
 
-    await ctx.require(WORKSPACE).restore(workspace, tree)
+    await ctx.require(WORKSPACE).restore(agent.id, tree, session=session)
 
     assert (root / "build.log").read_text(encoding="utf-8") == "cached, then some\n"
     assert (root / "after.log").exists()
@@ -248,7 +258,7 @@ async def test_an_untracked_file_comes_back_untracked(mount: MountProfile, tmp_p
     tree = latest_checkpoint(session, agent.id)
     (root / "untracked.txt").write_text("changed\n", encoding="utf-8")
 
-    await ctx.require(WORKSPACE).restore(workspace, tree)
+    await ctx.require(WORKSPACE).restore(agent.id, tree, session=session)
 
     _, status, _ = await git(ctx, root, "status", "--porcelain")
     assert status.strip() == "?? untracked.txt", f"restore changed the index: {status!r}"
@@ -268,7 +278,7 @@ async def test_scratch_survives_a_revert(mount: MountProfile, tmp_path: Path) ->
     )
     tree = latest_checkpoint(session, agent.id)
 
-    await ctx.require(WORKSPACE).restore(workspace, tree)
+    await ctx.require(WORKSPACE).restore(agent.id, tree, session=session)
 
     assert (workspace.scratch / "notes.md").read_text(encoding="utf-8") == "what I learned\n"
 
@@ -283,10 +293,10 @@ async def test_a_collected_tree_reports_rather_than_raises(
     That has to read as "this checkpoint is gone", never as a traceback or a
     half-restored tree.
     """
-    ctx, _session, _agent, workspace = await worktree_agent(mount, tmp_path)
+    ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
 
     with pytest.raises(FileNotFoundError):
-        await ctx.require(WORKSPACE).restore(workspace, "0" * 40)
+        await ctx.require(WORKSPACE).restore(agent.id, "0" * 40, session=session)
 
 
 # --------------------------------------------------------------------- fold --
@@ -325,6 +335,56 @@ async def test_revert_restores_and_says_what_it_restored(
 
     assert "restored" in shown
     assert (workspace.root / "tracked.txt").read_text(encoding="utf-8") == "original\n"
+
+
+async def test_a_revert_is_on_disk_before_the_tree_is_touched(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S12: a restore rewrites and deletes files, and one cut short leaves a tree that
+    is neither the restore point nor what was there. The seam records it around the
+    act (`WORKSPACE_RESTORE`) — on disk before git touches the tree — for every caller,
+    so a crash inside `/revert` reads as "may be partly restored" rather than as a
+    command whose outcome is unknown.
+
+    Sabotage: restore without the session in `/revert`, and nothing is recorded.
+    """
+    ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
+    seq = await _checkpointed(ctx, session, agent)
+    (workspace.root / "tracked.txt").write_text("the run did this\n", encoding="utf-8")
+    seen: list[bool] = []
+    original = workspace_git.GitWorktreeProvider.restore
+
+    async def watched(self: workspace_git.GitWorktreeProvider, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        seen.append("workspace/restoring" in stored_types(ctx, session.id))
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_git.GitWorktreeProvider, "restore", watched)
+
+    await _run(ctx, session, agent, str(seq))
+
+    assert seen == [True], "the tree was touched before its restore was on disk"
+    (restored,) = [one for one in session.events if one.type == "workspace/restored"]
+    assert (restored.data["ok"], restored.data["agentId"]) == (True, agent.id)
+
+
+async def test_a_restore_that_raised_is_settled_as_not_done(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The act's own answer, not repair's: a tier that raised is settled `ok: false`
+    with why, and the raise still reaches the caller that asked by name."""
+    ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
+    await _checkpointed(ctx, session, agent)
+    token = latest_checkpoint(session, agent.id)
+    monkeypatch.setattr(
+        workspace_git.GitWorktreeProvider, "restore", raising(RuntimeError("the index is locked"))
+    )
+
+    with pytest.raises(RuntimeError, match="locked"):
+        await ctx.require(WORKSPACE).restore(agent.id, token, session=session)
+
+    (restored,) = [one for one in session.events if one.type == "workspace/restored"]
+    assert restored.data["ok"] is False and "locked" in str(restored.data["detail"])
+    assert unsettled_why(restored.data) is None
 
 
 async def test_revert_lists_what_restoring_the_tree_did_not_undo(

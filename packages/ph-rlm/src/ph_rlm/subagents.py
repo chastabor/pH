@@ -42,57 +42,49 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any, Literal
 
 import anyio
 from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
-from ph.cordis import Context, Disposer, plugin
-from ph.json import JsonObject, as_str, thaw_json
-from ph.keys import AGENTS, FS, JOBS, LLM, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, WORKSPACE
+from ph.cordis import Context, Disposer, InactiveScopeError, plugin
+from ph.json import as_str
+from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
 from ph.persistence import open_session
 from ph.seams.subagents import (
-    ADMITTED,
-    DELETED,
     SUSPENDED_DETAIL,
-    USAGE,
     Access,
     DowngradeReason,
-    PlainStatus,
     StatusCause,
     SubagentAwaiter,
     SubagentRequest,
     SubagentResult,
     SubagentRun,
     SubagentSpawnError,
-    admission_payload,
     child_model_key,
     child_route,
     default_child_name,
+    reconcile_usage,
+    record_admitted,
+    record_deleted,
     record_settled,
     record_started,
     record_status,
+    usage_mirror,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import (
     Session,
-    SessionBatch,
     SessionEvent,
-    SessionObserver,
     derive_event_message,
 )
-from ph.session.writers import log_writer
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
-
-_LOG = log_writer(__name__)
 
 __all__ = [
     "MAX_NAME_CHARS",
@@ -156,31 +148,6 @@ def delegation_depth(session: Session) -> int:
     because a resumed child has no live parent to ask and the gate must hold.
     """
     return session.header.delegation_depth or 0
-
-
-def _answer_usage(event: SessionEvent) -> Mapping[str, object] | None:
-    """What an answer spent: a child's `assistant/message` that reports usage, or `None`.
-
-    The one test of "this is an answer", for the live mirror and the resume reconcile
-    both, so the two cannot count different things. `Mapping`, not `dict`: a committed
-    event's data is frozen into `MappingProxyType`, which is a Mapping and is *not* a
-    dict instance, so an `isinstance(..., dict)` guard silently attributed nothing.
-    """
-    if event.type != "assistant/message":
-        return None
-    usage = event.data.get("usage")
-    return usage if isinstance(usage, Mapping) else None
-
-
-def _attribution(
-    run_id: str,
-    seq: int,
-    usage: Mapping[str, object],
-    origin: Literal["spawn_task", "reconciled"] = "spawn_task",
-) -> JsonObject:
-    """One child answer charged to its parent: the `USAGE` payload, spelled once for
-    the live mirror and the resume reconcile."""
-    return {"runId": run_id, "targetSeq": seq, "childUsage": thaw_json(usage), "origin": origin}
 
 
 @dataclass(slots=True)
@@ -367,9 +334,17 @@ class RlmChildProvider:
             self.ctx.require(SESSIONS).dispose(child_session.id)
             raise SubagentSpawnError(f"the child agent could not be created: {error}") from error
 
-        granted, downgrade = await self._workspace(
-            parent, child_agent, child_session, request.access
-        )
+        try:
+            granted, downgrade = await self._workspace(
+                parent, child_agent, child_session, request.access
+            )
+        except InactiveScopeError:
+            # The parent went away while this child was being built — its scope,
+            # and the child's agent inside it, were disposed under the await.
+            # Nothing names the child yet, so its session is let go rather than
+            # tombstoned; the seam turns the scope error into the refusal.
+            self.ctx.require(SESSIONS).dispose(child_session.id)
+            raise
 
         run = SubagentRun(
             id=run_id,
@@ -398,16 +373,8 @@ class RlmChildProvider:
         run.result = self._awaiter(child)
 
         if log_admission:
-            _LOG.append(parent_session, ADMITTED, admission_payload(run, request))
+            record_admitted(parent_session, run, request)
 
-        # The child is an artifact of the *parent's* scope (I2), so a disposed
-        # parent unwinds its children instead of leaving them running with nobody
-        # to answer — and `delete()` becomes "release it early" rather than a
-        # second cleanup path that has to remember everything.
-        run.dispose = await parent.ctx.effect(
-            lambda: partial(self._release, parent_session, run_id, PARENT_TEARDOWN),
-            label=f"subagent:{run_id}",
-        )
         # A child whose own log shows it working has been started, whatever the
         # parent's roster says: `running` rides the parent's log in memory, so a
         # crash can keep the child's turns and lose the record of its start — and
@@ -430,10 +397,26 @@ class RlmChildProvider:
                     source=_TASK_SOURCE,
                 )
             )
-        # `resumed` is what makes a restart countable: without it the log holds
-        # a `running` record per start and no way to tell a first one from a
-        # fourth, which is the fold the ladder needs.
-        await self._attach(child, parent, cause="resumed" if restarts else None)
+        try:
+            # The child is an artifact of the *parent's* scope (I2), so a disposed
+            # parent unwinds its children instead of leaving them running with nobody
+            # to answer — and `delete()` becomes "release it early" rather than a
+            # second cleanup path that has to remember everything.
+            run.dispose = await parent.ctx.effect(
+                lambda: partial(self._release, parent_session, run_id, PARENT_TEARDOWN),
+                label=f"subagent:{run_id}",
+            )
+            # `resumed` is what makes a restart countable: without it the log holds
+            # a `running` record per start and no way to tell a first one from a
+            # fourth, which is the fold the ladder needs. A parent torn down under the
+            # effect's await refuses here too: the job is registered on its scope.
+            await self._attach(child, parent, cause="resumed" if restarts else None)
+        except InactiveScopeError:
+            # Past the admission, so the row it opened is ended rather than left
+            # live: the release a disposed parent runs, run now. Idempotent, so the
+            # parent's own teardown reaching it as well does nothing twice.
+            await self._release(parent_session, run_id, PARENT_TEARDOWN)
+            raise
         return run
 
     async def _child_session(self, session_id: str, parent_session: Session, depth: int) -> Session:
@@ -524,7 +507,7 @@ class RlmChildProvider:
         """
         assert child.session is not None
         limit = self.config.max_concurrent
-        child.unobserve = child.session.observe(self._mirror(child))
+        child.unobserve = child.session.observe(usage_mirror(child.parent_session, child.run.id))
         # `ctx.jobs`, which detaches rather than running inline: the job gives the
         # run an id, a cancel and `job/*` events for free, and a subagent is the
         # seam's own example of work that outlives the step that started it.
@@ -545,7 +528,9 @@ class RlmChildProvider:
             # Written only when there was actually a wait. An admitted child with
             # no status already reads as `queued` to the roster; this is the record
             # for the case where that is true *for a reason*.
-            on_queued=lambda: self._status(child, "queued", slots=limit),
+            on_queued=lambda: record_status(
+                child.parent_session, child.run.id, "queued", slots=limit
+            ),
         )
         child.job_id = job.id
 
@@ -628,65 +613,15 @@ class RlmChildProvider:
 
         return wait
 
-    def _mirror(self, child: _Child) -> SessionObserver:
-        """Attribute the child's usage to the parent as it is produced."""
-        parent_session, run_id = child.parent_session, child.run.id
-
-        def observer(_source: Session, event: SessionEvent) -> None:
-            usage = _answer_usage(event)
-            if usage is not None:
-                _LOG.append(parent_session, USAGE, _attribution(run_id, event.seq, usage))
-
-        return observer
-
     async def reconcile_answers(
         self, parent: Session, run_id: str, *, session_id: str, through: int
     ) -> int:
-        """Attribute the answers the child's stored log holds past `through` (L5).
-
-        `_mirror` attributes each answer as the child makes it, into the parent's log
-        in memory, while the child's own log reaches disk before each request. A
-        crash between the two left the answer on the child's disk and missing from
-        the parent's, so the goal budget did not count it and the ladder read the
-        restart as fruitless. The resume sweep asks this before it decides.
-
-        Read from the store, which is what the child's log holds after a crash, and
-        written in one batch, so the parent's account moves all at once or not at all.
-        Marked `origin: "reconciled"` so a reader can tell them from the live ones.
-        """
-        persistence = self.ctx.get(SESSION_PERSISTENCE)
-        if persistence is None:
-            return 0
-
-        def stored() -> list[SessionEvent]:
-            return persistence.read(session_id)[1] if persistence.exists(session_id) else []
-
-        events = await anyio.to_thread.run_sync(stored)
-        missing = [
-            (event.seq, usage)
-            for event in events
-            if event.seq > through and (usage := _answer_usage(event)) is not None
-        ]
-        if missing:
-            with parent.batch() as batch:
-                for seq, usage in missing:
-                    _LOG.append(batch, USAGE, _attribution(run_id, seq, usage, "reconciled"))
-        return len(missing)
-
-    def _status(
-        self,
-        child: _Child,
-        status: PlainStatus,
-        *,
-        into: SessionBatch | None = None,
-        **extra: Any,  # noqa: ANN401
-    ) -> None:
-        # Only the event, and only from the child's own parent log — or a batch of
-        # it, when the status has to land with another record. A copy on the handle
-        # would be a second source of truth for a fact the roster folds, frozen at
-        # the last in-process update. Through the seam's one writer, as every
-        # provider's status is.
-        record_status(child.parent_session if into is None else into, child.run.id, status, **extra)
+        """`AttributingProvider`: this provider's children charge their answers through
+        `usage_mirror`, so a resume brings the parent's account level with the child's
+        stored log through `reconcile_usage` (L5)."""
+        return await reconcile_usage(
+            self.ctx, parent, run_id, session_id=session_id, through=through
+        )
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
@@ -978,15 +913,10 @@ class RlmChildProvider:
             self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
-        # The ending and the tombstone in one batch (S14), before anything awaits:
-        # apart, a flush between them left a child `canceled` and not deleted.
-        with parent_session.batch() as batch:
-            if child.result is None:
-                # A terminal state for the roster: a revoked child is not merely
-                # absent, and a panel that knew only `deleted` could not say whether
-                # it had run.
-                self._status(child, "canceled", into=batch, reason=reason)
-            _LOG.append(batch, DELETED, {"runId": run_id, "reason": reason})
+        # The ending and the tombstone together (S14), before anything awaits — and
+        # the ending at all, because a revoked child is not merely absent: a panel
+        # that knew only `deleted` could not say whether it had run.
+        record_deleted(parent_session, run_id, reason, ended=child.result is not None)
         self._let_go(child)
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while
@@ -1023,7 +953,7 @@ class RlmChildProvider:
         jobs, registry = self.ctx.get(JOBS), self.ctx.get(SUBAGENTS)
         for child in self._children.values():
             if child.result is None:
-                self._status(child, "queued", detail=SUSPENDED_DETAIL)
+                record_status(child.parent_session, child.run.id, "queued", detail=SUSPENDED_DETAIL)
                 child.result = SubagentResult(status="queued", error=SUSPENDED_DETAIL)
             if child.job_id is not None and jobs is not None:
                 jobs.cancel(child.job_id)

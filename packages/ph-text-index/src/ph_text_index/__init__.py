@@ -61,7 +61,7 @@ from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
-from ph.seams.commands import CommandContext, CommandDefinition, reading_verbs
+from ph.seams.commands import Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
 from ph.seams.skills import discover_skills
@@ -715,16 +715,13 @@ async def apply(ctx: Context, config: Config) -> None:
             scope=scope,
         )
 
-    async def install(argument: str, _invocation: CommandContext) -> str:
+    async def model(verb: Provisioning) -> str:
         """`/text-index install` — fetch and load the model, now, on purpose.
 
         A **command** and not a tool, per the seam's own rule: this is a thing
         the *person* asks the harness to do, and routing it through a model turn
         would put the model in the log as having decided it. It costs no turn.
         """
-        verb = argument.strip().lower() or "status"
-        if verb not in ("install", "status"):
-            return f"/text-index takes `install` or `status`, not {argument.strip()!r}."
         if seam.provider is None:
             return (
                 "No embedder is registered, so there is nothing to install — "
@@ -745,12 +742,10 @@ async def apply(ctx: Context, config: Config) -> None:
         ok, sentence = await provision(seam.provider)
         return sentence if ok else f"{sentence}\n(weights would go under {weights})"
 
-    command = CommandDefinition(
-        name="text-index",
-        summary="Download and load the embedding model, or report whether it is ready.",
-        argument_hint="[install|status]",
-        run=install,
-        reads=reading_verbs("", "status"),
+    command = install_or_status(
+        "text-index",
+        "Download and load the embedding model, or report whether it is ready.",
+        model,
     )
     contribute_item(
         ctx,

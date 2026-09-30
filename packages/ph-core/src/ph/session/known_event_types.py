@@ -86,12 +86,6 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # *about* an agent rather than the agent's own. `agent/failed` also sat
         # one letter from `agent/error`, which means something else entirely.
         "supervisor/retry",
-        # A retry putting the tree back to its last restore point, and whether it
-        # did (S12) — `SUPERVISOR_RESTORE`, `ph_app.kinds`. A pair rather than a
-        # line on the retry, because the restore is an act of its own: one cut
-        # short leaves a tree that is neither the checkpoint nor what the crash left.
-        "supervisor/restoring",
-        "supervisor/restored",
         "supervisor/failed",
         "supervisor/recovered",
         # A root released for being idle (P5-05). Its own record because the
@@ -224,6 +218,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # which only works if both halves are in the vocabulary.
         "workspace/acquired",
         "workspace/disposed",
+        # A workspace put back to a restore point, and whether it was (S12) —
+        # `WORKSPACE_RESTORE`. A pair, because the restore is an act of its own: one
+        # cut short leaves a tree that is neither the restore point nor what was
+        # there. Opened by the seam, whoever asked — `/revert` or a retry.
+        "workspace/restoring",
+        "workspace/restored",
         # Where a tier is *about to* put a fresh tree, written before it makes one
         # (S12): an `acquiring` with nothing after it is a tree a crash may have left
         # half-made — a checkout, or a mounted overlay — and reconcile needs the
@@ -417,8 +417,6 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # hard-refusing a whole session over two records carrying no
         # conversational content.
         "supervisor/retry",
-        "supervisor/restoring",
-        "supervisor/restored",
         "supervisor/failed",
         "supervisor/recovered",
         "supervisor/passivated",
@@ -453,6 +451,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "limits/exceeded",
         "limits/breaker-tripped",
         "sandbox/denied",
+        "workspace/restoring",
+        "workspace/restored",
         "workspace/acquiring",
         "workspace/acquired",
         "workspace/disposed",
@@ -504,9 +504,9 @@ INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
         "attachment/uploading": IntentPair("attachment/uploaded", "ph.session.kinds"),
         "question/asked": IntentPair("question/answered", "ph.session.kinds"),
         "shell/command": IntentPair("shell/result", "ph.session.kinds"),
-        "supervisor/restoring": IntentPair("supervisor/restored", "ph_app.kinds"),
         "tool/code-dispatch-start": IntentPair("tool/code-dispatch", "ph.session.kinds"),
         "tool/effect": IntentPair("tool/effect-settled", "ph.session.kinds"),
+        "workspace/restoring": IntentPair("workspace/restored", "ph.session.kinds"),
     }
 )
 """Every type that opens an intent, by the type that opens it (T4).
@@ -571,9 +571,19 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.seams.schedule": frozenset(
             {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
         ),
-        # The seam writes the terminal status for a child it gave up on — one the
-        # provider admitted and can no longer end — so the roster row closes.
-        "ph.seams.subagents": frozenset({"subagent/status"}),
+        # Every record of the roster, and from nowhere else: a provider reports its
+        # child through this module's doors (`record_admitted`, `record_status`,
+        # `record_started`, `record_settled`, `record_deleted`, `usage_mirror`,
+        # `reconcile_usage`), which keep the durability rules each record carries —
+        # and the seam writes the terminal status for a child it gave up on.
+        "ph.seams.subagents": frozenset(
+            {
+                "subagent/admitted",
+                "subagent/deleted",
+                "subagent/status",
+                "subagent/usage-attributed",
+            }
+        ),
         "ph.seams.workspace": frozenset(
             {
                 "workspace/acquired",
@@ -612,16 +622,6 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
         "ph_rlm.harness.service": frozenset({"harness/refined"}),
         "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
-        # Not `subagent/status`: a provider reports its child's status through
-        # `ph.seams.subagents`' doors (`record_status`, `record_started`,
-        # `record_settled`), which keep the durability rules a status carries.
-        "ph_rlm.subagents": frozenset(
-            {
-                "subagent/admitted",
-                "subagent/deleted",
-                "subagent/usage-attributed",
-            }
-        ),
         # Compaction rewrites the model's history through surface `replace` — a
         # summary as a `user/message`, an elided call as an `assistant/message`, a
         # clipped result as a `tool/result` — which is why the three surface types

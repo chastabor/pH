@@ -39,7 +39,7 @@ from ph.llm.types import (
 )
 from ph.persistence import interrupted_turn_closers, repaired
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
-from ph.session.kinds import DISPATCH_INTERRUPTED
+from ph.session.kinds import DISPATCH_INTERRUPTED, restore_settled
 from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
 from ph.testing import (
     MountProfile,
@@ -49,7 +49,6 @@ from ph.testing import (
     simple_tool,
     user_payload,
 )
-from ph_app.kinds import restore_settled
 from ph_app.shell import INTERRUPTED
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, RULES, TuiEventAdapter
 from ph_app.tui.state import Surface, TuiState
@@ -555,28 +554,28 @@ async def test_an_orphaned_dispatch_is_drawn_settled(mount: MountProfile) -> Non
 @pytest.mark.parametrize(
     ("settle", "said"),
     [
-        ((True, None), "Restored the tree to its last restore point before attempt 1"),
-        ((False, "no"), "The tree could not be restored before attempt 1"),
-        (None, "The harness stopped while restoring the tree before attempt 1"),
+        ((True, None), "Restored the tree to its restore point"),
+        ((False, "no"), "The tree could not be restored; it stays as it was: no"),
+        (None, "The harness stopped while restoring the tree"),
     ],
     ids=["restored", "refused", "interrupted"],
 )
-async def test_a_retrys_restore_says_what_the_tree_is(
+async def test_a_restore_says_what_the_tree_is(
     mount: MountProfile, settle: tuple[bool, str | None] | None, said: str
 ) -> None:
-    """S12. The restore is its own pair, and its settle is the row: put back, left as
-    the crash left it, or — a daemon that died restoring — unknown. The last is fed
-    the closer repair actually writes, so the two cannot drift."""
+    """S12. A restore is its own pair, whoever asked for it, and its settle is the
+    row: put back, left as it was, or — a process that died restoring — unknown. The
+    last is fed the closer repair actually writes, so the two cannot drift."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-restore")
     log_event(session, "supervisor/retry", {"attempt": 1, "of": 3, "delayMs": 0, "reason": "x"})
-    opened = log_event(session, "supervisor/restoring", {"attempt": 1, "tree": "t1"})
+    opened = log_event(session, "workspace/restoring", {"agentId": "a", "tree": "t1"})
     if settle is None:
         for closer in interrupted_turn_closers(session.events):
             session.admit(closer)
     else:
         ok, detail = settle
-        log_event(session, "supervisor/restored", restore_settled(opened, ok=ok, detail=detail))
+        log_event(session, "workspace/restored", restore_settled(opened, ok=ok, detail=detail))
 
     assert _shape(_replay(session))[-1][1].startswith(said)
 

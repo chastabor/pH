@@ -1454,6 +1454,10 @@ BOUND: dict[str, str] = {
     "ToolDefinition.reconcile": "ToolRuntime._answer",
     # The five registries P6-29 reached, once the binding could hold a pair.
     "CommandDefinition.run": "CommandRegistry.dispatch",
+    # A command's verb table is its `run`: `Verbs.__call__` hands the argument to
+    # one of these inside the binding `dispatch` entered for the body.
+    "CommandVerb.run": "CommandRegistry.dispatch",
+    "Verbs.otherwise": "CommandRegistry.dispatch",
     "CompactionNote.text": "CompactionSeam.notes",
     "Diagnostic.read": "DiagnosticsRegistry.report",
     "Invariant.check": "InvariantRegistry.verify",
@@ -1530,7 +1534,6 @@ UNBOUND: dict[str, str] = {
     # --- policy and presentation, called for an answer rather than for effect --
     # These are asked a question and expected to return one. None of them has a
     # reason to register, and two of them run outside any pipeline at all.
-    "CommandDefinition.reads": "a policy answer about an argument, asked before the body runs",
     "ToolDefinition.present_call": "TUI presentation, outside the pipeline",
     "ToolDefinition.present_result": "TUI presentation, outside the pipeline",
     "TransportPresentation.present_call": "TUI presentation, outside the pipeline",

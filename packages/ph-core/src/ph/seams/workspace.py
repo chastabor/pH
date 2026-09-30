@@ -49,10 +49,11 @@ from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, runn
 from ..json import JsonValue, as_seq, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
-from ..session import Session, SessionEvent, session_written
+from ..session import Session, SessionEvent, intents_of, session_written
+from ..session.kinds import WORKSPACE_RESTORE, restore_settled
 from ..session.writers import log_writer
 from ..tools.definition import ToolExecution, ToolExecutionResult
-from ..tools.errors import HarnessError
+from ..tools.errors import HarnessError, error_message
 from ..wire import WireModel, literal_lookup, validation_summary
 
 if TYPE_CHECKING:
@@ -1726,19 +1727,43 @@ class WorkspaceSeam:
         _LOG.append(session, CHECKPOINT, {"agentId": agent_id, "tree": token, "callId": call_id})
         return token
 
-    async def restore(self, workspace: Workspace, token: str) -> tuple[str, ...]:
-        """Put this workspace back to `token`. Returns the paths the run had added.
+    async def restore(self, agent_id: str, token: str, *, session: Session) -> tuple[str, ...]:
+        """Put this agent's workspace back to `token`. Returns the paths the run had added.
 
         Raises rather than answering `None`, unlike every other optional capability
         here: each caller is acting on a restore point a person or a retry ladder
         asked for **by name**, and "it silently did nothing" is the one answer none
         of them may mistake for success.
+
+        **Recorded, always** (`WORKSPACE_RESTORE`): a restore rewrites and deletes
+        files, and one the process died inside leaves a tree that is neither the
+        restore point nor what was there — repair closes that pair
+        `outcome-unknown`, which is what a reader is owed. On disk before the tree
+        is touched, and a restore the log cannot record is not run
+        (`IntentNotDurable`); one that raised is settled `ok: false`, then raised on.
+        Here rather than at each caller, and `session` required as `checkpoint`
+        requires it, so `/revert`, a supervisor's retry and any third caller say it
+        one way — and none can leave it out. The workspace is the agent's own, looked
+        up here, so a caller cannot hand in one tree and record another agent.
         """
+        workspace = self.of(agent_id)
+        if workspace is None:
+            raise FileNotFoundError(f"agent {agent_id!r} holds no workspace to restore")
         provider = self.provider
         if not isinstance(provider, CheckpointingProvider):
             raise FileNotFoundError(f"no mounted tier can restore {workspace.root}")
-        with running(self.provider_by):
-            return await provider.restore(workspace, token)
+        journal = intents_of(self.ctx)
+        opening: dict[str, JsonValue] = {"agentId": agent_id, "tree": token}
+        async with journal.claim(session, WORKSPACE_RESTORE, opening) as held:
+            try:
+                with running(self.provider_by):
+                    removed = await provider.restore(workspace, token)
+            except Exception as error:
+                failed = restore_settled(held.opened, ok=False, detail=error_message(error))
+                journal.settle(session, held, failed)
+                raise
+            journal.settle(session, held, restore_settled(held.opened, ok=True))
+        return removed
 
     def _reclaimer(
         self, records: Sequence[WorkspaceRecord], verb: str

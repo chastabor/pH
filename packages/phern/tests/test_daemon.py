@@ -134,8 +134,9 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +160,7 @@ from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
 from ph.seams.subagents import SubagentService
 from ph.session import Session, SessionEvent
+from ph.session.kinds import WORKSPACE_RESTORE
 from ph.testing import ReapedHost, log_event, not_none, stored_log, stored_types
 from ph_app import runtime as runtime_module
 from ph_app.daemon import recovery, server
@@ -166,11 +168,28 @@ from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import Root, RootStartAbandoned, Supervisor
-from ph_app.kinds import SUPERVISOR_RESTORE
 from ph_app.protocol import DaemonError
 from ph_app.runtime import mounted
 
-RESTORING, RESTORED = SUPERVISOR_RESTORE.opened, SUPERVISOR_RESTORE.settled
+RESTORING, RESTORED = WORKSPACE_RESTORE.opened, WORKSPACE_RESTORE.settled
+
+
+@dataclass(slots=True)
+class _Checkpoints:
+    """A tier that can put a tree back (`CheckpointingProvider`), doing what the test
+    says. Beneath the seam's `restore`, which is where the record is now kept — so a
+    test that replaced that method would skip the very thing it is about."""
+
+    put_back: Callable[[str], Awaitable[tuple[str, ...]]]
+    tier: str = "worktree"
+
+    async def capture(self, workspace: object) -> str | None:
+        return None
+
+    async def restore(self, workspace: object, token: str) -> tuple[str, ...]:
+        return await self.put_back(token)
+
+
 pytestmark = pytest.mark.anyio
 
 
@@ -1059,21 +1078,16 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
 
         asked: list[str] = []
 
-        async def fake_restore(
-            _seam: object,
-            workspace: object,
-            token: str,
-        ) -> tuple[str, ...]:
+        async def put_back(token: str) -> tuple[str, ...]:
             asked.append(token)
             return ()
 
-        # The **seam's** method, not a module import: the ladder asks the mounted
-        # tier now, so patching a name in this module would have kept passing while
-        # the call it stands for went somewhere else.
-        monkeypatch.setattr(
-            type(root.ctx.require(WORKSPACE)), "of", lambda self, agent_id: object()
-        )
-        monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", fake_restore)
+        # The mounted **tier**, not a module import: the ladder asks the seam, so
+        # patching a name in this module would have kept passing while the call it
+        # stands for went somewhere else.
+        seam = root.ctx.require(WORKSPACE)
+        monkeypatch.setattr(type(seam), "of", lambda self, agent_id: object())
+        monkeypatch.setattr(seam, "provider", _Checkpoints(put_back))
 
         workspace, tree = supervisor._restore_point(root)
         assert tree == "newest", "the retry went back to a stale restore point"
@@ -1084,14 +1098,10 @@ async def test_the_tree_is_restored_from_the_latest_checkpoint_before_a_retry(
 
         # Best-effort: a restore that fails must not cost the retry, and must
         # not claim a rollback that did not happen.
-        async def angry_restore(
-            _seam: object,
-            workspace: object,
-            token: str,
-        ) -> tuple[str, ...]:
+        async def refuse(token: str) -> tuple[str, ...]:
             raise RuntimeError("the tier said no")
 
-        monkeypatch.setattr(type(root.ctx.require(WORKSPACE)), "restore", angry_restore)
+        monkeypatch.setattr(seam, "provider", _Checkpoints(refuse))
         await supervisor._restore(root, workspace, tree)
         assert not_none(root.session.latest(RESTORED)).data["ok"] is False
 
@@ -1118,7 +1128,7 @@ async def test_a_retry_is_on_disk_before_its_restore_runs(
     It ran first and the retry was written after, so a daemon that died while
     restoring had rewritten the tree with no record of the attempt — and a crash
     loop there never advanced the count. The retry reaches disk first, then the
-    restore's own opening record (`SUPERVISOR_RESTORE`); a restore that fails is
+    restore's own opening record (`WORKSPACE_RESTORE`); a restore that fails is
     settled `ok: false`, so the transcript claims no rollback.
 
     Sabotage: restore before recording again, and the restore finds neither record
@@ -1132,13 +1142,13 @@ async def test_a_retry_is_on_disk_before_its_restore_runs(
         def written() -> list[str]:
             return stored_types(root.ctx, root.id)
 
-        async def refused(_seam: object, workspace: object, token: str) -> tuple[str, ...]:
+        async def refused(token: str) -> tuple[str, ...]:
             seen.append((recovery.RETRY in written(), RESTORING in written()))
             raise RuntimeError("the tier said no")
 
-        seam = type(root.ctx.require(WORKSPACE))
-        monkeypatch.setattr(seam, "of", lambda self, agent_id: object())
-        monkeypatch.setattr(seam, "restore", refused)
+        seam = root.ctx.require(WORKSPACE)
+        monkeypatch.setattr(type(seam), "of", lambda self, agent_id: object())
+        monkeypatch.setattr(seam, "provider", _Checkpoints(refused))
         _crash(monkeypatch, root, 1)
         await supervisor.prompt("restores", "hello")
         await until(lambda: RESTORED in written(), what="the restore's settle")
@@ -1148,7 +1158,7 @@ async def test_a_retry_is_on_disk_before_its_restore_runs(
             one for one in root.session.events if one.type in {recovery.RETRY, RESTORING, RESTORED}
         ]
         assert [one.type for one in ladder] == [recovery.RETRY, RESTORING, RESTORED]
-        assert dict(ladder[1].data) == {"attempt": 1, "tree": "t1"}
+        assert dict(ladder[1].data) == {"agentId": root.agent.id, "tree": "t1"}
         assert ladder[2].data["restoringSeq"] == ladder[1].seq
         assert ladder[2].data["ok"] is False
         assert "the tier said no" in as_str(ladder[2].data["detail"])

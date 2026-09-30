@@ -59,7 +59,7 @@ from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
-from ph.seams.commands import CommandContext, CommandDefinition, reading_verbs
+from ph.seams.commands import Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
 from ph.seams.skills import discover_skills
@@ -808,7 +808,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def install(argument: str, _invocation: CommandContext) -> str:
+    async def grammar_command(verb: Provisioning) -> str:
         """`/code-graph install|status` — make the grammars ready, on purpose.
 
         A **command** rather than a tool, per the seam's own rule: a person asks
@@ -817,9 +817,6 @@ async def apply(ctx: Context, config: Config) -> None:
         the long tail fetches — but "is this ready" should have one answer per
         plugin, asked the same way.
         """
-        verb = argument.strip().lower() or "status"
-        if verb not in ("install", "status"):
-            return f"/code-graph takes `install` or `status`, not {argument.strip()!r}."
         wanted = [one for one in (config.languages or DEFAULT_LANGUAGES) if indexable(one)]
         if verb == "status":
             ready, missing = await anyio.to_thread.run_sync(readiness, wanted)
@@ -834,12 +831,10 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         return f"all {count_of(len(ready), 'grammar')} ready under {seam.grammars}."
 
-    command = CommandDefinition(
-        name="code-graph",
-        summary="Make the tree-sitter grammars ready, or report whether they are.",
-        argument_hint="[install|status]",
-        run=install,
-        reads=reading_verbs("", "status"),
+    command = install_or_status(
+        "code-graph",
+        "Make the tree-sitter grammars ready, or report whether they are.",
+        grammar_command,
     )
     contribute_item(
         ctx,

@@ -48,7 +48,7 @@ from rlm_fixtures import (
 
 from ph.cordis import Context
 from ph.json import as_obj
-from ph.keys import AGENTS, CREDENTIALS, LLM, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
+from ph.keys import AGENTS, CREDENTIALS, JOBS, LLM, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
 from ph.llm.adapter import ResolvedModel
 from ph.llm.fake import FakeAdapter, text_script
 from ph.llm.types import text_of, user_text
@@ -94,7 +94,13 @@ from ph.testing.git import WORKTREE_ROWS, git_repo
 from ph.tools.definition import NotDone
 from ph_rlm.bindings import RUN_TOOL
 from ph_rlm.keys import RLM_CHILDREN
-from ph_rlm.subagents import PARENT_TEARDOWN, PROVIDER_NAME, TASK_PREFIX, delegation_depth
+from ph_rlm.subagents import (
+    PARENT_TEARDOWN,
+    PROVIDER_NAME,
+    TASK_PREFIX,
+    RlmChildProvider,
+    delegation_depth,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -127,6 +133,44 @@ async def _spawn(
 
 
 # ------------------------------------------------------------------ admission --
+
+
+@pytest.mark.parametrize("step", ["before-admission", "after-admission"])
+async def test_a_parent_that_goes_away_mid_admission_refuses_the_child(
+    delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """A spawn whose parent's scope is disposed under one of its awaits is refused.
+
+    It escaped as a raw `InactiveScopeError` from whichever registration met the
+    dead scope first — a workspace effect on the child's scope, the release effect or
+    the job on the parent's — carrying no spawn code, and past the admission it left
+    a roster row open that nothing would ever end. Now it is a `SubagentSpawnError`,
+    and what was built is released: taken apart before the admission, tombstoned
+    after it.
+
+    Sabotage: drop either `except InactiveScopeError` in `_admit`.
+    """
+    ctx, session, parent = await delegating()
+    # An await on each side of the admission: building the child's workspace, and
+    # starting the job that drives it, which registers on the parent's scope.
+    owner, name = (
+        (RlmChildProvider, "_workspace")
+        if step == "before-admission"
+        else (type(ctx.require(JOBS)), "start")
+    )
+    original = getattr(owner, name)
+
+    async def parent_goes(self: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        await ctx.require(AGENTS).dispose(parent.id)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(owner, name, parent_goes)
+
+    with pytest.raises(SubagentSpawnError, match="went away"):
+        await _spawn(ctx, parent)
+
+    assert not any(child_is_live(row) for row in subagent_roster(session).values())
+    assert ctx.require(SUBAGENTS).list() == []
 
 
 async def test_admission_returns_before_the_child_answers(delegating: MountedRuntime) -> None:
@@ -1412,7 +1456,7 @@ CHILD_ANSWER_USAGE = {"inputTokens": 120, "outputTokens": 30}
 async def _answered_on_its_own_disk(ctx: Context, run: Any) -> SessionEvent:  # noqa: ANN401
     """The child answers, and only the child's log is written.
 
-    What a crash between the two writes leaves behind: `_mirror` attributes the answer
+    What a crash between the two writes leaves behind: `usage_mirror` charges the answer
     to the parent at once, in memory, and the child's log reaches disk before its next
     request, while a parent waiting on it makes no request and writes nothing.
     """

@@ -34,9 +34,9 @@ from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_str
 from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
-from ..seams.commands import CommandContext, CommandDefinition, reading_verbs
+from ..seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
 from ..seams.workspace import checkpoints, workspace_of
-from ..session import Session
+from ..session import IntentNotDurable, Session
 from ..text import brief_value
 
 __all__ = ["apply"]
@@ -91,7 +91,17 @@ async def apply(ctx: Context, config: None) -> None:
                 f"{point['agentId']!r}, which does not hold a workspace here"
             )
         try:
-            removed = await ctx.require(WORKSPACE).restore(workspace, as_str(point["tree"]))
+            # With the session, so the seam records the restore around the act
+            # (`WORKSPACE_RESTORE`): a crash inside it reads as "may be partly
+            # restored", not as a command whose outcome is unknown.
+            removed = await ctx.require(WORKSPACE).restore(
+                agent_id, as_str(point["tree"]), session=session
+            )
+        except IntentNotDurable:
+            return (
+                f"refusing: restore point {raw} was not restored, because the log could "
+                "not record it"
+            )
         except FileNotFoundError as gone:
             # Not a crash window any more: a restore point is pinned before it is
             # recorded (`WorkspaceSeam.checkpoint`), so a recorded one named state
@@ -114,8 +124,9 @@ async def apply(ctx: Context, config: None) -> None:
             name="revert",
             summary="Restore this agent's workspace to a per-run checkpoint.",
             argument_hint="<seq>",
-            run=revert,
-            reads=reading_verbs(""),
+            # Bare, it lists — a question; with a seq it restores. One body for both,
+            # because the checks ahead of either are the same.
+            run=Verbs({"": CommandVerb(revert, reads=True)}, otherwise=revert),
         ),
         scope=ctx,
     )

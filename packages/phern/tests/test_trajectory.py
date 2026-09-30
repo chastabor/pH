@@ -170,7 +170,7 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # upload once it settles; the auditor wants the moment it was attempted.
         "attachment/uploading",
         # S12: a restore about to rewrite the tree. The transcript draws its settle.
-        "supervisor/restoring",
+        "workspace/restoring",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {

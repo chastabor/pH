@@ -556,6 +556,7 @@ async def test_a_run_can_be_reverted_to_the_state_before_it(
     in a demo: an edit, a deletion, and a file the run created.
     """
     ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
     workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
@@ -567,7 +568,7 @@ async def test_a_run_can_be_reverted_to_the_state_before_it(
     (workspace.root / "added.txt").write_text("the run made this\n", encoding="utf-8")
     (workspace.root / "README.md").unlink()
 
-    added = await ctx.require(WORKSPACE).restore(workspace, token)
+    added = await ctx.require(WORKSPACE).restore("a1", token, session=session)
 
     assert (workspace.root / "tracked.txt").read_text(encoding="utf-8") == "before the run\n"
     assert (workspace.root / "README.md").exists(), "a file the run deleted did not come back"
@@ -592,6 +593,7 @@ async def test_the_operation_log_keeps_a_restore_point_reachable(
     alone would have taken the first out.
     """
     ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
     workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
@@ -603,7 +605,7 @@ async def test_the_operation_log_keeps_a_restore_point_reachable(
         (workspace.root / f"cell-{step}.txt").write_text(f"{step}\n", encoding="utf-8")
         await ctx.require(WORKSPACE).capture(workspace)
 
-    added = await ctx.require(WORKSPACE).restore(workspace, token)
+    added = await ctx.require(WORKSPACE).restore("a1", token, session=session)
 
     assert (workspace.root / "keep.txt").read_text(
         encoding="utf-8"
@@ -619,6 +621,7 @@ async def test_a_restore_leaves_ignored_files_alone(mount: MountProfile, tmp_pat
     `read-tree` never sees one.
     """
     ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
     (base / ".gitignore").write_text("build/\n", encoding="utf-8")
     workspace = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
@@ -629,7 +632,7 @@ async def test_a_restore_leaves_ignored_files_alone(mount: MountProfile, tmp_pat
     assert token is not None
     (workspace.root / "build" / "cache").write_text("still expensive\n", encoding="utf-8")
 
-    await ctx.require(WORKSPACE).restore(workspace, token)
+    await ctx.require(WORKSPACE).restore("a1", token, session=session)
 
     assert (workspace.root / "build" / "cache").read_text(encoding="utf-8") == "still expensive\n"
 
@@ -645,6 +648,7 @@ async def test_a_restore_touches_only_its_own_workspace(
     back with it — in the tier bought precisely so a fan-out does not collide.
     """
     ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
     one = await ctx.require(WORKSPACE).acquire(
         session_id="s1", agent_id="a1", base=base, access="write"
     )
@@ -656,7 +660,7 @@ async def test_a_restore_touches_only_its_own_workspace(
     (one.root / "mine.txt").write_text("a1's cell\n", encoding="utf-8")
     (two.root / "theirs.txt").write_text("a2 is still working\n", encoding="utf-8")
 
-    await ctx.require(WORKSPACE).restore(one, token)
+    await ctx.require(WORKSPACE).restore("a1", token, session=session)
 
     assert not (one.root / "mine.txt").exists()
     assert (two.root / "theirs.txt").read_text(encoding="utf-8") == "a2 is still working\n"
@@ -700,12 +704,11 @@ async def test_a_restore_point_that_is_gone_is_reported_rather_than_crashing(
     above the tier that made it.
     """
     ctx, base = await _tiered(mount, tmp_path)
-    workspace = await ctx.require(WORKSPACE).acquire(
-        session_id="s1", agent_id="a1", base=base, access="write"
-    )
+    session = ctx.require(SESSIONS).create("s1")
+    await ctx.require(WORKSPACE).acquire(session_id="s1", agent_id="a1", base=base, access="write")
 
     with pytest.raises(FileNotFoundError):
-        await ctx.require(WORKSPACE).restore(workspace, "deadbeef" * 5)
+        await ctx.require(WORKSPACE).restore("a1", "deadbeef" * 5, session=session)
 
 
 async def test_revert_offers_restore_points_for_a_jj_workspace(

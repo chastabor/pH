@@ -23,7 +23,7 @@ import os
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import anyio
 import pytest
@@ -39,7 +39,13 @@ from ph.seams.code_runtime import (
     PersistenceObligationError,
     validate_binding_name,
 )
-from ph.seams.commands import CommandDefinition, CommandRegistry, reading_verbs
+from ph.seams.commands import (
+    CommandContext,
+    CommandDefinition,
+    CommandRegistry,
+    CommandVerb,
+    Verbs,
+)
 from ph.seams.compaction import (
     CompactionError,
     CompactionNote,
@@ -1050,14 +1056,15 @@ async def test_a_command_the_log_cannot_record_does_not_run(
 async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`reads`: the question is answered, and recorded after, whole.
+    """A verb that `reads`: the question is answered, and recorded after, whole.
 
     A durable record in front of every command made the one someone reaches for
-    on a full disk — what state are things in? — refuse along with the rest. An
-    argument the command says only asks takes no barrier; the verb beside it that
+    on a full disk — what state are things in? — refuse along with the rest. A verb
+    the command's table says only asks takes no barrier; the verb beside it that
     acts still does.
 
-    Sabotage: ignore `reads` in the dispatch, and the listing is refused too.
+    Sabotage: ignore the table's `reads` in the dispatch, and the listing is refused
+    too.
     """
     from ph.keys import COMMANDS, SESSIONS
     from ph.session import SessionStore
@@ -1066,12 +1073,22 @@ async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
     session = ctx.require(SESSIONS).create("s")
     ran: list[str] = []
 
-    def body(arg: str, _ctx: object) -> str:
-        ran.append(arg)
-        return f"did {arg}"
+    def verb(name: str) -> CommandVerb:
+        def body(rest: str, _ctx: object) -> str:
+            ran.append(f"{name} {rest}".rstrip())
+            return f"did {name}"
+
+        return CommandVerb(body, reads=name == "list")
 
     ctx.require(COMMANDS).register(
-        CommandDefinition(name="trees", summary="t", run=body, reads=reading_verbs("", "list"))
+        CommandDefinition(
+            name="trees",
+            summary="t",
+            run=Verbs(
+                {"list": verb("list"), "remove": verb("remove")},
+                otherwise=verb("usage").run,
+            ),
+        )
     )
     monkeypatch.setattr(SessionStore, "flush", raising(OSError("read-only file system")))
 
@@ -1083,6 +1100,32 @@ async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
     run, done = [one for one in session.events if one.type.startswith("command/")][:2]
     assert (run.data["argument"], done.data["outcome"]) == ("list", "ok")
     assert done.data["runSeq"] == run.seq and run.batch is not None and done.batch == run.batch
+
+
+async def test_a_verb_table_is_the_one_parse_of_a_verb() -> None:
+    """`Verbs` reads the first word — without regard to case — hands a verb only what
+    follows it, gives the whole argument to `otherwise` when no verb is named, and
+    answers a verb's refusal with its text."""
+
+    def refuse(_rest: str, _ctx: object) -> str:
+        raise LookupError("no such tree")
+
+    table = Verbs(
+        {
+            "": CommandVerb(lambda rest, _ctx: f"bare {rest}", reads=True),
+            "drop": CommandVerb(lambda rest, _ctx: f"drop {rest}"),
+            "gone": CommandVerb(refuse),
+        },
+        otherwise=lambda argument, _ctx: f"else {argument}",
+        refused=(LookupError,),
+    )
+    context = cast(CommandContext, None)
+
+    assert (await table("", context), table.reads("")) == ("bare ", True)
+    assert (await table("DROP  a b", context), table.reads("drop a")) == ("drop a b", False)
+    assert (await table("42", context), table.reads("42")) == ("else 42", False)
+    assert await table("gone x", context) == "no such tree"
+    assert await Verbs({}, otherwise="usage: /x")("anything", context) == "usage: /x"
 
 
 async def test_a_failing_command_still_records_its_outcome() -> None:

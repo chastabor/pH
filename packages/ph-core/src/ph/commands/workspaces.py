@@ -48,12 +48,13 @@ becomes a row, so `remove` can never be aimed at it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..cordis import Context, plugin
 from ..keys import COMMANDS, FS, SESSION_PERSISTENCE, WORKSPACE
-from ..seams.commands import CommandContext, CommandDefinition, reading_verbs
+from ..seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
 from ..seams.workspace import BRANCH_PREFIX as PREFIX
 from ..seams.workspace import stored_survivors
 
@@ -111,21 +112,31 @@ async def apply(ctx: Context, config: None) -> None:
     its checkouts. The tier answers now, and it knows where it puts them.
     """
 
-    async def workspaces(argument: str, _invocation: CommandContext) -> str:
-        verb, _, rest = argument.strip().partition(" ")
-        view = _Workspaces(ctx=ctx, base=ctx.require(FS).root)
-        try:
-            if verb in ("", "list"):
-                return await view.list()
-            if verb == "export":
-                return await view.export(rest.strip())
-            if verb == "merge":
-                return await view.merge(rest.strip())
-            if verb == "remove":
-                return await view.remove(rest)
-        except _Refused as refusal:
-            return str(refusal)
-        return USAGE
+    def verb(
+        act: Callable[[_Workspaces, str], Awaitable[str]], *, reads: bool = False
+    ) -> CommandVerb:
+        """One `/workspaces` verb: `act` on a fresh view, a refusal said rather than
+        raised."""
+
+        async def run(rest: str, _invocation: CommandContext) -> str:
+            try:
+                return await act(_Workspaces(ctx=ctx, base=ctx.require(FS).root), rest)
+            except _Refused as refusal:
+                return str(refusal)
+
+        return CommandVerb(run, reads=reads)
+
+    listing = verb(lambda view, _rest: view.list(), reads=True)
+    workspaces = Verbs(
+        {
+            "": listing,
+            "list": listing,
+            "export": verb(_Workspaces.export),
+            "merge": verb(_Workspaces.merge),
+            "remove": verb(_Workspaces.remove),
+        },
+        otherwise=lambda _argument, _invocation: USAGE,
+    )
 
     ctx.require(COMMANDS).register(
         CommandDefinition(
@@ -133,7 +144,6 @@ async def apply(ctx: Context, config: None) -> None:
             summary="List, export, merge or remove the branches agents left behind.",
             argument_hint=HINT,
             run=workspaces,
-            reads=reading_verbs("", "list"),
         ),
         scope=ctx,
     )

@@ -33,7 +33,7 @@ from pathlib import Path
 from ..cordis import Context, Row, plugin
 from ..keys import COMMANDS, MOUNT, SANDBOX, TUI_STATUS
 from ..seams._registry import contribute_item
-from ..seams.commands import CommandContext, CommandDefinition, reading_verbs
+from ..seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
 from ..seams.invariants import contribute_fold_cache
 from ..seams.sandbox import DENIED, NETWORK_MODES, Allowances, NetworkAllowance
 from ..seams.sandbox_allow import describe
@@ -302,21 +302,24 @@ class _Denials:
 async def apply(ctx: Context, config: None) -> None:
     """Register `/sandbox`, and the footer reading that says refusals happened."""
 
-    async def sandbox(argument: str, invocation: CommandContext) -> str:
-        verb, _, rest = argument.strip().partition(" ")
-        view = _Sandbox(
-            ctx=ctx, session=invocation.session, line=f"/sandbox {argument.strip()}".rstrip()
-        )
-        try:
-            if verb in ("", "show", "list"):
-                return view.show()
-            if verb in ("allow", "revoke"):
-                return await view.edit(rest, adding=verb == "allow")
-            if verb == "network":
-                return await view.network(rest.strip())
-        except _Refused as refusal:
-            return str(refusal)
-        return USAGE
+    def view(invocation: CommandContext) -> _Sandbox:
+        return _Sandbox(ctx=ctx, session=invocation.session, line=invocation.line)
+
+    showing = CommandVerb(lambda _rest, invocation: view(invocation).show(), reads=True)
+    sandbox = Verbs(
+        {
+            "": showing,
+            "show": showing,
+            "list": showing,
+            "allow": CommandVerb(lambda rest, invocation: view(invocation).edit(rest, adding=True)),
+            "revoke": CommandVerb(
+                lambda rest, invocation: view(invocation).edit(rest, adding=False)
+            ),
+            "network": CommandVerb(lambda rest, invocation: view(invocation).network(rest)),
+        },
+        otherwise=USAGE,
+        refused=(_Refused,),
+    )
 
     ctx.require(COMMANDS).register(
         CommandDefinition(
@@ -324,7 +327,6 @@ async def apply(ctx: Context, config: None) -> None:
             summary="Show what confined commands may reach, and change it without a restart.",
             argument_hint=HINT,
             run=sandbox,
-            reads=reading_verbs("", "show", "list"),
         ),
         scope=ctx,
     )

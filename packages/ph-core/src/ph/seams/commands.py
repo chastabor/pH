@@ -12,10 +12,10 @@ decided. So a command dispatches directly, records `command/run` and
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from ..agent.types import AgentHandle
 from ..cordis import (
@@ -42,9 +42,12 @@ __all__ = [
     "CommandDefinition",
     "CommandRegistry",
     "CommandSchema",
+    "CommandVerb",
+    "Provisioning",
+    "Verbs",
     "apply",
+    "install_or_status",
     "parse_command_line",
-    "reading_verbs",
 ]
 
 log = logging.getLogger("ph.seams.commands")
@@ -92,31 +95,105 @@ class CommandDefinition:
     name: str
     summary: str
     run: CommandBody
-    """The body. Returns the line to show the human, or nothing."""
+    """The body. Returns the line to show the human, or nothing. A command with verbs
+    is given a `Verbs` table here, which is what lets the registry tell a verb that
+    only asks from one that acts."""
     argument_hint: str = ""
-    reads: Callable[[str], bool] = field(default=lambda _argument: False)
-    """Whether this argument only *asks* — changes no tree, no setting, no record
-    beyond the command's own pair. An invocation that does runs without
-    `COMMAND_RUN`'s barrier, and is recorded after it answers.
-
-    **Per argument, not per command**, because every command that has a question
-    to answer also has a verb that acts: `/workspaces list` beside `remove`, bare
-    `/revert` beside `/revert <seq>`. A tool can declare `effect_free` whole; a
-    command cannot. Asked of the stripped argument; `reading_verbs` is the usual
-    answer. Anything unsure says `False`, which is the default: the cost of a
-    wrong `False` is a refused listing on a full disk, and of a wrong `True` an
-    act with no record ahead of it."""
 
     def schema(self) -> CommandSchema:
         """The wire-facing half. Nothing else about the command reaches a front end."""
         return CommandSchema.model_validate(declarable(self))
 
 
-def reading_verbs(*verbs: str) -> Callable[[str], bool]:
-    """A `CommandDefinition.reads` for the usual shape: the argument's first word
-    names the verb, and these verbs — `""` for a bare command — only answer."""
-    answering = frozenset(verbs)
-    return lambda argument: argument.partition(" ")[0] in answering
+@dataclass(frozen=True, slots=True)
+class CommandVerb:
+    """One verb of a command: the body that answers it, and whether it only asks."""
+
+    run: CommandBody
+    """Given what follows the verb, stripped — the verb is the table's to read."""
+    reads: bool = False
+    """Whether this verb only *asks* — changes no tree, no setting, no record beyond
+    the command's own pair. One that does runs without `COMMAND_RUN`'s barrier and is
+    recorded after it answers, so the question someone asks on a full disk — what
+    state are things in? — is still answered. Anything unsure says `False`: the cost
+    of a wrong `False` is a refused listing on a full disk, and of a wrong `True` an
+    act with no record ahead of it."""
+
+
+@dataclass(frozen=True, slots=True)
+class Verbs:
+    """A command body that dispatches on its argument's first word — the one parse of
+    a verb, and the one place a verb says whether it only asks.
+
+    **Per verb, not per command**, because every command with a question to answer
+    also has a verb that acts: `/workspaces list` beside `remove`, bare `/revert`
+    beside `/revert <seq>`. A tool can declare `effect_free` whole; a command cannot.
+    And in one table, because a command that parsed its own verbs and declared the
+    reading ones beside them kept two lists in step by hand — where one wrong `True`
+    runs an act with no record ahead of it.
+
+    `""` is the bare command. Verbs match without regard to case.
+    """
+
+    table: Mapping[str, CommandVerb]
+    otherwise: CommandBody | str
+    """For an argument whose first word names no verb: a usage line, answered as it
+    is, or a body given the whole argument — for `/revert <seq>`, the body the
+    argument is data for."""
+    refused: tuple[type[Exception], ...] = ()
+    """What a verb raises to refuse, answered with its text rather than raised on —
+    each command's own refusal, said once here instead of caught in every verb."""
+
+    def lookup(self, argument: str) -> tuple[CommandVerb | None, str]:
+        """The verb `argument` names, if it names one, and what follows it."""
+        word, _, rest = argument.partition(" ")
+        return self.table.get(word.casefold()), rest.strip()
+
+    def reads(self, argument: str) -> bool:
+        verb, _ = self.lookup(argument)
+        return verb is not None and verb.reads
+
+    async def __call__(self, argument: str, invocation: CommandContext) -> str | None:
+        verb, rest = self.lookup(argument)
+        if verb is not None:
+            body, given = verb.run, rest
+        elif isinstance(self.otherwise, str):
+            return self.otherwise
+        else:
+            body, given = self.otherwise, argument
+        try:
+            return await maybe_await(body(given, invocation))
+        except self.refused as refusal:
+            return str(refusal)
+
+
+Provisioning: TypeAlias = Literal["install", "status"]
+
+
+def install_or_status(
+    name: str, summary: str, answer: Callable[[Provisioning], Awaitable[str]]
+) -> CommandDefinition:
+    """The command a plugin that provisions something offers: `install` acts, and
+    `status` — the bare command too — only asks.
+
+    One shape for every such plugin, because "is this ready" should be asked the same
+    way of each, and its verbs sorted into asking and acting the same way too. The
+    whole definition, so the hint naming the verbs comes from the table that owns
+    them.
+    """
+    status = CommandVerb(lambda _rest, _invocation: answer("status"), reads=True)
+    install = CommandVerb(lambda _rest, _invocation: answer("install"))
+    return CommandDefinition(
+        name=name,
+        summary=summary,
+        argument_hint="[install|status]",
+        run=Verbs(
+            {"": status, "status": status, "install": install},
+            otherwise=lambda argument, _invocation: (
+                f"/{name} takes `install` or `status`, not {argument!r}."
+            ),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +213,10 @@ class CommandContext:
     *unsafe* direction". The boundary is stated at the top of the dispatch; there
     is no reason for the bottom to guess."""
     agent: AgentHandle | None = None
+    line: str = ""
+    """The command as it was typed, `/name` and all — what a record of the command
+    says asked. Here because a verb is handed only what follows it (`Verbs`), and a
+    body that records the line should not rebuild it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +320,9 @@ class CommandRegistry:
         journal = intents_of(self.ctx)
         opening: JsonObject = {"name": name, "argument": argument}
         held: Claim | None = None
-        if session is not None and not definition.reads(argument):
+        run = definition.run
+        reads = isinstance(run, Verbs) and run.reads(argument)
+        if session is not None and not reads:
             # **On disk before the body runs** (S16) — `COMMAND_RUN`'s barrier. A
             # command's effects used to come before any durable record of it:
             # `/revert` rewrote the tree while `command/run` sat in memory, and a
@@ -277,13 +360,14 @@ class CommandRegistry:
             resolved = scope if scope is not None else (agent.ctx if agent is not None else None)
             with running(entry.by, resolved):
                 result = await maybe_await(
-                    definition.run(
+                    run(
                         argument,
                         CommandContext(
                             ctx=self.ctx,
                             session=session,
                             scope=resolved if resolved is not None else entry.by.layer,
                             agent=agent,
+                            line=f"/{name} {argument}".rstrip(),
                         ),
                     )
                 )

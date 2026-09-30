@@ -439,6 +439,8 @@ HANDLERS: Mapping[str, Handler] = {
     "workspace/retained": _on_harness_event,
     "workspace/provisioned": _on_harness_event,
     "workspace/checkpoint": _on_harness_event,
+    "workspace/restoring": _on_harness_event,
+    "workspace/restored": _on_harness_event,
     "permission/preset": _on_harness_event,
     # The environment the session started in (session profiles, S3) — the first
     # thing an audit of a run asks, and nothing a conversation shows.
@@ -466,8 +468,6 @@ HANDLERS: Mapping[str, Handler] = {
     # stopped working would look like one that simply went quiet. For an
     # unattended run that is the whole point of reading the trace.
     "supervisor/retry": _on_harness_event,
-    "supervisor/restoring": _on_harness_event,
-    "supervisor/restored": _on_harness_event,
     "supervisor/failed": _on_harness_event,
     "supervisor/recovered": _on_harness_event,
     "supervisor/passivated": _on_harness_event,
