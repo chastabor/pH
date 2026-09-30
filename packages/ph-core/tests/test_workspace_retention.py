@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from ph.persistence.protocol import StoredSession, stored_row
+from ph.persistence.protocol import StoredSession, children_among, stored_row
 from ph.seams.subagents import descendants, reachable_family
 from ph.seams.workspace import (
     WorkspaceRecord,
@@ -521,6 +521,18 @@ class _Store:
             for index, (one, session) in enumerate(self.sessions.items())
         ][:limit]
 
+    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Declared because `SessionArchive` carries it; the fold walks the listing.
+        Answered through the backends' own filter, over the same rows `stored` builds."""
+        return children_among(
+            parent_id,
+            (
+                stored_row(one, session.header, float(index))
+                for index, (one, session) in enumerate(self.sessions.items())
+                if session.header.family == family
+            ),
+        )
+
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
         if session_id == self.unreadable:
             raise ValueError("a half-written log")
@@ -528,7 +540,12 @@ class _Store:
         return session.header, list(session.events)
 
     def read_own(
-        self, session_id: str, upto: int | None = None, family: str | None = None
+        self,
+        session_id: str,
+        upto: int | None = None,
+        family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """Whole logs in memory, so the unchained read *is* the materialized one.
         Declared because `SessionArchive` carries both; the fold uses `read`."""

@@ -42,15 +42,13 @@ import anyio
 from pydantic import ValidationError
 
 from ph.cordis import Context, plugin
-from ph.json import JsonObject, as_obj, as_seq, as_str, thaw_json
+from ph.json import JsonObject, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock, PluginSource, create_user_message, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import (
     FamilyRole,
     reachable_family,
-    roster_of,
-    subagent_roster,
 )
 from ph.session import Session, SessionEvent, derive_event_message, session_written
 from ph.tools import (
@@ -324,8 +322,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
         target = ctx.require(AGENTS).get(target_id)
         if target is None:
-            # A settled child kept its session, its log and its roster row; what
-            # it lost was the agent that holds an inbox. Waking it is the seam's
+            # A settled child kept its session and its log; what it lost was the
+            # agent that holds an inbox. Waking it is the seam's
             # job (P3-13), and addressing one is exactly the trigger the plan
             # names — so a send to a finished child works rather than telling the
             # sender to go read a transcript.
@@ -455,9 +453,11 @@ async def apply(ctx: Context, config: Config) -> None:
 
         Not the send's own resolution: that reads the live family, and after a
         restart most of it is not live yet. A parent is named in the sender's header,
-        children in its own roster, and a child's siblings in its parent's. A root's
-        siblings are the other roots, which only the live ones stand for, so a root's
-        sibling send can be found but never ruled out.
+        and children — the sender's, or its parent's for a sibling — are read off
+        their own logs, live or stored (`load_children`); a child is filed with its
+        parent, so the sender's family is where both are. A root's siblings are the
+        other roots, which only the live ones stand for, so a root's sibling send can
+        be found but never ruled out.
 
         The parent is the agent that spawned the sender (`delegating_parent`), not
         the log a fork continues: a forked root's parent send reached nobody, and its
@@ -466,17 +466,16 @@ async def apply(ctx: Context, config: Config) -> None:
         parent_id = sender.header.delegating_parent
         if role == "parent":
             return ([parent_id] if parent_id else []), True
+        subagents = ctx.require(SUBAGENTS)
+        family = sender.header.family
         if role == "child":
-            children = subagent_roster(sender).values()
-            return [as_str(row.get("sessionId")) for row in children], True
+            children = await subagents.load_children(sender.id, family)
+            return [state.session_id for state in children.values()], True
         if parent_id is None:
             live = ctx.require(SESSIONS).list()
             return [one.id for one in live if one.header.delegating_parent is None], False
-        parent_log = await log_of(parent_id)
-        if parent_log is None:
-            return None
-        siblings = roster_of(parent_log).values()
-        return [as_str(row.get("sessionId")) for row in siblings], True
+        siblings = await subagents.load_children(parent_id, family)
+        return [state.session_id for state in siblings.values()], True
 
     async def reconcile_send(
         arguments: Any,  # noqa: ANN401
@@ -611,13 +610,13 @@ def _named(ctx: Context, agent_id: str, wanted: str) -> bool:
 
 
 def _display(ctx: Context, agent_id: str) -> str:
-    """The roster name of an agent, or its id when nobody named it.
+    """The name an agent's own admission gives it, or its id when nobody named it.
 
     One line, because the lookup lives in the seam that owns the fold: the prompt
     needs the same answer, and two copies is how a prompt names one agent while a
     send delivers to another.
     """
-    return str(ctx.require(SUBAGENTS).name_of(ctx.require(SESSIONS).list(), agent_id))
+    return ctx.require(SUBAGENTS).name_of(agent_id)
 
 
 def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:

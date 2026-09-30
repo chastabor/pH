@@ -175,9 +175,9 @@ async def apply(ctx: Context, config: None) -> None:
     def facts(request: AssembleContext) -> str:
         """The turn-to-turn state, as a cache-safe snapshot (A12).
 
-        One roster fold, reused: the family names and the children line are both
-        answers from it, and folding once per name turned prompt assembly into
-        N+1 scans of the parent's whole log per model step.
+        Each child's state is its own cached fold (`SubagentService.children`), so
+        the family names and the children line cost a lookup each rather than a scan
+        of anybody's whole log per model step.
         """
         session = request.session
         if session is None:
@@ -192,21 +192,21 @@ async def apply(ctx: Context, config: None) -> None:
         lines.extend(_workspace(ctx, request.agent.id if request.agent is not None else ""))
 
         sessions = ctx.require(SESSIONS).list()
+        subagents = ctx.require(SUBAGENTS)
         family = [
-            f"{role} {ctx.require(SUBAGENTS).name_of(sessions, agent_id)}"
+            f"{role} {subagents.name_of(agent_id)}"
             for agent_id, role in sorted(reachable_family(sessions, session.id).items())
             if role != "self"
         ]
         if family:
             lines.append(f"Reachable agents: {', '.join(family)}")
-        children = ctx.require(SUBAGENTS).roster(session)
+        children = subagents.children(session.id)
         if children:
             lines.append(
                 "Your children: "
                 + ", ".join(
-                    f"{row.get('name')} "
-                    f"({'deleted' if row.get('deleted') else row.get('status', 'queued')})"
-                    for row in children.values()
+                    f"{child.name} ({'deleted' if child.deleted else child.status})"
+                    for child in children.values()
                 )
             )
         return "\n".join(lines)

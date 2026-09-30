@@ -57,7 +57,7 @@ from ph.keys import CODE_RUNTIME_STUB, COMMANDS, SESSIONS, WORKSPACE
 from ph.seams import workspace_git
 from ph.seams.workspace import CHECKPOINT, checkpoints, latest_checkpoint
 from ph.seams.workspace_git import pre_run_ref
-from ph.session import Session, unsettled_why
+from ph.session import Session, SessionStore, unsettled_why
 from ph.testing import (
     MountProfile,
     code_mode_stub,
@@ -344,25 +344,36 @@ async def test_a_revert_is_on_disk_before_the_tree_is_touched(
     is neither the restore point nor what was there. The seam records it around the
     act (`WORKSPACE_RESTORE`) — on disk before git touches the tree — for every caller,
     so a crash inside `/revert` reads as "may be partly restored" rather than as a
-    command whose outcome is unknown.
+    command whose outcome is unknown. The command's own `command/run` is written by
+    that same barrier (`with-act`): one fsync ahead of the tree, not two back to back.
 
-    Sabotage: restore without the session in `/revert`, and nothing is recorded.
+    Sabotage: restore without the session in `/revert`, and nothing is recorded;
+    declare its restore `before`, and two barriers run.
     """
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     seq = await _checkpointed(ctx, session, agent)
     (workspace.root / "tracked.txt").write_text("the run did this\n", encoding="utf-8")
-    seen: list[bool] = []
+    seen: list[set[str]] = []
+    barriers: list[str] = []
     original = workspace_git.GitWorktreeProvider.restore
+    written = SessionStore.written
 
     async def watched(self: workspace_git.GitWorktreeProvider, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        seen.append("workspace/restoring" in stored_types(ctx, session.id))
+        seen.append(set(stored_types(ctx, session.id)))
         return await original(self, *args, **kwargs)
 
+    async def counted(store: SessionStore, log: Session) -> bool:
+        barriers.append(log.id)
+        return await written(store, log)
+
     monkeypatch.setattr(workspace_git.GitWorktreeProvider, "restore", watched)
+    monkeypatch.setattr(SessionStore, "written", counted)
 
     await _run(ctx, session, agent, str(seq))
 
-    assert seen == [True], "the tree was touched before its restore was on disk"
+    (on_disk,) = seen
+    assert {"command/run", "workspace/restoring"} <= on_disk, "the tree was touched first"
+    assert barriers == [session.id], "one barrier ahead of the tree, not two"
     (restored,) = [one for one in session.events if one.type == "workspace/restored"]
     assert (restored.data["ok"], restored.data["agentId"]) == (True, agent.id)
 

@@ -10,7 +10,9 @@ this module changing (I1, I7).
 Sessions are listed as a tree. Forks make them one — the header records
 `parent_session` — and a flat list of ids hides which session came from which,
 so children are indented under their parent. A session with no fork is a tree
-with one node, and the list reads the same either way.
+with one node, and the list reads the same either way. A sub-agent's log hangs
+under the agent that spawned it too, marked as one and shown rather than offered:
+its root's mount writes it, so it is never attached (P11-08).
 
 @module ph_app.tui.modals.pickers
 """
@@ -289,7 +291,8 @@ def _contract_segments(summaries: dict[str, SessionSummary]) -> dict[str, str | 
 
 
 def _session_row(summary: SessionSummary, depth: int, *, marked: bool) -> Choice:
-    indent = f"{'  ' * depth}{'↳ ' if depth else ''}"
+    child = summary.origin == "subagent"
+    indent = f"{'  ' * depth}{('⤷ ' if child else '↳ ') if depth else ''}"
     # A running session's size and mtime are whatever the last flush left, so
     # they would describe the file rather than the conversation. The state is
     # what a person is choosing on.
@@ -301,6 +304,16 @@ def _session_row(summary: SessionSummary, depth: int, *, marked: bool) -> Choice
     return Choice(
         value=summary.session_id,
         label=f"{indent}{summary.title or summary.session_id}",
-        detail=detail,
+        detail=f"sub-agent · {detail}" if child else detail,
         marked=marked,
+        # Shown, not offered: attaching a child is refused (`NotARoot`), and a
+        # picker that sent it anyway would trade the row for an error. Reading its
+        # log is what a person can do with it, and that needs no daemon.
+        unavailable=(
+            f"{summary.session_id} is a sub-agent of {summary.parent or 'another agent'}, "
+            f"so its root's mount writes it and it cannot be opened here — read it with "
+            f"`phern --mode trajectory --session {summary.session_id}`"
+            if child
+            else ""
+        ),
     )

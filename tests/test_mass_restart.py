@@ -51,7 +51,7 @@ from ph.llm.types import (
 from ph.persistence import interrupted_turn_closers, resume_session
 from ph.persistence.lease import SessionBusy, claim_session
 from ph.seams.credentials import waiting_for
-from ph.seams.subagents import subagent_roster
+from ph.seams.subagents import ChildState
 from ph.session import Session, SessionEvent, declared_intents, open_intents, outcome_of
 from ph.session.kinds import APPROVAL_ASK, SHELL_COMMAND, TOOL_EFFECT
 from ph.testing import MountProfile, not_none, stored_types
@@ -113,10 +113,21 @@ async def _restarted(mount: MountProfile) -> tuple[Context, Session, AgentDriver
     return ctx, root, parent
 
 
-async def _until_settled(root: Session, *runs: str) -> None:
+def _children(ctx: Context, root: Session) -> dict[str, ChildState]:
+    """The root's children by run id, each as its own log tells it — the root's log
+    holds no record of them."""
+    return ctx.require(SUBAGENTS).children(root.id)
+
+
+async def _until_settled(ctx: Context, root: Session, *runs: str) -> None:
     with anyio.fail_after(20):
-        while any(subagent_roster(root)[run].get("status") != "done" for run in runs):
+        while any(_children(ctx, root)[run].status != "done" for run in runs):
             await anyio.sleep(0.02)
+
+
+def _stored_open(ctx: Context, session_id: str) -> list[str]:
+    """`_open`, over what the store holds for one log."""
+    return _open(ctx.require(SESSION_PERSISTENCE).read(session_id)[1])
 
 
 def _open(events: Any) -> list[str]:  # noqa: ANN401
@@ -158,12 +169,15 @@ async def test_every_sub_agent_picks_up_where_it_left_off(
     ctx, root = await _restart(mount)
     running, queued = crashed["running"]["run"], crashed["queued"]["run"]
 
-    await _until_settled(root, running, queued)
+    await _until_settled(ctx, root, running, queued)
 
-    roster = subagent_roster(root)
-    assert roster[running]["starts"] == 2, "one first run, one after the restart"
-    assert "resumes" not in roster[queued], "a child that never ran is a first attempt"
-    assert len(roster) == 2, "no child invented, none lost"
+    children = _children(ctx, root)
+    assert children[running].starts == 2, "one first run, one after the restart"
+    assert children[queued].resumes == 0, "a child that never ran is a first attempt"
+    assert len(children) == 2, "no child invented, none lost"
+    assert not [event for event in root.events if event.type.startswith("subagent/")], (
+        "a child's records are its own; the root's log names none of them"
+    )
     child = ctx.require(SESSIONS).get(crashed["running"]["session"])
     assert child is not None and child.latest("session/resumed") is not None, (
         "the child's own log came off disk rather than being made again"
@@ -197,7 +211,7 @@ async def test_every_log_reads_back_whole_and_a_second_restart_changes_nothing(
     """No log is refused, none holds an open intent, and reopening them all again —
     what a second crash before anybody noticed would do — closes nothing."""
     ctx, root = await _restart(mount)
-    await _until_settled(root, crashed["running"]["run"], crashed["queued"]["run"])
+    await _until_settled(ctx, root, crashed["running"]["run"], crashed["queued"]["run"])
     await _flushed(ctx)
 
     store = ctx.require(SESSION_PERSISTENCE)
@@ -222,46 +236,62 @@ async def test_a_sub_agent_whose_key_a_restart_lost_is_held_then_released(
     crashed_keyed: dict[str, Any], mount: MountProfile
 ) -> None:
     """Held by name, not failed, and no retry spent; the rest resumes; supplying the
-    key puts both back to work, the interrupted one on its second start."""
+    key puts both back to work, the interrupted one on its second start.
+
+    Each hold is in the held child's own log — the hold a session waiting on its own
+    route writes — and on its disk, since nothing is running it to write it later.
+    """
     ctx, root, parent = await _restarted(mount)
     running, queued = crashed_keyed["running"]["run"], crashed_keyed["queued"]["run"]
 
-    roster = subagent_roster(root)
-    assert (roster[running]["status"], roster[queued]["status"]) == ("queued", "queued")
-    assert roster[running]["starts"] == 1, "held, so no rung of its ladder spent"
-    assert "resumes" not in roster[queued]
-    assert waiting_for(ctx, root) == {running: KEY, queued: KEY}
+    children = _children(ctx, root)
+    assert (children[running].status, children[queued].status) == ("queued", "queued")
+    assert children[running].starts == 1, "held, so no rung of its ladder spent"
+    assert children[queued].resumes == 0
+    assert (children[running].awaiting, children[queued].awaiting) == (KEY, KEY)
+    for which in ("running", "queued"):
+        held = _stored_open(ctx, crashed_keyed[which]["session"])
+        assert [one.split()[0] for one in held] == ["credential/needed"], which
     assert _latest(root, "session/resumed").data["interrupted"] is True, "the root resumed"
-    assert [one.split()[0] for one in _open(root.events)] == ["credential/needed"] * 2, (
-        "everything else the crash left open was settled as before"
-    )
+    assert _open(root.events) == [], "everything the crash left open was settled as before"
+    assert waiting_for(ctx, root) == {}, "a child's hold is not its parent's"
 
     ctx.require(CREDENTIALS).provide_value(KEY, "supplied")
     revived = await ctx.require(SUBAGENTS).readmit_waiting(parent, retry_limit=RETRIES)
-    await _until_settled(root, running, queued)
+    await _until_settled(ctx, root, running, queued)
 
     assert sorted(revived) == sorted([running, queued])
-    assert waiting_for(ctx, root) == {}
-    assert subagent_roster(root)[running]["starts"] == 2, "its one restart, counted once"
+    assert [child.awaiting for child in _children(ctx, root).values()] == [None, None]
+    assert _children(ctx, root)[running].starts == 2, "its one restart, counted once"
 
 
 async def test_a_second_restart_before_the_key_arrives_holds_again_and_grows_nothing(
     crashed_keyed: dict[str, Any], mount: MountProfile
 ) -> None:
     """What a second power cut before anybody noticed does: the holds are still in
-    the log, the check finds them, and nothing but the resume's own record is added."""
+    each child's own log, the check finds them, and nothing but the root's resume
+    record is added — to the root's log, and to neither child's."""
     first, _root = await _restart(mount)
     await _flushed(first)
-    before = stored_types(first, "root")
+    sessions = ["root", crashed_keyed["running"]["session"], crashed_keyed["queued"]["session"]]
+    before = {session_id: stored_types(first, session_id) for session_id in sessions}
 
     again, root = await _restart(mount)
     await _flushed(again)
-    grown = stored_types(again, "root")[len(before) :]
+    grown = {
+        session_id: stored_types(again, session_id)[len(before[session_id]) :]
+        for session_id in sessions
+    }
 
-    assert grown == ["session/end-seed", "session/resumed"], grown
+    assert grown == {
+        "root": ["session/end-seed", "session/resumed"],
+        sessions[1]: [],
+        sessions[2]: [],
+    }, grown
     running, queued = crashed_keyed["running"]["run"], crashed_keyed["queued"]["run"]
-    assert waiting_for(again, root) == {running: KEY, queued: KEY}
-    assert subagent_roster(root)[running]["starts"] == 1
+    children = _children(again, root)
+    assert (children[running].awaiting, children[queued].awaiting) == (KEY, KEY)
+    assert children[running].starts == 1
 
 
 async def test_a_readmitted_childs_log_is_leased_by_the_process_that_resumed_it(
@@ -277,7 +307,7 @@ async def test_a_readmitted_childs_log_is_leased_by_the_process_that_resumed_it(
     claim below is granted.
     """
     ctx, root = await _restart(mount)
-    await _until_settled(root, crashed["running"]["run"], crashed["queued"]["run"])
+    await _until_settled(ctx, root, crashed["running"]["run"], crashed["queued"]["run"])
     store = ctx.require(SESSION_PERSISTENCE)
 
     with pytest.raises(SessionBusy):

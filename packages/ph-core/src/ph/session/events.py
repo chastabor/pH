@@ -38,7 +38,7 @@ __all__ = [
     "now_ms",
 ]
 
-SESSION_FORMAT_VERSION = 2
+SESSION_FORMAT_VERSION = 3
 """The on-disk format version, stamped into every header and checked on load.
 
 A single monotonic integer with no major/minor split. Bump exactly when an older
@@ -62,6 +62,13 @@ count}` — so a reader can tell a batch a torn write cut short (and drop it who
 one that is complete, anywhere in a log and not only at its tail. A format-1 reader
 would refuse the field as unknown, which is exactly why this is a bump; a format-1
 log is refused by this header check, not migrated.
+
+**3 (0.6.0): each session owns its log** (Phase 11). A sub-agent's `subagent/*`
+records are in the sub-agent's own log, and a parent's log holds none;
+`subagent/usage-attributed` is gone, since a child's answers carry their own usage. A
+format-2 reader would read a child's `subagent/admitted` as the child having admitted
+a child of its own, and a format-2 root's children as records this build no longer
+reads, so a format-2 log is refused, not migrated.
 """
 
 SURFACE_EVENT_TYPES: frozenset[str] = frozenset(

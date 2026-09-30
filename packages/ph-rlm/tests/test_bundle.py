@@ -20,7 +20,7 @@ from runtime_helpers import dispatch_names, run_ipython_cell
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
-from ph.keys import CODE_RUNTIME, SYSTEM_PROMPT, TOOLS
+from ph.keys import CODE_RUNTIME, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import report_section
 from ph.tools.registry import RUN_CODE
@@ -165,14 +165,14 @@ async def test_a_cell_can_delegate_through_the_shipped_profile(
     )
     assert result.is_error is False
     assert result.value["value"] == "scout"
-    # One governed dispatch, and the admission it caused, in one log.
+    # One governed dispatch in the parent's log, and the admission it caused in the
+    # child's own.
     assert dispatch_names(session) == ["rlm_run"]
-    admitted = [event for event in session.events if event.type == "subagent/admitted"]
-    assert len(admitted) == 1
+    (child,) = ctx.require(SUBAGENTS).children(session.id).values()
     # `write`, and honestly: the shipped profile's tier is `advisory`, where the
     # child shares its parent's checkout and can write it. `read` here would be a
     # guarantee nothing in this profile enforces (§4.8).
-    assert admitted[0].data["grantedAccess"] == "write"
+    assert child.granted_access == "write"
 
 
 async def test_the_shipped_runtime_gets_the_configured_graces(

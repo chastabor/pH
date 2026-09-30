@@ -238,22 +238,27 @@ async def apply(ctx: Context, config: Config) -> None:
         return _task_value(handle, outcome.status, outcome.answer)
 
     async def reconciled(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
-        """Did a `task` call a crash cut short start a child? The parent's roster says (S2).
+        """Did a `task` call a crash cut short start a child? The children's own logs
+        say (S2).
 
-        No admission under this call's id is a call that started nothing — the
-        admission reaches disk before the child runs — so it is `NotDone`, and asking
-        again is what the call wanted. A child still live is `Done` as the wait's
-        honest ending: it was delegated, the resume puts it back to work, and its
-        answer comes by message. One that ended without an answer is `Unknown`, as a
-        failed wait would have read.
+        Asked while the parent resumes, before any child is open, so the children are
+        read off the store (`load_children`): each admission names the call that
+        asked for it. No admission under this call's id is a call that started
+        nothing — the admission reaches the child's disk before the child runs — so
+        it is `NotDone`, and asking again is what the call wanted. A child still live
+        is `Done` as the wait's honest ending: it was delegated, the resume puts it
+        back to work, and its answer comes by message. One that has ended, however, is
+        `Unknown`: the answer the cut-short wait would have returned reached nobody,
+        and a child that ended cannot be asked for it again.
         """
-        row = admitted_by(ctx.require(SUBAGENTS).roster(session), call)
-        if row is None:
+        children = await ctx.require(SUBAGENTS).load_children(session.id, session.header.family)
+        child = admitted_by(children, call)
+        if child is None:
             return NotDone()
-        if not child_is_live(row):
+        if not child_is_live(child):
             return Unknown()
-        status: SubagentStatus = "queued" if row.get("status") == "queued" else "running"
-        return Done(_task_value(SubagentRun.of(row), status))
+        status: SubagentStatus = "queued" if child.status == "queued" else "running"
+        return Done(_task_value(child.run(), status))
 
     async def _collected(handle: SubagentRun, run: ToolRunContext) -> SubagentResult:
         """Wait for the child, releasing it if this call is canceled (C7).

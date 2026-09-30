@@ -36,20 +36,19 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, TypeAlias
 
 from pydantic import Field
 
 from ..cordis import Context, plugin
 from ..json import as_bool, as_str
-from ..keys import GOALS
+from ..keys import GOALS, SUBAGENTS
 from ..session import Session, SessionEvent, SessionFoldCache
 from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
-from .subagents import USAGE as CHILD_USAGE
-from .token_meter import reported_usage
+from .token_meter import event_tokens
 
 _LOG = log_writer(__name__)
 
@@ -104,8 +103,10 @@ TokenSource: TypeAlias = Literal["own", "compaction", "children"]
 
 `own` is the agent's replies (`assistant/message`), `compaction` the summarize
 calls that shortened its context (`compaction/summarized`), `children` the
-subagents it delegated to (`subagent/usage-attributed`, in this log). The fold
-counts all three; `Budget.token_sources` decides which spend `max_tokens`."""
+sub-agents admitted under the goal and everything beneath them — read from their
+own logs (Phase 11), since nothing about a child is in this one. The fold counts the
+first two and `GoalService.spent` adds the third; `Budget.token_sources` decides
+which spend `max_tokens`."""
 
 
 def own_tokens_only() -> list[TokenSource]:
@@ -225,10 +226,10 @@ class GoalState:
 _TOKEN_RECORDS: Mapping[str, tuple[TokenSource, str]] = {
     "assistant/message": ("own", "usage"),
     "compaction/summarized": ("compaction", "usage"),
-    CHILD_USAGE: ("children", "childUsage"),
 }
-"""Each record that spends tokens: whose they are, and the key they sit under.
-The one place a new source is added — the fold and the budget follow."""
+"""Each record in a goal's own log that spends tokens (`SPENDING_TYPES`): whose they
+are, and the key they sit under. `children` is not a record here — see
+`GoalService.spent`."""
 
 _COUNTED = frozenset({SET, CONTINUED, GATE, SETTLED, "turn/end", *_TOKEN_RECORDS})
 """The eight types this fold reads. Everything else is skipped on a set test.
@@ -274,21 +275,7 @@ def fold_goal_event(found: dict[str, GoalState], event: SessionEvent) -> None:
         current.spent.turns += 1
     elif event.type in _TOKEN_RECORDS:
         source, key = _TOKEN_RECORDS[event.type]
-        current.spent.tokens[source] += _tokens(event, key)
-
-
-def _tokens(event: SessionEvent, key: str = "usage") -> int:
-    """One record's total, or `0` when it carries none or none that parses.
-
-    Through `reported_usage`, the one reader of a usage payload, and
-    `TokenUsage.total`: reading `inputTokens + outputTokens` off the raw payload
-    made this the third hand-written definition of "tokens" in the tree and the
-    only two-term one, so a cache-heavy run spent most of its input outside the
-    budget and `/autonomous`'s status disagreed with the footer showing the same
-    word. A malformed payload counts nothing rather than raising out of the fold.
-    """
-    usage = reported_usage(event, key)
-    return 0 if usage is None else usage.total
+        current.spent.tokens[source] += event_tokens(event, key)
 
 
 def goals(session: Session) -> dict[str, GoalState]:
@@ -340,6 +327,8 @@ class GoalService:
     and a whole-log fold per read is the cost `Root.accepted` records.
     """
 
+    ctx: Context | None = None
+    """Where the sub-agents a goal's spend includes are asked for (`spent`)."""
     _states: SessionFoldCache[dict[str, GoalState]] = field(
         default_factory=lambda: SessionFoldCache(goals, extend=extend_goals)
     )
@@ -362,6 +351,21 @@ class GoalService:
     def open(self, session: Session) -> GoalState | None:
         """The goal still being worked on, if there is one."""
         return open_goal(self.states(session))
+
+    def spent(self, session: Session, state: GoalState) -> Spent:
+        """What `state`'s goal has spent: its own log's fold, and what the sub-agents
+        admitted under it spent, beneath them included (`children`).
+
+        Joined here, at read time, rather than folded: a child's answers are in the
+        child's own log (Phase 11), and a fold of this log that read another would be
+        a projection the cache could not key. The goal's own fold stays pure; this
+        is a copy of it, with the children's spend beside it.
+        """
+        subagents = self.ctx.get(SUBAGENTS) if self.ctx is not None else None
+        tokens = Counter(state.spent.tokens)
+        if subagents is not None:
+            tokens["children"] = subagents.delegated_tokens(session.id, state.goal.id)
+        return replace(state.spent, tokens=tokens)
 
     def set(self, session: Session, goal: Goal) -> Goal:
         """Record a goal. Refuses a second while one is open."""
@@ -410,7 +414,7 @@ class GoalService:
 @plugin("goals", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
     """Publish `ctx.goals`."""
-    service = GoalService()
+    service = GoalService(ctx=ctx)
     ctx.provide(GOALS, service)
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
     contribute_fold_cache(

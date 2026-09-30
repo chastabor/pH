@@ -14,7 +14,7 @@ has taught the model a capability the deployment does not have.
 ## The handle returns before the child answers
 
 `start()` resolves once the child is **admitted** — session created, admission
-logged, task detached — not once it has finished.
+logged in the child's own log, task detached — not once it has finished.
 
 That is the non-blocking fan-out an RLM parent depends on: it spawns eight
 children, keeps working, and their replies arrive as ordinary inbox messages on
@@ -44,8 +44,9 @@ The handle reports both, and they may differ:
 | `requested_access` | what the parent asked for |
 | `granted_access` | what the available tier could actually honor |
 
-`granted` is what the roster and the child's own prompt report, because a child
-told nothing about its workspace attempts writes and reads the failures as bugs.
+`granted` is what the parent's list of its children and the child's own prompt
+report, because a child told nothing about its workspace attempts writes and reads
+the failures as bugs.
 This is the same request-versus-guarantee rule [`ctx.workspace`](workspace.md)
 states about `repo_writable`, seen from the delegation side.
 
@@ -95,7 +96,8 @@ and a skill it gives the child may name the one it needs in its front matter
 (`model: classify`). `resolve_model` turns the key into a route through the
 parent's own `models` list (`ctx.models`, the profile as it runs); a key the list
 does not hold is refused, so the models an agent can reach are the ones its
-profile says. `subagent/admitted` records the key beside the route it resolved to.
+profile says. The child's `subagent/admitted` records the key beside the route it
+resolved to.
 Two skills naming different models are refused — name one with `model=`.
 
 `profile="reviewer"` assigns the child a named profile, composed by the host
@@ -154,41 +156,127 @@ Resuming is a separate Protocol, `RehydratableProvider.rehydrate(run_id) ->
 bool`, because not every way of running a child can resume one — and as its own
 Protocol rather than a `getattr` probe, since a provider whose method is misnamed
 or has the wrong arity would otherwise fail silently as "cannot rehydrate".
+Stopping a live child is one too, `RevokingProvider.revoke(run_id, reason) ->
+bool`, for the same reason (see [Revoking a child](#revoking-a-child)).
 
 `ctx.subagents.register_provider(name, provider)` — per name, so a deployment may
 offer more than one kind of child.
 
 Obligations a provider carries, in order:
 
-1. **Log admission first.** `subagent/admitted` is appended *before* the handle
-   returns — the seam owns the neutral event names, and `ph-app` reads them
-   without depending on `ph-rlm`.
+1. **Open the child's own log, naming its parent.** The header carries
+   `parentSession` and `origin: "subagent"`, the id starts `<parent id>-`, and the
+   log is filed in the parent's family. That log is the child's only record, and it
+   is how the parent finds the child after a restart (`SessionArchive.children_of`),
+   so the seam refuses a child whose log does not name its parent.
 2. **Validate the kwargs, gate the depth** (`RLM_MAX_DEPTH`), and preflight the
    model **with no fallback**: a child silently downgraded to another model is a
    result nobody can interpret.
-3. **Detach.** The child runs in its own task; `start` returns.
-4. **Attribute usage** — `subagent/usage-attributed`, so a parent's budget sees
-   what its children spent.
-5. **Report terminal states**, and emit `subagent/status` as it moves.
+3. **Hand back the run, and hold the child at its gate.** The provider doesn't write
+   the admission. The seam does, into the child's log, because it holds both the
+   resolved request and the run, and it stamps the `owner` a readmission finds the
+   provider by. The seam then bounds the child, flushes the admission, and only
+   then opens `SubagentRun.ready`, which the drive waits on before its first step.
+4. **Detach.** The child runs in its own task; `start` returns.
+5. **Record the child's life through the seam's doors, into the child's log:**
+   `record_started`, `record_waiting`, `record_ended` and `record_deleted`. Each door
+   keeps its record's durability rule, so no provider hand-writes a flush.
+   `ph.seams.subagents` is the one writer of these types (`_WRITTEN_BY`), so a
+   provider that appends one itself fails `test_log_writers`. Nothing goes into the
+   parent's log.
 
-## Events
+A child's spend needs no obligation: its answers carry their `usage` in its own
+log.
 
-| event | |
-|---|---|
-| `subagent/admitted` | a child was created — logged *before* the handle returns |
-| `subagent/status` | it moved |
-| `subagent/usage-attributed` | what it spent, charged to the parent |
-| `subagent/deleted` | a tombstone; the roster folds these |
+## Records, in the child's own log
 
-The roster is a **fold over these events**, not a table — `roster(session)` — so
-passivation and rehydration need no second source of truth, and a crash leaves a
-roster that still reconstructs.
+Each session owns its log (Phase 11). Every record about a child is in the child's
+log, and the parent's log holds none: the parent keeps its own acts, such as the tool
+call that spawned the child. All three types are required reading, because a reader
+that skipped one would miscount the retry ladder or bring back a deleted child.
+
+| record | carries | door | durable when |
+|---|---|---|---|
+| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`) and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
+| `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
+| `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |
+
+- **The admission** has no `sessionId` or `parentId`: the log's own id is one, and
+  its header names the other. `owner` is the provider row that runs the child, so a
+  readmission finds that provider rather than whichever one is mounted alone.
+  `parentTurn` is the seq of the parent's latest `turn/start`, which the spawn caps
+  count a turn by. `goalId` is the parent's open goal, which the child's spend is
+  charged to. The admission is written before the ceiling is applied, so a child the
+  ceiling refuses reads as admitted and then ended in its own log.
+- **A status carries its own reason or none.** `cause` is `resumed` for a restart
+  and `rehydrated` for a woken child; `detail` says why a child waits or failed.
+  Neither carries over to the next status.
+- **`subagent/usage-attributed` is gone.** It was a copy of each answer's usage in
+  the parent's log. The answer's own `assistant/message` in the child's log already
+  carries it.
+
+Until format 3 these records sat in the parent's log, and every durability rule
+above was an order kept *between* two logs: the parent flushed before the child ran
+(S2), the parent flushed before a restart's attempt (S10), the child's log written
+before the parent's `done` (F1), and the parent's usage copy caught up from the
+child's log on resume (L5). Two logs have two write schedules, so each of those was
+a way for a crash to leave the two accounts disagreeing. With one account, each is a
+rule about one log. Format 3 refuses a format-2 log rather than misreading it.
+
+## Reading a child
+
+`child_state(session)` folds one child's log, and nothing else, into a
+`ChildState`. It's frozen, and a pure function of that log:
+
+- the admission, read through properties (`run_id`, `name`, `owner`, `call_id`,
+  `goal_id`, `parent_turn`, `model`, the two accesses);
+- the latest status with its `cause` and `detail`, each status replacing them whole;
+- `deleted` and `deleted_reason`;
+- `awaiting`, the credential the child is held for;
+- the ladder's counters (below);
+- `tokens`, what its answers and compactions spent.
+
+A child with an admission and no status reads `queued`. A log with no admission is
+not a child (a workspace record can reach the disk first), and every reader skips
+it. `to_wire()` is the row the model's list tool returns; `run()` rebuilds the handle
+a spawn returned, for a tool answering after a crash.
+
+A parent's children are a **join over their logs**, not a table and not a fold of
+the parent:
+
+```text
+ctx.subagents.children(parent_id)                      # {run_id: ChildState}, admission order
+await ctx.subagents.load_children(parent_id, family)   # the same, with the stored ones read in
+ctx.subagents.state(session_id)                        # one child, live or stored
+ctx.subagents.name_of(agent_id)                        # its admission's name, or the id
+```
+
+- **`children`** reads each live child through its own cached fold
+  (`subagent-fold-cache`, checked per child against a fresh fold, I6), beside the
+  stored children already read.
+- **`load_children`** reads the parent's stored children off the store
+  (`SessionArchive.children_of`, in the parent's family) once per mount, on a worker
+  thread, parsing only the records a child's state is folded from
+  (`CHILD_EVENT_TYPES`). `open_session` calls it as a resumed session opens, on every
+  host; the resume sweep, a spawn, a `task` call's crash check, messaging and a
+  delete call it again, which then costs a lookup.
+- **`family`** walks the whole tree beneath a parent, each child before its own
+  children — the one walk a goal's spend, the daemon's panel and what holds a root
+  all read.
+- **A child that is let go** keeps its last state as its stored copy.
+
+The prompt, the list tool, messaging, passivation, the spawn caps (the session count
+is the parent's children, and the turn count those whose `parentTurn` is its current
+turn) and a goal budget with `children` among its `token_sources` all read this join.
+The budget reads `delegated_tokens(parent_id, goal_id)`: the children admitted under
+that goal, and every level beneath them. A fork is a new root, so it starts with no
+children.
 
 `queued` is a child admitted and waiting for a slot. The rlm provider caps how
 many of one parent's children run at once (`maxConcurrent`, four in the shipped
 `rlm` bundle), and the rest wait in admission order rather than being refused:
 the parent asked for them, and a refusal answers a question about resources with
-one about intent. A queued child is live to the roster, so a parent is not
+one about intent. A queued child is live (`child_is_live`), so a parent is not
 passivated while it waits, and a slot is freed on `done`, `error` or `canceled`
 alike. Deleting a queued child cancels its wait and takes no slot.
 
@@ -207,24 +295,41 @@ no default naming a kind it does not produce. `phern daemon
 
 ## Across a restart
 
-A harness that stopped between a child's admission and its first turn left that
-work described in the parent's log and running nowhere. `resume_children(parent)`
-is what the next one calls — the daemon does, at the point it resumes a root —
-and it gives the two states opposite answers:
+A harness that stopped between a child's admission and its end left that work
+described in the child's own log and running nowhere. `resume_children(parent, *,
+retry_limit)` is what the next one calls — the daemon does, at the point it resumes
+a root. It reads the parent's children first (`load_children`), and gives the two
+states opposite answers:
 
 | the log says | what happens | why |
 |---|---|---|
 | `queued` | **re-driven**, under its own run id | it claimed nothing and spent nothing; this is the work happening once |
 | `running` | put back on the **ladder**, its task presented again | its turn was cut short; three attempts, then failed |
-| `running`, nothing mounted that can resume it | **settled** with its own reason | a row left `queued` for a provider that never comes holds the root out of passivation for good |
+| `running`, nothing mounted that can resume it | **settled** with its own reason | a child left `queued` for a provider that never comes holds the root out of passivation for good |
 
 Which of those a child gets is decided where the capability probe answers, and
 written once. Marking it `queued` and discovering afterwards that nothing can
 readmit it is the state this sweep exists to end, recreated.
 
 Leaving the second alone is not neutral: `child_is_live` counts an unsettled
-child, so a row nothing will ever move keeps its whole root out of passivation
+child, so a child nothing will ever move keeps its whole root out of passivation
 for the life of the process while the parent waits on a reply nobody is writing.
+
+**Each decision is written in the log it is about.** A child the sweep gives up on
+is ended `error` in its own log: opened from the store without being resumed
+(`stored_session`), written, flushed and let go. A child it puts back is readmitted
+by the provider its admission's `owner` names, and the child's drive writes
+`running` with `cause: resumed` on its own disk before the attempt. Nothing orders
+one child's records against another's or against the parent's, so a crash
+mid-sweep leaves each child decided on its own disk or undecided, and the next start
+decides the undecided ones the same way.
+
+**A child waiting for a credential is held, not readmitted** (T5). If its route
+names a credential this deployment cannot supply, readmitting it would spend its
+ladder on a key a person could supply in a second. So its own log records the hold
+(`CREDENTIAL_WAIT` with `SESSION_HOLDER`, what a root waiting on its own route
+writes). It stays live, and no start is counted. `readmit_waiting` asks again when
+a credential arrives.
 
 **Re-presenting the task is what makes a retry real.** Starting a turn *claims*
 the task from the child's inbox, and the claim is a logged splice — so a resumed
@@ -233,34 +338,33 @@ reports `completed` for work it never did. The task goes back in, saying the
 turn was cut short, so the transcript reads as one interrupted attempt and not
 as one instruction given twice.
 
-**The ladder's whole state is folded, not carried.** The parent's log already
-records one `subagent/status running` per drive and one
-`subagent/usage-attributed` per model answer, so the roster derives its counters
-from facts that are already there rather than maintaining a number that could
-disagree with them:
+**The ladder's whole state is folded, not carried.** The child's own log already
+records one `subagent/status running` per drive and one `assistant/message` per
+model answer, so `ChildState` derives its counters from facts that are already
+there rather than maintaining a number that could disagree with them:
 
-| on the row | what it counts | cleared by |
+| on `ChildState` | what it counts | cleared by |
 |---|---|---|
 | `starts` | every time this child has been driven | nothing |
 | `resumes` | the drives that were restarts (`cause: resumed`) | nothing |
-| `resumesAtLastAnswer` | `resumes` as of the child's latest model answer | — |
+| `resumes_at_last_answer` | `resumes` as of the child's latest model answer | — |
 
-`restarts_since_progress(row)`, the difference of the last two, is the ladder's
+`restarts_since_progress(state)`, the difference of the last two, is the ladder's
 count: restarts that achieved nothing since the child last answered. After
 `retry_limit` of them the child is failed and the reason says which bound it hit.
 
-**Reconciled on resume, before the ladder reads it** (L5). The usage record goes into
-the parent's log in memory, while the child's own log reaches disk before each
-request, so a crash can drop answers the child's log still holds. Uncounted, the
-ladder would read those restarts as fruitless and a goal's token budget would miss
-what they spent. So `resume_children` first asks each interrupted child's provider
-(`AttributingProvider.reconcile_answers`) to append what the child's stored log has
-past `lastAnswerSeq`, marked `origin: "reconciled"`, and only then decides.
+**No catch-up step.** The answers the ladder counts are in the child's own log,
+where the child wrote them, so the sweep reads them there. When the parent's log
+held a copy of each answer's usage (`subagent/usage-attributed`), the copy waited
+in the parent's memory while the child's log reached disk before every request. A
+crash could drop the copy and keep the answer, and the ladder then read a child that
+had answered as stuck. The sweep had to copy the difference back before deciding
+(L5, `reconcile_answers`). Phase 11 removed the copy, and the step went with it.
 
-**Every level** (L5b). A child's own children are in its log, so each readmitted child
-is swept the same way, with the same `retry_limit`, before it takes its first step:
-`SubagentRun.ready` is the gate its drive waits on, opened once the child is bounded
-and its children swept. `readmit_waiting` descends the same way when a credential
+**Every level** (L5b). A readmitted child may have children of its own, so each
+readmitted child is swept the same way, with the same `retry_limit`, before it takes
+its first step: `SubagentRun.ready` is the gate its drive waits on, opened once the
+child is bounded and its children swept. `readmit_waiting` descends the same way when a credential
 arrives. There are no delays, unlike the root's ladder, because this one only ever
 runs while a harness is starting — which is already the wait.
 
@@ -287,14 +391,14 @@ count it again.
 
 **The ceiling is re-derived, not restored from memory.** A readmit goes through
 the same `check_grant` and `grant_for` a fresh admission does, against a request
-rebuilt from the admission record — which is why that record carries the
+rebuilt from the child's admission — which is why that record carries the
 child's `preset`, `skills` and `tools` (`admission_payload`). Without them a
 child would come back holding its parent's whole reach: §6.5 broken by a power
 cut. It is checked against what the deployment holds **now**, so a child admitted
 with a skill since removed is refused rather than quietly readmitted without it.
 
 The spawn **guards** do not run again, deliberately: a guard answers "may this
-delegation happen", and this one already did — its admission is in the log, so
+delegation happen", and this one already did — its admission is in its log, so
 asking again would count the child against a cap its own record fills and refuse
 to restore work that was once allowed. Guards gate new work.
 
@@ -316,6 +420,33 @@ about being asked again can widen what the first question was allowed. Before
 this, rehydration rebuilt the agent and its grant but took no workspace at all,
 which left a re-addressed child writing into its parent's tree.
 
+## Revoking a child
+
+```text
+await ctx.subagents.delete(parent_session, run_id, reason="…")   # -> bool
+```
+
+The one revocation door, for **any** child of the parent, live or not. A child this
+process runs is its provider's to stop (`RevokingProvider.revoke`): its job, its
+agent. The provider writes the tombstone into the child's log as it lets go. A child
+nothing here runs, because an earlier process settled it, is tombstoned by the seam
+in its stored log. Before Phase 11 a revocation reached only children a provider
+held in memory, so one an earlier process had settled answered `False`. Now `False`
+means there is no such child, or it was deleted already.
+
+`record_deleted` writes the `canceled` that ends an unfinished child and the
+`subagent/deleted` tombstone in **one batch** (S14). Written apart, a flush between
+them left a child canceled and not deleted. Whether the child had already ended is
+read from its own log, not from a caller's flag, and a child that ended is not
+ended again: a `canceled` over its `done` turned a finished child into a revoked
+one. The transcript stays on disk, because a parent looking for what a revoked
+child did should find the revocation, not a gap. A deleted child is never
+rehydrated.
+
+A mount going away is not a revocation. The provider suspends each unfinished
+child instead: `queued` with `SUSPENDED_DETAIL` in its own log, no tombstone, and
+the resume sweep readmits it.
+
 ## What it does not do
 
 * It does not run the child. That is the provider's, and `ph-base` has none.
@@ -331,4 +462,5 @@ which left a re-addressed child writing into its parent's tree.
 ## See also
 
 [`ctx.workspace`](workspace.md) · [Adding a seam](../cookbook/adding-a-seam.md) ·
-`test_subagent_task.py`, `test_subagent_grant.py`, `test_subagents.py` (ph-rlm)
+`test_child_logs.py`, `test_subagent_status.py`, `test_subagent_task.py`,
+`test_subagent_grant.py`, `test_subagents.py` (ph-rlm)

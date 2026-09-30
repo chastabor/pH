@@ -76,16 +76,12 @@ RECORDLESS: frozenset[str] = frozenset(
         # Kernel bookkeeping: one per changed variable per cell. `kernel/restored`
         # *is* a record, because a variable that did not come back is news.
         "kernel/snapshot",
-        # The panel's, in both views — a child's status and token attribution are
-        # a projection beside the trajectory, not entries in it.
-        "subagent/status",
-        "subagent/usage-attributed",
     }
 )
 """Types that deliberately produce no record.
 
-*Differently shaped* from the transcript's set, not smaller — both hold seven,
-and four of these are types the transcript renders. The difference is the point:
+*Differently shaped* from the transcript's set, not a part of it — two of these
+are types the transcript renders. The difference is the point:
 `request/header`, `approval/policy`, `fs/observed` and `session/end-seed` are
 record-less for a *reader* and are exactly what an auditor came for, while
 `assistant/chunk` and the dispatch's opening half are rows in a conversation and
@@ -503,7 +499,11 @@ HANDLERS: Mapping[str, Handler] = {
     "tool/effect": _on_harness_event,
     "tool/effect-settled": _on_harness_event,
     "kernel/restored": _on_harness_event,
+    # A sub-agent's own story, in its own log (Phase 11): what it was asked, each
+    # start and wait and its ending, and its revocation. A child's log is read here
+    # and nowhere else (P11-08), and a root's log holds none of them.
     "subagent/admitted": _on_harness_event,
+    "subagent/status": _on_harness_event,
     "subagent/deleted": _on_harness_event,
     "harness/refined": _on_harness_event,
     "harness/refine-considered": _on_harness_event,

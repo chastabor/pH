@@ -171,13 +171,16 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "attachment/uploading",
         # S12: a restore about to rewrite the tree. The transcript draws its settle.
         "workspace/restoring",
+        # Phase 11: a sub-agent's own story, which only its own log holds — a
+        # root's transcript never meets them, and this is where a child is read.
+        "subagent/admitted",
+        "subagent/status",
+        "subagent/deleted",
     } == TRANSCRIPT_RECORDLESS - RECORDLESS
     # And the reverse: what this view skips that the transcript renders.
     assert {
         "assistant/chunk",
         "tool/code-dispatch-start",
-        "subagent/status",
-        "subagent/usage-attributed",
     } == RECORDLESS - TRANSCRIPT_RECORDLESS
 
 
@@ -217,6 +220,36 @@ def _conversation() -> Session:
     log_event(session, "step/end", {"turn": 1, "step": 0})
     log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     return session
+
+
+def test_a_childs_own_log_tells_its_whole_story() -> None:
+    """A sub-agent's log read here says what it was asked, each start and ending,
+    and its revocation — every `subagent/*` record, and nothing about it from
+    anywhere else (Phase 11).
+
+    The trajectory view is where a child is read: its log is never attached as a
+    root (P11-08), and a root's transcript never meets these records. Its status
+    changes were a panel's concern while they lived in the parent's log; in the
+    child's own, they are the audit.
+
+    Sabotage: classify `subagent/status` as record-less again, and the child's
+    ending is missing from its own audit.
+    """
+    session = Session("lead-r1")
+    log_event(session, "subagent/admitted", {"runId": "r1", "name": "scout", "model": "fake-1"})
+    log_event(session, "subagent/status", {"status": "running"})
+    log_event(session, "subagent/status", {"status": "error", "detail": "boom"})
+    log_event(session, "subagent/deleted", {"reason": "user"})
+
+    records = build_trajectory(session)
+
+    assert [record.type for record in records] == [
+        "subagent/admitted",
+        "subagent/status",
+        "subagent/status",
+        "subagent/deleted",
+    ]
+    assert "boom" in records[2].summary
 
 
 def test_the_record_set_is_dshs_closed_vocabulary() -> None:

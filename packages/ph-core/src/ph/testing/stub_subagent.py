@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..keys import SESSIONS
 from ..seams.subagents import (
     Access,
     DowngradeReason,
@@ -26,6 +27,7 @@ from ..seams.subagents import (
     SubagentResult,
     SubagentRun,
     SubagentStatus,
+    open_child_log,
 )
 
 __all__ = ["StubSubagentProvider"]
@@ -64,10 +66,18 @@ class StubSubagentProvider:
         self.requests.append(request)
         index = len(self.requests)
         granted: Access = self.grants or request.access
+        run_id = f"run-{index}"
+        # A log of its own, opened through the door a real provider's is (Phase 11):
+        # the seam writes the child's admission into it and refuses a child without
+        # one — so a stubbed spawn meets the check a real one does.
+        parent_log = request.parent.session
+        session_id = f"session-{index}"
+        if parent_log is not None and request.parent.ctx.get(SESSIONS) is not None:
+            session_id = (await open_child_log(request.parent.ctx, parent_log, run_id)).id
         run = SubagentRun(
-            id=f"run-{index}",
+            id=run_id,
             name=request.name or f"child-{index}",
-            session_id=f"session-{index}",
+            session_id=session_id,
             parent_id=request.parent.id,
             model_provider="fake",
             model="fake-1",

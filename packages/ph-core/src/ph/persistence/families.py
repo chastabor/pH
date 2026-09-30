@@ -17,7 +17,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-__all__ = ["family_dirs", "locate_under", "logs_under", "path_under"]
+from ..session.store import child_session_id
+
+__all__ = ["children_under", "family_dirs", "locate_under", "logs_under", "path_under"]
 
 
 def path_under(root: Path, family: str, name: str, suffix: str) -> Path:
@@ -86,6 +88,57 @@ def logs_under(root: Path, suffix: str, *, tag: str = "") -> list[tuple[Path, os
         except OSError:  # pragma: no cover - a directory that vanished mid-scan
             continue
     found.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
+    return found
+
+
+def children_under(
+    root: Path, family: str, parent_id: str, suffix: str
+) -> list[tuple[Path, os.stat_result]]:
+    """The logs in one family that **may** be `parent_id`'s children: one `scandir`.
+
+    Two facts narrow the store to this, and neither is the answer:
+    - **A child is filed in its parent's family.** `SessionStore.create` inherits
+      it, so one directory holds every candidate and no other directory holds any.
+    - **A child's id starts with its parent's id and a dash**
+      (`<parent>-child-<hex>`), so only the names that do are `stat`ed.
+
+    The prefix only narrows. A grandchild shares it, and so can a fork someone
+    named after its source, so the header peek each backend makes afterwards
+    decides (`children_among`).
+
+    Not `logs_under` with a filter. The listing `stat`s every log in the store
+    and then cuts at a limit, and a parent's children fall below that cut once
+    the store is big enough (`SURVEY_LIMIT`). That is fine for a picker, but a
+    resume ladder, a budget or a cap needs every child. This stays inside one
+    directory, so its cost follows the size of the family and not the store.
+
+    An empty `family` is refused. `path_under` would resolve it to the sessions
+    root, which holds family directories and no logs, so the caller would get
+    "no children" when it should get an error. A family nobody has written yet
+    is a directory that does not exist, and that is an empty answer.
+
+    **Only that one is.** `family_dirs` turns any `OSError` into an empty store,
+    and a listing can afford that. Here "no children" tells a resume sweep there
+    is nothing to settle, so a directory that exists and cannot be read raises.
+    A log deleted between the scan and its `stat` is skipped: it is no longer
+    anyone's child.
+    """
+    if not family:
+        raise ValueError(f"listing {parent_id!r}'s children needs its family")
+    prefix = child_session_id(parent_id, "")
+    found: list[tuple[Path, os.stat_result]] = []
+    try:
+        with os.scandir(root / family) as logs:
+            for entry in logs:
+                if not (entry.name.startswith(prefix) and entry.name.endswith(suffix)):
+                    continue
+                try:
+                    if entry.is_file():
+                        found.append((Path(entry.path), entry.stat()))
+                except FileNotFoundError:
+                    continue
+    except FileNotFoundError:
+        return []
     return found
 
 

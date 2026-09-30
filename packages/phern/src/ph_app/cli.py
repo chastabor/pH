@@ -344,6 +344,7 @@ def default(
     # Here rather than at the top: `phern --help` must not pay for the persistence
     # layer, and `route` is about to import it anyway.
     from ph.persistence import SessionBusy  # noqa: PLC0415
+    from ph.session import SessionForkError  # noqa: PLC0415
 
     try:
         outcome = anyio.run(route)
@@ -354,14 +355,22 @@ def default(
         # no name for the difference and printed 191 lines for the one case a
         # person most needs to read (P4-12).
         fail_unmounted(profile, error)
-    except (AttachmentUnavailable, LoaderError, ModelChoiceError, OSError, SessionBusy) as error:
+    except (
+        AttachmentUnavailable,
+        LoaderError,
+        ModelChoiceError,
+        OSError,
+        SessionBusy,
+        SessionForkError,
+    ) as error:
         # A file that cannot be read fails the *command*: `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
         # turn to explain. A row whose plugin will not import is the same kind of
         # failure one step earlier — the loader's one refusal left at mount time,
         # now that `profile_or_exit` composes. A session another process holds is
         # the same shape again (I-5): refused before a byte is written, as the
-        # one sentence the daemon would have sent, not a traceback.
+        # one sentence the daemon would have sent, not a traceback — and so is a
+        # sub-agent's log, which only its root's mount writes (P11-08).
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
     if mode == "json":

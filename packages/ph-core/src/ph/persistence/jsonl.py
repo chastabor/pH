@@ -51,10 +51,17 @@ from ..session import (
 )
 from ..session.writers import log_writer
 from ..wire import WireModel
-from .families import locate_under, logs_under, path_under
+from .families import children_under, locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
-from .protocol import SessionPersistence, StoredSession, attach, stored_row, write_on_unwind
+from .protocol import (
+    SessionPersistence,
+    StoredSession,
+    attach,
+    children_among,
+    stored_row,
+    write_on_unwind,
+)
 from .repair import CallOutcome, interrupted_turn_closers, unresolved_calls
 
 _LOG = log_writer(__name__)
@@ -109,7 +116,12 @@ def session_logs(root: Path, *, tag: str = "") -> list[tuple[Path, os.stat_resul
 
 
 def read_stored(
-    root: Path, session_id: str, upto: int | None = None, family: str | None = None
+    root: Path,
+    session_id: str,
+    upto: int | None = None,
+    family: str | None = None,
+    *,
+    types: frozenset[str] | None = None,
 ) -> tuple[SessionHeader, list[SessionEvent]]:
     """One stored log's own file under `root` — `ReadOne` for `materialize`, with no
     store and no mount behind it, for a reader that needs a log before either."""
@@ -120,7 +132,7 @@ def read_stored(
     )
     if path is None or not path.is_file():
         raise FileNotFoundError(f"no stored session {session_id!r}")
-    return read_session(path, upto=upto)
+    return read_session(path, upto=upto, types=types)
 
 
 def locate_session(root: Path, session_id: str) -> Path | None:
@@ -514,10 +526,15 @@ class JsonlSessionStore:
         return materialize(self.read_own, session_id)
 
     def read_own(
-        self, session_id: str, upto: int | None = None, family: str | None = None
+        self,
+        session_id: str,
+        upto: int | None = None,
+        family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This file and nothing else — the unchained read `materialize` walks with."""
-        return read_stored(self.root, session_id, upto, family)
+        return read_stored(self.root, session_id, upto, family, types=types)
 
     def directory(self) -> Path | None:
         return self.root
@@ -567,6 +584,22 @@ class JsonlSessionStore:
             stored_row(path.stem, _peek_header(path), stat.st_mtime)
             for path, stat in session_logs(self.root)[:limit]
         ]
+
+    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored child of `parent_id`: one `scandir` of its family, then one
+        header line per log whose name has the parent's prefix.
+
+        The same peek `stored` makes per row, so a child's row here is the row the
+        listing would have shown for it. Only the candidates are read, which are
+        the parent's descendants and any log named after it.
+        """
+        return children_among(
+            parent_id,
+            (
+                stored_row(path.stem, _peek_header(path), stat.st_mtime)
+                for path, stat in children_under(self.root, family, parent_id, SUFFIX)
+            ),
+        )
 
     def forget(self, session_id: str) -> None:
         self._progress.pop(session_id, None)
@@ -704,7 +737,7 @@ def _peek_header(path: Path) -> SessionHeader | None:
 
 
 def read_session(
-    path: Path, *, upto: int | None = None
+    path: Path, *, upto: int | None = None, types: frozenset[str] | None = None
 ) -> tuple[SessionHeader, list[SessionEvent]]:
     """Read a stored session back, validating every envelope.
 
@@ -725,9 +758,15 @@ def read_session(
     unterminated line that *parses* is a whole record that lost only its
     newline, and is kept by both. A malformed line with a newline after it is
     damage of some other kind, and still refuses the log.
+
+    `types` keeps only events of those types, skipped on the **raw** record before
+    `from_wire`, for `upto`'s reason: the validate-and-freeze is the cost. The last
+    record of any type is kept aside, so the torn-batch rule below still judges the
+    tail by what was written rather than by what was kept.
     """
     header: SessionHeader | None = None
     events: list[SessionEvent] = []
+    tail: dict[str, Any] | None = None
     with path.open("r", encoding="utf-8") as handle:
         for number, line in enumerate(handle, start=1):
             text = line.strip()
@@ -756,11 +795,15 @@ def read_session(
                 # on the header so a file that puts it after an event still
                 # yields one rather than raising "no session header line".
                 break
+            tail = record
+            if types is not None and record.get("type") not in types:
+                continue
             events.append(SessionEvent.from_wire(record))
     if header is None:
         raise ValueError(f"{path}: no session header line")
-    if upto is None:
-        dropped = _unfinished_batch(events)
+    if upto is None and tail is not None:
+        last = SessionEvent.from_wire(tail)
+        dropped = _unfinished_batch([last])
         if dropped:
             log.warning(
                 "ph.persistence.jsonl: %s ends in %d event(s) of a batch a write did not "
@@ -768,7 +811,7 @@ def read_session(
                 path,
                 dropped,
             )
-            del events[len(events) - dropped :]
+            events = [event for event in events if event.seq <= last.seq - dropped]
     return header, events
 
 

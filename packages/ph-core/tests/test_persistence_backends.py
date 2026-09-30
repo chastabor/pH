@@ -105,7 +105,7 @@ from ph.persistence import (
     materialize,
 )
 from ph.persistence.jsonl import JsonlSessionStore
-from ph.persistence.protocol import SessionPersistence, StoredSession
+from ph.persistence.protocol import SURVEY_LIMIT, SessionPersistence, StoredSession
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, family_for
 from ph.testing import MountProfile, log_event, reference_fork, user_payload
 
@@ -1257,3 +1257,126 @@ async def test_a_second_store_over_a_live_session_does_not_rewrite_what_is_there
     _header, events = second.read("relive")
     assert [one.data["turn"] for one in events] == [0, 1, 2, 3], "the log was rewritten"
     assert [one.seq for one in events] == [0, 1, 2, 3], "the seq space gained a duplicate"
+
+
+# ------------------------------------------------ a session's children (P11-01) --
+
+
+def _child(store: SessionPersistence, child_id: str, parent: Session) -> Session:
+    """A sub-agent's log, with the header ph-rlm opens one with.
+
+    `origin: "subagent"` is what makes `parent_session` a delegating parent and
+    not the log a fork was cut from. `family` is given explicitly here, and
+    `SessionStore.create` does the same thing when it builds a child of a live
+    parent: a child is filed in its parent's directory, and that directory is
+    where `children_of` looks.
+    """
+    return _session(
+        store,
+        child_id,
+        parent_session=parent.id,
+        origin="subagent",
+        family=parent.header.family,
+    )
+
+
+async def test_a_parent_lists_every_child_past_the_survey_limit(
+    store: SessionPersistence,
+) -> None:
+    """**Every child, where the listing stops at a cut.**
+
+    `stored` checks every log in the store and then keeps the newest `limit`,
+    and even the lineage survey's `SURVEY_LIMIT` is a cut. A parent with more
+    children than that loses the rest from any answer built on the listing,
+    and a resume ladder, a budget or a spawn cap then misses children. So this
+    writes one more child than the survey reads and asks for them all.
+
+    The parent is worked in a directory, so its family is `<cwd-tag>-p` and not
+    its id. A backend that looked in a directory named after the parent would
+    find nothing here.
+
+    Headers only, no events: a child's header is what reaches disk at its first
+    flush, and it is all the listing reads. `forget` after each flush keeps
+    Turso from holding five hundred databases open.
+
+    The real `SURVEY_LIMIT` and not a patched one. The count is the point, and
+    code that imported the constant would still read the real value while this
+    test wrote a handful. It costs about four seconds on Turso, which opens one
+    database per header.
+
+    Sabotage: answer with `stored(limit=SURVEY_LIMIT)` filtered by
+    `delegating_parent`, and one child is missing.
+    """
+    parent = _session(store, "p", cwd="/work")
+    _append(store, parent, "turn/start", {"turn": 0})
+    await store.flush(parent)
+    spawned = [f"p-child-{index:04x}" for index in range(SURVEY_LIMIT + 1)]
+    for child_id in spawned:
+        child = _child(store, child_id, parent)
+        await store.flush(child)
+        store.forget(child_id)
+
+    listed = store.children_of("p", parent.header.family)
+    assert [row.session_id for row in listed] == sorted(spawned), (
+        "a child below the listing's cut was not listed, or the order is not by id"
+    )
+    assert {row.delegating_parent for row in listed} == {"p"}
+    # Each row carries the family, which is what makes reading the child next
+    # a path and not a search of every family.
+    assert {row.family for row in listed} == {family_for("p", "/work")}
+    header, _events = store.read_own(spawned[0], family=listed[0].family)
+    assert header.delegating_parent == "p"
+
+
+async def test_a_grandchild_is_not_its_grandparents_child(store: SessionPersistence) -> None:
+    """**The id prefix narrows the search, and the header decides.**
+
+    A child's id is `<parent>-child-<hex>`, so a grandchild's id is
+    `<parent>-child-<hex>-child-<hex>`. It starts with its grandparent's id too,
+    and it is filed in the same family. Listing by name alone would give the
+    grandparent both generations, and a ladder that settled a grandchild as
+    its own child would settle it from the wrong log. Each generation lists
+    only its own children.
+
+    Sabotage: drop the `delegating_parent` check from `children_among`, and the
+    grandparent lists the grandchild.
+    """
+    parent = _session(store, "p")
+    _append(store, parent, "turn/start", {"turn": 0})
+    await store.flush(parent)
+    child = _child(store, "p-child-a", parent)
+    await store.flush(child)
+    await store.flush(_child(store, "p-child-a-child-b", child))
+
+    family = parent.header.family
+    assert [row.session_id for row in store.children_of("p", family)] == ["p-child-a"]
+    assert [row.session_id for row in store.children_of("p-child-a", family)] == [
+        "p-child-a-child-b"
+    ]
+    assert store.children_of("p-child-a-child-b", family) == ()
+
+
+async def test_a_fork_is_not_a_child(store: SessionPersistence) -> None:
+    """**`parent` is not `delegating_parent`.**
+
+    A fork's header names the log it was cut from in `parent_session`, the same
+    field a sub-agent's does. Only `origin: "subagent"` tells them apart. A fork
+    is a session of its own that a person continues, and not something the
+    parent spawned. Counting it as a child would make the parent's resume sweep
+    settle a conversation it does not own. This fork is named after its source
+    and filed in its family, so only the header check can leave it out.
+
+    Sabotage: filter on `row.parent` instead of `row.delegating_parent`, and the
+    fork is listed.
+    """
+    parent = _session(store, "p", cwd="/work")
+    _append(store, parent, "turn/start", {"turn": 0})
+    _append(store, parent, "turn/end", {"turn": 0, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+    family = parent.header.family
+    await store.flush(_reference_fork(store, "p-fork", "p", boundary=2, family=family))
+    await store.flush(_child(store, "p-child-a", parent))
+
+    rows = {row.session_id: row for row in store.stored()}
+    assert rows["p-fork"].parent == "p", "the fixture's fork does not name its source"
+    assert [row.session_id for row in store.children_of("p", family)] == ["p-child-a"]

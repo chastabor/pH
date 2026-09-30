@@ -68,6 +68,7 @@ from .payloads import (
     RootStatusReply,
     ScheduleCanceled,
     SessionBrowse,
+    SessionChildrenNotice,
     SessionCommandsNotice,
     SessionDetached,
     SessionModelsReply,
@@ -105,6 +106,7 @@ __all__ = [
     "SESSION_ADOPT",
     "SESSION_ATTACH",
     "SESSION_CANCEL",
+    "SESSION_CHILDREN",
     "SESSION_COMMAND",
     "SESSION_DETACH",
     "SESSION_MODEL",
@@ -165,12 +167,15 @@ SESSION_CANCEL = Verb("session/cancel", SessionParams, RootDescription)
 SESSION_SNAPSHOT = Verb("session/snapshot", SnapshotParams, SnapshotPage)
 
 # --- the read-only projections (P5-14) -----------------------------------------
-# Two of the four answer with the *notice* type, because the reply and the
+# Three of them answer with the *notice* type, because the reply and the
 # notification are one shape and the server was the only party not saying so.
 
 SESSION_READINGS = Verb("session/readings", SessionParams, SessionReadingsReply)
 COMMANDS_LIST = Verb("commands/list", SessionParams, SessionCommandsNotice)
 SCREENS_LIST = Verb("screens/list", SessionParams, SessionScreensNotice)
+SESSION_CHILDREN = Verb("session/children", SessionParams, SessionChildrenNotice)
+"""Every sub-agent beneath a root, from their own logs (P11-07) — for a client that
+has just attached. `session.children` pushes the same list whenever it moves."""
 TOOLS_LIST = Verb("tools/list", SessionParams, SessionToolsReply)
 SKILLS_LIST = Verb("skills/list", SessionParams, SessionSkillsReply)
 PRESETS_LIST = Verb("presets/list", SessionParams, SessionPresetsReply)

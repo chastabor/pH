@@ -50,6 +50,7 @@ from ph.keys import (
     MODELS,
     PERMISSION_PRESETS,
     SKILLS,
+    SUBAGENTS,
     TOOLS,
     TUI_SCREENS,
     TUI_STATUS,
@@ -59,10 +60,11 @@ from ph.seams.commands import CommandSchema
 from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
+from ph.seams.subagents import ChildState
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 
-from ..payloads import ConfigRow
+from ..payloads import ChildRow, ConfigRow
 from ..sessions import SessionSummary, session_summaries
 
 if TYPE_CHECKING:
@@ -73,6 +75,8 @@ __all__ = [
     "commands_of",
     "credentials_named",
     "credentials_of",
+    "family_of",
+    "family_rows",
     "models_of",
     "readings_of",
     "screens_of",
@@ -128,6 +132,24 @@ def screens_of(root: Root) -> list[ScreenSchema]:
     if registry is None:
         return []
     return [one.schema() for one in registry.list()]
+
+
+def family_of(root: Root) -> list[ChildState]:
+    """Every sub-agent beneath `root`, each from its own log (Phase 11) — the seam's
+    one walk of a delegation tree (`SubagentService.family`): a parent before its own
+    children, siblings in admission order, which is the order a tree is drawn in.
+
+    **What this process has read, and nothing more.** Every child of the root — read
+    as the root's log opens — and the children of every child it has opened since.
+    A fold, like everything in this module: asking loads nothing.
+    """
+    subagents = root.ctx.get(SUBAGENTS)
+    return subagents.family(root.id) if subagents is not None else []
+
+
+def family_rows(root: Root) -> list[ChildRow]:
+    """`family_of`, as the rows `session/children` and `session.children` carry."""
+    return [ChildRow.of(state) for state in family_of(root)]
 
 
 def tools_of(root: Root) -> list[ToolSchema]:

@@ -141,7 +141,9 @@ async def apply(ctx: Context, config: Config) -> None:
         if state is None:
             return
 
-        spent = state.spent.exhausted(state.goal.budget, elapsed_ms=now_ms() - state.started_at)
+        spent = goals.spent(session, state).exhausted(
+            state.goal.budget, elapsed_ms=now_ms() - state.started_at
+        )
         if spent is not None:
             goals.settle(session, state.goal.id, "budget_limited", detail=spent)
             return
@@ -188,7 +190,7 @@ async def apply(ctx: Context, config: Config) -> None:
             goals.settle(session, state.goal.id, "abandoned")
             return f'stopped: "{state.goal.objective}"'
         if not objective:
-            return _status(state)
+            return _status(goals, session, state)
         if state is not None:
             return f'a goal is already open: "{state.goal.objective}". Use `/autonomous stop`.'
 
@@ -201,7 +203,8 @@ async def apply(ctx: Context, config: Config) -> None:
                 budget=budget_of(),
             ),
         )
-        return _status(goals.states(session)[goal.id])
+        opened = goals.states(session)[goal.id]
+        return _status(goals, session, opened)
 
     ctx.require(COMMANDS).register(
         CommandDefinition(
@@ -232,11 +235,11 @@ def _nudge(state: GoalState, notes: list[str]) -> str:
     )
 
 
-def _status(state: GoalState | None) -> str:
-    """What the open goal has spent, or that there is none."""
+def _status(goals: GoalService, session: Session, state: GoalState | None) -> str:
+    """What the open goal has spent — its sub-agents' included — or that there is none."""
     if state is None:
         return f"no goal is open — {USAGE}"
-    spent, budget = state.spent, state.goal.budget
+    spent, budget = goals.spent(session, state), state.goal.budget
     gates = ", ".join(state.goal.gates) if state.goal.gates else "none — the model decides"
     return (
         f'working toward: "{state.goal.objective}"\n'

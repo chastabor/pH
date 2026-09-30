@@ -2,24 +2,39 @@
 
 The load-bearing claim is **non-blocking admission**: `start()` returns once the
 child is admitted, not once it has answered. Everything else here is about the
-parent being able to act on that handle — the roster is a fold, a silent child is
-announced, usage is attributed, a revoked child leaves a tombstone.
+parent being able to act on that handle — a child's state is read from its own
+log, a silent child is announced, what a child spent is counted where it spent it,
+a revoked child leaves a tombstone.
 
-## `subagent/usage-attributed` is a record, not a correction
+## Each session owns its log (Phase 11)
 
-This module's own docstring used to say the event exists "so the token meter
-**can** subtract a child's tokens from the parent's own context measurement".
-That was never true, and "can" was doing the work in the sentence.
+Every record about a child — its admission, each start, each wait, its ending and
+its tombstone — is in the **child's own** log, and nothing about it is written to
+its parent's. So these tests read a child's story from the child (`_log_of`,
+`_state`), and the ones about durability ask the child's store, not the parent's.
+
+The parent used to keep a roster of its children in its own log, and every
+durability rule in this file existed to keep that second account in step with the
+first: the parent flushed before a child's gate opened (S2), before a restart
+(S10), after the child's own log (F1), and a resume copied the answers a crash had
+left only in the child's log back into the parent's (L5). With one account there
+is nothing to keep in step, and each rule is about one log.
+`test_a_parents_log_holds_no_record_of_its_child` is what keeps it that way.
+
+## A child's spend never was a correction to its parent's context
 
 `TokenMeter.last_usage` folds only `assistant/message` in the log it is *given*,
 and a child's `assistant/message` events are in the **child's** log — so the
 parent's context measurement never included them and there is nothing to
-subtract. The event is additive, for readers; its only consumer is the TUI panel.
+subtract. The mirror this package once wrote into the parent's log
+(`subagent/usage-attributed`) was additive, for readers, and those readers — a
+goal's budget, the retry ladder, the TUI panel — read the child's own answers now
+(`ChildState.tokens`).
 
 Worth keeping written down because the false version was load-bearing-sounding:
 it implied a fan-out of eight would otherwise read as context pressure on the
 parent and trigger a compaction it does not need. It would not, and no code path
-depends on the event to prevent it.
+depends on a parent-side record to prevent it.
 
 ## Why the parent check sits above `agents.create` in `rehydrate`
 
@@ -46,28 +61,45 @@ from rlm_fixtures import (
     logs_after_a_crash,
 )
 
+from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
-from ph.json import as_obj
-from ph.keys import AGENTS, CREDENTIALS, JOBS, LLM, SESSIONS, SKILLS, SUBAGENTS, TOOLS, WORKSPACE
+from ph.json import as_obj, as_seq
+from ph.keys import (
+    AGENTS,
+    CREDENTIALS,
+    JOBS,
+    LLM,
+    SESSION_PERSISTENCE,
+    SESSIONS,
+    SKILLS,
+    SUBAGENTS,
+    TOOLS,
+    WORKSPACE,
+)
 from ph.llm.adapter import ResolvedModel
 from ph.llm.fake import FakeAdapter, text_script
 from ph.llm.types import text_of, user_text
 from ph.persistence import SessionBusy, open_session, resume_session
 from ph.seams.credentials import waiting_for
 from ph.seams.subagents import (
+    ADMITTED,
+    DELETED,
     STATUS,
     SUSPENDED_DETAIL,
     UNRECOVERABLE_DETAIL,
-    USAGE,
+    ChildState,
+    StatusCause,
     SubagentRequest,
+    SubagentRun,
     SubagentSpawnError,
     child_is_live,
+    child_state,
+    child_state_of,
     default_child_name,
     exhausted_detail,
     family_reach,
+    record_started,
     restarts_since_progress,
-    roster_of,
-    subagent_roster,
 )
 from ph.seams.token_meter import reported_usage
 from ph.seams.workspace import workspace_survivors
@@ -132,10 +164,46 @@ async def _spawn(
     )
 
 
+def _log_of(ctx: Context, run: SubagentRun) -> list[SessionEvent]:
+    """A child's own log: its live session's events, else what its store holds.
+
+    The live one while this process has the child open, since that is what its doors
+    write. The stored one for a child this process let go — one a resume sweep ended
+    without readmitting it, whose log it opened, wrote, flushed and closed again — for
+    which the disk is the only copy left.
+    """
+    live = ctx.require(SESSIONS).get(run.session_id)
+    return list(live.events) if live is not None else stored_events(ctx, run.session_id)
+
+
+def _state(ctx: Context, run: SubagentRun) -> ChildState:
+    """One child as its own log tells it, through the service every reader asks — the
+    prompt, the roster tool, the resume sweep and the budgets alike."""
+    return not_none(ctx.require(SUBAGENTS).state(run.session_id), f"the child {run.id}")
+
+
+def _stored_state(ctx: Context, run: SubagentRun) -> ChildState:
+    """One child as its **store** holds it: what a resume would be handed, and so what a
+    durability rule is about."""
+    header, events = ctx.require(SESSION_PERSISTENCE).read(run.session_id)
+    return child_state_of(run.session_id, header, events)
+
+
+def _statuses(ctx: Context, run: SubagentRun, field: str = "status") -> list[str]:
+    """Every status this child reached, in order — or another `field` of the same
+    records. Its own log's, which is the only place a status is written."""
+    return [str(event.data.get(field)) for event in _log_of(ctx, run) if event.type == STATUS]
+
+
+def _about_children(session: Session) -> list[str]:
+    """The `subagent/*` records in a parent's own log — none, by design."""
+    return [event.type for event in session.events if event.type.startswith("subagent/")]
+
+
 # ------------------------------------------------------------------ admission --
 
 
-@pytest.mark.parametrize("step", ["before-admission", "after-admission"])
+@pytest.mark.parametrize("step", ["building-its-workspace", "starting-its-drive"])
 async def test_a_parent_that_goes_away_mid_admission_refuses_the_child(
     delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch, step: str
 ) -> None:
@@ -143,19 +211,21 @@ async def test_a_parent_that_goes_away_mid_admission_refuses_the_child(
 
     It escaped as a raw `InactiveScopeError` from whichever registration met the
     dead scope first — a workspace effect on the child's scope, the release effect or
-    the job on the parent's — carrying no spawn code, and past the admission it left
-    a roster row open that nothing would ever end. Now it is a `SubagentSpawnError`,
-    and what was built is released: taken apart before the admission, tombstoned
-    after it.
+    the job on the parent's — carrying no spawn code, and a child it had got as far
+    as starting was left open with nothing that would ever end it. Now it is a
+    `SubagentSpawnError`, and what was built is released: its session let go while
+    it is being built, tombstoned in its own log once its drive exists. Either way
+    the seam never writes its admission, so its log names no child, and nothing
+    reads as a live child of the parent.
 
     Sabotage: drop either `except InactiveScopeError` in `_admit`.
     """
     ctx, session, parent = await delegating()
-    # An await on each side of the admission: building the child's workspace, and
-    # starting the job that drives it, which registers on the parent's scope.
+    # Two awaits in building the child: its workspace, and the job that drives it,
+    # which registers on the parent's scope.
     owner, name = (
         (RlmChildProvider, "_workspace")
-        if step == "before-admission"
+        if step == "building-its-workspace"
         else (type(ctx.require(JOBS)), "start")
     )
     original = getattr(owner, name)
@@ -169,8 +239,20 @@ async def test_a_parent_that_goes_away_mid_admission_refuses_the_child(
     with pytest.raises(SubagentSpawnError, match="went away"):
         await _spawn(ctx, parent)
 
-    assert not any(child_is_live(row) for row in subagent_roster(session).values())
+    assert not any(
+        child_is_live(state) for state in ctx.require(SUBAGENTS).children(session.id).values()
+    )
     assert ctx.require(SUBAGENTS).list() == []
+    assert _about_children(session) == []
+    logs = [
+        one for one in ctx.require(SESSIONS).list() if one.header.delegating_parent == session.id
+    ]
+    if step == "building-its-workspace":
+        assert logs == [], "the child's session outlived its refusal"
+    else:
+        (child,) = logs
+        kinds = [event.type for event in child.events if event.type.startswith("subagent/")]
+        assert ADMITTED not in kinds and DELETED in kinds, kinds
 
 
 async def test_admission_returns_before_the_child_answers(delegating: MountedRuntime) -> None:
@@ -179,16 +261,16 @@ async def test_admission_returns_before_the_child_answers(delegating: MountedRun
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
 
-    # Admitted, not finished: the record of it existing is written and nothing
-    # has reported on it yet.
-    assert [event.type for event in session.events if event.type.startswith("subagent/")] == [
-        "subagent/admitted"
-    ]
-    admitted = [event for event in session.events if event.type == "subagent/admitted"]
-    assert len(admitted) == 1
-    assert admitted[0].data["runId"] == run.id
-    assert admitted[0].data["name"] == run.name
-    assert admitted[0].data["prompt"] == "research the thing"
+    # Admitted, not finished: the record of it existing is written — in its own log,
+    # and not its parent's — and nothing has reported on it yet.
+    own = _log_of(ctx, run)
+    assert [event.type for event in own if event.type.startswith("subagent/")] == [ADMITTED]
+    (admitted,) = [event for event in own if event.type == ADMITTED]
+    assert admitted.data["runId"] == run.id
+    assert admitted.data["name"] == run.name
+    assert admitted.data["prompt"] == "research the thing"
+    assert admitted.data["owner"] == PROVIDER_NAME, "readmission finds its provider by this"
+    assert _about_children(session) == []
 
     # The child's own session exists and carries the parent link and depth.
     child_session = ctx.require(SESSIONS).get(run.session_id)
@@ -198,37 +280,58 @@ async def test_admission_returns_before_the_child_answers(delegating: MountedRun
 
 
 async def test_the_admission_is_logged_before_any_status(delegating: MountedRuntime) -> None:
-    """A fold that met status for an unadmitted child would show a family that
-    does not exist, so the order is not incidental."""
-    ctx, session, parent = await delegating()
-    await _spawn(ctx, parent)
+    """The child's drive is gated on its admission (`SubagentRun.ready`), so every
+    status the drive writes follows the admission in the child's own log.
+
+    The fold no longer needs the order — a log with statuses and no admission is not a
+    child, and every reader skips it — but a drive that ran ahead of its admission
+    would be a child working before anything recorded it existed, which is S2's
+    failure seen from the other side."""
+    ctx, _session, parent = await delegating()
+    run = await _spawn(ctx, parent)
     await ctx.drain()
 
-    kinds = [event.type for event in session.events if event.type.startswith("subagent/")]
-    assert kinds[0] == "subagent/admitted"
-    assert "subagent/status" in kinds
+    kinds = [event.type for event in _log_of(ctx, run) if event.type.startswith("subagent/")]
+    assert kinds[0] == ADMITTED
+    assert STATUS in kinds
 
 
 async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
-    delegating: MountedRuntime, gate: ModelGate
+    delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """S2 — the admission is the one record a resume finds a child by.
 
-    It rode the parent's log in memory for the child's whole run, and a child's
-    flushes never write its parent (a subagent inherits no prefix), so a crash
-    mid-run left a child with a log and a tree that no roster on disk named. Now
-    the gate opens only once the parent's log holds the admission.
+    It is in the child's own log, and the seam flushes that log before it opens the
+    child's gate: a crash any time after the child's first step leaves a log on disk
+    that says what the child was asked, by whom and under which ceiling — which is
+    what the store lists a parent's children by (`children_of`) and the sweep
+    readmits them from. It used to ride the parent's log in memory, while the child's
+    own flushes never wrote its parent, so a crash mid-run left a child with a log and
+    a tree that nothing on disk named.
 
-    Sabotage: open the gate in `SubagentService.start` before `session_written`,
-    and the stored parent log names no child while one is at the model.
+    Asked at the gate, not at the model: the child's first model request flushes its
+    log anyway, so by then the question is moot. The drive's first act after the gate
+    is its `running` record, so the store is read there.
+
+    Sabotage: drop the child's flush from `SubagentService._admit`, and the stored
+    log is empty when the child starts.
     """
-    ctx, session, parent = await delegating()
-    run = await _spawn(ctx, parent, "work")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    ctx, _session, parent = await delegating()
+    seen: list[list[str]] = []
+    original = record_started
 
-    assert run.id in roster_of(stored_events(ctx, session.id)), (
-        "a child is working and its parent's log on disk does not name it"
-    )
+    async def watched(
+        scope: Context, child: Session, *, cause: StatusCause | None = None
+    ) -> SessionEvent:
+        seen.append(stored_types(ctx, child.id))
+        return await original(scope, child, cause=cause)
+
+    monkeypatch.setattr("ph_rlm.subagents.record_started", watched)
+    await _spawn(ctx, parent, "work")
+    await ctx.drain()
+
+    assert len(seen) == 1, "the child never started"
+    assert ADMITTED in seen[0], "a child started and its own log on disk does not say so"
 
 
 async def test_a_child_whose_admission_cannot_be_written_is_not_started(
@@ -236,16 +339,18 @@ async def test_a_child_whose_admission_cannot_be_written_is_not_started(
 ) -> None:
     """Fail-closed, as a durable intent is: no admission on disk, no child.
 
-    The refusal reaches the caller, the child never reaches the model, and its row
-    ends — so nothing holds the parent out of passivation for a child that never
-    ran.
+    The refusal reaches the caller, the child never reaches the model, and it is
+    ended in its own log — so nothing holds the parent out of passivation for a child
+    that never ran.
 
     Sabotage: open the gate whether or not the write worked, and the child runs.
     """
     ctx, session, parent = await delegating()
 
     def refuse(target: Session) -> None:
-        if target.id == session.id:
+        # The child's log, which is the one the admission is written to: its id is
+        # minted inside the spawn, and its header names the parent.
+        if target.header.delegating_parent == session.id:
             raise OSError("the disk is full")
 
     ctx.on("session/flush", refuse)
@@ -254,21 +359,22 @@ async def test_a_child_whose_admission_cannot_be_written_is_not_started(
     await ctx.drain()
 
     assert gate.arrived == 0, "the child ran without its admission on disk"
-    (row,) = subagent_roster(session).values()
-    assert row["status"] == "error"
-    assert not child_is_live(row)
+    (state,) = ctx.require(SUBAGENTS).children(session.id).values()
+    assert state.status == "error"
+    assert not child_is_live(state)
 
 
 async def test_an_interrupted_spawn_is_answered_with_the_handle_it_admitted(
     delegating: MountedRuntime,
 ) -> None:
-    """S2 — an `rlm.run` a crash cut short is found in the roster by its call.
+    """S2 — an `rlm.run` a crash cut short is found among its parent's children by its
+    call.
 
-    Its whole value is the admission handle, and the admission is on disk before the
-    child runs, so a resume can show the program the handle it would have had —
-    rather than "outcome unknown", on which a model spawns the same child beside the
-    one the resume has already put back to work. No admission under the call is a
-    spawn that never happened.
+    Its whole value is the admission handle, and the admission is on the child's disk
+    before the child runs — carrying the call's id — so a resume can show the program
+    the handle it would have had, rather than "outcome unknown", on which a model
+    spawns the same child beside the one the resume has already put back to work. No
+    admission under the call is a spawn that never happened.
 
     Sabotage: drop `call_id` from the request `run_child` builds, and the admitted
     child is not found.
@@ -291,7 +397,10 @@ async def test_eight_children_are_all_admitted_without_waiting(delegating: Mount
 
     assert len({run.id for run in runs}) == 8
     assert len({run.name for run in runs}) == 8, "names address children, so they are unique"
-    assert len([e for e in session.events if e.type == "subagent/admitted"]) == 8
+    assert [
+        event.type for run in runs for event in _log_of(ctx, run) if event.type == ADMITTED
+    ] == [ADMITTED] * 8, "one admission each, in each child's own log"
+    assert list(ctx.require(SUBAGENTS).children(session.id)) == [run.id for run in runs]
     assert len(ctx.require(SUBAGENTS).list(parent_id=parent.id)) == 8
 
 
@@ -323,7 +432,10 @@ async def test_the_depth_gate_names_both_numbers(delegating: MountedRuntime) -> 
         await _spawn(ctx, parent)
     # Refused before the child existed, so there is nothing to reconcile: no
     # admission, no session, no artifacts.
-    assert [event for event in session.events if event.type.startswith("subagent/")] == []
+    assert ctx.require(SUBAGENTS).children(session.id) == {}
+    assert [
+        one.id for one in ctx.require(SESSIONS).list() if one.header.delegating_parent == session.id
+    ] == [], "a refused spawn opened a log for its child"
 
 
 async def test_a_child_cannot_delegate_past_the_depth_limit(delegating: MountedRuntime) -> None:
@@ -384,16 +496,16 @@ async def test_the_default_shapes_the_request_and_the_tier_answers_it(
     assert asked.granted_access == "write"
 
     rows = {
-        event.data["runId"]: event.data
-        for event in session.events
-        if event.type == "subagent/admitted"
+        run_id: not_none(state.admission)
+        for run_id, state in ctx.require(SUBAGENTS).children(session.id).items()
     }
     # Nothing was *narrowed*, so there is no downgrade to report: the widening a
     # `read` request meets at this tier is visible in the pair itself, and the
     # child is told plainly by its own workspace prompt line.
     assert asked.downgrade_reason is None
     assert default.downgrade_reason is None
-    assert "downgradeReason" not in rows[default.id]
+    assert rows[default.id].downgrade_reason is None
+    assert "downgradeReason" not in rows[default.id].to_wire()
 
 
 async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
@@ -443,25 +555,11 @@ async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Mou
 
     assert child.granted_access == "read"
     assert child.downgrade_reason == "workspace-not-mounted"
-    rows = {
-        event.data["runId"]: event.data
-        for event in session.events
-        if event.type == "subagent/admitted"
-    }
-    assert rows[child.id]["downgradeReason"] == "workspace-not-mounted"
+    admitted = not_none(ctx.require(SUBAGENTS).children(session.id)[child.id].admission)
+    assert admitted.downgrade_reason == "workspace-not-mounted"
 
 
 # ------------------------------------------------------- what the parent hears --
-
-
-def _statuses(session: Session, run_id: str, field: str = "status") -> list[str]:
-    """Every status this child reached, in order — or another `field` of the same
-    records. One spelling, four readers."""
-    return [
-        str(event.data.get(field))
-        for event in session.events
-        if event.type == STATUS and event.data.get("runId") == run_id
-    ]
 
 
 def _notices(session: Session) -> list[str]:
@@ -524,56 +622,67 @@ async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mount
 
     assert _notices(session) == [], "a child that replied was announced as silent"
     # The status record still lands: only the redundant notice is suppressed.
-    assert _statuses(session, run.id)[-1] == "done"
+    assert _statuses(ctx, run)[-1] == "done"
 
 
-async def test_the_child_status_reaches_the_parents_log(delegating: MountedRuntime) -> None:
+async def test_the_child_status_reaches_its_own_log(delegating: MountedRuntime) -> None:
+    """Each start and the ending are the child's records, in its log; the parent's
+    log hears of the child only as a notice in its inbox."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
     await ctx.drain()
 
-    statuses = _statuses(session, run.id)
+    statuses = _statuses(ctx, run)
     assert statuses[0] == "running"
     assert statuses[-1] in {"done", "error"}
+    assert _about_children(session) == []
 
 
-async def test_a_childs_outcome_is_on_disk_before_its_parent_says_done(
+async def test_a_childs_outcome_is_on_disk_before_its_parent_is_told(
     delegating: MountedRuntime,
 ) -> None:
-    """F1. The parent's `subagent/status{done}` is only written once the child's own
-    log holds what it is reporting.
+    """F1. The parent hears a child finished — the notice in its inbox, the result
+    its waiters are handed — only once the child's own log on disk holds the ending,
+    and the answer before it.
 
     Nothing used to flush a child after its last model request — its last barrier
     comes *before* that request, and a parent's flush walks ancestors, never
-    children — so every child log on disk ended before its answer while the
-    parent's said "done" with a preview of it. Repair then closed the child's
-    turn as interrupted on the next open.
+    children — so every child log on disk ended before its answer while the parent
+    was told "done" with a preview of it. Repair then closed the child's turn as
+    interrupted on the next open, and readmitted it to do the work again. The rule is
+    one log's now: `record_ended` writes the ending and flushes the child before the
+    drive tells anyone.
 
-    Asked of the store at the moment the parent's record lands, through the
-    Protocol: what it would hand a resume, not what is in memory.
+    Asked of the store at the moment the notice lands in the parent's log, through
+    the Protocol: what it would hand a resume, not what is in memory.
 
-    Sabotage: drop the child's flush from `ph.seams.subagents.record_settled` and the
-    child's stored log is missing its answer when the parent reports it.
+    Sabotage: drop the flush from `ph.seams.subagents.record_ended`, and the child's
+    stored log is missing its ending when the parent is told.
     """
     ctx, session, parent = await delegating()
-    children: list[str] = []
-    seen: list[tuple[int, int, str]] = []
+    children: list[SubagentRun] = []
+    seen: list[tuple[list[SessionEvent], list[SessionEvent]]] = []
 
-    def watch(_session: Session, event: Any) -> None:  # noqa: ANN401
-        if event.type == "subagent/status" and event.data.get("status") == "done":
-            child = not_none(ctx.require(SESSIONS).get(children[0]))
-            stored = stored_types(ctx, child.id)
-            seen.append((len(stored), child.seq, stored[-1]))
+    def watch(_session: Session, event: SessionEvent) -> None:
+        if event.type == "agent/inbox/spliced" and "rlm child" in repr(event.data):
+            child = not_none(ctx.require(SESSIONS).get(children[0].session_id))
+            seen.append((stored_events(ctx, child.id), list(child.events)))
 
     session.observe(watch)
-    run = await _spawn(ctx, parent)
-    children.append(run.session_id)
+    children.append(await _spawn(ctx, parent))
     await ctx.drain()
 
-    assert len(seen) == 1, "the child never reported done"
-    stored, held, last = seen[0]
-    assert stored == held, f"the store held {stored} of the child's {held} events"
-    assert last == "turn/end"
+    assert len(seen) == 1, "the parent was never told the child finished"
+    stored, held = seen[0]
+    ending = next(
+        i for i, event in enumerate(held) if event.type == STATUS and event.data["status"] == "done"
+    )
+    # Everything up to and including the ending — the answer among it. What follows
+    # it (the withdrawn workspace mark) is the child's own business, not the news.
+    assert [event.seq for event in stored[: ending + 1]] == [
+        event.seq for event in held[: ending + 1]
+    ], "the parent was told before the child's disk held its answer and its ending"
+    assert _stored_state(ctx, children[0]).status == "done"
 
 
 async def test_a_waiter_can_still_block_on_completion(delegating: MountedRuntime) -> None:
@@ -588,70 +697,138 @@ async def test_a_waiter_can_still_block_on_completion(delegating: MountedRuntime
     assert outcome.answer == "ok"
 
 
-async def test_child_usage_is_attributed_to_the_parent(delegating: MountedRuntime) -> None:
-    """Without this a fan-out of eight reads as context pressure on the parent
-    and triggers a compaction it does not need."""
+async def test_a_childs_spend_is_counted_from_its_own_answers(
+    delegating: MountedRuntime,
+) -> None:
+    """What a child spent is read where it spent it: the `usage` on its own
+    `assistant/message`s, which a goal's budget (`delegated_tokens`) and the panel
+    add up. Nothing is copied into the parent's log for them to read — a copy that
+    could lag the child's own after a crash, and had to be caught up on every resume.
+    """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
     await ctx.drain()
 
-    attributed = [
-        event
-        for event in session.events
-        if event.type == "subagent/usage-attributed" and event.data["runId"] == run.id
-    ]
-    assert attributed, "the child's tokens were never attributed"
-    assert attributed[0].data["origin"] == "spawn_task"
-    assert "childUsage" in attributed[0].data
+    answers = [event for event in _log_of(ctx, run) if event.type == "assistant/message"]
+    spent = sum(not_none(reported_usage(event)).total for event in answers)
+    assert spent > 0, "the child's answer carries no usage to count"
+    assert _state(ctx, run).tokens == spent
+    assert ctx.require(SUBAGENTS).delegated_tokens(session.id) == spent
+    assert _about_children(session) == []
 
 
-# --------------------------------------------------------- roster and deletion --
+# ------------------------------------------------------- children and deletion --
 
 
-async def test_the_roster_is_a_fold_over_the_parents_own_log(delegating: MountedRuntime) -> None:
-    """P3-13 by construction: no side table, so restart and compaction are free."""
+async def test_the_children_are_read_from_their_own_logs(delegating: MountedRuntime) -> None:
+    """P3-13 by construction: no side table, so restart and compaction are free.
+    A parent's children are whatever logs name it, each folded on its own — the
+    service's cached fold equals a fresh fold of the child's log (I6)."""
     ctx, session, parent = await delegating()
     first = await _spawn(ctx, parent, "one", name="alpha")
     second = await _spawn(ctx, parent, "two", name="beta")
     await ctx.drain()
 
-    roster = subagent_roster(session)
-    assert set(roster) == {first.id, second.id}
-    assert roster[first.id]["name"] == "alpha"
-    assert roster[second.id]["status"] in {"done", "error"}, "status folded onto the row"
+    children = ctx.require(SUBAGENTS).children(session.id)
+    assert list(children) == [first.id, second.id], "in admission order"
+    assert children[first.id].name == "alpha"
+    assert children[second.id].status in {"done", "error"}, "status folded onto the state"
+    for run in (first, second):
+        assert children[run.id] == child_state(not_none(ctx.require(SESSIONS).get(run.session_id)))
 
 
-async def test_deleting_a_child_leaves_a_tombstone(delegating: MountedRuntime) -> None:
-    """The transcript stays on disk, so the revocation must be findable."""
+async def test_deleting_a_child_leaves_a_tombstone(
+    delegating: MountedRuntime, gate: ModelGate
+) -> None:
+    """The transcript stays on disk, so the revocation must be findable — in the
+    child's own log, which alone then tells its whole story.
+
+    Held at the model, so it is revoked while it works: the delete reads the parent's
+    stored children off the event loop first, and an unheld child answers meanwhile.
+    """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "doomed")
-    provider = ctx.require(RLM_CHILDREN)
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    subagents = ctx.require(SUBAGENTS)
 
-    assert await provider.delete(session, run.id, reason="user") is True
-    assert ctx.require(SUBAGENTS).get(run.id) is None
+    assert await subagents.delete(session, run.id, reason="user") is True
+    assert subagents.get(run.id) is None
     # Deleting twice is not an error, and does not double-tombstone.
-    assert await provider.delete(session, run.id) is False
+    assert await subagents.delete(session, run.id, reason="again") is False
 
-    tombstones = [event for event in session.events if event.type == "subagent/deleted"]
+    own = _log_of(ctx, run)
+    tombstones = [event for event in own if event.type == DELETED]
     assert len(tombstones) == 1
-    assert tombstones[0].data == {"runId": run.id, "reason": "user"}
+    assert tombstones[0].data == {"reason": "user"}
 
-    roster = subagent_roster(session)
-    assert roster[run.id]["deleted"] is True
-    assert roster[run.id]["deletedReason"] == "user"
+    state = _state(ctx, run)
+    assert state.deleted is True
+    assert state.deleted_reason == "user"
     # A revoked child has a terminal state, not merely an absence — a panel that
     # knew only `deleted` could not say whether it had ever run.
-    assert roster[run.id]["status"] == "canceled"
+    assert state.status == "canceled"
     # And it lands with the tombstone (S14): apart, a flush between them left a
     # child canceled and not deleted.
     canceled = next(
-        event
-        for event in session.events
-        if event.type == STATUS and event.data.get("status") == "canceled"
+        event for event in own if event.type == STATUS and event.data.get("status") == "canceled"
     )
     assert canceled.batch is not None and canceled.batch == tombstones[0].batch
+    # On its disk before anything was let go.
+    assert _stored_state(ctx, run).deleted is True
     # The child's log is still there — a tombstone is not a deletion.
     assert ctx.require(SESSIONS).get(run.session_id) is not None
+    assert _about_children(session) == []
+
+
+async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRuntime) -> None:
+    """The one-writer gate (Phase 11). A child's whole life — spawned, answered,
+    woken and answered again, deleted — is written in its own log and not its
+    parent's: the parent's log gains no `subagent/*` record, nothing reaches it but
+    the notices delivered to its own inbox, and it is never flushed on the child's
+    account.
+
+    One writer per log is one writer per lock. Every door a child's drive called used
+    to take the parent's `Session`, so each child appended to its parent's log and
+    sometimes flushed it — a writer the parent's lease never saw, and a second account
+    of the child that every durability rule then had to keep in step with the first.
+
+    Sabotage: have a door write the parent's log as well as the child's — the roster
+    this replaced — and the parent's log holds a `subagent/*` record.
+    """
+    ctx, session, parent = await delegating()
+    before = session.seq
+    flushed: list[str] = []
+
+    def note(target: Session) -> None:
+        flushed.append(target.id)
+
+    ctx.on("session/flush", note)
+
+    run = await _spawn(ctx, parent, "answer twice")
+    await ctx.drain()
+    assert await ctx.require(SUBAGENTS).rehydrate(run.id)
+    not_none(ctx.require(AGENTS).get(run.session_id)).steer(user_text("and once more"))
+    await ctx.drain()
+    assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user")
+
+    # The child's own log tells the whole story…
+    assert [event.type for event in _log_of(ctx, run) if event.type.startswith("subagent/")] == [
+        ADMITTED,
+        STATUS,
+        STATUS,
+        STATUS,
+        STATUS,
+        DELETED,
+    ]
+    assert _statuses(ctx, run) == ["running", "done", "running", "done"]
+    assert _stored_state(ctx, run).deleted, "on the child's disk"
+    # …and the parent's tells none of it.
+    appended = {event.type for event in session.events if event.seq >= before}
+    assert appended <= {"agent/inbox/spliced"}, f"the child wrote its parent's log: {appended}"
+    assert len(_notices(session)) == 2, "each answer was announced to the parent's inbox"
+    assert session.id not in flushed, "the child flushed its parent's log"
+    await ctx.require(SESSIONS).flush(session)
+    assert [kind for kind in stored_types(ctx, session.id) if kind.startswith("subagent/")] == []
 
 
 async def test_a_settled_child_releases_its_agent_scope(delegating: MountedRuntime) -> None:
@@ -675,21 +852,26 @@ async def test_disposing_the_parent_unwinds_its_children(delegating: MountedRunt
 
     await ctx.require(AGENTS).dispose(parent.id)
     assert ctx.require(SUBAGENTS).get(run.id) is None
-    tombstones = [event for event in session.events if event.type == "subagent/deleted"]
+    tombstones = [event for event in _log_of(ctx, run) if event.type == DELETED]
     assert [event.data["reason"] for event in tombstones] == [PARENT_TEARDOWN]
+    assert _about_children(session) == []
 
 
-async def test_the_status_and_usage_records_are_ignorable(delegating: MountedRuntime) -> None:
-    """A different build may skip them; it may *not* skip an admission, because
-    that would show the parent the wrong family."""
-    ctx, session, parent = await delegating()
-    await _spawn(ctx, parent)
+async def test_every_record_of_a_child_is_required_reading(delegating: MountedRuntime) -> None:
+    """No build may skip one. An admission never could — skipping it shows the
+    parent the wrong family — and a status no longer may either: the retry ladder
+    counts starts from it, so a reader that skipped one would miscount the ladder or
+    bring back a child that ended."""
+    ctx, _session, parent = await delegating()
+    run = await _spawn(ctx, parent)
     await ctx.drain()
+    await ctx.require(SUBAGENTS).delete(not_none(parent.session), run.id, reason="user")
 
-    by_type = {event.type: event for event in session.events if event.type.startswith("subagent/")}
-    assert by_type["subagent/status"].ignorable is True
-    assert by_type["subagent/usage-attributed"].ignorable is True
-    assert by_type["subagent/admitted"].ignorable is False
+    by_type = {
+        event.type: event for event in _log_of(ctx, run) if event.type.startswith("subagent/")
+    }
+    assert set(by_type) == {ADMITTED, STATUS, DELETED}
+    assert [event.ignorable for event in by_type.values()] == [False] * 3
 
 
 # ------------------------------------------------------------- seam vocabulary --
@@ -989,19 +1171,19 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
     second = await _spawn(ctx, parent, "second")
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
 
-    roster = ctx.require(SUBAGENTS).roster(session)
-    assert roster[first.id]["status"] == "running"
-    assert roster[second.id]["status"] == "queued", "admitted, not refused — and waiting"
-    assert _statuses(session, second.id) == ["queued"], "the wait is in the log"
+    children = ctx.require(SUBAGENTS).children(session.id)
+    assert children[first.id].status == "running"
+    assert children[second.id].status == "queued", "admitted, not refused — and waiting"
+    assert _statuses(ctx, second) == ["queued"], "the wait is in its log"
 
     gate.release_one()
     await _until(lambda: gate.arrived == 2, "the second child to take the freed slot")
-    assert ctx.require(SUBAGENTS).roster(session)[first.id]["status"] == "done"
-    assert _statuses(session, second.id) == ["queued", "running"]
+    assert ctx.require(SUBAGENTS).children(session.id)[first.id].status == "done"
+    assert _statuses(ctx, second) == ["queued", "running"]
 
     gate.release_one()
     assert (await second.result()).status == "done"
-    assert _statuses(session, first.id) == ["running", "done"], "no wait, no queued record"
+    assert _statuses(ctx, first) == ["running", "done"], "no wait, no queued record"
 
 
 async def test_a_child_that_failed_frees_its_slot(
@@ -1014,8 +1196,6 @@ async def test_a_child_that_failed_frees_its_slot(
     rather than a model call failing, which the agent loop contains as a turn that
     ended in error and the provider records as `done`.
     """
-    from ph.agent_loop.driver import ReactLoopAgent
-
     original_run = ReactLoopAgent.run
     failed: list[str] = []
 
@@ -1028,7 +1208,7 @@ async def test_a_child_that_failed_frees_its_slot(
         await original_run(self)
 
     monkeypatch.setattr(ReactLoopAgent, "run", run)
-    ctx, session, parent = await delegating(maxConcurrent=1)
+    ctx, _session, parent = await delegating(maxConcurrent=1)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
 
@@ -1037,8 +1217,8 @@ async def test_a_child_that_failed_frees_its_slot(
     gate.release_one()
 
     assert (await second.result()).status == "done"
-    assert _statuses(session, first.id) == ["running", "error"]
-    assert _statuses(session, second.id)[-2:] == ["running", "done"]
+    assert _statuses(ctx, first) == ["running", "error"]
+    assert _statuses(ctx, second)[-2:] == ["running", "done"]
 
 
 async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
@@ -1047,13 +1227,12 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     """A child revoked before it ran is canceled where it waits, and the slot it
     never held is not leaked — the next child still gets it."""
     ctx, session, parent = await delegating(maxConcurrent=1)
-    provider = ctx.require(RLM_CHILDREN)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
 
-    assert await provider.delete(session, second.id, reason="user") is True
-    assert _statuses(session, second.id) == ["queued", "canceled"]
+    assert await ctx.require(SUBAGENTS).delete(session, second.id, reason="user") is True
+    assert _statuses(ctx, second) == ["queued", "canceled"]
 
     third = await _spawn(ctx, parent, "third")
     gate.release_one()
@@ -1061,19 +1240,23 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     gate.release_one()
     assert (await first.result()).status == "done"
     assert (await third.result()).status == "done"
-    assert _statuses(session, third.id) == ["queued", "running", "done"]
+    assert _statuses(ctx, third) == ["queued", "running", "done"]
 
 
 # ------------------------------------------------------------ across a restart --
 
 
 async def _persisted(ctx: Context, session: Session) -> None:
-    """Put on disk what a restart will read, with the harness holding still.
+    """Put the parent's own log on disk, with the harness holding still, so a restart
+    has a root to resume.
 
-    A flush and nothing else. The first harness is parked at the model for the
-    whole of these tests; draining here instead would wait on the very child that
-    is meant to be caught mid-flight. `_restart` reads a snapshot of what this
-    wrote, so nothing the first harness does afterwards reaches the second.
+    Only the parent's: each child's log is on its disk by its own barriers — the
+    admission's flush before its gate opened, the checkpoint before each model
+    request — and flushing a child here would put on disk what a crash might not
+    have. A flush and nothing else. The first harness is parked at the model for the
+    whole of these tests; draining here instead would wait on the very child that is
+    meant to be caught mid-flight. `_restart` reads a snapshot of what is on disk, so
+    nothing the first harness does afterwards reaches the second.
     """
     await ctx.require(SESSIONS).flush(session)
 
@@ -1151,11 +1334,11 @@ async def test_a_live_childs_log_refuses_a_second_opener(
 async def test_a_queued_child_is_re_driven_after_a_restart(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """The work was described in the parent's log and running nowhere (P5-04).
+    """The work was described in the child's log and running nowhere (P5-04).
 
     A child that never reached its first turn has claimed nothing and spent
     nothing, so the next harness runs it for the first time — under its original
-    id, so the parent's roster gains no second child it never asked for.
+    id, so the parent gains no second child it never asked for.
 
     Reaching the model is the proof of "re-driven": the gate counts arrivals, and
     the readmitted child is the only one the second harness can run.
@@ -1164,7 +1347,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
-    assert _statuses(session, second.id) == ["queued"]
+    assert _statuses(ctx, second) == ["queued"]
     await _persisted(ctx, session)
 
     # Room for both, so which one this asserts about is not a race: the
@@ -1175,11 +1358,13 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
         "the queued child came back under its own id"
     )
     await _until(
-        lambda: _statuses(revived, second.id)[-1] == "running",
+        lambda: _statuses(revived_ctx, second)[-1] == "running",
         "the readmitted child to reach the model",
     )
-    assert len(subagent_roster(revived)) == 2, "no child was invented or lost"
-    assert "resumes" not in subagent_roster(revived)[second.id], (
+    assert len(revived_ctx.require(SUBAGENTS).children(revived.id)) == 2, (
+        "no child was invented or lost"
+    )
+    assert _state(revived_ctx, second).resumes == 0, (
         "a child that never ran is a first attempt, not a retry"
     )
 
@@ -1199,21 +1384,21 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     ctx, session, parent = await delegating(maxConcurrent=1)
     interrupted = await _spawn(ctx, parent, "only")
     await _until(lambda: gate.arrived == 1, "the child to reach the model")
-    assert _statuses(session, interrupted.id) == ["running"]
+    assert _statuses(ctx, interrupted) == ["running"]
     await _persisted(ctx, session)
 
-    revived_ctx, revived, _parent = await _restart(mount, session.id)
+    revived_ctx, _revived, _parent = await _restart(mount, session.id)
 
     assert interrupted.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
-    assert child_is_live(subagent_roster(revived)[interrupted.id]), "a child owed a turn is live"
+    assert child_is_live(_state(revived_ctx, interrupted)), "a child owed a turn is live"
     # The count follows the restart's own `running` record, which a detached
     # drive job writes a moment later — so this waits for the fact rather than
-    # reading the roster before it exists.
+    # reading the child's state before it exists.
     await _until(
-        lambda: restarts_since_progress(subagent_roster(revived)[interrupted.id]) == 1,
+        lambda: restarts_since_progress(_state(revived_ctx, interrupted)) == 1,
         "the restart to be counted",
     )
-    assert subagent_roster(revived)[interrupted.id]["starts"] == 2, "one first run, one restart"
+    assert _state(revived_ctx, interrupted).starts == 2, "one first run, one restart"
     await _until(gate.twice, "the resumed child to reach the model again")
 
     child = revived_ctx.require(SESSIONS).get(interrupted.session_id)
@@ -1235,9 +1420,10 @@ async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_t
 
     A daemon stopping, or a root remounted on a new profile, unwinds the parent's
     scope, and each child's release wrote `canceled` and `subagent/deleted` as it
-    went: `resume_children` skips a deleted row, so an ordinary restart abandoned
+    went: `resume_children` skips a deleted child, so an ordinary restart abandoned
     every delegation in flight. The mount going away now suspends its children —
-    `queued`, saying why, and no tombstone — and the next mount readmits them.
+    `queued`, saying why, in each child's own log, and no tombstone — and the next
+    mount readmits them.
 
     Sabotage: drop the `suspend` disposer from `apply`, and the release raises on
     the way down and writes nothing, so the restart reads the child as crashed.
@@ -1247,12 +1433,11 @@ async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_t
     await _until(lambda: gate.arrived == 1, "the child to reach the model")
 
     await ctx.root.dispose()
-    revived_ctx, revived, _parent = await _restart(mount, session.id)
+    revived_ctx, _revived, _parent = await _restart(mount, session.id)
 
-    row = subagent_roster(revived)[working.id]
-    assert not row.get("deleted"), "the stop revoked the child"
-    assert SUSPENDED_DETAIL in _statuses(revived, working.id, "detail"), (
-        "the log does not say why the child stopped"
+    assert not _state(revived_ctx, working).deleted, "the stop revoked the child"
+    assert SUSPENDED_DETAIL in _statuses(revived_ctx, working, "detail"), (
+        "the child's log does not say why it stopped"
     )
     assert working.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
     await _until(gate.twice, "the resumed child to reach the model again")
@@ -1330,57 +1515,78 @@ async def test_a_settled_child_is_not_canceled_when_its_parent_goes(
     parent was gone.
 
     Sabotage: write `canceled` in `_release` whatever the child's result, and the
-    roster says canceled.
+    child's log says canceled.
     """
-    ctx, session, parent = await delegating()
+    ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "finish first")
     await ctx.drain()
 
     await ctx.require(AGENTS).dispose(parent.id)
 
-    row = subagent_roster(session)[run.id]
-    assert row["status"] == "done"
-    assert row["deleted"] is True, "released with its parent all the same"
+    state = _state(ctx, run)
+    assert state.status == "done"
+    assert state.deleted is True, "released with its parent all the same"
 
 
 async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
-    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+    delegating: MountedRuntime,
+    gate: ModelGate,
+    mount: MountProfile,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S10 — the ladder counts `running{cause: resumed}`, and that rode in memory.
+    """S10 — the ladder counts `running{cause: resumed}`, so that record is on the
+    child's own disk before the attempt it counts.
 
-    Nothing flushed the parent between readmitting a child and the child working, so
-    a child that took the daemon down again left its restart unrecorded on disk: a
-    crash loop never advanced the count, and the ladder never gave up.
+    A restart that reached only memory before the child took the daemon down again
+    was never counted: a crash loop never advanced the count on disk, and the ladder
+    never gave up. It used to ride the parent's log, which nothing flushed between
+    readmitting a child and the child working.
+
+    Asked as the attempt starts — the drive's call into the child's run — rather
+    than at the model: the child's first model request flushes its log anyway, so by
+    then the question is moot.
 
     Sabotage: drop the flush from `ph.seams.subagents.record_started`, and the stored
-    roster has no restart while the resumed child is at the model.
+    child has no restart when its attempt begins.
     """
     ctx, session, parent = await delegating()
     interrupted = await _spawn(ctx, parent, "only")
     await _until(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
+    revived: list[Context] = []
+    seen: list[int] = []
+    original = ReactLoopAgent.run
 
-    revived_ctx, _revived, _parent = await _restart(mount, session.id)
+    async def watched(self: ReactLoopAgent) -> None:
+        # The first harness's child is already inside its own `run`, and the revived
+        # parent is never run, so the one call this sees is the resumed child's.
+        if self.id == interrupted.session_id:
+            seen.append(restarts_since_progress(_stored_state(revived[0], interrupted)))
+        await original(self)
+
+    monkeypatch.setattr(ReactLoopAgent, "run", watched)
+    await _restart(mount, session.id, prepare=revived.append)
     await _until(gate.twice, "the resumed child to reach the model again")
 
-    stored = roster_of(stored_events(revived_ctx, session.id))[interrupted.id]
-    assert restarts_since_progress(stored) == 1, "the restart is not on disk yet"
+    assert seen == [1], "the attempt began before its restart was on the child's disk"
 
 
-def _resumed(session: Session, run_id: str, times: int) -> None:
-    """Record `times` restarts, the way a restart actually records one.
+async def _resumed(ctx: Context, run: SubagentRun, times: int) -> None:
+    """Record `times` restarts in the child's own log, the way a restart actually
+    records one, and put them on its disk as the door does.
 
     The real facts rather than a seeded count: the ladder folds `running` records
     carrying `cause: resumed`, so a test that wrote an `attempts` number would be
     asserting against a field production no longer has.
     """
+    child = not_none(ctx.require(SESSIONS).get(run.session_id))
     for _ in range(times):
-        log_event(session, STATUS, {"runId": run_id, "status": "running", "cause": "resumed"})
+        log_event(child, STATUS, {"status": "running", "cause": "resumed"})
+    await ctx.require(SESSIONS).flush(child)
 
 
 async def _stalled(
     ctx: Context,
-    session: Session,
     parent: object,
     gate: ModelGate,
     *,
@@ -1389,7 +1595,7 @@ async def _stalled(
     """A child at the model that has already been restarted `restarts` times."""
     child = await _spawn(ctx, parent, "only")
     await _until(lambda: gate.arrived == 1, "the child to reach the model")
-    _resumed(session, child.id, restarts)
+    await _resumed(ctx, child, restarts)
     return child
 
 
@@ -1402,18 +1608,21 @@ async def test_the_ladder_gives_up_and_says_so(
     reads, which is the failure the root's own ladder is bounded to avoid.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
-    spent = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
-    assert restarts_since_progress(subagent_roster(session)[spent.id]) == RETRIES
+    spent = await _stalled(ctx, parent, gate, restarts=RETRIES)
+    assert restarts_since_progress(_state(ctx, spent)) == RETRIES
     await _persisted(ctx, session)
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
 
     assert revived_ctx.require(SUBAGENTS).list() == [], "a spent ladder put a child back to work"
-    row = subagent_roster(revived)[spent.id]
-    assert row["status"] == "error"
-    assert row["detail"] == exhausted_detail(RETRIES)
-    assert str(RETRIES) in row["detail"], "the sentence names the bound it hit"
-    assert not child_is_live(row), "a root cannot be passivated while this reads live"
+    state = _state(revived_ctx, spent)
+    assert state.status == "error"
+    assert state.detail == exhausted_detail(RETRIES)
+    assert str(RETRIES) in state.detail, "the sentence names the bound it hit"
+    assert not child_is_live(state), "a root cannot be passivated while this reads live"
+    # Ended in its own log, on its own disk — the one place the next start will look.
+    assert _stored_state(revived_ctx, spent).status == "error"
+    assert _about_children(revived) == []
 
 
 async def test_progress_since_the_last_restart_clears_the_ladder(
@@ -1423,29 +1632,26 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
 
     Without a reset the ladder counts a lifetime's interruptions rather than
     consecutive ones, and fails work that was going fine. The same setup as the
-    test above plus one fact: the child was attributed a model answer, which is
+    test above plus one fact: the child gave a model answer, in its own log, which is
     something a turn that did nothing cannot produce.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
-    moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
-    log_event(
-        session, USAGE, {"runId": moved.id, "targetSeq": 0, "childUsage": {}, "origin": "probe"}
-    )
-    row = subagent_roster(session)[moved.id]
-    assert restarts_since_progress(row) == 0, "progress forgives the restarts before it"
-    assert row["resumes"] == RETRIES, "and the roster still says how many there were"
+    moved = await _stalled(ctx, parent, gate, restarts=RETRIES)
+    await _answered_on_its_own_disk(ctx, moved)
+    state = _state(ctx, moved)
+    assert restarts_since_progress(state) == 0, "progress forgives the restarts before it"
+    assert state.resumes == RETRIES, "and the child's state still says how many there were"
     await _persisted(ctx, session)
 
-    revived_ctx, revived, _parent = await _restart(mount, session.id)
+    revived_ctx, _revived, _parent = await _restart(mount, session.id)
 
-    row = subagent_roster(revived)[moved.id]
-    assert child_is_live(row), "a child that got somewhere is owed another attempt"
+    assert child_is_live(_state(revived_ctx, moved)), "a child that got somewhere is owed more"
     assert moved.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
     # **The restart is still recorded as one**, counting up from the answer.
     # Derived from the ladder instead, this readmit would look like a first run,
     # write no `resumed`, and the ladder would never count it again.
     await _until(
-        lambda: restarts_since_progress(subagent_roster(revived)[moved.id]) == 1,
+        lambda: restarts_since_progress(_state(revived_ctx, moved)) == 1,
         "the restart to be counted from a cleared ladder",
     )
 
@@ -1453,12 +1659,12 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
 CHILD_ANSWER_USAGE = {"inputTokens": 120, "outputTokens": 30}
 
 
-async def _answered_on_its_own_disk(ctx: Context, run: Any) -> SessionEvent:  # noqa: ANN401
-    """The child answers, and only the child's log is written.
+async def _answered_on_its_own_disk(ctx: Context, run: SubagentRun) -> SessionEvent:
+    """The child answers, and its own log reaches its disk.
 
-    What a crash between the two writes leaves behind: `usage_mirror` charges the answer
-    to the parent at once, in memory, and the child's log reaches disk before its next
-    request, while a parent waiting on it makes no request and writes nothing.
+    What its checkpoint does before its next request, while a parent waiting on it
+    makes no request and writes nothing. The answer's `usage` is the whole record of
+    what it spent: nothing is copied anywhere else.
     """
     child = not_none(ctx.require(SESSIONS).get(run.session_id))
     payload = {**assistant_payload("found it", "a1"), "usage": CHILD_ANSWER_USAGE}
@@ -1467,67 +1673,44 @@ async def _answered_on_its_own_disk(ctx: Context, run: Any) -> SessionEvent:  # 
     return answer
 
 
-def _attributed(session: Session, run_id: str) -> list[SessionEvent]:
-    return [
-        event for event in session.events if event.type == USAGE and event.data["runId"] == run_id
-    ]
-
-
-async def test_an_answer_only_the_childs_log_kept_is_counted_after_a_restart(
-    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+@pytest.mark.parametrize("parent_written", ["before-the-answer", "after-the-answer"])
+async def test_a_crash_after_an_answer_is_counted_exactly(
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile, parent_written: str
 ) -> None:
-    """L5. The resume reconciles the parent's account of a child's answers from the
-    child's own log before the ladder reads it.
+    """L5, fixed by construction. A child answers, only the child's log is written,
+    and the mount restarts: the ladder forgives the restarts before the answer, and
+    the budget counts what the answer spent — once — with no catch-up step.
 
-    Two decisions read that account. The ladder takes an answer as progress, so a
-    child that answered in a run whose attribution a crash dropped read as stuck, and
-    after `RETRIES` restarts was failed as exhausted while it was getting somewhere. A
-    goal's token budget counts the attribution's `childUsage`, so what the child spent
-    went uncounted.
+    Two decisions read a child's answers. The ladder takes an answer as progress, so
+    a child whose answer a restart could not see read as stuck, and after `RETRIES`
+    restarts was failed as exhausted while it was getting somewhere. A goal's budget
+    counts what the answer spent. Both used to read a copy of each answer mirrored
+    into the parent's log, which a crash could leave behind the child's own — so a
+    resume had to copy the missing answers back, and not copy one twice when the
+    parent's log had reached disk after it. Both read the child's own log now, which
+    is where the answer is, whenever the parent's log was last written.
 
-    Sabotage: skip the reconcile in `resume_children` and the child is failed as
-    exhausted, with no attribution in the revived parent's log.
+    Sabotage: have the fold skip `assistant/message`, as a reader of anything but the
+    child's own answers would, and the child is failed as exhausted with nothing
+    counted.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
-    moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
-    await _persisted(ctx, session)
-    answer = await _answered_on_its_own_disk(ctx, moved)
-    assert _attributed(session, moved.id), "the live mirror attributed it, in memory"
-    assert USAGE not in stored_types(ctx, session.id), "and the parent's disk never heard of it"
+    moved = await _stalled(ctx, parent, gate, restarts=RETRIES)
+    if parent_written == "before-the-answer":
+        await _persisted(ctx, session)
+    await _answered_on_its_own_disk(ctx, moved)
+    if parent_written == "after-the-answer":
+        await _persisted(ctx, session)
+    assert _about_children(session) == [], "nothing about the answer reached the parent's log"
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
 
-    row = subagent_roster(revived)[moved.id]
-    assert row["status"] != "error", f"failed as {row.get('detail')!r} though it had answered"
+    state = _state(revived_ctx, moved)
+    assert state.status != "error", f"failed as {state.detail!r} though it had answered"
     assert moved.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
-    reconciled = _attributed(revived, moved.id)
-    assert [(event.data["targetSeq"], event.data["origin"]) for event in reconciled] == [
-        (answer.seq, "reconciled")
-    ]
-    assert not_none(reported_usage(reconciled[0], "childUsage")).total == 150, (
-        "the budget reads what the child's answer spent"
-    )
-
-
-async def test_a_restart_attributes_nothing_the_parent_already_counted(
-    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
-) -> None:
-    """L5's other half: the reconcile adds only answers past the parent's last one.
-
-    When the parent's log reached disk after the answer, it already holds the live
-    attribution, and a second one would count the child's spend twice.
-
-    Sabotage: reconcile from the start of the child's log (`through=-1`) and the
-    revived parent holds the answer twice.
-    """
-    ctx, session, parent = await delegating(maxConcurrent=1)
-    moved = await _stalled(ctx, session, parent, gate, restarts=RETRIES)
-    await _answered_on_its_own_disk(ctx, moved)
-    await _persisted(ctx, session)
-
-    _revived_ctx, revived, _parent = await _restart(mount, session.id)
-
-    assert [event.data["origin"] for event in _attributed(revived, moved.id)] == ["spawn_task"]
+    assert state.tokens == 150, "the budget reads what the child's answer spent, once"
+    assert revived_ctx.require(SUBAGENTS).delegated_tokens(revived.id) == 150
+    assert _about_children(revived) == [], "and the resume wrote no catch-up into the parent"
 
 
 async def _grandchild(
@@ -1548,46 +1731,52 @@ async def _grandchild(
 
 
 async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
-    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+    delegating: MountedRuntime,
+    gate: ModelGate,
+    mount: MountProfile,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """L5b. A readmitted child's own children are swept the way the root's are.
 
-    `RLM_MAX_DEPTH` lets a child delegate, and its children are in *its* log. The
-    resume swept the root's roster alone, so a grandchild caught mid-turn kept a
-    `running` row nothing drove, readmitted or failed, and its parent's model was
-    told it was still working.
+    `RLM_MAX_DEPTH` lets a child delegate, and its children name *it* as their
+    parent. The resume swept the root's children alone, so a grandchild caught
+    mid-turn stayed `running` with nothing driving it, readmitted or failed, and its
+    parent's model was told it was still working.
 
-    **Before the child's first step** (`SubagentRun.ready`): the sweep's record for
-    the grandchild lands ahead of the child's new turn, so the roster the child's
-    first request is built from is the swept one.
+    **Before the child's first step** (`SubagentRun.ready`): the grandchild is
+    readmitted ahead of the child's new attempt, so the children the child's first
+    request is built from are the swept ones.
 
     Sabotage: drop `_sweep_readmitted` from `_readmit_children` and the grandchild
     is never readmitted; open a readmitted child's gate at admission and its new
-    turn starts ahead of the sweep.
+    attempt starts ahead of the sweep.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     middle, leaf = await _grandchild(ctx, parent, gate)
+    revived: list[Context] = []
+    swept_first: list[bool] = []
+    original = record_started
 
-    revived_ctx, _revived, _parent = await _restart(mount, session.id)
+    async def watched(
+        scope: Context, child: Session, *, cause: StatusCause | None = None
+    ) -> SessionEvent:
+        if child.id == middle.session_id:
+            readmitted = {run.id for run in revived[0].require(SUBAGENTS).list()}
+            swept_first.append(leaf.id in readmitted)
+        return await original(scope, child, cause=cause)
+
+    monkeypatch.setattr("ph_rlm.subagents.record_started", watched)
+    revived_ctx, _revived, _parent = await _restart(mount, session.id, prepare=revived.append)
 
     assert leaf.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}, (
         "the grandchild came back under its own id"
     )
-    middle_log = not_none(revived_ctx.require(SESSIONS).get(middle.session_id))
     await _until(
-        lambda: restarts_since_progress(subagent_roster(middle_log)[leaf.id]) == 1,
-        "the grandchild's restart to be counted in its own parent's log",
+        lambda: restarts_since_progress(_state(revived_ctx, leaf)) == 1,
+        "the grandchild's restart to be counted in its own log",
     )
     await _until(lambda: gate.arrived == 4, "both to reach the model again")
-    since = max(i for i, event in enumerate(middle_log.events) if event.type == "session/resumed")
-    after = [
-        "sweep" if event.type == STATUS and event.data.get("runId") == leaf.id else event.type
-        for event in middle_log.events[since:]
-        if event.type in {"turn/start", STATUS}
-    ]
-    assert after.index("sweep") < after.index("turn/start"), (
-        f"the child's new turn started before its children were swept: {after}"
-    )
+    assert swept_first == [True], "the child's new attempt started before its children were swept"
 
 
 GRANDCHILD_KEY = "PH_L5B_GRANDCHILD_KEY"
@@ -1611,8 +1800,9 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
     """L5b, the credential half. A grandchild waiting for a name is released by it.
 
     The nested sweep holds a grandchild whose route names a credential the restarted
-    deployment lacks, in its own parent's log (T5). `readmit_waiting` asked only the
-    root's roster when the name arrived, so that hold was never released.
+    deployment lacks, in the grandchild's own log (T5) — the hold a session waiting on
+    its own route writes. `readmit_waiting` asked only the root's children when the
+    name arrived, so that hold was never released.
 
     Sabotage: stop `readmit_waiting` descending into live children, and the grandchild
     stays held with its key supplied.
@@ -1624,9 +1814,9 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
 
     revived_ctx, _revived, revived_parent = await _restart(mount, session.id, prepare=_keyed)
     middle_log = not_none(revived_ctx.require(SESSIONS).get(middle.session_id))
-    assert waiting_for(revived_ctx, middle_log) == {leaf.id: GRANDCHILD_KEY}, (
-        "held by name, in its own parent's log"
-    )
+    assert _state(revived_ctx, leaf).awaiting == GRANDCHILD_KEY, "held by name"
+    assert _stored_state(revived_ctx, leaf).awaiting == GRANDCHILD_KEY, "in its own log, on disk"
+    assert waiting_for(revived_ctx, middle_log) == {}, "and not in its parent's"
 
     revived_ctx.require(CREDENTIALS).provide_value(GRANDCHILD_KEY, "supplied")
     revived = await revived_ctx.require(SUBAGENTS).readmit_waiting(
@@ -1634,7 +1824,7 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
     )
 
     assert leaf.id in revived, "the key arrived and the grandchild stayed held"
-    assert waiting_for(revived_ctx, middle_log) == {}
+    assert _state(revived_ctx, leaf).awaiting is None
 
 
 async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
@@ -1658,16 +1848,15 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     await _until(lambda: gate.arrived == 1, "the first child to reach the model")
     await _persisted(ctx, session)
 
-    revived_ctx, revived, _parent = await _restart(mount, session.id, skills=("review", "audit"))
+    revived_ctx, _revived, _parent = await _restart(mount, session.id, skills=("review", "audit"))
 
-    # Read back off the *resumed* log, which is the only copy a restart has.
+    # Read back off the child's own log as the restart found it, which is the only
+    # copy a restart has.
     admitted = next(
-        event.data
-        for event in revived.events
-        if event.type == "subagent/admitted" and event.data["runId"] == narrowed.id
+        event.data for event in _log_of(revived_ctx, narrowed) if event.type == ADMITTED
     )
-    assert list(admitted["skills"]) == ["review"], "the narrowing has to survive the round trip"
-    assert list(admitted["tools"]) == ["read"]
+    assert list(as_seq(admitted["skills"])) == ["review"], "the narrowing survives the round trip"
+    assert list(as_seq(admitted["tools"])) == ["read"]
 
     back = next(run for run in revived_ctx.require(SUBAGENTS).list() if run.id == narrowed.id)
     assert back.grant is not None
@@ -1691,16 +1880,19 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
     await _until(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
 
-    bare = await mount()
+    # Over a snapshot, as `_restart` is: ending the child means claiming its log,
+    # which the first harness — alive, and parked at the model — still holds.
+    bare = await mount({"id": "session-persistence", "config": {"root": str(logs_after_a_crash())}})
     revived = await resume_session(bare, session.id)
     await bare.require(SUBAGENTS).resume_children(
         bare.require(AGENTS).create(revived, FAKE_OPTIONS), retry_limit=RETRIES
     )
 
-    row = subagent_roster(revived)[orphan.id]
-    assert row["status"] == "error"
-    assert row["detail"] == UNRECOVERABLE_DETAIL
-    assert not child_is_live(row), "a root cannot be passivated while this reads live"
+    state = _state(bare, orphan)
+    assert state.status == "error"
+    assert state.detail == UNRECOVERABLE_DETAIL
+    assert not child_is_live(state), "a root cannot be passivated while this reads live"
+    assert _stored_state(bare, orphan).status == "error", "ended in its own log, on disk"
 
 
 async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
@@ -1729,12 +1921,12 @@ async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
 
     # The deployment no longer mounts `review`, so the parent does not hold it
     # and `check_grant` refuses the child that was admitted with it.
-    _revived_ctx, revived, _parent = await _restart(mount, session.id, concurrent=2)
+    revived_ctx, _revived, _parent = await _restart(mount, session.id, concurrent=2)
 
-    row = subagent_roster(revived)[narrowed.id]
-    assert row["status"] == "error"
-    assert "could not be resumed" in row["detail"]
-    assert not child_is_live(row), "a root cannot be passivated while this reads live"
+    state = _state(revived_ctx, narrowed)
+    assert state.status == "error"
+    assert "could not be resumed" in not_none(state.detail)
+    assert not child_is_live(state), "a root cannot be passivated while this reads live"
 
 
 # ------------------------------------------------- a child asked a second thing --

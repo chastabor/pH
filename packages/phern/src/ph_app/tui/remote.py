@@ -104,6 +104,7 @@ from ..payloads import (
     QuestionAsk,
     QuestionAskReply,
     RootDescription,
+    SessionChildrenNotice,
     SessionCommandsNotice,
     SessionModelsReply,
     SessionScreensNotice,
@@ -203,6 +204,10 @@ class DaemonSession:
 
     A mirror rather than the truth: the *root* holds the tray, because two people
     looking at one conversation must see one composer."""
+    _families: int = 0
+    """How many `session.children` frames have arrived — so an answer to
+    `session/children` asked before one of them is not drawn over it
+    (`refresh_children`)."""
 
     def __post_init__(self) -> None:
         header = (
@@ -376,6 +381,13 @@ class DaemonSession:
             if self.app is not None:
                 self._wire_screens(self.app)
             self.host.state_changed()
+        elif isinstance(notice, SessionChildrenNotice):
+            # The whole family, from the children's own logs (P11-09): a root's
+            # stream carries nothing about them any more, so this is the panel's
+            # only source.
+            self._families += 1
+            self.state.take_children(notice.children)
+            self.host.state_changed(Surface.SIDEBAR)
         elif isinstance(notice, AskSettledNotice):
             # Another terminal answered first (H1). The daemon settled the ask
             # before publishing this, so the modal here can only produce an
@@ -433,6 +445,24 @@ class DaemonSession:
             verbs.PRESETS_LIST, SessionParams(session_id=self.session_id)
         )
         return list(reply.presets)
+
+    async def refresh_children(self) -> None:
+        """Read the family once, for a client that has just attached (P11-09).
+
+        Asked **after** the attach, so every change from then on also arrives as a
+        `session.children` frame, pushed after the change it announces. A frame
+        that lands while this is in flight therefore leaves the newest word with
+        the frames, whichever of the two the daemon built first: the answer is
+        drawn only if none arrived, since a list read before a change must not be
+        drawn over the frame announcing it.
+        """
+        heard = self._families
+        reply = await self.client.call(
+            verbs.SESSION_CHILDREN, SessionParams(session_id=self.session_id)
+        )
+        if self._families == heard:
+            self.state.take_children(reply.children)
+            self.host.state_changed(Surface.SIDEBAR)
 
     def credential_held(self, name: str) -> bool:
         """From the last `credentials/held` answer — a fact about the *daemon's*
@@ -792,6 +822,7 @@ async def attach_session(
     # shape for `--since`.
     await front.feed.catch_up(client, attached.cursor.model_copy(update={"sequence": 0}))
     front.feed.live()
+    await front.refresh_children()
     return front
 
 

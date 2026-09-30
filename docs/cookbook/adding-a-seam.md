@@ -93,9 +93,9 @@ The mode is fixed at declaration â€” `emit`, `waterfall`, `parallel`, `serial` â
 and `ctx.<mode>` raises on a mismatch. `phern events --profile <name>` prints the
 producer/consumer matrix, which is why `owner` and `doc` are worth writing.
 
-Name events for the *fact*, not for who consumes them. `ctx.subagents` emits
-`subagent/admitted` and `ph-app` reads it; had it been named for the reader, the
-seam would depend on its consumer.
+Name events for the *fact*, not for who consumes them. `ctx.subagents` writes
+`subagent/admitted` into each child's own log, and `ph-app` reads it there; had it
+been named for the reader, the seam would depend on its consumer.
 
 ## Failing closed
 

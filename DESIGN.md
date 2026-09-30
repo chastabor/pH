@@ -341,10 +341,10 @@ so one bad teardown cannot strand the rest.
 > **That ordering is load-bearing and is a real constraint on plugin authors.**
 > An effect registered *about* a child runs **after** that child's scope is
 > already gone. The subagent provider's teardown is exactly this shape, and its
-> docstring bounds what that path may do: the roster, the parent's log and the
-> tombstone are live; anything needing the *child's* scope — flushing its session
-> through its own services, snapshotting its workspace — is not
-> (`ph_rlm/subagents.py`).
+> docstring bounds what that path may do: the child's log and its tombstone belong
+> to the store, not to the child's scope, so they are live, and the flush is
+> `session_written` on the mount; anything needing the *child's* scope — its own
+> services, its workspace — is not (`ph_rlm/subagents.py`).
 
 Process-level shutdown is the other half. `ph.resources.install_lifecycle`
 disposes the root on `atexit` and on `SIGTERM`/`SIGINT` with a grace period, then
@@ -932,7 +932,8 @@ the workspace, after a rejected `agent/pre-step`
 (`persistence/checkpoint_policy.py`) — and a kind that needs one declares
 `tools-execute` rather than placing a second. What still flushes by hand: a
 daemon verb before it replies (F7), an upload before its handle is cached, a
-subagent's outcome before its parent reports it. A backend writes what the log
+sub-agent's admission before its gate opens, and its ending before its parent is
+handed the result (`record_ended`, F1). A backend writes what the log
 holds past its own cursor rather than draining a queue, so what a teardown
 appends is still owed — and `write_on_unwind`, which each backend's `claim`
 registers beside the lease, is the mount's last act (`persistence/protocol.py`).
@@ -1029,7 +1030,7 @@ the tombstone is the record.
 | **Session lease (I-5)** | a second daemon opens a held log | **none** — an error frame, `session_already_active` | the first daemon is unaffected |
 | **Mount abandoned** | shutdown reaches a root still being built, or a client asks for one after `aclose` has begun | **none** — an error frame, `root_start_abandoned` | nothing of that root: it never reached `self.roots`, and the build unwinds itself |
 | **Agent cancellation** | `AgentCancelCause` | `turn/end{aborted}` | a partial `assistant/message` with `interrupted: true`; durable `tool/result` pairs for skipped calls |
-| **Subagent release** | parent teardown, or model `delete()` | `subagent/status{canceled}` + `subagent/deleted` | the child's **log**, always — it is a tombstone, not a deletion |
+| **Subagent release** | parent teardown, or a delete (`SubagentService.delete`) | `subagent/status{canceled}` (unless the child had already ended) + `subagent/deleted`, one batch in the **child's own** log | the child's **log**, always — it is a tombstone, not a deletion |
 | **Limits / breaker** | a configured ceiling | `limits/exceeded` or `limits/breaker-tripped` | everything — none of these stop a process |
 
 Details worth having:
@@ -1117,26 +1118,163 @@ behind.
 
 In the log, the same relationship is `SessionHeader.parent_session`,
 `origin: "subagent"`, and `delegation_depth`. An agent's id **is** its session's
-id, so the link needs no side index.
+id, so the link needs no side index. It is also how a parent finds its children
+after a restart: a child is filed in its parent's family with an id that starts
+`<parent>-`, and the store lists those logs and lets each header decide
+(`SessionArchive.children_of`).
 
 ### 6.2 Orchestration
 
 **Admission is non-blocking.** `start()` resolves once the child is *admitted* —
-session created, admission logged, task detached — not once it has answered
-(`seams/subagents.py`).
+session created, admission logged in the child's own log, task detached — not
+once it has answered (`seams/subagents.py`).
 
-The spawn path, in order (`ph_rlm/subagents.py`): depth gate → name and
-model resolution (**no model fallback**) → child session with the header meta →
-`agents.create(..., parent=parent)` → workspace → `SubagentRun` → append
-`subagent/admitted` → register the parent-scope effect → `followup` the task.
+**Each session owns its log** (Phase 11, format 3). Every record about a child —
+what it was asked, each start, each wait, its ending, its deletion — is in the
+child's own log, written through the doors in `ph.seams.subagents`. The parent's
+log keeps only the parent's own acts, such as the tool call that spawned the
+child. Until format 3 the parent's log held a second account, a roster folded from
+`subagent/*` records the child's drive appended there. Two logs are written on two
+schedules and no batch spans them, so every rule about a child's durability had to
+be an order arranged *between* logs, and each was a gap a crash could open: the
+admission flushed in the parent before the child ran (S2), a restart flushed in the
+parent before the attempt it counted (S10), the child's log written before the
+parent's `done` (F1), and on resume the answers the parent's copy had lost counted
+back in from the child's (L5). With one account there is nothing to keep in step,
+and each of those is a rule about one log. It also means one writer per log: no
+child appends to its parent's log or flushes it.
 
-**Status is a fold, not a field.** `subagent_roster(session)` folds
-`admitted | status | deleted` from the parent's own log
-(`seams/subagents.py`). Admission seeds `queued` because `to_wire()`
-deliberately omits status and the first `subagent/status` comes from a detached
-task — without the seed, a reader between the two sees a child with no status.
-Deletion writes a **tombstone**, not a status: a parent asking what happened to
-the child it revoked deserves an answer other than silence.
+The spawn path, in order. The seam (`SubagentService.start`): profile, preset and
+model resolution → the parent's stored children read (`load_children`) → the spawn
+guards → the ceiling → the provider (`ph_rlm/subagents.py`): depth gate → name
+(unique among the parent's `children`) and model resolution (**no model
+fallback**) → child session with the header meta → `agents.create(...,
+parent=parent)` → workspace → `SubagentRun` → `followup` the task → register the
+parent-scope effect → start the drive, which waits at the run's gate. Then the
+seam again (`_admit`): refuse a child whose log does not name its parent → append
+`subagent/admitted` **to the child's log** → bound it (`_enforce`) → flush the
+child's log, fail-closed → open the gate (`SubagentRun.ready`).
+
+**The seam writes the admission, not the provider**, because it holds all of it:
+the request as resolved — the preset, profile, skills, tools and paths a
+readmission re-derives the ceiling from (§6.5) — and the provider's run. Beside the
+run and the task, it stamps what a reader of the child needs from the parent's side
+at that moment:
+
+- `owner`, the provider row that runs the child, so a readmission finds that
+  provider rather than whichever one happens to be mounted alone;
+- `parentTurn`, the seq of the parent's latest `turn/start`, which the spawn caps
+  count a turn by;
+- `goalId`, the parent's open goal, which the child's spend is charged to.
+
+It carries no `sessionId` or `parentId`: the log's own id is the one, and its
+header names the other. It is written before the ceiling is applied, so a child the
+ceiling refuses reads as admitted and then ended, not as a log with no account of
+what it was. And it is on the child's disk before the gate opens, **fail-closed**: a
+child's log is the only thing a restart can find it by, so a child whose admission
+cannot be written, or whose provider opened no log naming its parent, is refused.
+A log with no admission is not a child (a workspace record can reach the disk
+first), and every reader skips it.
+
+Each record has one door, and the door keeps the record's durability rule, so no
+provider hand-writes a flush:
+
+| Record (in the child's log) | Door | Its rule |
+|---|---|---|
+| `subagent/admitted` | `record_admitted`, the seam's alone | on the child's disk before its gate opens; fail-closed (S2) |
+| `subagent/status` `queued` | `record_waiting` | none: a wait, for a slot or for a stopped mount, decides nothing a crash could get wrong |
+| `subagent/status` `running` | `record_started` | on the child's disk before the attempt, when `cause` is `resumed` (S10) |
+| `subagent/status` `done`, `error`, `canceled` | `record_ended` | on the child's disk before its parent is handed the result (F1) |
+| `subagent/deleted` | `record_deleted` | one batch with a `canceled` for a child that had not ended; on disk before anything is released (S14) |
+
+**F1 is an order, kept by one door.** `record_ended` flushes the child's ending
+before it returns, and the drive hands the parent the result only after that. The
+other order is the one that does harm: a parent told "done, here is the answer" by
+a child whose log ended before the answer holds an answer the next open calls
+interrupted, and readmits the child to do the work again. A crash between the two
+can leave only the harmless half, an ended child whose parent never heard. The
+child's log says how it ended, and a `task` call the crash cut short is settled by
+that tool's crash check, which finds the child by the `callId` its admission
+carries.
+
+**A child's state is a fold of its own log.** `ChildState` (`child_state`,
+`fold_child_event`) is a frozen dataclass folded from one child's log and nothing
+else: the admission, the latest status with its `cause` and `detail`, the
+tombstone, the credential the child is held for, the ladder's counters (`starts`,
+`resumes`, `resumesAtLastAnswer`), and `tokens`, what its answers and compactions
+spent. An admitted child with no status yet reads `queued`, because its first
+`subagent/status` comes from a detached drive; without that default, a reader
+between the two would see a child with no status. Each status replaces `cause` and
+`detail` whole. The roster this replaces merged each status into its row, so a
+child woken after a restart went on saying `resumed`. Deletion is a **tombstone**,
+not a status: a parent asking what happened to the child it revoked deserves an
+answer other than silence. `SubagentService` caches each child's fold separately,
+with an `extend` step (`subagent-fold-cache`), so a cached fold equals a fresh one
+per child (I6) and the staleness check needs no key that spans logs.
+
+**A parent's children are a join, not a fold.** `SubagentService.children(parent_id)`
+reads the cached fold of each live session whose header names the parent, beside
+the stored children already read, keyed by run id in admission order.
+`load_children` reads the stored ones first: once per parent per mount, on a worker
+thread, and only the records a child's state is folded from (a child's log is mostly
+streamed chunks, and every root of a daemon shares the loop), through
+`SessionArchive.children_of` — as a resumed session opens (`open_session`), on every
+host. The store's general survey can't stand in for
+that listing, because it stops at a limit, and a ladder, a budget or a cap that
+missed a child would miscount. A child that is let go keeps its last state as its
+stored copy. The resume sweep calls `load_children` first, so every reader after it
+sees the whole family: the prompt's "your children", the model's list tool,
+messaging's recipients, the `task` crash check, the spawn caps, the goal budget and
+the daemon's children view (`session/children`, pushed as `session.children`). A
+fork is a new root, so no child names it and it starts with none. The roster, folded
+over a fork's seeded prefix, handed it its source's children.
+
+**Budgets and caps join at read time, and their own folds stay pure.** A goal's fold
+still reads only the parent's log. When `children` is among its `token_sources`,
+`GoalService.spent` adds `delegated_tokens(parent, goal_id)`: what the children
+admitted under that goal (`goalId`) spent, and every level beneath them, because a
+goal is a budget for a whole delegation tree. The spawn caps' fold still counts the
+parent's turns. Their session count is the parent's children, and their turn count
+is the children whose `parentTurn` is the parent's current `turn/start`. A fold that
+read a second log would be a projection its cache could not key, which is why the
+join sits outside it.
+
+**The resume sweep decides from each child's own log, and writes each decision
+there.** `resume_children`, which the daemon calls where it resumes a root, loads
+the parent's children, then:
+
+- a `running` child that is spent (`restarts_since_progress` at the host's
+  `retry_limit`), or that no mounted provider can readmit, is ended `error` in its
+  own log: opened without being resumed (`stored_session`), written, flushed and let
+  go;
+- every other `running` child and every `queued` one is readmitted by the provider
+  its admission's `owner` names, and its drive writes `running` with
+  `cause: resumed` on its own disk before the attempt (S10);
+- a child whose route needs a credential this deployment lacks is held instead, and
+  its own log records the hold (`CREDENTIAL_WAIT` with `SESSION_HOLDER`, which is
+  what a root waiting on its own route writes);
+- each readmitted child's own children are swept the same way before its gate
+  opens (L5b).
+
+There is **no catch-up step**: the ladder counts answers in the log they were
+written to. Nothing orders one child's records against another's or against the
+parent's, so a crash mid-sweep leaves each child decided on its own disk or
+undecided, and the next start decides the undecided ones the same way. One mount can
+open a child's log more than once, to record a hold and later to readmit it, so a
+lease claimed again from the scope that holds it is a no-op
+(`persistence/lease.py`): `flock` belongs to the open descriptor, and a second handle
+would refuse its own holder.
+
+**A delete is a tombstone in the child's log, for any child.**
+`SubagentService.delete(parent, run_id, reason=…)` is the one revocation door. A
+child this process runs is its provider's to stop (`RevokingProvider.revoke`), and
+the provider writes the tombstone as it lets go. A child settled by an earlier
+process is tombstoned by the seam, in its stored log. Before, a revocation reached
+only children held in memory, and one an earlier process had settled answered
+`False`. `record_deleted` lands the `canceled` and the tombstone in one batch, since
+a flush between them left a child canceled and not deleted. It also reads from the
+child's own state whether it had already ended, and never writes `canceled` over a
+`done`, which turned a finished child into a revoked one.
 
 `SETTLED_STATUSES` is a real constant for a real reason: a hand-written copy was
 once wrong in three of its four members and pinned every parent forever
@@ -1148,10 +1286,9 @@ does the work"), read from the **typed** header field rather than the wire alias
 because a rename would return 0 and 0 *opens* the gate
 (`ph_rlm/subagents.py`).
 
-**Quiescing** drops the session observer, releases the jobs entry, and disposes
-the agent — because the agent scope owns the child's kernel subprocess, and
-keeping it leaked one CPython per delegation. The terminal `result` is kept, so a
-late `result()` still answers.
+**Quiescing** releases the jobs entry and disposes the agent — because the agent
+scope owns the child's kernel subprocess, and keeping it leaked one CPython per
+delegation. The terminal `result` is kept, so a late `result()` still answers.
 
 ### 6.3 Communication
 
@@ -1168,7 +1305,7 @@ return sender_parent == target_parent  # a sibling, roots included
 ```
 
 A grandparent is out of reach. Two roots are siblings. `reachable_family` is
-*derived from* this function so the guard that refuses a send and the roster that
+*derived from* this function so the guard that refuses a send and the list that
 tells the model who it may address cannot disagree.
 
 **The boundary is a `ctx.tools.guard`** — deny-only, runs last, and cannot be
@@ -1180,21 +1317,29 @@ Delivery is always `steer`, landing at the target's next step. A settled target
 is woken through `ensure_addressable` first. Pending messages are capped per
 session, and bodies at 16 KiB.
 
-**Usage is attributed upward.** Each child `assistant/message` appends
-`subagent/usage-attributed` to the **parent's** log.
+**Usage stays where it was spent.** A child's answers carry their `usage` on its
+own `assistant/message` records, and its compactions on `compaction/summarized`.
+Nothing is copied into the parent's log; `ChildState.tokens` totals them.
 
-> It is **not an input to the context meter**: `TokenMeter.last_usage` folds only
-> `assistant/message` in the log it is given (`seams/token_meter.py`), and a
-> child's messages are in the *child's* log, so the parent's context measurement is
-> correct without it. It **is** an input to two decisions, besides the TUI panel:
-> a goal's `max_tokens` budget (`goals._TOKEN_RECORDS`, as `children`), and the
-> child's own retry ladder, where each record is an answer that forgives the
-> restarts before it (`restarts_since_progress`). So its durability matters. It is
-> written to the parent's log in memory while the child's log reaches disk before
-> each request, so a crash can drop answers the parent's log never counted. The
-> resume sweep counts them back in from the child's log before the ladder reads
-> them (`AttributingProvider`, L5), and sweeps each readmitted child's own children
-> the same way before that child takes a step (`SubagentRun.ready`, L5b).
+> It is **not an input to the parent's context meter**: `TokenMeter.last_usage`
+> folds only `assistant/message` in the log it is given (`seams/token_meter.py`),
+> and a child's messages are in the *child's* log. It **is** an input to two
+> decisions, besides the TUI panel: a goal's `max_tokens` budget, when `children` is
+> among its `token_sources` (`GoalService.spent`, §6.2), and the child's own retry
+> ladder, where an answer forgives the restarts before it
+> (`restarts_since_progress`). So where it lives matters. Until format 3 the
+> provider mirrored each answer into the parent's log as
+> `subagent/usage-attributed`. The mirror sat in the parent's memory while the
+> child's log reached disk before each request, so a crash could drop answers the
+> parent never counted. The ladder then read a child that answered in every run as
+> stuck and failed it as exhausted, and the budget missed what it spent. The resume
+> sweep had to count them back in from the child's log before the ladder read them
+> (L5). The mirror also charged one level only: a grandchild's spend, and every
+> child's compactions, reached no goal. Read from the child's own log, the answers
+> are where the ladder and the budget look, and the catch-up step is gone. One limit
+> is stated where it lives (`delegated_tokens`): a child's own children count once
+> this process has read them, so after a restart the children of a child that was
+> not readmitted are not loaded.
 
 **`descendants()` is deliberately not `reachable_family`.** Descent is transitive
 and covers grandchildren; the messaging family is one hop and includes siblings.
@@ -1211,8 +1356,8 @@ subprocess (`scope.effect(enter, label=f"code-runtime:{namespace}")`), jobs, and
 the child itself as an effect of the *parent's* scope.
 
 Since the scope tree nests, that parent-scope effect is **no longer what stops
-the child** — the tree shape is. What it does now is write the tombstone and
-update the roster. And because `dispose` unwinds children before its own effects,
+the child** — the tree shape is. What it does now is write the tombstone, into the
+child's own log. And because `dispose` unwinds children before its own effects,
 that handler runs when the child's scope is *already gone*, which bounds what it
 may do (§2.5).
 
@@ -1422,13 +1567,17 @@ state. What the harness offers a tool since Phase 10:
 
 What it does not offer: a tool with neither a key nor a `reconcile` — every MCP
 tool today — still leaves the model an unknown after a crash; and a fact that
-spans two logs (a child's and its parent's roster, a send and its receipt) is
+spans two logs (a send and its receipt, a global harness edit and its approval) is
 eventual, not atomic. Across two logs only the order holds: a message is on its
 receiver's disk before its sender is told, so a crash never leaves a send falsely
 delivered, and on resume the send is checked against that log;
-a global harness edit is written after the approval that allowed it; and a child's
-usage, which its parent's log can lag, is counted back in from the child's log when
-its parent resumes, at every level (`plans/Two_Log_Facts_Todo.md`, L4–L6b). Within one log,
+a global harness edit is written after the approval that allowed it
+(`plans/Two_Log_Facts_Todo.md`, L4–L6b); and a child's ending is on its own disk
+before its parent is handed the result (F1). A child's lifecycle is no longer such a
+fact. Since format 3 every record about a child is in the child's own log (§6.2), so
+its admission, its restarts and its spend are one log's facts, and the usage a
+parent's copy could lag is gone rather than counted back in
+(`plans/Each_Session_Owns_Its_Log_Plan.md`, which supersedes L5). Within one log,
 `Session.batch()` lands records whole or not at all, including across a torn write
 (format 2). Both are `NON_GUARANTEES` rows.
 
@@ -1520,8 +1669,9 @@ therefore the same three things — a **state**, a **step** that folds one more
 event into it, and a **canonical replay** over the whole prefix that the steps must
 agree with — and `SessionFoldCache` (`session/folds.py`) is that shape with the
 cache attached: `compute` is the replay, `extend` the step, and the key is `seq`.
-Six rows hold their projection in one: the subagent roster, goals, schedules,
-the harness state, the limits, the sandbox refusals.
+Six rows hold their projection in one: each sub-agent's state (one entry per
+child, folded from the child's own log), goals, schedules, the harness state, the
+limits, the sandbox refusals.
 
 Three readers live *inside* `Session` and are its own, and `Session.stale()` checks
 exactly those three against their replays (I6): the **events snapshot** against the
@@ -1569,8 +1719,8 @@ every one of them until the log is long and evenly sampled past that:
   seq and event type, because that event is the one the two paths read differently.
 
 All six consumers are held to these, over logs their own services wrote — the
-third law to the four that carry an `extend`, since schedules and the subagent
-roster have no step to hold to their replay. (Deterministic and
+third law to the five that carry an `extend`, since schedules have no step to
+hold to their replay. (Deterministic and
 batching-invariant are the same two laws LangGraph asks of a `DeltaChannel`
 reducer, and enforces in a docstring; pH runs them.)
 

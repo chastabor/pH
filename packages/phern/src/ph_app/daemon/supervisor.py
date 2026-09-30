@@ -70,7 +70,7 @@ from ph.seams.models import (
 from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
-from ph.seams.subagents import child_is_live
+from ph.seams.subagents import CHILD_EVENT_TYPES, child_is_live
 from ph.seams.workspace import Workspace, latest_checkpoint, workspace_of
 from ph.session import (
     IntentNotDurable,
@@ -94,10 +94,12 @@ from ph.tools.errors import error_message
 
 from ..attach import Tray, prompt_message
 from ..payloads import (
+    ChildRow,
     ProfileAsk,
     ProfileAskReply,
     RootDescription,
     RootDetail,
+    SessionChildrenNotice,
     SessionCommandsNotice,
     SessionEventNotice,
     SessionNotice,
@@ -112,12 +114,12 @@ from ..profiles import (
 )
 from ..protocol import Refusal, cursor_of
 from ..runtime import mount_session
-from ..sessions import recorded_start
+from ..sessions import not_a_root, recorded_start
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
 from .profile_command import profile_command
-from .projections import commands_of, readings_of, screens_of
+from .projections import commands_of, family_of, family_rows, readings_of, screens_of
 from .recovery import (
     CHILD_RETRY_LIMIT,
     FAILED,
@@ -136,6 +138,7 @@ _LOG = log_writer(__name__)
 
 __all__ = [
     "NON_GUARANTEES",
+    "NotARoot",
     "Root",
     "RootStartAbandoned",
     "ScheduleUnavailable",
@@ -158,6 +161,18 @@ class RootStartAbandoned(Refusal):
     """
 
     code = "root_start_abandoned"
+
+
+class NotARoot(Refusal):
+    """This id names a sub-agent's log, which only its root's mount writes (P11-08).
+
+    Its own code for `RootStartAbandoned`'s reason: the client's next move is
+    specific. Retrying never helps, and what does is the root this names: attach
+    that, and its mount readmits the child. A second root on the child's own file
+    would be a second writer on a log that is the child's only record.
+    """
+
+    code = "not_a_root"
 
 
 @dataclass(slots=True)
@@ -302,10 +317,11 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
         "its sender is told (L6), and on resume the send is checked against that log: "
         "found, it reads as done, and missing from every log it could have reached, as "
         "not done (L6b). Only a root's send to a sibling root not yet resumed can stay "
-        "unknown. A child's usage in its parent's log can lag the child's own, and a "
-        "resume counts it back in from the child's log before the retry ladder reads "
-        "it, at every level of delegation (L5, L5b). Within one log a `Session.batch()` "
-        "lands whole or not at all (P10-14, P10-15); across two logs there is no batch",
+        "unknown. A child's ending is on its own disk before its parent is handed the "
+        "result (F1), so a crash can leave a child that ended under a parent that never "
+        "heard, and never a parent holding an answer from a child that reads as "
+        "unfinished. Within one log a `Session.batch()` lands whole or not at all "
+        "(P10-14, P10-15); across two logs there is no batch",
     ),
     (
         "per user",
@@ -337,6 +353,27 @@ agent's inbox and on disk."""
 
 Subscriber = Callable[[str, dict[str, Any]], None]
 """`(event_name, payload)` — how a connection hears about a root it watches."""
+
+
+@dataclass(slots=True)
+class _FamilyFeed:
+    """What `session.children` has told a root's watchers, and whether it owes them
+    another (P11-07).
+
+    The root's own stream carries nothing about its children any more — each child
+    writes only its own log — so the supervisor listens to every log in the root's
+    mount and pushes the family when a row would change. **Two filters, both cheap
+    enough for a streamed chunk:** only a record a child's state is folded from
+    (`CHILD_EVENT_TYPES`) can move a row, so every other record is one set test; and
+    the rows are compared with the last ones sent, so a change no row shows sends
+    nothing.
+    """
+
+    sent: list[ChildRow] | None = None
+    """The rows last pushed, or `None` before the first."""
+    due: bool = False
+    """A push is scheduled and has not run yet: what coalesces a burst — a batch's
+    `canceled` and its tombstone, eight children settling in one step — into one."""
 
 
 @dataclass(slots=True)
@@ -417,6 +454,8 @@ class Root:
     person's own profile moved, and the root was started for a front end that can
     be asked. Held like a missing credential — nothing is driven, and a prompt
     waits in the inbox — and `status` says `needs-profile-decision`."""
+    family: _FamilyFeed = field(default_factory=_FamilyFeed)
+    """What `session.children` last told this root's watchers (P11-07)."""
 
     @property
     def needs_credential(self) -> str | None:
@@ -827,14 +866,57 @@ def _say_profile_moved(root: Root) -> None:
 
 
 def _waiting_on(roots: Iterable[Root]) -> list[tuple[str, str]]:
-    """`(credential, "root, root/run, …")` for every hold these roots' logs record."""
+    """`(credential, "root, root/run, root/run/run, …")` for every hold these roots and
+    the sub-agents beneath them record (T5).
+
+    **Each hold is in the log of the session that waits** (Phase 11): a root's own
+    route in the root's log, and a child's in the child's — as `SESSION_HOLDER` in
+    both, which is what `ChildState.awaiting` folds. So a root's log answers for the
+    root alone, and every level of its family is asked too, since a grandchild
+    readmitted beneath a readmitted child is held for its key the same way. Named by
+    the run ids from the root down, the way a parent addresses each child.
+    """
     waiting: dict[str, list[str]] = {}
     for root in roots:
-        for holder, name in waiting_for(root.ctx, root.session).items():
-            waiting.setdefault(name, []).append(
-                root.id if holder == SESSION_HOLDER else f"{root.id}/{holder}"
-            )
+        name = root.needs_credential
+        if name is not None:
+            waiting.setdefault(name, []).append(root.id)
+        where = {root.id: root.id}
+        for state in family_of(root):
+            where[state.session_id] = f"{where.get(state.parent_id, root.id)}/{state.run_id}"
+            if state.awaiting is not None:
+                waiting.setdefault(state.awaiting, []).append(where[state.session_id])
     return [(name, ", ".join(holders)) for name, holders in sorted(waiting.items())]
+
+
+def _working_beneath(root: Root) -> bool:
+    """Whether a sub-agent beneath `root` is still working — what holds it mounted.
+
+    Read from each child's own log (Phase 11): `child_is_live` over `family_of`,
+    the family as this process has read it. **Every child of the root counts**,
+    stored ones too, because the resume sweep has decided each of them by the time
+    a sweeper can ask: readmitted, ended in its own log, or held for a credential,
+    which is waiting and must not be released under.
+
+    **A grandchild counts only while this mount is running it.** One whose own
+    parent is still working is already covered by that parent, and one this
+    process runs beneath a parent that has settled is real work, rare and brief — a
+    settled child's own children are revoked with it. What is left is the case
+    that must not count: a grandchild left `queued` or `running` on disk beneath a
+    child that ended in an earlier process. Nothing readmits it — the sweep reaches
+    a child's children only through a child it readmits — so holding the root for
+    it would hold it for good, which is E3's failure over a log instead of a
+    status.
+    """
+    sessions = root.ctx.get(SESSIONS)
+    return any(
+        child_is_live(state)
+        and (
+            state.parent_id == root.id
+            or (sessions is not None and sessions.get(state.session_id) is not None)
+        )
+        for state in family_of(root)
+    )
 
 
 def model_for(ctx: Context, choice: ModelChoice) -> ModelEntry:
@@ -1045,6 +1127,10 @@ class Supervisor:
             # resumed one's is what its own header recorded, read off disk
             # because there is no store to ask until this mount exists.
             recorded = recorded_start(resolve_roots().sessions_dir(), root_id)
+            if recorded.owner is not None:
+                # Before the mount and the claim, so the refusal leaves the child's
+                # file exactly as its root left it.
+                raise NotARoot(not_a_root(root_id, recorded.owner))
             where = cwd or recorded.cwd
             ctx, starting = await mount_session(
                 exits,
@@ -1191,6 +1277,28 @@ class Supervisor:
                 if root.subscribers:
                     root.publish(SessionScreensNotice(session_id=root.id, screens=screens_of(root)))
 
+            def beneath(source: Session, event: SessionEvent) -> None:
+                """A child's log in this root's mount moved a row: push the family
+                (P11-07).
+
+                The store-wide feed, filtered, where `relay` below is the root's own:
+                a root's log holds nothing about its children (Phase 11), so their
+                state reaches a watcher only from their own logs. A mount holds one
+                root and its family, so a log with a parent link is a descendant; and
+                only a record a child's state is folded from can move its row — a
+                streamed chunk is one set test. Guarded like `relay`: nothing is read
+                for nobody, and `_tell_family` sends only what the rows show changed.
+                """
+                if (
+                    not root.subscribers
+                    or event.type not in CHILD_EVENT_TYPES
+                    or source.header.delegating_parent is None
+                ):
+                    return
+                if not root.family.due:
+                    root.family.due = True
+                    self.tasks.start_soon(self._tell_family, root)
+
             def lifetime(agent_: object, _status: str) -> None:
                 """A turn starting or ending changes what holds the *daemon*.
 
@@ -1233,6 +1341,9 @@ class Supervisor:
             # child agent's events belong to its own transcript, and subscribing
             # here means never receiving them rather than receiving and discarding.
             exits.callback(session.observe(relay))
+            # The children's are heard on the bus, and only as a row: what a watcher
+            # is sent about them is `session.children`, never their chunks.
+            ctx.on("session/event", beneath)
             ctx.on("agent/status", lifetime)
             ctx.on("agent/status", announce)
             ctx.on("commands/change", verbs)
@@ -1374,6 +1485,28 @@ class Supervisor:
                 root.id,
                 len(revived),
             )
+
+    async def _tell_family(self, root: Root) -> None:
+        """Push `session.children` to this root's watchers, once per burst (P11-07).
+
+        Scheduled by the first change of a burst and run at the next checkpoint, so
+        every change the burst made is in the one list it reads: a batch lands its
+        `canceled` and its tombstone together, and a child's ending and its parent's
+        next step are one loop turn apart. The list is read whole, from the
+        children's own logs, and sent only if it differs from the last one sent —
+        so a change the rows do not show sends nothing.
+
+        A root released while this waited is not told anything: its watchers were
+        told `passivated`, and its context is gone.
+        """
+        root.family.due = False
+        if self.roots.get(root.id) is not root or not root.subscribers:
+            return
+        rows = family_rows(root)
+        if rows == root.family.sent:
+            return
+        root.family.sent = rows
+        root.publish(SessionChildrenNotice(session_id=root.id, children=rows))
 
     async def _decide_profile(self, root: Root, asking: anyio.CancelScope) -> None:
         """Put a root's moved named profile to a person, and act on the answer (S6).
@@ -2138,13 +2271,13 @@ class Supervisor:
         return [root.describe() for root in self.roots.values()]
 
     def awaited(self) -> list[tuple[str, str]]:
-        """Every credential a mounted root or its children wait for, and who waits:
-        `(name, "root, root/run, …")` rows for `phern agents doctor` (T5).
+        """Every credential a mounted root or a sub-agent beneath it waits for, and
+        who waits: `(name, "root, root/run, …")` rows for `phern agents doctor` (T5).
 
-        Read from each root's log, where the resume check recorded the holds, so
-        the doctor and a transcript say the same thing. Roots not mounted are not
-        asked: their holds are on disk, and are asked again when they are next
-        started.
+        Read from the logs of the sessions that wait — a root's own, and each
+        child's (`_waiting_on`) — where the resume check recorded the holds, so the
+        doctor and a transcript say the same thing. Roots not mounted are not asked:
+        their holds are on disk, and are asked again when they are next started.
         """
         return _waiting_on(self.roots.values())
 
@@ -2160,9 +2293,10 @@ class Supervisor:
         * **somebody is watching** — `subscribers`, the root's own attachment set, so a
           client that attached and never detached keeps its session alive by the same
           fact that makes it receive events;
-        * **it has live children** — folded from `subagent/*`, because a parent released
-          while a child is still running would be rehydrated by the child's own events
-          arriving at a root that no longer exists;
+        * **it has work beneath it** — a child still working, from the child's own
+          log (`_working_beneath`), because a root released under a running child
+          takes the child's mount with it: the child is suspended mid-task, and comes
+          back only when something wakes the root;
         * **it has work scheduled** (P5-06) — a root with a live schedule has already
           said when it comes back;
         * **it has been quiet long enough**, from the log.
@@ -2183,15 +2317,13 @@ class Supervisor:
         # out of ninety.
         if root.idle_for(now) < after * 1000:
             return False
-        # Through the seam's cached fold rather than the bare function:
-        # `SessionFoldCache` keys on `session.seq`, and an idle root's log does
-        # not grow, so every sweep after the first is a dict hit instead of a
-        # whole-log walk. That is what saves the root this returns `False` for —
-        # idle, unwatched, one unsettled child — which would otherwise re-fold
-        # every sixty seconds for the life of the daemon.
-        subagents = root.ctx.get(SUBAGENTS)
-        roster = subagents.roster(root.session) if subagents is not None else {}
-        if any(child_is_live(child) for child in roster.values()):
+        # Through the seam's cached folds rather than the bare function: each
+        # child's `SessionFoldCache` keys on its log's `seq`, and an idle child's
+        # log does not grow, so every sweep after the first is a dict hit per
+        # child instead of a whole-log walk. That is what saves the root this
+        # returns `False` for — idle, unwatched, one unsettled child — which would
+        # otherwise re-fold every sixty seconds for the life of the daemon.
+        if _working_beneath(root):
             return False
         # Last, and cached the same way: this one was inserted *above* the
         # comment describing the cached fold, so the paragraph arguing against
@@ -2255,8 +2387,9 @@ class Supervisor:
         self.roots.pop(root.id, None)
         subagents = root.ctx.get(SUBAGENTS)
         if subagents is not None:
-            # The cached roster would outlive the root otherwise: the seam keys
-            # its fold by session id and nothing else tells it this one is gone.
+            # The children it read for this root would outlive the root otherwise:
+            # the seam keys them by the parent's id, and nothing else tells it this
+            # one is gone.
             subagents.forget_session(root.id)
         schedule = root.ctx.get(SCHEDULE)
         if schedule is not None:

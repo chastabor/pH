@@ -30,7 +30,7 @@ import pytest
 
 from ph.agent.types import AgentHandle
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
-from ph.json import as_str
+from ph.json import JsonValue, as_str
 from ph.seams._names import SLUG_CHARACTERS
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, ApprovalService, Edited
 from ph.seams.code_runtime import (
@@ -66,8 +66,8 @@ from ph.seams.subprocess import (
 )
 from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
-from ph.session import Session, open_intents
-from ph.session.kinds import APPROVAL_ASK
+from ph.session import Session, intents_of, open_intents
+from ph.session.kinds import APPROVAL_ASK, WORKSPACE_RESTORE, restore_settled
 from ph.testing import MountProfile, StubAgent, log_event, noted, raising, settled, stored_types
 
 pytestmark = pytest.mark.anyio
@@ -1032,6 +1032,61 @@ async def test_a_command_is_on_disk_before_its_body_runs(mount: MountProfile) ->
     assert done.data["runSeq"] == run.seq
 
 
+async def test_a_verb_whose_act_opens_a_durable_intent_is_written_by_that_barrier(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`with-act`: one fsync ahead of the act, not two back to back.
+
+    `/revert <seq>` flushed `command/run`, then its restore flushed again for one more
+    line, with only checks in memory between them. A verb whose act opens a durable
+    intent first has its record written by that intent's barrier — on disk before the
+    act all the same — and one that refuses without acting leaves the pair for the
+    next flush.
+
+    Sabotage: declare the verb `before` and two barriers run; open `command/run` with
+    `record` and the act finds it missing from disk.
+    """
+    from ph.keys import COMMANDS, SESSIONS
+    from ph.session import SessionStore
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    journal = intents_of(ctx)
+    barriers: list[str] = []
+    ahead: list[list[str]] = []
+    written = SessionStore.written
+
+    async def counted(store: SessionStore, log: Session) -> bool:
+        barriers.append(log.id)
+        return await written(store, log)
+
+    async def restore(argument: str, _ctx: object) -> str:
+        if argument == "no":
+            return "refusing: nothing to restore"
+        opening: dict[str, JsonValue] = {"agentId": "a1", "tree": argument}
+        async with journal.claim(session, WORKSPACE_RESTORE, opening) as held:
+            ahead.append(stored_types(ctx, "s"))
+            journal.settle(session, held, restore_settled(held.opened, ok=True))
+        return "restored"
+
+    ctx.require(COMMANDS).register(
+        CommandDefinition(
+            name="put-back",
+            summary="restores",
+            run=Verbs({}, otherwise=CommandVerb(restore, record="with-act")),
+        )
+    )
+    monkeypatch.setattr(SessionStore, "written", counted)
+
+    assert await ctx.require(COMMANDS).dispatch("/put-back t1", session=session) == "restored"
+    assert (ahead, barriers) == ([["command/run", "workspace/restoring"]], ["s"])
+
+    said = await ctx.require(COMMANDS).dispatch("/put-back no", session=session)
+    assert said == "refusing: nothing to restore" and barriers == ["s"]
+    run, done = [one for one in session.events if one.type.startswith("command/")][-2:]
+    assert (run.data["argument"], done.data["runSeq"]) == ("no", run.seq)
+
+
 async def test_a_command_the_log_cannot_record_does_not_run(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1056,14 +1111,14 @@ async def test_a_command_the_log_cannot_record_does_not_run(
 async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A verb that `reads`: the question is answered, and recorded after, whole.
+    """A verb recorded `after`: the question is answered, and recorded after, whole.
 
     A durable record in front of every command made the one someone reaches for
     on a full disk — what state are things in? — refuse along with the rest. A verb
     the command's table says only asks takes no barrier; the verb beside it that
     acts still does.
 
-    Sabotage: ignore the table's `reads` in the dispatch, and the listing is refused
+    Sabotage: ignore the table's `record` in the dispatch, and the listing is refused
     too.
     """
     from ph.keys import COMMANDS, SESSIONS
@@ -1078,7 +1133,7 @@ async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
             ran.append(f"{name} {rest}".rstrip())
             return f"did {name}"
 
-        return CommandVerb(body, reads=name == "list")
+        return CommandVerb(body, record="after" if name == "list" else "before")
 
     ctx.require(COMMANDS).register(
         CommandDefinition(
@@ -1086,7 +1141,7 @@ async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
             summary="t",
             run=Verbs(
                 {"list": verb("list"), "remove": verb("remove")},
-                otherwise=verb("usage").run,
+                otherwise=verb("usage"),
             ),
         )
     )
@@ -1105,27 +1160,29 @@ async def test_a_command_that_only_asks_answers_when_the_log_cannot_be_written(
 async def test_a_verb_table_is_the_one_parse_of_a_verb() -> None:
     """`Verbs` reads the first word — without regard to case — hands a verb only what
     follows it, gives the whole argument to `otherwise` when no verb is named, and
-    answers a verb's refusal with its text."""
+    answers a verb's refusal with its text. A usage line acts on nothing, so it is
+    recorded as a question is."""
 
     def refuse(_rest: str, _ctx: object) -> str:
         raise LookupError("no such tree")
 
     table = Verbs(
         {
-            "": CommandVerb(lambda rest, _ctx: f"bare {rest}", reads=True),
+            "": CommandVerb(lambda rest, _ctx: f"bare {rest}", record="after"),
             "drop": CommandVerb(lambda rest, _ctx: f"drop {rest}"),
             "gone": CommandVerb(refuse),
         },
-        otherwise=lambda argument, _ctx: f"else {argument}",
+        otherwise=CommandVerb(lambda argument, _ctx: f"else {argument}", record="with-act"),
         refused=(LookupError,),
     )
     context = cast(CommandContext, None)
 
-    assert (await table("", context), table.reads("")) == ("bare ", True)
-    assert (await table("DROP  a b", context), table.reads("drop a")) == ("drop a b", False)
-    assert (await table("42", context), table.reads("42")) == ("else 42", False)
+    assert (await table("", context), table.record("")) == ("bare ", "after")
+    assert (await table("DROP  a b", context), table.record("drop a")) == ("drop a b", "before")
+    assert (await table("42", context), table.record("42")) == ("else 42", "with-act")
     assert await table("gone x", context) == "no such tree"
-    assert await Verbs({}, otherwise="usage: /x")("anything", context) == "usage: /x"
+    usage = Verbs({}, otherwise="usage: /x")
+    assert (await usage("anything", context), usage.record("anything")) == ("usage: /x", "after")
 
 
 async def test_a_failing_command_still_records_its_outcome() -> None:

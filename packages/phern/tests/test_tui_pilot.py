@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from daemon_helpers import Daemon
 from daemon_helpers import until as settled
+from textual.app import App
 from textual.binding import Binding
 from textual.pilot import Pilot
 from textual.widgets import Input
@@ -46,7 +47,7 @@ from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
 from ph_app.tui.modals.pickers import NEW_SESSION
 from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
 from ph_app.tui.state import ChatItem
-from ph_app.tui.themes import load_theme_profile
+from ph_app.tui.themes import fallback_variables, load_theme_profile
 from ph_app.tui.trajectory_app import run_trajectory
 from ph_app.tui.widgets.prompt import PromptInput
 
@@ -675,6 +676,48 @@ async def test_a_picker_filters_on_typed_text(make_tui_app: MakeApp) -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert chosen == ["b"]
+
+
+class _Picking(App[None]):
+    """A bare app to open a picker on. `PHTuiApp` would bring a daemon, a socket
+    and a mount with it, and a picker needs none of them — only the `$ph-*`
+    variables its CSS names, which Textual refuses to parse without."""
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return fallback_variables()
+
+
+async def test_a_row_that_cannot_be_chosen_leaves_the_picker_open() -> None:
+    """P11-08: a row can be seen and not taken — a sub-agent's log among the sessions.
+
+    Choosing it says why and answers nothing, so no caller is handed an id it would
+    send only to have it refused; the rows around it answer as before. Runs without
+    a daemon, so it holds in a sandbox that has no sockets.
+
+    Sabotage: dismiss with an unavailable row's value, and `chosen` holds it.
+    """
+    app = _Picking()
+    async with app.run_test() as pilot:
+        chosen: list[Any] = []
+        app.push_screen(
+            ChoicePicker(
+                title="sessions",
+                choices=[
+                    Choice("helper", "  ⤷ a child", unavailable="read it elsewhere"),
+                    Choice("lead", "the root"),
+                ],
+            ),
+            chosen.append,
+        )
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert chosen == [], "an unavailable row answered with its value"
+        assert isinstance(app.screen, ChoicePicker), "and the picker stayed open"
+        assert [str(one.message) for one in app._notifications] == ["read it elsewhere"]
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert chosen == ["lead"]
 
 
 # -------------------------------------------------------------- completions --

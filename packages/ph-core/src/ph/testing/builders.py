@@ -24,7 +24,7 @@ from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..host import host_config_path, load_host_config
 from ..json import JsonValue, as_str, dumps
-from ..keys import SESSION_PERSISTENCE, SKILLS, TOOLS
+from ..keys import SESSION_PERSISTENCE, SESSIONS, SKILLS, TOOLS
 from ..llm.types import (
     ContentBlock,
     ContextForm,
@@ -46,6 +46,7 @@ from ..persistence.jsonl import (
 from ..persistence.lease import lease_path
 from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
+from ..seams.subagents import ADMITTED
 from ..seams.workspace import (
     ACQUIRED,
     ACQUIRING,
@@ -61,6 +62,7 @@ from ..session import (
     SessionHeader,
     SessionKind,
     SurfaceIntent,
+    child_session_id,
     derive_event_message,
     freeze_json_value,
     intents,
@@ -230,6 +232,38 @@ def log_event(
     """Write one event into a hand-built log, through `SCAFFOLDING` — what a test
     calls where it used to call `session.append` (T6)."""
     return SCAFFOLDING.append(log, event_type, data, surface)
+
+
+def admitted_child(
+    ctx: Context,
+    parent: Session,
+    run_id: str,
+    admission: Mapping[str, JsonValue] | None = None,
+    *,
+    admitted: bool = True,
+) -> Session:
+    """A sub-agent's own log, published in `ctx`'s store under `parent` and admitted —
+    named and filed as `open_child_log` opens one (Phase 11).
+
+    `admission` adds to the record, in the log's spelling (`goalId`, `prompt`); the
+    run id, a name and an owner are there already. `admitted=False` leaves a log with
+    no admission, which is not a child. Written through `log_event`, so a test says
+    what the child's log holds rather than running a provider to get there.
+    """
+    child = ctx.require(SESSIONS).create(
+        child_session_id(parent.id, run_id),
+        meta={
+            "parentSession": parent.id,
+            "family": parent.header.family,
+            "origin": "subagent",
+            "delegationDepth": (parent.header.delegation_depth or 0) + 1,
+        },
+    )
+    if admitted:
+        log_event(
+            child, ADMITTED, {"runId": run_id, "name": run_id, "owner": "stub", **(admission or {})}
+        )
+    return child
 
 
 @contextmanager

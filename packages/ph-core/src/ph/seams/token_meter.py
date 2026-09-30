@@ -49,10 +49,12 @@ __all__ = [
     "IMAGE_TOKENS_UNKNOWN",
     "MEDIA_TOKENS_UNKNOWN",
     "PDF_TOKENS_PER_PAGE",
+    "SPENDING_TYPES",
     "TokenBaseline",
     "TokenMeter",
     "apply",
     "estimate_media_tokens",
+    "event_tokens",
     "reported_usage",
 ]
 
@@ -327,6 +329,24 @@ def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None
     except ValidationError:
         log.warning("ph.seams.token_meter: %s carries unparseable usage", event.type)
         return None
+
+
+SPENDING_TYPES = frozenset({"assistant/message", "compaction/summarized"})
+"""The records in a log that spend tokens: a model's replies and the summarize calls
+that shortened its context. What a goal's own log charges and what a sub-agent's log
+says it spent read this one set, so a record added to it reaches both."""
+
+
+def event_tokens(event: SessionEvent, key: str = "usage") -> int:
+    """One record's spend as `TokenUsage.total`, or `0` when it carries none that
+    parses — the one definition of "tokens" a budget and a child's account share.
+
+    `total`, not `inputTokens + outputTokens`: a two-term sum left most of a
+    cache-heavy run's input outside the budget, and disagreed with the footer
+    showing the same word.
+    """
+    usage = reported_usage(event, key)
+    return 0 if usage is None else usage.total
 
 
 @plugin("token-meter", affects="environment")

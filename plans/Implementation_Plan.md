@@ -721,12 +721,46 @@ by the header check rather than migrated, and a daemon started before the upgrad
 restarted: a 0.4 client refuses a 0.3 daemon's repeat, whose `outcome` it requires.
 
 
+
+### Phase 11 — Each session owns its log *(2026-09-30; ten rows, all landed)*
+
+**Why a phase.** A sub-agent was a row in its *parent's* log: its admission, its
+statuses, its tombstone and a mirror of its usage, written there by the child's own
+drive. Every durability rule of the seam-logging audit that touched a child — the
+admission flushed before the gate (S2), a restart flushed before its attempt (S10), the
+child's log written before its parent's `done` (F1), the usage caught up from the
+child's log after a crash (L5) — was an order kept between two logs to stop that copy
+drifting from the child's own. Phase 11 removes the copy: every record of a child is in
+the child's own log, written through the seam's doors, and a parent, the resume sweep,
+budgets, caps and front ends read a child's state from there (`ChildState`,
+`SubagentService.children`). One writer per log, so a child never appends to or flushes
+its parent's. The full account is `plans/Each_Session_Owns_Its_Log_Plan.md`;
+`docs/dev-notes/phase-11.md` records what was traded.
+
+| ID | Work item | Delivers | Gate |
+|---|---|---|---|
+| P11-01 | **Landed.** The store lists a session's children (`children_of`), past the survey limit | I-5 | `test_persistence_backends` |
+| P11-02 | **Landed.** A child's records in its own log, through doors; the seam writes the admission; format 3 | rule 2 | `test_subagent_status`, `test_log_writers` |
+| P11-03 | **Landed.** `ChildState`, a pure fold per child; `children` / `load_children` | I6 | `test_fold_laws`, `test_child_logs` |
+| P11-04 | **Landed.** The seam's admission, sweep, readmission, holds and delete read and write the child's log; readmission finds its provider by `owner` | A5 | `test_child_logs`, `test_subagent_grant` |
+| P11-05 | **Landed.** ph-rlm writes only its children's logs | rule 2 | ph-rlm `test_subagents`, `test_mass_restart` |
+| P11-06 | **Landed.** The `task` crash check, goal budgets (every level, by `goalId`) and spawn caps (by `parentTurn`) read children | A5 | `test_subagent_task`, `test_goals`, `test_limits` |
+| P11-07 | **Landed.** The daemon's `session/children` projection and `session.children` notice; passivation and credential rows over the family (`PROTOCOL_VERSION` 6) | — | `test_daemon`, `test_daemon_methods` |
+| P11-08 | **Landed.** A sub-agent's log is never mounted as a root (`not_a_root`, `SESSION_IS_SUBAGENT`) | I-5 | `test_daemon`, `test_subagent_log_refusal`, `test_tui_state` |
+| P11-09 | **Landed.** The TUI panel from the notice | — | `test_tui_code_cell` |
+| P11-10 | **Landed.** `DESIGN.md` §6, the seam doc, `NON_GUARANTEES`, these notes | rule 6 | `test_non_guarantees` |
+
+**The version bump.** Format 3 and protocol 6 move together, once. A format-2 log is
+refused by the header check rather than migrated, and a daemon started before the
+upgrade must be restarted: a 0.5 client refuses the `origin` a 0.6 daemon's browse rows
+carry, and never asks for the family.
+
 ---
 
 ## 5. Engineering rules that hold across every phase
 
 1. **Declare, never derive.** Aliases are fixed at class definition (`WireModel`); a name is never reconstructed from a wire string. Same for event modes (`events.declare`) and tool outputs (mandatory `output`).
-2. **Log first, act second.** `tool/call` before execution; the snapshot event before the blob; `rlm/child-admitted` before the handle returns; `workspace/checkpoint` before the mutating run.
+2. **Log first, act second.** `tool/call` before execution; the snapshot event before the blob; `subagent/admitted` on the child's own disk before its gate opens; `workspace/checkpoint` before the mutating run.
 3. **Every artifact through `ctx.effect()`.** A lint forbids `subprocess.Popen`, `tempfile.mkdtemp`, `git worktree add` and lock acquisition outside the seam.
 4. **The program and the child are hostile.** Every inbound fd-3 frame is rebuilt; every binding argument is snapshotted as lossless JSON; the guest trusts the host, the host trusts nothing.
 5. **Fail closed at the seam.** `SANDBOX_UNAVAILABLE` rather than unconfined; `unavailable` approval denies; a `partial` backend under `strict` refuses; an unresolvable `reference` is rejected.

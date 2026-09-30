@@ -50,10 +50,17 @@ from ..paths import resolve_roots
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
-from .families import locate_under, logs_under, path_under
+from .families import children_under, locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
-from .protocol import SessionPersistence, StoredSession, attach, stored_row, write_on_unwind
+from .protocol import (
+    SessionPersistence,
+    StoredSession,
+    attach,
+    children_among,
+    stored_row,
+    write_on_unwind,
+)
 
 __all__ = ["TursoSessionStore", "apply"]
 
@@ -236,7 +243,12 @@ class TursoSessionStore:
         return materialize(self.read_own, session_id)
 
     def read_own(
-        self, session_id: str, upto: int | None = None, family: str | None = None
+        self,
+        session_id: str,
+        upto: int | None = None,
+        family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This database and nothing else, up to `upto` if one is given.
 
@@ -264,7 +276,14 @@ class TursoSessionStore:
                 if upto is None
                 else cursor.execute("SELECT wire FROM events WHERE seq < ? ORDER BY seq", (upto,))
             ).fetchall()
-            return header, [SessionEvent.from_wire(json.loads(wire)) for (wire,) in rows]
+            # A flush is one transaction here, so no batch is ever torn; `types` only
+            # spares the validate-and-freeze of the records nobody asked for.
+            records = (json.loads(wire) for (wire,) in rows)
+            return header, [
+                SessionEvent.from_wire(record)
+                for record in records
+                if types is None or record.get("type") in types
+            ]
 
     def _path_for(self, session_id: str, family: str | None = None) -> Path:
         """This session's database, by what is known before what is on disk.
@@ -326,6 +345,26 @@ class TursoSessionStore:
                 stored_row(session_id, self._peek_header(session_id, path), stat.st_mtime)
             )
         return listed
+
+    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored child of `parent_id`: one `scandir` of its family, then one
+        header `SELECT` per database whose name has the parent's prefix.
+
+        **One connection per candidate, not one query.** No table here holds more
+        than one header, since each session is its own database. A single query
+        would have to `ATTACH` every candidate, which opens each file anyway and
+        adds the attach limit on top. So this peeks the way `stored` does, through
+        `_borrow`, and each handle is closed again unless a writer owns it. The
+        family and the prefix are what keep the count down: only the parent's
+        descendants, and any database named after it, are opened.
+        """
+        candidates: list[StoredSession] = []
+        for path, stat in children_under(self.root, family, parent_id, SUFFIX):
+            session_id = path.name[: -len(SUFFIX)]
+            candidates.append(
+                stored_row(session_id, self._peek_header(session_id, path), stat.st_mtime)
+            )
+        return children_among(parent_id, candidates)
 
     # ----------------------------------------------------------- internals --
 

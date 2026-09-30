@@ -73,6 +73,10 @@ class Choice:
     detail: str = ""
     marked: bool = False
     """Rendered as the current selection — the active model, the live theme."""
+    unavailable: str = ""
+    """Why this row cannot be chosen, for one that is worth seeing but not taking —
+    a sub-agent's log among the sessions. Choosing it shows this and leaves the
+    picker open, so no caller is handed a value it would have to refuse."""
 
     def matches(self, needle: str) -> bool:
         return matches_terms(f"{self.label} {self.detail} {self.value}", needle)
@@ -184,8 +188,13 @@ class ChoicePicker(PhModal[str | None]):
         self.query_one("#picker-list", ListView).action_cursor_up()
 
     def _choose(self, index: int | None) -> None:
-        if index is not None and index < len(self._visible):
-            self.dismiss(self._visible[index].value)
+        if index is None or index >= len(self._visible):
+            return
+        choice = self._visible[index]
+        if choice.unavailable:
+            self.notify(choice.unavailable, severity="warning", markup=False)
+            return
+        self.dismiss(choice.value)
 
 
 class Action(NamedTuple):

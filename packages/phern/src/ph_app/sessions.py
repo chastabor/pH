@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -77,10 +78,20 @@ class SessionSummary(WireModel):
     title: str = ""
     cwd: str = ""
     parent: str | None = None
-    """The session this one was forked from, when the header says so."""
+    """The session this one was forked from, when the header says so — or, for a
+    sub-agent's log (`origin`), the agent that spawned it."""
 
     kind: str = ""
     """`"fork"`, `"segment"`, or empty for a root — which has no parent to qualify."""
+
+    origin: Literal["subagent"] | None = None
+    """`"subagent"` for a sub-agent's log, as its header says (P11-08).
+
+    `parent` alone cannot tell a child from a fork: both name the session they came
+    from. A fork is a session of its own a person can carry on; a child's log is
+    written by its root's mount and is never attached, so the picker has to know
+    which one a row is before it offers it.
+    """
 
     state: str = "stored"
     """`running` or `stored` — whether a daemon is holding this session now.
@@ -229,6 +240,7 @@ def _summarize(path: Path, modified: float, size: int, *, cwd: str = "") -> Sess
     kind = ""
     family = ""
     parent: str | None = None
+    origin: Literal["subagent"] | None = None
     try:
         with path.open("r", encoding="utf-8") as handle:
             for index, line in enumerate(handle):
@@ -251,6 +263,7 @@ def _summarize(path: Path, modified: float, size: int, *, cwd: str = "") -> Sess
                             return None  # not this directory's; stop before the title
                         parent = header.parent_session
                         kind = header.kind or ""
+                        origin = header.origin
                         family = header.family
                     continue
                 if record.get("type") == "user/message":
@@ -266,6 +279,7 @@ def _summarize(path: Path, modified: float, size: int, *, cwd: str = "") -> Sess
         title=title,
         cwd=recorded,
         kind=kind,
+        origin=origin,
         family=family,
         parent=parent,
     )
@@ -286,11 +300,31 @@ class RecordedStart:
 
     cwd: str = ""
     environment: LoggedEnvironment = field(default_factory=LoggedEnvironment)
+    owner: str | None = None
+    """The root whose mount writes this log, when it is a sub-agent's (P11-08), and
+    `None` for a session of its own: a root, a fork or a segment. `""` for a child
+    whose header names no spawner.
+
+    What a start refuses on, and from the header, before anything is mounted: a
+    child's log has one writer, the mount of the root that spawned it, which
+    readmits it whenever that root comes up. The root rather than the spawner, so a
+    grandchild names the one id worth attaching instead (`_owning_root`)."""
+
+
+def not_a_root(session_id: str, owner: str) -> str:
+    """Why `session_id`'s log is not opened as a root (P11-08): it is a sub-agent's,
+    written by the mount of root `owner` — `""` when its header names no spawner.
+    The one sentence the daemon, `phern -p` and rpc all refuse with."""
+    root = f"root {owner}" if owner else "the root that spawned it"
+    return (
+        f"{session_id} is a sub-agent's log, written by the mount of {root}; open that "
+        f"root instead, or read this one with `phern --mode trajectory --session {session_id}`"
+    )
 
 
 def recorded_start(sessions_dir: Path, session_id: str) -> RecordedStart:
-    """Where a stored session was worked in, and its environment — one locate, for a
-    root's start.
+    """Where a stored session was worked in, its environment, and whose it is when it
+    is a sub-agent's — one locate, for a root's start.
 
     **Read without mounting anything**, which is the whole reason it exists: a
     root's profile has to be mounted *with* its working directory — the fs seam
@@ -310,7 +344,31 @@ def recorded_start(sessions_dir: Path, session_id: str) -> RecordedStart:
     return RecordedStart(
         cwd=(header.cwd or "") if header is not None else "",
         environment=_environment_at(sessions_dir, path, header),
+        owner=(
+            _owning_root(sessions_dir, header)
+            if header is not None and header.is_subagent
+            else None
+        ),
     )
+
+
+def _owning_root(sessions_dir: Path, header: SessionHeader) -> str:
+    """The top of a sub-agent's delegation line: its spawner's spawner, and so on.
+
+    One header line per step, **opened rather than searched for**: the whole line
+    shares one family directory, so every spawner is a sibling there, as
+    `_inherited_title` walks a fork's ancestors. Bounded by the reader's
+    `MAX_DEPTH`, which also ends a hand-edited cycle, and it stops at the first
+    spawner that will not read, naming the last one it could.
+    """
+    owner = header.delegating_parent or ""
+    family = sessions_dir / header.family
+    for _ in range(MAX_DEPTH):
+        above = _header_line(family_log(family, owner)) if owner else None
+        if above is None or above.delegating_parent is None:
+            break
+        owner = above.delegating_parent
+    return owner
 
 
 def recorded_environment(sessions_dir: Path, session_id: str) -> LoggedEnvironment:

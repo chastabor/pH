@@ -23,7 +23,7 @@ import pytest
 
 from ph.cordis import Context
 from ph.llm.types import AttachmentRef, MediaBlock, create_user_message
-from ph.persistence.protocol import StoredSession
+from ph.persistence.protocol import StoredSession, children_among, stored_row
 from ph.seams.attachments import (
     LISTING_LIMIT,
     MIN_AGE,
@@ -74,11 +74,26 @@ class _Store:
         rows = [StoredSession(session_id=one, modified=0.0, family=one) for one in self.sessions]
         return rows * limit if self.truncate else rows
 
+    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Declared because `SessionArchive` carries it; the fold never asks. Answered
+        through the backends' own filter all the same, so a test that starts asking
+        gets the store's answer rather than a stub's."""
+        return children_among(
+            parent_id,
+            (
+                stored_row(one.id, one.header, 0.0)
+                for one in self.sessions.values()
+                if one.header.family == family
+            ),
+        )
+
     def read_own(
         self,
         session_id: str,
         upto: int | None = None,
         family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         self.asked[session_id] = family
         if session_id == self.broken:

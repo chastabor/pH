@@ -9,8 +9,10 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+import anyio
+
 from ..cordis import Context
-from ..keys import SESSION_PERSISTENCE, SESSIONS
+from ..keys import SESSION_PERSISTENCE, SESSIONS, SUBAGENTS
 from ..seams.telemetry import ops_record
 from ..session import Session, SessionForkError, new_session_id, valid_session_id
 from ..session_profile import opened
@@ -68,6 +70,12 @@ async def open_session(
     store = await _claimed(ctx, resolved)
     if store is not None and store.exists(resolved):
         session = await resume_session(ctx, resolved)
+        # Its children, from their own logs (Phase 11): a resumed session's family is
+        # on disk, not in its log, so it is read as the session opens — on every host,
+        # not only where a daemon's sweep would have read it.
+        subagents = ctx.get(SUBAGENTS)
+        if subagents is not None:
+            await subagents.load_children(session.id, session.header.family)
     else:
         session = ctx.require(SESSIONS).create(resolved, meta=dict(meta) if meta else None)
     # The environment it starts in, before anything runs in it (S3): here, because
@@ -97,7 +105,8 @@ async def stored_session(ctx: Context, session_id: str) -> Session:
     await _claimed(ctx, session_id)
     if not store.exists(session_id):
         raise LookupError(f"no stored session {session_id!r}")
-    header, events = store.read(session_id)
+    # Off the loop: a long log is a long read, and the loop is every root's.
+    header, events = await anyio.to_thread.run_sync(store.read, session_id)
     loaded = Session(session_id, seed=events, header=header, durable=len(events))
     return ctx.require(SESSIONS).adopt(loaded)
 

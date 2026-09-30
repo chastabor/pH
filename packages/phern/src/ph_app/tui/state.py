@@ -13,13 +13,15 @@ becomes its own `tool/result` row rather than a second row beside it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
 from typing import Any, Literal, TypeAlias
 
-from ph.json import JsonValue, as_bool, as_str
+from ph.json import JsonValue
+from ph.seams.subagents import child_is_live
 
-from ..payloads import DaemonLifetime
+from ..payloads import ChildRow, DaemonLifetime
 
 __all__ = [
     "CatalogEntry",
@@ -122,31 +124,36 @@ STATUS_GLYPHS: dict[str, str] = {
 }
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class SubagentRow:
-    """One child, as the panel shows it.
+    """One sub-agent, as the panel draws it: the daemon's row, and how deep it sits.
 
-    The *drawn projection* of one row of `TuiState.roster`, which the adapter
-    folds through the seam's own `fold_subagent_event`. Keeping the fold in the
-    seam and the drawing here is what stops the panel from becoming a second
-    projection of one fold (A11) — the failure the seam was factored out to
-    prevent. `tokens` is the one field that is genuinely the panel's: usage is
-    attributed per child message and is not a roster fact.
+    **The wire row itself rather than a copy of its fields** (P11-09), for the reason
+    `TuiState.lifetime` holds its model whole: the daemon folds each child's own log
+    (`ChildRow`), and a second shape here would be a second declaration of fourteen
+    fields with nothing checking that they agree. What the panel adds is only what
+    drawing needs — the glyph, and `depth`, which is the family's tree read off
+    `parent_id` so a grandchild is indented under the child that spawned it.
     """
 
-    run_id: str
-    name: str = ""
-    status: str = "queued"
-    model: str = ""
-    cause: str = ""
-    """Why it is in that status — `rehydrated` for a settled child woken by a
-    message, which still reads as `running` (P3-13)."""
-    deleted: bool = False
-    tokens: int = 0
+    child: ChildRow
+    depth: int = 0
+    """0 for a child of the root, 1 for a grandchild, and so on."""
+
+    @property
+    def session_id(self) -> str:
+        """The child's own log — what the panel keys it by, unique at every depth."""
+        return self.child.session_id
+
+    @property
+    def live(self) -> bool:
+        """Still working: not revoked, and not settled — `child_is_live`, over the row,
+        so the panel and the seam cannot come to disagree."""
+        return child_is_live(self.child)
 
     @property
     def glyph(self) -> str:
-        return "⊘" if self.deleted else STATUS_GLYPHS.get(self.status, "○")
+        return "⊘" if self.child.deleted else STATUS_GLYPHS.get(self.child.status, "○")
 
 
 @dataclass(slots=True)
@@ -245,14 +252,16 @@ class TuiState:
     so a second shape here would be a second declaration of three fields with
     nothing checking they agree."""
     todos: list[dict[str, Any]] = field(default_factory=list)
-    roster: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """The seam's own fold of `subagent/*`, kept verbatim so the panel and the
-    roster the model reads are one projection rather than two."""
     subagents: dict[str, SubagentRow] = field(default_factory=dict)
-    """Children by run id, in admission order — the drawn view of `roster`. A
-    live projection beside the transcript rather than rows inside it: eight
-    children ticking through `queued → running → done` would push the
-    conversation off screen."""
+    """Every sub-agent beneath this session by session id, a parent before its own
+    children — the daemon's `session.children`, drawn (P11-09).
+
+    **Not folded from the log**, and it cannot be: a root's log holds no record of
+    its children (Phase 11), so the daemon reads each child's own log and sends the
+    family whole (`take_children`). Which is also why `reset` leaves it alone —
+    replaying the log does not determine it. A panel beside the transcript rather
+    than rows inside it: eight children ticking through `queued → running → done`
+    would push the conversation off screen."""
     _cards: dict[str, ToolCard] = field(default_factory=dict, repr=False)
     """Every tool card by call id — top-level calls and Code Mode sub-dispatches
     alike, so a `tool/code-dispatch` finds its row the way a `tool/result` does."""
@@ -266,20 +275,22 @@ class TuiState:
     block, for the life of the app — and a thinking row that never stopped
     animating on a turn that had long since finished."""
 
-    def sync_subagents(self) -> None:
-        """Bring the drawn rows in line with the folded roster.
+    def take_children(self, rows: Sequence[ChildRow]) -> None:
+        """The daemon's children list, drawn whole (P11-09).
 
-        `tokens` survives, because it is the one field the fold does not carry.
+        **Replaced, never merged**: each `session.children` frame is the whole
+        family, so a row missing from it is a row the daemon no longer lists, and a
+        merge would keep it. In place, for `reset`'s reason — the app holds this
+        dict. Depth is read off `parent_id` in one pass, which the daemon's order
+        (a parent before its own children) is what makes possible; a row whose
+        parent is not listed is the root's own child.
         """
-        for run_id, entry in self.roster.items():
-            row = self.subagents.get(run_id)
-            if row is None:
-                row = self.subagents[run_id] = SubagentRow(run_id=run_id)
-            row.name = as_str(entry.get("name") or run_id)
-            row.status = as_str(entry.get("status"), "queued")
-            row.model = as_str(entry.get("model"))
-            row.cause = as_str(entry.get("cause"))
-            row.deleted = as_bool(entry.get("deleted"))
+        depth: dict[str, int] = {}
+        self.subagents.clear()
+        for row in rows:
+            level = depth[row.parent_id] + 1 if row.parent_id in depth else 0
+            depth[row.session_id] = level
+            self.subagents[row.session_id] = SubagentRow(child=row, depth=level)
 
     # ------------------------------------------------------------------ rows --
 
@@ -322,8 +333,6 @@ class TuiState:
         self._cards.clear()
         self._streaming.clear()
         self.todos.clear()
-        self.roster.clear()
-        self.subagents.clear()
         self.status = "idle"
         self.turn = 0
         self.queued = 0

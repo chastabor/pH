@@ -305,7 +305,7 @@ async def apply(ctx: Context, config: None) -> None:
     def view(invocation: CommandContext) -> _Sandbox:
         return _Sandbox(ctx=ctx, session=invocation.session, line=invocation.line)
 
-    showing = CommandVerb(lambda _rest, invocation: view(invocation).show(), reads=True)
+    showing = CommandVerb(lambda _rest, invocation: view(invocation).show(), record="after")
     sandbox = Verbs(
         {
             "": showing,

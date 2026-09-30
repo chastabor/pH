@@ -6,13 +6,16 @@ is a thing the obvious implementation gets wrong:
 
 **The handle returns before the child answers.** Stated once, in
 `ph.seams.subagents` — this file's job is to keep the promise. `start()` creates
-the session and the agent, appends `subagent/admitted`, starts the job, and
-returns; the child's reply arrives on a later turn as an ordinary inbox message.
+the session and the agent, starts the job, and returns; the seam writes the child's
+admission into the child's own log, and the child's reply arrives on a later turn
+as an ordinary inbox message.
 
-**Admission is logged before anything runs.** The agent is *created* first, so a
-`create` failure cannot leave a phantom child in an append-only roster — but it is
-not started until after the record exists, so no status event can precede the
-record of the child it describes.
+**Every record of a child is in the child's own log** (Phase 11). This provider
+writes nothing to a parent's log: a child's starts, waits, ending and tombstone go
+through the seam's doors into the child's log, and a parent — the roster tool, the
+prompt, the resume sweep — reads them from there. The agent is *created* before
+the admission, so a `create` failure leaves no admitted child behind — and not
+started until the seam opens its gate, after the admission is on disk.
 
 **A child is an artifact of its parent's scope.** Acquired through
 `parent.ctx.effect()`, so a disposed parent unwinds its children (I2) and
@@ -20,13 +23,11 @@ record of the child it describes.
 agent scope alive for the host's lifetime — and that scope owns the child's kernel
 subprocess, so every delegation leaked a CPython.
 
-**Usage is recorded upward.** Each child `assistant/message` appends
-`subagent/usage-attributed` to the *parent's* log. It is **not an input to the
-context meter**: `TokenMeter.last_usage` folds the log it is *given*, and a child's
-messages are in the child's log, so the parent's context measurement never included
-them and there is nothing to subtract. It **is** read by a goal's token budget and by
-the child's retry ladder, which counts each record as an answer
-(`restarts_since_progress`), as well as by the TUI panel.
+**Usage stays where it was spent.** A child's answers carry their usage in its own
+log, and a goal's budget, the retry ladder and the TUI panel read it there
+(`ChildState.tokens`, `restarts_since_progress`). The copy this provider used to
+mirror into the parent's log could lag the child's own after a crash, and had to be
+caught up on every resume.
 
 **The child's workspace is taken here, not by the lifecycle row** (P4-08): its
 base is the parent's root and its access is the parent's decision, and the row
@@ -49,12 +50,11 @@ import anyio
 from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
-from ph.cordis import Context, Disposer, InactiveScopeError, plugin
-from ph.json import as_str
+from ph.cordis import Context, InactiveScopeError, plugin
+from ph.json import JsonValue
 from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
-from ph.persistence import open_session
 from ph.seams.subagents import (
     SUSPENDED_DETAIL,
     Access,
@@ -68,18 +68,17 @@ from ph.seams.subagents import (
     child_model_key,
     child_route,
     default_child_name,
-    reconcile_usage,
-    record_admitted,
+    open_child_log,
     record_deleted,
-    record_settled,
+    record_ended,
     record_started,
-    record_status,
-    usage_mirror,
+    record_waiting,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import (
     Session,
     SessionEvent,
+    child_session_id,
     derive_event_message,
 )
 from ph.wire import WireModel
@@ -157,20 +156,16 @@ class _Child:
     Settlement releases what a *finished* child does not need — its agent scope
     (and with it the kernel subprocess), the session observer, the session
     handle. What it keeps is what a late `result()` or a rehydration needs: the
-    run, the outcome, the parent's log and the options to rebuild the agent with.
+    run, the outcome and the options to rebuild the agent with.
     """
 
     run: SubagentRun
     finished: anyio.Event
-    parent_session: Session
-    """The log the child reports to — the single source for every append about
-    this child, so a rehydration and a tombstone cannot land in different logs."""
     options: AgentOptions
     """The child's resolved options, because at rehydration time the parent agent
     may be gone and `reasoning_effort` survives nowhere else."""
     agent: AgentDriver | None = None
     session: Session | None = None
-    unobserve: Disposer | None = None
     job_id: str | None = None
     """The drive job, owned by the *parent's* scope. Not the child's: the child's
     scope is disposed *by* the drive job's own last act, and a job that abandoned
@@ -238,17 +233,10 @@ class RlmChildProvider:
 
         run_id = f"child-{secrets.token_hex(6)}"
         taken = [
-            as_str(row.get("name"))
-            for row in self.ctx.require(SUBAGENTS).roster(parent_session).values()
+            child.name for child in self.ctx.require(SUBAGENTS).children(parent_session.id).values()
         ]
         name = self._resolve_name(request.name, prompt, run_id, taken)
-        return await self._admit(
-            request,
-            run_id=run_id,
-            name=name,
-            session_id=f"{parent_session.id}-{run_id}",
-            depth=depth,
-        )
+        return await self._admit(request, run_id=run_id, name=name)
 
     async def readmit(
         self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
@@ -258,11 +246,11 @@ class RlmChildProvider:
         The record is the whole input: the seam rebuilt this request from it and
         re-derived the ceiling, so what is left here is the build — the same one
         `start` does, with the ids the log names rather than fresh ones, so the
-        child keeps its identity and its place in the roster.
+        child keeps its identity, its log and its place among its parent's children.
 
-        **No second `subagent/admitted`.** The admission already happened and is
-        in the log; writing it again would make one delegation read as two, and
-        the roster would grow a child the parent never asked for.
+        **No second `subagent/admitted`.** The admission already happened and is in
+        the child's log; the seam writes one only for a new child, so this delegation
+        stays one.
 
         Declines rather than raises when the parent is not one this provider can
         build a child under — the seam's sweep is starting a *root*, and one
@@ -271,20 +259,20 @@ class RlmChildProvider:
         parent_session = request.parent.session
         if parent_session is None:
             return None
-        depth = delegation_depth(parent_session)
+        if session_id != child_session_id(parent_session.id, run_id):
+            # A child this provider opens is named for its parent (`open_child_log`);
+            # one that is not was never this provider's, and is not opened as if it were.
+            log.warning(
+                "ph_rlm.subagents: %s is not %s's child; not readmitted", session_id, run_id
+            )
+            return None
         if not request.prompt.strip():
             # A record with no task is one nothing can re-run. Said out loud: a
             # silent skip here is a child that stays queued forever.
             log.warning("ph_rlm.subagents: %s has no prompt in its record; not readmitted", run_id)
             return None
         return await self._admit(
-            request,
-            run_id=run_id,
-            name=request.name or run_id,
-            session_id=session_id,
-            depth=depth,
-            log_admission=False,
-            restarts=restarts,
+            request, run_id=run_id, name=request.name or run_id, restarts=restarts
         )
 
     async def _admit(
@@ -293,16 +281,9 @@ class RlmChildProvider:
         *,
         run_id: str,
         name: str,
-        session_id: str,
-        depth: int,
-        log_admission: bool = True,
         restarts: int = 0,
     ) -> SubagentRun:
         """Build one child and set it running. Shared by admission and readmit.
-
-        `log_admission` is a fact about the *log* rather than about the child: a
-        readmitted child was admitted once already, and the record it is being
-        rebuilt from is that admission.
 
         `restarts` is how many times this child has already been started. Above
         zero the task is presented with that said, which is the difference
@@ -314,11 +295,11 @@ class RlmChildProvider:
         prompt = request.prompt.strip()
         provider_name, model, effort = self._resolve_model(request, parent)
 
-        child_session = await self._child_session(session_id, parent_session, depth)
-        # Created before the admission is appended, so the ways `agents.create`
-        # can fail — no driver, no route, options the driver rejects — cannot
-        # leave a phantom child in an append-only roster. It does not *run* yet,
-        # so the ordering the log cares about still holds.
+        child_session = await self._child_session(parent_session, run_id)
+        # Created before the seam writes the admission, so the ways `agents.create`
+        # can fail — no driver, no route, options the driver rejects — cannot leave
+        # an admitted child behind. It does not *run* yet, so the ordering the log
+        # cares about still holds.
         options = replace(
             parent.options,
             provider=provider_name,
@@ -364,7 +345,6 @@ class RlmChildProvider:
         child = _Child(
             run=run,
             finished=anyio.Event(),
-            parent_session=parent_session,
             options=options,
             agent=child_agent,
             session=child_session,
@@ -372,16 +352,6 @@ class RlmChildProvider:
         self._children[run_id] = child
         run.result = self._awaiter(child)
 
-        if log_admission:
-            record_admitted(parent_session, run, request)
-
-        # A child whose own log shows it working has been started, whatever the
-        # parent's roster says: `running` rides the parent's log in memory, so a
-        # crash can keep the child's turns and lose the record of its start — and
-        # the task would be presented as a first attempt beside the turn it cut
-        # short (S2).
-        if not restarts and child_session.latest("turn/start") is not None:
-            restarts = 1
         # **Presented again, and that is what makes a retry real.** Starting a
         # step claims the task from the inbox, and the claim is a logged splice —
         # so a resumed child whose task was not re-presented finds an empty inbox,
@@ -403,7 +373,7 @@ class RlmChildProvider:
             # to answer — and `delete()` becomes "release it early" rather than a
             # second cleanup path that has to remember everything.
             run.dispose = await parent.ctx.effect(
-                lambda: partial(self._release, parent_session, run_id, PARENT_TEARDOWN),
+                lambda: partial(self._release, run_id, PARENT_TEARDOWN),
                 label=f"subagent:{run_id}",
             )
             # `resumed` is what makes a restart countable: without it the log holds
@@ -412,16 +382,17 @@ class RlmChildProvider:
             # effect's await refuses here too: the job is registered on its scope.
             await self._attach(child, parent, cause="resumed" if restarts else None)
         except InactiveScopeError:
-            # Past the admission, so the row it opened is ended rather than left
-            # live: the release a disposed parent runs, run now. Idempotent, so the
-            # parent's own teardown reaching it as well does nothing twice.
-            await self._release(parent_session, run_id, PARENT_TEARDOWN)
+            # Ended rather than left live: the release a disposed parent runs, run now.
+            # Idempotent, so the parent's own teardown reaching it as well does
+            # nothing twice.
+            await self._release(run_id, PARENT_TEARDOWN)
             raise
         return run
 
-    async def _child_session(self, session_id: str, parent_session: Session, depth: int) -> Session:
+    async def _child_session(self, parent_session: Session, run_id: str) -> Session:
         """This child's session — claimed, then resumed when a log for it survived,
-        else fresh — through `open_session`, the door every session is opened by.
+        else fresh — through `open_child_log`, the seam's door every child is opened
+        by, which names and files it the way its parent finds it.
 
         A readmitted child usually has no log at all: it never ran a turn, and what
         little its session held was still in a buffer when the daemon stopped. But a
@@ -430,26 +401,16 @@ class RlmChildProvider:
         backwards mid-file and the log stops being readable at all (P5-03).
 
         **Claimed, as a root is (I-5, L2).** A child's log is a session of its own,
-        openable by its id — `phern -p --session <child>`, a daemon's `session/new`
-        naming it — and it was the one writer the lease did not see, so a second
-        process could write it while this one drove the child. The lease is held
-        by the mount's scope, like the root's (`open_session` claims on `ctx.root`):
-        the child's session lives in the deployment's store for as long as the root
-        is mounted, and the mount's last act writes it before the lease is given
-        back. A child another
-        process holds refuses with `SessionBusy`, which a readmission settles as
-        one it could not resume.
+        and since Phase 11 its only record — so it has one writer, the mount of the
+        root that spawned it, and no host opens it as a root (P11-08). The lease is
+        what keeps a *second process* out: another daemon that mounted the same
+        root, say. It is held by the mount's scope, like the root's (`open_session`
+        claims on `ctx.root`): the child's session lives in the deployment's store
+        for as long as the root is mounted, and the mount's last act writes it
+        before the lease is given back. A child another process holds refuses with
+        `SessionBusy`, which a readmission settles as one it could not resume.
         """
-        return await open_session(
-            self.ctx,
-            session_id,
-            meta={
-                "parentSession": parent_session.id,
-                "origin": "subagent",
-                "delegationDepth": depth + 1,
-                "agentPreset": "rlm",
-            },
-        )
+        return await open_child_log(self.ctx, parent_session, run_id, agentPreset="rlm")
 
     def _resolve_name(
         self, requested: str | None, prompt: str, run_id: str, taken: list[str]
@@ -502,12 +463,11 @@ class RlmChildProvider:
         """Wire a live child to its parent and start driving it.
 
         One path for a fresh admission and for a rehydration, so the two cannot
-        attach different things: the usage mirror, the job, and the `cause` the
-        roster shows beside `running`.
+        attach different things: the job, and the `cause` its own log records beside
+        `running`.
         """
         assert child.session is not None
         limit = self.config.max_concurrent
-        child.unobserve = child.session.observe(usage_mirror(child.parent_session, child.run.id))
         # `ctx.jobs`, which detaches rather than running inline: the job gives the
         # run an id, a cancel and `job/*` events for free, and a subagent is the
         # seam's own example of work that outlives the step that started it.
@@ -526,27 +486,25 @@ class RlmChildProvider:
             # to get right rather than this provider's to re-derive.
             slot=None if limit is None else (self._parent_session(parent).id, limit),
             # Written only when there was actually a wait. An admitted child with
-            # no status already reads as `queued` to the roster; this is the record
-            # for the case where that is true *for a reason*.
-            on_queued=lambda: record_status(
-                child.parent_session, child.run.id, "queued", slots=limit
-            ),
+            # no status already reads as `queued`; this is the record for the case
+            # where that is true *for a reason*.
+            on_queued=lambda: self._waiting(child, slots=limit),
         )
         child.job_id = job.id
 
     async def rehydrate(self, run_id: str) -> bool:
         """Give a settled child a runtime again so it can be addressed (P3-13).
 
-        The child's session, log and roster row all survived settlement — what
-        `_quiesce` released was the agent, which is what holds an inbox. So
-        rehydration re-creates the agent against the same session and drives it
-        again; the `Inbox` rebuilds itself from `agent/inbox/spliced` in that log,
-        so anything queued before it settled is still there.
+        The child's session and its log survived settlement — what `_quiesce`
+        released was the agent, which is what holds an inbox. So rehydration
+        re-creates the agent against the same session and drives it again; the
+        `Inbox` rebuilds itself from `agent/inbox/spliced` in that log, so anything
+        queued before it settled is still there.
 
-        A *deleted* child is not rehydrated: the tombstone is the parent's record
-        that it revoked the child, and quietly reviving it would make that record
-        false. Passivation across a restart — where the session itself is gone
-        and has to come off disk — is the daemon's (Phase 5).
+        A *deleted* child is not rehydrated: the tombstone in its log records that its
+        parent revoked it, and quietly reviving it would make that record false.
+        Passivation across a restart — where the session itself is gone and has to
+        come off disk — is the daemon's (Phase 5).
         """
         child = self._children.get(run_id)
         if child is None or child.agent is not None:
@@ -613,24 +571,34 @@ class RlmChildProvider:
 
         return wait
 
-    async def reconcile_answers(
-        self, parent: Session, run_id: str, *, session_id: str, through: int
-    ) -> int:
-        """`AttributingProvider`: this provider's children charge their answers through
-        `usage_mirror`, so a resume brings the parent's account level with the child's
-        stored log through `reconcile_usage` (L5)."""
-        return await reconcile_usage(
-            self.ctx, parent, run_id, session_id=session_id, through=through
-        )
+    def _child_log(self, child: _Child) -> Session | None:
+        """The child's own log, whether or not it still has an agent.
+
+        `child.session` goes with the agent when a child settles (`_quiesce`), while
+        the log itself stays live in the store for the mount's life — and is where a
+        rehydration, a revocation or a suspension records what happened to it. `get`,
+        for `_release`'s reason: on a mount's unwind the store may be gone.
+        """
+        if child.session is not None:
+            return child.session
+        sessions = self.ctx.get(SESSIONS)
+        return sessions.get(child.run.session_id) if sessions is not None else None
+
+    def _waiting(self, child: _Child, **extra: JsonValue) -> None:
+        """`queued`, in the child's own log, when it has one to write to."""
+        own = self._child_log(child)
+        if own is not None:
+            record_waiting(own, **extra)
 
     async def _drive(self, child: _Child, *, cause: StatusCause | None) -> None:
         """Run the child to quiescence, tell the parent, then let it go."""
         run = child.run
-        parent_session = child.parent_session
+        own = child.session
+        assert own is not None, "a child is driven only while it has its own log"
         try:
             # Not before the seam says so (`SubagentRun.ready`): bounded, and for a
             # readmitted child its own children swept, so neither its ceiling nor
-            # the roster its first prompt shows is still being worked out.
+            # the children its first prompt shows are still being worked out.
             await run.ready.wait()
             # **Once released, the release owns the ending** — here, at the gate, and
             # after the run below: revoked, refused or suspended, the child's ending
@@ -638,26 +606,24 @@ class RlmChildProvider:
             # slot is one `Job.cancel` no longer reaches, so the check is the drive's.
             if child.finished.is_set():
                 return
-            # `running` either way; `cause` says *why* it is running, because the
-            # roster folds status last-write-wins and a woken child that is
-            # working must not read as not-running. A restart is on disk before
-            # the attempt it counts (S10) — the seam's door keeps that rule.
-            await record_started(self.ctx, parent_session, run.id, cause=cause)
+            # `running` either way; `cause` says *why* it is running, because a
+            # child's state folds status last-write-wins and a woken child that is
+            # working must not read as not-running. A restart is on its own disk
+            # before the attempt it counts (S10) — the seam's door keeps that rule.
+            await record_started(self.ctx, own, cause=cause)
             agent = child.agent
             assert agent is not None, "a child runs only after it has an agent"
             await agent.run()
             if child.finished.is_set():
                 return
-            answer = _last_assistant_text(child.session)
+            answer = _last_assistant_text(own)
             child.result = SubagentResult(status="done", answer=answer)
-            # The child's own outcome is on disk before its parent says so (F1):
-            # `record_settled` writes the child's log, then the parent's status.
-            await record_settled(
+            # The child's ending is on its own disk before its parent is handed the
+            # answer (F1): `record_ended` flushes, and the waiters wake after it.
+            await record_ended(
                 self.ctx,
-                parent_session,
-                run.id,
+                own,
                 "done",
-                child=child.session,
                 answerPreview=answer[: self.config.answer_preview_chars] or None,
             )
             # The other half of retain-by-default (P6-28): a child that finished
@@ -673,7 +639,7 @@ class RlmChildProvider:
             if not child.replied:
                 tail = f" Last assistant text: {answer}" if answer else ""
                 self._inject(
-                    parent_session,
+                    run.parent_id,
                     f"[rlm child {run.name} ({run.id}) completed without sending a reply.{tail}]",
                     f"{run.name} finished without replying",
                 )
@@ -683,11 +649,9 @@ class RlmChildProvider:
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
             # The same order for a failure: the child's account of it first.
-            await record_settled(
-                self.ctx, parent_session, run.id, "error", child=child.session, detail=message
-            )
+            await record_ended(self.ctx, own, "error", detail=message)
             self._inject(
-                parent_session,
+                run.parent_id,
                 f"[rlm child {run.name} ({run.id}) failed: {message}{self._evidence(child)}]",
                 f"{run.name} failed",
             )
@@ -748,9 +712,6 @@ class RlmChildProvider:
         a `finally`, and a teardown that raised would replace a settled child's
         outcome with a disposal error.
         """
-        if child.unobserve is not None:
-            child.unobserve()
-            child.unobserve = None
         # `get`, for `_release`'s reason: a mount's unwind reaches here after the
         # rows that provide these have gone, and there is nothing left to release.
         jobs = self.ctx.get(JOBS)
@@ -768,14 +729,14 @@ class RlmChildProvider:
         except Exception:  # pragma: no cover - teardown must not mask an outcome
             log.debug("ph_rlm.subagents: disposing child %s failed", child.run.id, exc_info=True)
 
-    def _inject(self, parent_session: Session, text: str, summary: str) -> None:
+    def _inject(self, parent_id: str, text: str, summary: str) -> None:
         """Put one notice in the parent's inbox — and only if it is still there.
 
         A parent disposed while a child was running has no inbox to deliver to;
         the child's own log already records what it did, so the notice is dropped
         rather than raising inside a detached task.
         """
-        parent = self.ctx.require(AGENTS).get(parent_session.id)
+        parent = self.ctx.require(AGENTS).get(parent_id)
         if parent is None:
             return
         parent.inject(
@@ -869,16 +830,17 @@ class RlmChildProvider:
             seam.retain(child_agent.id, "the child has not settled cleanly")
         return project_access(workspace.kind), None
 
-    async def delete(self, parent_session: Session, run_id: str, *, reason: str = "user") -> bool:
-        """Revoke one child early. Its transcript stays on disk.
+    async def revoke(self, run_id: str, reason: str) -> bool:
+        """`RevokingProvider`: stop one child this provider holds, with a tombstone in
+        its own log. `False` for a child it does not hold.
 
-        A tombstone rather than a removal, because the child's log and artifacts
-        outlive it: a parent looking for what a revoked child did should find the
-        revocation, not a gap.
+        Asked by `SubagentService.delete`, the door every revocation goes through: a
+        child this provider is not running — settled by an earlier process — is the
+        seam's to tombstone.
         """
-        return await self._release(parent_session, run_id, reason)
+        return await self._release(run_id, reason)
 
-    async def _release(self, parent_session: Session, run_id: str, reason: str) -> bool:
+    async def _release(self, run_id: str, reason: str) -> bool:
         """The one revocation path, whether the model asked or the parent unwound.
 
         **On the parent-teardown path the child's scope is already gone** (P6-27).
@@ -888,9 +850,10 @@ class RlmChildProvider:
 
         Nothing here breaks on that: `cancel` touches only the phase and the inbox, and
         disposing an inactive scope returns at once. But it **bounds what this path may
-        do**: the roster, the parent's log and the tombstone are live; anything needing the
-        *child's* scope — flushing its session through its own services, snapshotting its
-        workspace — is not, and would work when the model calls `delete()` and fail here.
+        do**: the child's log and its tombstone are the store's, not the child scope's,
+        and live; anything needing the *child's* scope — its own services, its
+        workspace — is not, and would work when the model calls `delete()` and fail
+        here.
 
         **Only ever a revocation.** A mount going away reaches its children first, through
         `suspend`, and leaves nothing here to release; so a parent's teardown that does
@@ -913,10 +876,13 @@ class RlmChildProvider:
             self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
-        # The ending and the tombstone together (S14), before anything awaits — and
-        # the ending at all, because a revoked child is not merely absent: a panel
-        # that knew only `deleted` could not say whether it had run.
-        record_deleted(parent_session, run_id, reason, ended=child.result is not None)
+        # The ending and the tombstone together (S14), in the child's own log and on
+        # its disk before anything is let go — and the ending at all, because a
+        # revoked child is not merely absent: a panel that knew only `deleted` could
+        # not say whether it had run.
+        own = self._child_log(child)
+        if own is not None:
+            await record_deleted(self.ctx, own, reason)
         self._let_go(child)
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while
@@ -953,7 +919,7 @@ class RlmChildProvider:
         jobs, registry = self.ctx.get(JOBS), self.ctx.get(SUBAGENTS)
         for child in self._children.values():
             if child.result is None:
-                record_status(child.parent_session, child.run.id, "queued", detail=SUSPENDED_DETAIL)
+                self._waiting(child, detail=SUSPENDED_DETAIL)
                 child.result = SubagentResult(status="queued", error=SUSPENDED_DETAIL)
             if child.job_id is not None and jobs is not None:
                 jobs.cancel(child.job_id)

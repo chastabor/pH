@@ -20,7 +20,7 @@ from pydantic import Field
 from rlm_fixtures import PROVIDER_ROW
 
 from ph.cordis import ChildLimit, ChildReach, Context, Profile, ProfileDocument, plugin
-from ph.json import JsonObject, as_obj, as_seq
+from ph.json import JsonObject, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SANDBOX, SESSIONS, SKILLS, SUBAGENTS
 from ph.paths import canonical
 from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
@@ -73,9 +73,11 @@ async def _spawn(ctx: Context, parent: Any, **kwargs: Any) -> Any:  # noqa: ANN4
     )
 
 
-def _admitted(parent: Any) -> JsonObject:  # noqa: ANN401
-    (event,) = parent.session.select("subagent/admitted")
-    return as_obj(event.data)
+def _admitted(ctx: Context, parent: Any) -> JsonObject:  # noqa: ANN401
+    """The one child's admission, from the child's own log — where a restart reads the
+    narrowing back from, so where it has to be recorded."""
+    (child,) = ctx.require(SUBAGENTS).children(parent.session.id).values()
+    return as_obj(thaw_json(not_none(child.admission).to_wire()))
 
 
 async def test_a_skill_naming_a_listed_model_starts_its_child_on_that_route(
@@ -93,7 +95,7 @@ async def test_a_skill_naming_a_listed_model_starts_its_child_on_that_route(
     run = await _spawn(ctx, parent, skills=("sort",))
 
     assert (run.model_provider, run.model) == ("fake", "fake-9")
-    admitted = _admitted(parent)
+    admitted = _admitted(ctx, parent)
     assert admitted["modelKey"] == "classify" and admitted["model"] == "fake-9"
     child = ctx.require(AGENTS).get(run.session_id)
     assert child is not None and child.options.model_key == "classify"
@@ -117,7 +119,7 @@ async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(
     with pytest.raises(SubagentSpawnError, match="it lists classify, main"):
         await _spawn(ctx, parent, model_key="summarize")
 
-    assert not parent.session.select("subagent/admitted")
+    assert ctx.require(SUBAGENTS).children(parent.session.id) == {}
 
 
 async def test_skills_that_name_different_models_are_refused(mount: MountProfile) -> None:
@@ -158,7 +160,7 @@ async def test_an_assigned_profile_narrows_the_child_s_tools_model_and_access(
 
     run = await _spawn(ctx, parent, profile="sorter")
 
-    admitted = _admitted(parent)
+    admitted = _admitted(ctx, parent)
     tools = as_seq(admitted["tools"])
     assert "bash" not in tools and "read" in tools
     assert run.model == "fake-9" and admitted["profile"] == "sorter"
@@ -235,7 +237,7 @@ async def test_a_skill_goes_with_the_row_that_gave_it(mount: MountProfile) -> No
 
     await _spawn(ctx, parent, profile="nobash")
 
-    skills = as_seq(_admitted(parent)["skills"])
+    skills = as_seq(_admitted(ctx, parent)["skills"])
     assert "shell-tips" not in skills and "review" in skills
 
 
@@ -273,7 +275,7 @@ async def test_a_child_given_fewer_writable_directories_writes_only_those(
     run = await _spawn(ctx, parent, profile="cacheonly")
 
     sandbox = ctx.require(SANDBOX)
-    assert list(as_seq(_admitted(parent)["paths"])) == [cache]
+    assert list(as_seq(_admitted(ctx, parent)["paths"])) == [cache]
     assert sandbox.effective(SandboxPolicy(), agent=run.session_id).writable_extra == [cache]
     assert allowed_paths_of(ctx, run.session_id) == (Path(cache),)
     assert sandbox.effective(SandboxPolicy(), agent=parent.id).writable_extra == [cache, store]
@@ -356,7 +358,7 @@ async def test_a_child_holds_the_skills_found_under_the_paths_it_keeps(
 
     await _spawn(ctx, parent, profile="sorting")
 
-    skills = as_seq(_admitted(parent)["skills"])
+    skills = as_seq(_admitted(ctx, parent)["skills"])
     assert "sort" in skills and "audit" not in skills
     assert "shell-kit" in skills, "another row's skill is not this row's to withhold"
 
@@ -392,5 +394,5 @@ async def test_a_row_says_how_a_child_holds_less_of_it(
 
     await _spawn(ctx, parent, profile="sorting")
 
-    skills = as_seq(_admitted(parent)["skills"])
+    skills = as_seq(_admitted(ctx, parent)["skills"])
     assert "sort" in skills and "audit" not in skills

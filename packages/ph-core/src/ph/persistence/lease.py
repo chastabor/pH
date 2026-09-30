@@ -41,6 +41,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 from ..locks import LockBusy, acquire_file_lock
 
@@ -72,6 +73,12 @@ rather than beside the log it guards.
 """
 
 
+_HELD: WeakKeyDictionary[Context, set[str]] = WeakKeyDictionary()
+"""The ids each scope already holds a lease on, so a second claim from it is a no-op.
+
+Weakly keyed, so a scope that unwound takes its entry with it."""
+
+
 def lease_path(root: Path, session_id: str) -> Path:
     """Where this session's lease lives. Derived from the id and nothing else."""
     return root / LEASES / f"{session_id}.lock"
@@ -90,11 +97,24 @@ async def claim_session(scope: Context, root: Path, session_id: str) -> None:
     Two writers on one log, which is the one thing I-5 exists to refuse.
 
     A store is free to move its files; this is the fixed point.
+
+    **A second claim from the same scope holds what it already holds.** The lease
+    refuses another *process*; within one mount the store refuses a second live
+    `Session` for an id (`SessionStore.adopt`), so there is no second writer to
+    keep out. And one mount does open a log twice: the resume sweep writes a
+    sub-agent's ending or its credential hold into the sub-agent's own log, lets it
+    go, and may later readmit it (Phase 11). `flock` belongs to the open descriptor,
+    so a second lock file handle from this process would refuse its own holder.
     """
+    held = _HELD.setdefault(scope, set())
+    if session_id in held:
+        return
+    # Taken before the await, so two claims racing in one scope do not both lock.
+    held.add(session_id)
 
     def acquire() -> Callable[[], None]:
         try:
-            return acquire_file_lock(
+            unlock = acquire_file_lock(
                 lease_path(root, session_id), timeout=0, what=f'session "{session_id}"'
             )
         except LockBusy as busy:
@@ -102,4 +122,14 @@ async def claim_session(scope: Context, root: Path, session_id: str) -> None:
                 f'session "{session_id}" is already active in another process'
             ) from busy
 
-    await scope.effect(acquire, label=f"session-lease({session_id})")
+        def release() -> None:
+            held.discard(session_id)
+            unlock()
+
+        return release
+
+    try:
+        await scope.effect(acquire, label=f"session-lease({session_id})")
+    except BaseException:
+        held.discard(session_id)
+        raise

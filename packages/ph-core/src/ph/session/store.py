@@ -37,7 +37,9 @@ __all__ = [
     "SessionForkError",
     "SessionStore",
     "apply",
+    "child_session_id",
     "fork_boundaries",
+    "is_child_id",
     "is_fork_boundary",
     "new_session_id",
     "open_turn_at",
@@ -71,14 +73,16 @@ ForkRejection = Literal[
     "INVALID_BOUNDARY",
     "OPEN_TURN",
     "OPEN_BATCH",
+    "SESSION_IS_SUBAGENT",
 ]
-"""Why a session could not be created, adopted or forked.
+"""Why a session could not be created, adopted, forked or opened.
 
 A closed set because the code is what a client branches on — a daemon reply
 carries it and `phern` maps it to an exit status — so a new refusal is a
 deliberate addition to a vocabulary rather than a string somebody invents at a
 raise site. `SESSION_ID_INVALID` is K9's: an id that cannot be a path component
-is refused before it names a directory in three stores.
+is refused before it names a directory in three stores. `SESSION_IS_SUBAGENT` is
+P11-08's: a sub-agent's log opened as a root, which only its root's mount writes.
 """
 
 
@@ -94,6 +98,23 @@ def new_session_id() -> str:
     """A sortable, human-legible session id."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     return f"{stamp}-{secrets.token_hex(3)}"
+
+
+def child_session_id(parent_id: str, run_id: str) -> str:
+    """A sub-agent's session id: its parent's, then its run's.
+
+    **The prefix is how a parent finds its children on disk** (Phase 11): the store
+    narrows a family directory to the names beginning with the parent's id before it
+    reads a header (`SessionArchive.children_of`), so a child named any other way is
+    one no restart finds. One spelling, here, for every provider that names a child
+    and every reader that narrows by it."""
+    return f"{parent_id}-{run_id}"
+
+
+def is_child_id(parent_id: str, session_id: str) -> bool:
+    """Whether `session_id` is named as one of `parent_id`'s children — or theirs, since
+    a grandchild's id begins with its grandparent's too. The header decides which."""
+    return session_id.startswith(child_session_id(parent_id, ""))
 
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")

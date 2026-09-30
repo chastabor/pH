@@ -150,7 +150,9 @@ def test_a_failure_run_is_counted_per_tool_and_reset_by_a_success() -> None:
 def test_the_counts_obey_the_fold_laws() -> None:
     """`counts_of` is `_extend` from empty, so the law holds by construction — and
     this is where that is asked rather than assumed, over every prefix of a log
-    that exercises each counted type and the reset a `turn/start` performs."""
+    that exercises each counted type and the reset a `turn/start` performs.
+    (Children are not in it: they are counted in their own logs, when a spawn is
+    judged — the tests at the end.)"""
     session = Session("lawful")
     for turn in (1, 2):
         log_event(session, "turn/start", {"turn": turn})
@@ -168,11 +170,6 @@ def test_the_counts_obey_the_fold_laws() -> None:
                 SurfaceIntent("append"),
             )
         log_event(session, "assistant/chunk", {"text": "…"})
-    log_event(
-        session,
-        ADMITTED,
-        {"runId": "r1", "name": "scout", "model": "fake-1", "grantedAccess": "read"},
-    )
 
     assert_fold_laws(session, counts_of, _extend)
 
@@ -730,8 +727,9 @@ async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: MountProfile) -
 
 
 async def _parent(ctx: Context, session_id: str = "parent") -> tuple[Any, Any, Any]:
-    """A parent agent and a stub provider. The stub does not log admission —
-    the real provider does, as obligation 1 — so tests say what it would have."""
+    """A parent agent and a stub provider. The stub opens each child a log that
+    names its parent, as a real provider does, and the seam writes the child's
+    admission into it — so a spawn here leaves what a real one leaves."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     provider = StubSubagentProvider(root=ctx)
@@ -751,8 +749,7 @@ async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(
     ctx = await mount(row("limits", children={"turnLimit": 1}), profile=PROFILE)
     session, parent, provider = await _parent(ctx)
 
-    first = await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
-    log_event(session, ADMITTED, {**first.to_wire(), "prompt": "go"})
+    await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
 
     with pytest.raises(SubagentSpawnError, match=r"turn limit exceeded \(2/1 children\)"):
         await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="again", parent=parent))
@@ -801,8 +798,7 @@ async def test_the_child_ceiling_has_the_postures_its_siblings_have(
     ctx = await mount(row("limits", children={"turnLimit": 1, "exit": exit_}), profile=PROFILE)
     session, parent, _provider = await _parent(ctx)
 
-    first = await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
-    log_event(session, ADMITTED, {**first.to_wire(), "prompt": "go"})
+    await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
 
     with pytest.raises(SubagentSpawnError) as caught:
         await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="again", parent=parent))
@@ -812,6 +808,100 @@ async def test_the_child_ceiling_has_the_postures_its_siblings_have(
     assert refused.failure_kind == kind
     assert refused.concludes_turn is ends
     assert str(events_of(session, "limits/exceeded")[-1].data["posture"]) == exit_
+
+
+async def test_the_turn_cap_counts_children_admitted_this_turn(mount: MountProfile) -> None:
+    """Phase 11 — a child's admission is in its own log, so that is where it is counted.
+
+    The caps counted `subagent/admitted` in the parent's log, and a parent's log no
+    longer holds one: the seam writes it into the child's, stamped with
+    `parentTurn`, the seq of the parent's latest `turn/start`. Counted where it
+    used to be, every cap read zero and nothing was ever refused. A child from an
+    earlier turn is off this turn's count and still on the session's.
+
+    Sabotage: count the parent's log for `subagent/admitted` again and the second
+    spawn of turn one is made; count every child as this turn's and the first
+    spawn of turn two is refused.
+    """
+    ctx = await mount(row("limits", children={"turnLimit": 1, "sessionLimit": 2}), profile=PROFILE)
+    session, parent, provider = await _parent(ctx)
+    subagents = ctx.require(SUBAGENTS)
+
+    log_event(session, "turn/start", {"turn": 1})
+    await subagents.start("stub", SubagentRequest(prompt="one", parent=parent))
+    with pytest.raises(
+        SubagentSpawnError, match=r"reached: turn limit exceeded \(2/1 children\)\."
+    ):
+        await subagents.start("stub", SubagentRequest(prompt="two", parent=parent))
+
+    log_event(session, "turn/start", {"turn": 2})
+    await subagents.start("stub", SubagentRequest(prompt="three", parent=parent))
+
+    log_event(session, "turn/start", {"turn": 3})
+    with pytest.raises(
+        SubagentSpawnError, match=r"reached: session limit exceeded \(3/2 children\)\."
+    ):
+        await subagents.start("stub", SubagentRequest(prompt="four", parent=parent))
+
+    assert [one.prompt for one in provider.requests] == ["one", "three"]
+    assert not events_of(session, ADMITTED), "the premise: the parent's log holds no admission"
+    turns = [one.seq for one in events_of(session, "turn/start")]
+    admitted = subagents.children(session.id).values()
+    assert [child.parent_turn for child in admitted] == turns[:2]
+    breach = events_of(session, "limits/exceeded")[-1].data
+    assert (breach["turn"], breach["session"]) == (0, 2)
+
+
+async def test_a_deleted_child_still_counts(mount: MountProfile) -> None:
+    """Deleting a child frees none of the budget: the spawn was asked for and made.
+
+    The tombstone is in the child's own log now, beside its admission, and the
+    count is of admissions — as it was when the parent's log held them and a
+    delete never took one off.
+
+    Sabotage: leave deleted children out of `child_counts` and the second spawn
+    is made.
+    """
+    ctx = await mount(row("limits", children={"sessionLimit": 1}), profile=PROFILE)
+    session, parent, _provider = await _parent(ctx)
+    subagents = ctx.require(SUBAGENTS)
+    first = await subagents.start("stub", SubagentRequest(prompt="one", parent=parent))
+
+    assert await subagents.delete(session, first.id, reason="not needed")
+    assert subagents.children(session.id)[first.id].deleted
+
+    with pytest.raises(SubagentSpawnError, match=r"session limit exceeded \(2/1 children\)"):
+        await subagents.start("stub", SubagentRequest(prompt="two", parent=parent))
+
+
+async def test_a_fork_starts_with_no_children(mount: MountProfile) -> None:
+    """Decision 4 — a fork is a new root, so none of this budget is spent yet.
+
+    The count was folded from the parent's log from seq 0, and a fork's log begins
+    with its source's prefix, so a fork inherited its source's children and was
+    refused spawns it never made. Its children are the ones whose logs name it as
+    their parent, and it has none — in its seeded turn too, whose `turn/start`
+    carries the same seq as the source's.
+
+    Sabotage: count the children of the log the fork was cut from
+    (`header.parent_session`) and the fork's spawn is refused; count the parent's
+    log for `subagent/admitted` and the source's is not.
+    """
+    ctx = await mount(row("limits", children={"turnLimit": 1, "sessionLimit": 1}), profile=PROFILE)
+    source, parent, _provider = await _parent(ctx, "source")
+    subagents = ctx.require(SUBAGENTS)
+    log_event(source, "turn/start", {"turn": 1})
+    await subagents.start("stub", SubagentRequest(prompt="one", parent=parent))
+    with pytest.raises(SubagentSpawnError):
+        await subagents.start("stub", SubagentRequest(prompt="two", parent=parent))
+    log_event(source, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+
+    fork = ctx.require(SESSIONS).fork(source)
+    forked = ctx.require(AGENTS).create(fork, FAKE_OPTIONS)
+    run = await subagents.start("stub", SubagentRequest(prompt="again", parent=forked))
+
+    assert list(subagents.children(fork.id)) == [run.id]
+    assert len(subagents.children(source.id)) == 1
 
 
 async def test_no_children_budget_registers_no_guard(mount: MountProfile) -> None:

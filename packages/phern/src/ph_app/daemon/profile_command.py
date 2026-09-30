@@ -82,13 +82,13 @@ def profile_command(root: Root) -> CommandDefinition:
         return rest.split()[0]
 
     showing = CommandVerb(
-        lambda rest, _invocation: _show(root, full="--full" in rest.split()), reads=True
+        lambda rest, _invocation: _show(root, full="--full" in rest.split()), record="after"
     )
     run = Verbs(
         {
             "": showing,
             "show": showing,
-            "diff": CommandVerb(lambda _rest, _invocation: _diff(root), reads=True),
+            "diff": CommandVerb(lambda _rest, _invocation: _diff(root), record="after"),
             "save": CommandVerb(
                 lambda rest, invocation: _save(
                     root, named(rest), invocation.line, replace="--replace" in rest.split()

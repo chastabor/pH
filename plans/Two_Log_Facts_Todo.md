@@ -11,6 +11,15 @@ children and stopped), and L6b turned out to need Code Mode dispatches asked on 
 not only a `reconcile` on the send tool. L8 and L9 are closed with the reasons given; L3
 and L7 are optional.
 
+**Status, 2026-09-30.** L5 and L5b are superseded by Phase 11
+(`plans/Each_Session_Owns_Its_Log_Plan.md`): every record about a sub-agent is in the
+sub-agent's own log, and a parent's log holds none. L5's usage copy
+(`subagent/usage-attributed`) and its catch-up step (`reconcile_answers`,
+`AttributingProvider`) are gone, since the ladder and the goal budget read the answers
+in the child's own log. L5b's nested sweep and its `SubagentRun.ready` gate stand, but
+the sweep now reads each child's own log rather than a roster in its parent's. Their
+entries below are kept as the record of what was done.
+
 ## The goal every item is weighed against
 
 The same as `plans/Contained_Log_Writes_Todo.md`'s: **several sub-agents are running, each
@@ -39,6 +48,8 @@ the **order**, so a crash keeps the harmless half:
 - **Where the order cannot be arranged, reconcile from the log that runs ahead** (L5):
   the child's log reaches disk before each of its requests, and the parent's copy of its
   usage waits for the parent's next flush, so on resume the parent learns from the child.
+  (Superseded by Phase 11, 2026-09-30: the parent keeps no copy, so there is nothing to
+  reconcile.)
 
 ## The findings, one by one
 
@@ -67,6 +78,12 @@ the send, resume asking a dispatch's tool as it asks a top-level call's, and the
 result naming what the tools found. See L6b in the todo list.
 
 ### L5 — a child's usage in the parent's log can lag the child's own log
+
+> **Superseded by Phase 11 (2026-09-30).** The usage copy in the parent's log is gone,
+> and with it the lag and the reconcile below. A child's answers carry their usage on its
+> own `assistant/message` records, and the ladder (`restarts_since_progress`) and a goal's
+> `children` budget (`SubagentService.delegated_tokens`) read them there. What follows is
+> the history of the fix this replaced.
 
 **The review's wording was wrong in both halves.** It said "a re-run child attributes
 twice", and that DESIGN claims only the TUI reads the record.
@@ -112,6 +129,14 @@ twice", and that DESIGN claims only the TUI reads the record.
   the parked child makes it exact. See L5 in the todo list.
 
 ### L5b — the resume sweep stops at a root's own children (landed)
+
+> **Superseded by Phase 11 (2026-09-30), in part.** The fix stands: each readmitted
+> child's own children are swept before its gate opens (`_sweep_readmitted`,
+> `SubagentRun.ready`). What changed is what the sweep reads. It reads each grandchild's
+> own log through `SubagentService.load_children`, not a roster in the child's log, and
+> there are no answers to reconcile into the child's log. The "two kinds of sweep"
+> reasoning below no longer needs `reconcile_answers` as the roster sweep's first step,
+> because that step is gone.
 
 **Found while landing L5.** `SubagentService.resume_children` has one caller,
 `Supervisor._start`, for the root agent. `RLM_MAX_DEPTH` is 2, so a root's child can
@@ -263,6 +288,10 @@ nothing committed by Claude.
   - *Sabotaged two ways*, and each failed its gate: no write (nothing of the receiver's
     log is on disk), and the write placed before `steer` (the stored log has no splice).
 - [x] **L5 — Reconcile a child's usage into its parent's log on resume.**
+  - *Superseded by Phase 11 (2026-09-30).* `AttributingProvider`, `reconcile_answers`,
+    `usage_mirror`, `reconcile_usage` and `subagent/usage-attributed` are removed; the
+    child's own log is read instead. The gate that replaces these two is ph-rlm's
+    `test_a_crash_after_an_answer_is_counted_exactly` (P11-05).
   - *Landed.*
     - ph-core: `AttributingProvider.reconcile_answers(parent, run_id, *, session_id,
       through)`, an optional provider capability beside `ReadmittingProvider`.
@@ -312,6 +341,9 @@ nothing committed by Claude.
     `callId` on the ask, no local session write, the global append through a plain
     file append, and `append_records` as a plain append.
 - [x] **L5b — Sweep a readmitted child's own children on resume.**
+  - *Superseded by Phase 11 (2026-09-30), in part.* The nested sweep and the gate
+    stand. A grandchild's restart is now counted in the grandchild's own log, not in
+    its parent's, and there is nothing to reconcile.
   - *Landed.*
     - `_readmit_children` sweeps each child it readmits (`_sweep_readmitted`, which is
       `resume_children` on the child) with the same `retry_limit`, which is now threaded

@@ -51,7 +51,6 @@ from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_bind
 from ph.tools.definition import Done, NotDone, Reconciled
 from ph.wire import WireModel
 
-from .keys import RLM_CHILDREN
 from .subagents import PROVIDER_NAME
 
 __all__ = ["NAMESPACE", "Config", "apply"]
@@ -127,7 +126,7 @@ class Config(WireModel):
 
 def _spawn_handle(run: SubagentRun) -> dict[str, Any]:
     """What a spawn hands back for the child `run` names, whether the spawn just
-    admitted it or the roster says, on resume, that it did."""
+    admitted it or the child's own log says, on resume, that it did."""
     reason = run.downgrade_reason
     return SpawnHandle(
         child_id=run.id,
@@ -152,9 +151,7 @@ def _render_handle(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa
     return text_content("\n".join(lines))
 
 
-@plugin(
-    "rlm-bindings", affects="environment", config=Config, inject=[TOOLS, SUBAGENTS, RLM_CHILDREN]
-)
+@plugin("rlm-bindings", affects="environment", config=Config, inject=[TOOLS, SUBAGENTS])
 async def apply(ctx: Context, config: Config) -> None:
     """Register the `rlm_*` tools and group them as the `rlm` code namespace."""
 
@@ -190,27 +187,31 @@ async def apply(ctx: Context, config: Config) -> None:
         return _spawn_handle(handle)
 
     async def reconciled_spawn(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
-        """Did an `rlm.run` a crash cut short admit a child? The parent's roster says (S2).
+        """Did an `rlm.run` a crash cut short admit a child? The children's own logs
+        say (S2).
 
-        The call's whole value is the admission handle, and the admission reaches
-        disk before the child runs — so the row is the answer: `Done` with the handle
-        it would have returned, whatever the child has done since (the resume sweep
-        is what puts it back to work), and `NotDone` when no admission names this
-        call, since then no child was started and spawning is what the program asked.
+        The call's whole value is the admission handle, and the admission reaches the
+        child's disk before the child runs — so the child is the answer: `Done` with
+        the handle it would have returned, whatever the child has done since (the
+        resume sweep is what puts it back to work), and `NotDone` when no admission
+        names this call, since then no child was started and spawning is what the
+        program asked. Read off the store (`load_children`): this is asked while the
+        parent resumes, before any child is open.
         """
-        row = admitted_by(ctx.require(SUBAGENTS).roster(session), call)
-        return NotDone() if row is None else Done(_spawn_handle(SubagentRun.of(row)))
+        children = await ctx.require(SUBAGENTS).load_children(session.id, session.header.family)
+        child = admitted_by(children, call)
+        return NotDone() if child is None else Done(_spawn_handle(child.run()))
 
     def list_children(_args: object, run: ToolRunContext) -> dict[str, Any]:
-        """The roster, folded from the parent's own log — never a side table."""
+        """The children, each as its own log tells it — never a side table."""
         session = run.session
-        rows = list(ctx.require(SUBAGENTS).roster(session).values()) if session is not None else []
-        return {"children": rows}
+        children = ctx.require(SUBAGENTS).children(session.id) if session is not None else {}
+        return {"children": [state.to_wire() for state in children.values()]}
 
     async def delete_child(args: DeleteArgs, run: ToolRunContext) -> dict[str, Any]:
         session = run.session
         removed = (
-            await ctx.require(RLM_CHILDREN).delete(session, args.child_id, reason=args.reason)
+            await ctx.require(SUBAGENTS).delete(session, args.child_id, reason=args.reason)
             if session is not None
             else False
         )
@@ -240,7 +241,7 @@ async def apply(ctx: Context, config: Config) -> None:
     tools.register(
         define_tool(
             DELETE_TOOL,
-            "Revoke a child. Its transcript stays on disk; the roster keeps a tombstone.",
+            "Revoke a child. Its transcript stays on disk, ending in a tombstone.",
             parameters=DeleteArgs,
             output={"type": "object"},
             render=_render_deleted,

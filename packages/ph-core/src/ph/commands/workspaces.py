@@ -54,7 +54,13 @@ from pathlib import Path
 
 from ..cordis import Context, plugin
 from ..keys import COMMANDS, FS, SESSION_PERSISTENCE, WORKSPACE
-from ..seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
+from ..seams.commands import (
+    CommandContext,
+    CommandDefinition,
+    CommandRecord,
+    CommandVerb,
+    Verbs,
+)
 from ..seams.workspace import BRANCH_PREFIX as PREFIX
 from ..seams.workspace import stored_survivors
 
@@ -113,7 +119,7 @@ async def apply(ctx: Context, config: None) -> None:
     """
 
     def verb(
-        act: Callable[[_Workspaces, str], Awaitable[str]], *, reads: bool = False
+        act: Callable[[_Workspaces, str], Awaitable[str]], *, record: CommandRecord = "before"
     ) -> CommandVerb:
         """One `/workspaces` verb: `act` on a fresh view, a refusal said rather than
         raised."""
@@ -124,9 +130,9 @@ async def apply(ctx: Context, config: None) -> None:
             except _Refused as refusal:
                 return str(refusal)
 
-        return CommandVerb(run, reads=reads)
+        return CommandVerb(run, record=record)
 
-    listing = verb(lambda view, _rest: view.list(), reads=True)
+    listing = verb(lambda view, _rest: view.list(), record="after")
     workspaces = Verbs(
         {
             "": listing,
@@ -135,7 +141,7 @@ async def apply(ctx: Context, config: None) -> None:
             "merge": verb(_Workspaces.merge),
             "remove": verb(_Workspaces.remove),
         },
-        otherwise=lambda _argument, _invocation: USAGE,
+        otherwise=USAGE,
     )
 
     ctx.require(COMMANDS).register(

@@ -21,7 +21,10 @@ import pytest
 from pydantic import ValidationError
 
 from ph.seams.approval import ApprovalRequest
+from ph.seams.subagents import ADMITTED, STATUS, child_state
 from ph.seams.tui_status import StatusReading
+from ph.session import Session, SessionHeader
+from ph.testing import log_event
 from ph_app import payloads
 from ph_app.daemon.duplex import answering
 from ph_app.payloads import (
@@ -29,6 +32,7 @@ from ph_app.payloads import (
     ApprovalAsk,
     ApprovalAskReply,
     AttachReply,
+    ChildRow,
     DaemonLifetime,
     MutationRepeated,
     QuestionAsk,
@@ -144,6 +148,43 @@ def test_a_field_the_notice_does_not_take_is_refused() -> None:
     field is a failing test rather than one a reader silently drops."""
     with pytest.raises(ValueError):
         SessionStatusNotice.model_validate({"sessionId": "s", "status": "idle", "extra": 1})
+
+
+def test_a_child_row_is_its_own_logs_state_in_the_wire_spelling() -> None:
+    """`session.children` rows are pinned by name (P11-07): the fields a panel reads,
+    camelCased, and nothing of the admission a panel has no use for — the task
+    prompt least of all, which can be large and would ride every push.
+
+    The closed sets are the seam's own `Literal`s, so a status this build has never
+    heard of is refused at the edge rather than drawn as a blank glyph.
+    """
+    child = Session(
+        "lead-r1",
+        header=SessionHeader(id="lead-r1", created_at=1, parent_session="lead", origin="subagent"),
+    )
+    log_event(
+        child,
+        ADMITTED,
+        {"runId": "r1", "name": "scout", "model": "fake-1", "prompt": "a long task"},
+    )
+    log_event(child, STATUS, {"status": "error", "detail": "boom"})
+
+    wire = ChildRow.of(child_state(child)).to_wire()
+
+    assert wire == {
+        "runId": "r1",
+        "sessionId": "lead-r1",
+        "parentId": "lead",
+        "name": "scout",
+        "model": "fake-1",
+        "grantedAccess": "read",
+        "status": "error",
+        "detail": "boom",
+        "deleted": False,
+        "tokens": 0,
+    }
+    with pytest.raises(ValidationError):
+        ChildRow.model_validate({**wire, "status": "who-knows"})
 
 
 # ------------------------------------------------------- the notice family --

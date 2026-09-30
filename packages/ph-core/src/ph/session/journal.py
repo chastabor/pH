@@ -196,6 +196,30 @@ class IntentJournal:
         key = _key(kind.opened, kind.opened_key, data, session.seq)
         return Claim(kind=kind, key=key, opened=kind.writer.append(session, kind.opened, data))
 
+    def open_deferred(self, session: Session, kind: IntentKind, data: JsonObject) -> Claim:
+        """`open` for a durable kind whose barrier is its act's own — so synchronous.
+
+        For an opener whose act is itself preceded by a durable intent: `/revert
+        <seq>` restores through `WORKSPACE_RESTORE`, whose barrier writes the log
+        whole and in append order, so this record reaches disk with it before the
+        tree is touched. A barrier here as well was a second fsync for one line, with
+        nothing between the two but checks in memory. An opener that ends without
+        acting — a refusal — leaves the pair to the next flush, which is all a record
+        with no act behind it needs.
+
+        **The caller answers for that promise**, which is why this is a door of its
+        own rather than a flag on `open`: an act with no durable intent ahead of it
+        would run with this record still in memory.
+
+        :raises IntentError: when the kind is not durable or undeclared, or `data`
+            carries no key.
+        """
+        self._require_declared(kind)
+        if kind.barrier != "durable":
+            raise IntentError(f'"{kind.opened}" has no barrier to defer; record it with `record`')
+        key = _key(kind.opened, kind.opened_key, data, session.seq)
+        return Claim(kind=kind, key=key, opened=kind.writer.append(session, kind.opened, data))
+
     def open_settled(
         self,
         session: Session,

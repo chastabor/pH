@@ -21,6 +21,7 @@ loudly instead of inventing a path that protects nothing.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -133,6 +134,32 @@ def stored_row(session_id: str, header: SessionHeader | None, modified: float) -
     )
 
 
+def children_among(parent_id: str, rows: Iterable[StoredSession]) -> tuple[StoredSession, ...]:
+    """The rows `parent_id` spawned, ordered by id. **The header decides.**
+
+    Each backend narrows its candidates by the family directory and the id
+    prefix (`families.children_under`), and neither is proof. A grandchild's id
+    starts with its grandparent's too, and a fork can be named after its source
+    and filed in its family. So only `delegating_parent` counts. That is the
+    header's `origin: "subagent"` link, and a fork does not have one: its
+    `parent` names the log it was cut from.
+
+    Stated here and not once per backend for `stored_row`'s reason: two
+    backends that each wrote their own filter would drift, and nothing would
+    fail. Ordered by id so both backends give the same answer. Their scans
+    return names in whatever order the directory holds them.
+
+    A row whose header would not parse has no `delegating_parent`, so it is not
+    listed. A log that cannot say whose child it is cannot be resumed as one.
+    """
+    return tuple(
+        sorted(
+            (row for row in rows if row.delegating_parent == parent_id),
+            key=lambda row: row.session_id,
+        )
+    )
+
+
 @runtime_checkable
 class SessionArchive(Protocol):
     """A session store's listing and its two reads — what a fold needs, and no more.
@@ -151,12 +178,23 @@ class SessionArchive(Protocol):
     """
 
     def read_own(
-        self, session_id: str, upto: int | None = None, family: str | None = None
+        self,
+        session_id: str,
+        upto: int | None = None,
+        family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This one stored log, unchained — the primitive `read` composes.
 
         `upto` is a hint: events at or above it are not wanted, and returning them anyway
         is slower but not wrong.
+
+        `types` keeps only the events of those types, for a reader that folds a few
+        records out of a long log — a child's state out of a log that is mostly
+        `assistant/chunk` (`ph.seams.subagents`). A hint too, and the saving is the
+        parse: the others are dropped before they are validated. A torn batch at the
+        tail is still dropped whole, judged on every record, not on the kept ones.
 
         `family` is **not** a hint. Every member of a lineage shares one family directory,
         so the walk knows where an ancestor lives and passing it turns a directory search
@@ -173,6 +211,30 @@ class SessionArchive(Protocol):
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first."""
+        ...
+
+    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored session `parent_id` spawned, ordered by id. Direct children only.
+
+        **Every one, not a page.** `stored` checks every log in the store and
+        then cuts at `limit`, so a parent's children fall below the cut once the
+        store is big enough, even at `SURVEY_LIMIT`. A picker can live with
+        that. A resume ladder, a budget or a spawn cap that missed a child
+        would be wrong. So this stays inside the parent's family, where every
+        child is filed, and checks only the names that start with the parent's
+        id (`families.children_under`). Its cost follows the family, not the store.
+
+        `family` is required for the reason `read_own` gives for its own: it is
+        what makes this one directory rather than all of them. A live parent
+        has it on `session.header.family`, a stored one on `StoredSession.family`.
+        Each row carries it too, so reading a child after this is
+        `read_own(row.session_id, family=row.family)`, a path and not a search.
+
+        Only logs that reached disk are listed. A child's header is written at
+        its first flush, so one that is live and has never flushed is known
+        only to the process running it. The header decides who is a child
+        (`children_among`), so a grandchild and a fork are left out.
+        """
         ...
 
     def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:

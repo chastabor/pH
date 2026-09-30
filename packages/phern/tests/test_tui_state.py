@@ -382,6 +382,48 @@ def test_a_branch_of_a_rolled_session_lands_under_the_surviving_row(tmp_path: Pa
     ]
 
 
+def test_the_picker_shows_a_child_as_a_child(tmp_path: Path) -> None:
+    """**P11-08: a sub-agent's log is listed under its parent, and is not a way in.**
+
+    Its header names the agent that spawned it in `parentSession`, the same link a
+    fork's does, so the picker drew it as a fork: a second conversation a person
+    could carry on. Choosing it attached it as a root, which put a second writer on
+    a log its root's mount writes. The header's `origin` is what tells the two
+    apart, so it rides the summary, and the row says which one it is: nested under
+    its parent, marked as a sub-agent, and refused with the way to read it instead.
+
+    Sabotage: draw a sub-agent's row as a fork's, and it takes the fork's arrow and
+    answers with its id.
+    """
+    _write_session(tmp_path, "lead", "the original")
+    _write_session(tmp_path, "branch", "a fork", parentSession="lead", kind="fork")
+    _write_session(
+        tmp_path,
+        "helper",
+        "the delegated task",
+        parentSession="lead",
+        origin="subagent",
+        delegationDepth=1,
+    )
+
+    summaries = session_summaries(tmp_path)
+    assert {one.session_id: one.origin for one in summaries} == {
+        "lead": None,
+        "branch": None,
+        "helper": "subagent",
+    }
+    rows = session_choices(summaries)
+    assert rows[0].value == "lead", "both hang under the root they came from"
+    by_id = {row.value: row for row in rows}
+    assert by_id["branch"].label == "  ↳ a fork"
+    assert by_id["helper"].label == "  ⤷ the delegated task", "a child is not drawn as a fork"
+    assert by_id["helper"].detail.startswith("sub-agent · ")
+    # Seen, not taken: a fork is a session of its own, a child is not.
+    assert by_id["branch"].unavailable == ""
+    assert "sub-agent of lead" in by_id["helper"].unavailable
+    assert "phern --mode trajectory --session helper" in by_id["helper"].unavailable
+
+
 # ------------------------------------------------------------- credentials --
 
 

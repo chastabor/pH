@@ -40,6 +40,7 @@ __all__ = [
     "CommandBody",
     "CommandContext",
     "CommandDefinition",
+    "CommandRecord",
     "CommandRegistry",
     "CommandSchema",
     "CommandVerb",
@@ -105,64 +106,80 @@ class CommandDefinition:
         return CommandSchema.model_validate(declarable(self))
 
 
+CommandRecord: TypeAlias = Literal["before", "with-act", "after"]
+"""When a verb's `command/run` reaches disk — the one thing a verb says about its
+record, and one value rather than two flags, since a verb that only asks has no
+barrier to place.
+
+* `before` — `COMMAND_RUN`'s own barrier, ahead of the body (S16). The default, and
+  what anything unsure says.
+* `with-act` — the barrier of the durable intent the body opens before it acts:
+  `/revert <seq>` restores through `WORKSPACE_RESTORE`. Appended before the body and
+  written by that flush (`IntentJournal.open_deferred`) — one fsync where two back to
+  back bought nothing more. Only for a body whose every act is behind such an intent.
+* `after` — a verb that only asks, changing no tree, no setting, no record beyond
+  the command's own pair: no barrier, and recorded once it answers, as one pair, so
+  the question someone asks on a full disk — what state are things in? — is still
+  answered.
+
+A wrong `before` costs an fsync, or a refused listing on a full disk. A wrong `after`
+is an act with no record ahead of it, and a wrong `with-act` one whose record was
+still in memory — each the failure S16 closed."""
+
+
 @dataclass(frozen=True, slots=True)
 class CommandVerb:
-    """One verb of a command: the body that answers it, and whether it only asks."""
+    """One verb of a command: the body that answers it, and when its record is
+    written."""
 
     run: CommandBody
     """Given what follows the verb, stripped — the verb is the table's to read."""
-    reads: bool = False
-    """Whether this verb only *asks* — changes no tree, no setting, no record beyond
-    the command's own pair. One that does runs without `COMMAND_RUN`'s barrier and is
-    recorded after it answers, so the question someone asks on a full disk — what
-    state are things in? — is still answered. Anything unsure says `False`: the cost
-    of a wrong `False` is a refused listing on a full disk, and of a wrong `True` an
-    act with no record ahead of it."""
+    record: CommandRecord = "before"
 
 
 @dataclass(frozen=True, slots=True)
 class Verbs:
     """A command body that dispatches on its argument's first word — the one parse of
-    a verb, and the one place a verb says whether it only asks.
+    a verb, and the one place a verb says when its record is written.
 
     **Per verb, not per command**, because every command with a question to answer
     also has a verb that acts: `/workspaces list` beside `remove`, bare `/revert`
     beside `/revert <seq>`. A tool can declare `effect_free` whole; a command cannot.
     And in one table, because a command that parsed its own verbs and declared the
-    reading ones beside them kept two lists in step by hand — where one wrong `True`
+    reading ones beside them kept two lists in step by hand — where one wrong entry
     runs an act with no record ahead of it.
 
     `""` is the bare command. Verbs match without regard to case.
     """
 
     table: Mapping[str, CommandVerb]
-    otherwise: CommandBody | str
+    otherwise: CommandVerb | str
     """For an argument whose first word names no verb: a usage line, answered as it
-    is, or a body given the whole argument — for `/revert <seq>`, the body the
+    is, or a verb given the whole argument — for `/revert <seq>`, the verb the
     argument is data for."""
     refused: tuple[type[Exception], ...] = ()
     """What a verb raises to refuse, answered with its text rather than raised on —
     each command's own refusal, said once here instead of caught in every verb."""
 
-    def lookup(self, argument: str) -> tuple[CommandVerb | None, str]:
-        """The verb `argument` names, if it names one, and what follows it."""
+    def lookup(self, argument: str) -> tuple[CommandVerb | str, str]:
+        """The verb `argument` names and what follows it — or, naming none,
+        `otherwise` and the whole argument."""
         word, _, rest = argument.partition(" ")
-        return self.table.get(word.casefold()), rest.strip()
+        verb = self.table.get(word.casefold())
+        return (self.otherwise, argument) if verb is None else (verb, rest.strip())
 
-    def reads(self, argument: str) -> bool:
+    def record(self, argument: str) -> CommandRecord:
+        """When the record of what `argument` asks for is written. A usage line acts on
+        nothing, so it is answered as a question is."""
         verb, _ = self.lookup(argument)
-        return verb is not None and verb.reads
+        return "after" if isinstance(verb, str) else verb.record
 
     async def __call__(self, argument: str, invocation: CommandContext) -> str | None:
-        verb, rest = self.lookup(argument)
-        if verb is not None:
-            body, given = verb.run, rest
-        elif isinstance(self.otherwise, str):
-            return self.otherwise
-        else:
-            body, given = self.otherwise, argument
+        verb, given = self.lookup(argument)
+        if isinstance(verb, str):
+            return verb
         try:
-            return await maybe_await(body(given, invocation))
+            return await maybe_await(verb.run(given, invocation))
         except self.refused as refusal:
             return str(refusal)
 
@@ -181,7 +198,7 @@ def install_or_status(
     whole definition, so the hint naming the verbs comes from the table that owns
     them.
     """
-    status = CommandVerb(lambda _rest, _invocation: answer("status"), reads=True)
+    status = CommandVerb(lambda _rest, _invocation: answer("status"), record="after")
     install = CommandVerb(lambda _rest, _invocation: answer("install"))
     return CommandDefinition(
         name=name,
@@ -189,8 +206,11 @@ def install_or_status(
         argument_hint="[install|status]",
         run=Verbs(
             {"": status, "status": status, "install": install},
-            otherwise=lambda argument, _invocation: (
-                f"/{name} takes `install` or `status`, not {argument!r}."
+            otherwise=CommandVerb(
+                lambda argument, _invocation: (
+                    f"/{name} takes `install` or `status`, not {argument!r}."
+                ),
+                record="after",
             ),
         ),
     )
@@ -321,8 +341,10 @@ class CommandRegistry:
         opening: JsonObject = {"name": name, "argument": argument}
         held: Claim | None = None
         run = definition.run
-        reads = isinstance(run, Verbs) and run.reads(argument)
-        if session is not None and not reads:
+        # A body that is not a verb table said nothing about its record, so it gets
+        # the barrier anything unsure gets.
+        record = run.record(argument) if isinstance(run, Verbs) else "before"
+        if session is not None and record == "before":
             # **On disk before the body runs** (S16) — `COMMAND_RUN`'s barrier. A
             # command's effects used to come before any durable record of it:
             # `/revert` rewrote the tree while `command/run` sat in memory, and a
@@ -332,6 +354,10 @@ class CommandRegistry:
                 held = await journal.open(session, COMMAND_RUN, opening)
             except IntentNotDurable:
                 return f"refusing: /{name} was not run, because the log could not record it"
+        elif session is not None and record == "with-act":
+            # Before the body as well, and on disk before its act — written by the
+            # barrier of the intent the act opens, rather than by a second one here.
+            held = journal.open_deferred(session, COMMAND_RUN, opening)
         outcome = "ok"
         detail: str | None = None
         try:
@@ -407,7 +433,7 @@ class CommandRegistry:
                     ),
                 )
             elif session is not None:
-                # A question (`reads`): recorded once it is answered, as one pair and
+                # A question (`after`): recorded once it is answered, as one pair and
                 # with no barrier — it changed nothing a record had to precede, and a
                 # disk that cannot take a write is exactly when a person asks what
                 # state things are in.

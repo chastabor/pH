@@ -1454,10 +1454,10 @@ BOUND: dict[str, str] = {
     "ToolDefinition.reconcile": "ToolRuntime._answer",
     # The five registries P6-29 reached, once the binding could hold a pair.
     "CommandDefinition.run": "CommandRegistry.dispatch",
-    # A command's verb table is its `run`: `Verbs.__call__` hands the argument to
-    # one of these inside the binding `dispatch` entered for the body.
+    # A command's verb table is its `run`: `Verbs.__call__` hands the argument to a
+    # verb's body — `otherwise` is a verb too — inside the binding `dispatch`
+    # entered for the body.
     "CommandVerb.run": "CommandRegistry.dispatch",
-    "Verbs.otherwise": "CommandRegistry.dispatch",
     "CompactionNote.text": "CompactionSeam.notes",
     "Diagnostic.read": "DiagnosticsRegistry.report",
     "Invariant.check": "InvariantRegistry.verify",
@@ -1495,6 +1495,9 @@ BOUND: dict[str, str] = {
     "SandboxSeam.provider": "SandboxSeam.confine",
     "WorkspaceSeam.provider": "WorkspaceSeam.acquire",
     "_Registered.provider": "SubagentService.start",
+    # The same provider, carried as the readmitter a child's admission names, and
+    # asked inside the binding `_readmit_one` enters for its row.
+    "_Readmitter.provider": "SubagentService._readmit_one",
     # A spawn guard is asked before the provider is, inside the same method.
     "_SpawnGuard.check": "SubagentService.start",
     # The one provider slot whose target is already in hand — `ph.seams.fs` has

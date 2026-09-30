@@ -132,6 +132,7 @@ successful reply with no fields in it.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -147,6 +148,7 @@ from daemon_helpers import (
     break_the_provider,
     private_runtime,
     running,
+    spawned,
     supervised,
     until,
 )
@@ -154,20 +156,25 @@ from daemon_helpers import (
 from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context, Profile
-from ph.json import as_str
+from ph.json import JsonObject, as_str
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
+from ph.paths import resolve_roots
+from ph.persistence import session_path
 from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
-from ph.seams.subagents import SubagentService
-from ph.session import Session, SessionEvent
-from ph.session.kinds import WORKSPACE_RESTORE
+from ph.seams.subagents import ADMITTED, DELETED, STATUS, SubagentService
+from ph.session import Session, SessionEvent, SessionHeader
+from ph.session.kinds import SESSION_HOLDER, WORKSPACE_RESTORE, credential_hold
 from ph.testing import ReapedHost, log_event, not_none, stored_log, stored_types
 from ph_app import runtime as runtime_module
+from ph_app import verbs
 from ph_app.daemon import recovery, server
 from ph_app.daemon.client import DaemonClient
+from ph_app.daemon.projections import family_rows
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
-from ph_app.daemon.supervisor import Root, RootStartAbandoned, Supervisor
+from ph_app.daemon.supervisor import NotARoot, Root, RootStartAbandoned, Supervisor
+from ph_app.payloads import SessionChildrenNotice, SessionEventNotice
 from ph_app.protocol import DaemonError
 from ph_app.runtime import mounted
 
@@ -1394,45 +1401,185 @@ async def test_the_sweeper_actually_runs(tmp_path: Path) -> None:
         )
 
 
-async def test_a_root_with_a_live_child_is_not_released(tmp_path: Path) -> None:
-    """A parent whose subagent is still working stays mounted.
+async def test_a_root_with_a_live_child_is_not_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent whose subagent is still working stays mounted — **read from the
+    child's own log** (P11-07).
 
-    Releasing it would be worse than wasteful: the child's `subagent/status`
-    events are appended to the *parent's* log, so a released parent gets
-    rehydrated by its own child's bookkeeping — a root that puts itself back
-    every time the sweeper lets it go.
+    Releasing it would take the child's mount with it: the child is suspended
+    mid-task and comes back only when something wakes the root. A root's log holds
+    no record of its children any more, so the question is asked of each child's
+    log, through the seam's `child_is_live` — whose settled set is the one every
+    producer writes. The first version of this test spelled that set itself as
+    `{"completed", "failed", "canceled", "deleted"}`, of which only one is a
+    string any producer emits, and a root that had ever run a child to completion
+    could never be released.
 
-    Folded from `subagent/*` (P3-13) rather than tracked beside it, and asked of
-    the seam that owns the vocabulary — the first version of this test spelled
-    the settled statuses itself as `{"completed", "failed", "canceled",
-    "deleted"}`, of which only one is a string any producer emits. The writer
-    says `done` and `error`; deletion is a tombstone that leaves `status` alone.
-    The effect was that a root which had ever run a child to completion could
-    never be released, and the test passed only because it appended the same
-    invented status the predicate was checking for.
+    **A grandchild counts while this mount runs it, and not after.** One left
+    unsettled on disk beneath a child that has ended is work nothing will ever
+    readmit — the sweep reaches a child's children only through a child it
+    readmits — so holding the root for it would hold it for good.
+
+    Sabotage: read the root's own log for `subagent/*` again, and every child
+    reads as absent — each root is released under a working child.
     """
-    async with running(tmp_path) as daemon:
-        supervisor = daemon.running.supervisor
-
+    async with supervised(tmp_path, monkeypatch) as supervisor:
         for label, settle in (
-            ("finished", ("subagent/status", {"runId": "c", "status": "done"})),
-            ("errored", ("subagent/status", {"runId": "c", "status": "error"})),
-            ("canceled", ("subagent/status", {"runId": "c", "status": "canceled"})),
-            ("revoked", ("subagent/deleted", {"runId": "c", "reason": "revoked"})),
+            ("finished", (STATUS, {"status": "done"})),
+            ("errored", (STATUS, {"status": "error", "detail": "boom"})),
+            ("canceled", (STATUS, {"status": "canceled"})),
+            ("revoked", (DELETED, {"reason": "revoked"})),
         ):
             root = await supervisor.start(label)
-            log_event(root.session, "subagent/admitted", {"runId": "c"})
+            child = spawned(root, "c")
             assert await supervisor.sweep(after=0) == [], f"{label}: released with a live child"
 
-            log_event(root.session, *settle)
+            log_event(child, *settle)
             assert await supervisor.sweep(after=0) == [label], f"{label}: child never settled"
 
         # An unrecognized status keeps the parent alive rather than releasing one
         # whose child may still be running.
         root = await supervisor.start("unknown")
-        log_event(root.session, "subagent/admitted", {"runId": "c"})
-        log_event(root.session, "subagent/status", {"runId": "c", "status": "who-knows"})
+        log_event(spawned(root, "c"), STATUS, {"status": "who-knows"})
         assert await supervisor.sweep(after=0) == [], "an unknown status released the parent"
+
+        # A grandchild this mount is running holds the root, under a child that
+        # has already ended.
+        root = await supervisor.start("deep")
+        child = spawned(root, "c")
+        log_event(child, STATUS, {"status": "done"})
+        grandchild = spawned(root, "g", under=child)
+        assert await supervisor.sweep(after=0) == [], "released under a running grandchild"
+
+        # Let go unsettled, it is on disk and nothing runs it: not a reason to stay.
+        root.ctx.require(SESSIONS).dispose(grandchild.id)
+        assert await supervisor.sweep(after=0) == ["deep"], "held for good by an orphan"
+
+
+# --- P11-07: the family, from the children's own logs ------------------------
+
+
+async def test_a_childs_status_reaches_the_client_as_a_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**P11-07's gate: a child's state reaches a watcher from the child's own log.**
+
+    A root's stream carries nothing about its children any more — each child writes
+    only its own log (Phase 11) — so a client watching the root would see an empty
+    family. The supervisor listens to every log in the root's mount and pushes
+    `session.children`, the whole family, whenever a row moves: **one frame for a
+    batch**, since a revocation's `canceled` and its tombstone land together, and
+    **none for a chunk**, which moves no row. The child's own events never reach the
+    root's watchers.
+
+    Sabotage: stop listening to `session/event` in `_start`, and the notice never
+    comes.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("lead")
+        heard: list[tuple[str, dict[str, Any]]] = []
+
+        def watch(method: str, params: dict[str, Any]) -> None:
+            heard.append((method, params))
+
+        def families() -> list[SessionChildrenNotice]:
+            return [
+                SessionChildrenNotice.model_validate(params)
+                for method, params in heard
+                if method == SessionChildrenNotice.METHOD
+            ]
+
+        root.subscribe(watch)
+        child = spawned(root, "c1", name="scout")
+        await until(lambda: len(families()) == 1, what="the admission to be pushed")
+        log_event(child, STATUS, {"status": "running"})
+        await until(lambda: len(families()) == 2, what="the child's start to be pushed")
+        assert [(row.name, row.status) for row in families()[-1].children] == [("scout", "running")]
+
+        log_event(child, "assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "x"}})
+        await anyio.wait_all_tasks_blocked()
+        assert len(families()) == 2, "a chunk moved no row and was pushed anyway"
+
+        with child.batch() as batch:
+            log_event(batch, STATUS, {"status": "canceled"})
+            log_event(batch, DELETED, {"reason": "revoked"})
+        await until(
+            lambda: any(row.deleted for row in families()[-1].children),
+            what="the revocation to be pushed",
+        )
+        await anyio.wait_all_tasks_blocked()
+        assert len(families()) == 3, "one batch was pushed as two frames"
+        (row,) = families()[-1].children
+        assert (row.status, row.deleted, row.deleted_reason) == ("canceled", True, "revoked")
+
+        streamed = {
+            as_str(params["event"].get("type"))
+            for method, params in heard
+            if method == SessionEventNotice.METHOD
+        }
+        assert not streamed & {ADMITTED, STATUS, DELETED, "assistant/chunk"}, (
+            "a child's own record reached the root's stream"
+        )
+
+
+async def test_the_children_projection_lists_grandchildren(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`session/children` is the whole family, a parent before its own children.
+
+    A grandchild's log names the child that spawned it, not the root, so a list
+    of the root's own children would leave out every level beneath them — the
+    work a fan-out delegated again. Each row carries its `parentId`, which is what
+    lets a reader draw the tree in one pass.
+
+    Sabotage: list only `children(root.id)` in `family_of`, and the grandchild is
+    missing.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("lead")
+        first = spawned(root, "c1")
+        spawned(root, "c2")
+        spawned(root, "g1", under=first)
+
+        rows = family_rows(root)
+
+        assert [(row.run_id, row.parent_id) for row in rows] == [
+            ("c1", "lead"),
+            ("g1", "lead-c1"),
+            ("c2", "lead"),
+        ]
+        # What `session/children` answers, through its verb's own reply model.
+        wire = SessionChildrenNotice(session_id="lead", children=rows).to_wire()
+        assert verbs.SESSION_CHILDREN.read(wire).children == rows
+
+
+async def test_a_held_child_is_listed_as_awaiting_a_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-agent held for a key says so, at any depth — in the family and in the
+    doctor's credential rows (T5).
+
+    The hold is in the child's own log now, as a session waiting on its own route
+    (`SESSION_HOLDER`), where it used to be a row in its parent's log. So a root's
+    log answers for the root alone, and `awaited` asks every level beneath it —
+    naming each by the run ids from the root down.
+
+    Sabotage: read holds from the root's log alone in `_waiting_on`, and the
+    grandchild waits unlisted.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("lead")
+        child = spawned(root, "c1")
+        grandchild = spawned(root, "g1", under=child)
+
+        log_event(grandchild, "credential/needed", credential_hold(SESSION_HOLDER, "EXAMPLE_KEY"))
+
+        assert supervisor.awaited() == [("EXAMPLE_KEY", "lead/c1/g1")]
+        assert [row.awaiting for row in family_rows(root)] == [None, "EXAMPLE_KEY"]
+
+        log_event(grandchild, "credential/supplied", credential_hold(SESSION_HOLDER, "EXAMPLE_KEY"))
+        assert supervisor.awaited() == []
 
 
 # --- P5-06: the scheduler ----------------------------------------------------
@@ -2019,3 +2166,77 @@ async def test_a_deployment_can_bound_how_stale_an_appointment_may_be(
 
         assert await supervisor.wake_and_tick(now=long_after) == ["s"]
         assert "abandoned" in supervisor.roots, "the bound declined it, not the mechanism"
+
+
+# --- P11-08: a sub-agent's log is never mounted as a root --------------------
+
+
+def _stored_line(*chain: str) -> dict[str, bytes]:
+    """A root and a line of sub-agents under it, left on this daemon's disk by an
+    earlier process: `chain[0]` is the root, and each id after it was spawned by
+    the one before.
+
+    In the shape ph-rlm opens a child's log in — its spawner in `parentSession`,
+    `origin: "subagent"`, and the root's family, so the whole line is one
+    directory. Answers each file's bytes, for a test to say none of them moved.
+    """
+    sessions = resolve_roots().sessions_dir()
+    family = SessionHeader(id=chain[0], created_at=1).family
+    written: dict[str, bytes] = {}
+    for depth, session_id in enumerate(chain):
+        session = Session(
+            session_id,
+            header=SessionHeader(
+                id=session_id,
+                created_at=1,
+                family=family,
+                parent_session=chain[depth - 1] if depth else None,
+                origin="subagent" if depth else None,
+                delegation_depth=depth or None,
+            ),
+        )
+        # Something past the header, so a second writer has a log to resume.
+        log_event(session, "workspace/checkpoint", {"agentId": session_id, "tree": "t1"})
+        lines: list[JsonObject] = [{"type": "session/header", "header": session.header.to_wire()}]
+        lines += [event.to_wire() for event in session.events]
+        path = session_path(sessions, session_id, family)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{json.dumps(line)}\n" for line in lines), encoding="utf-8")
+        written[session_id] = path.read_bytes()
+    return written
+
+
+async def test_a_subagents_log_cannot_be_attached_as_a_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**P11-08's gate: a child's log has one writer, the mount of its root.**
+
+    `session/attach` reaches `Supervisor.start`, which mounted whatever id it was
+    handed — a sub-agent's included (defect 6). Its log is written by the mount of
+    the root that spawned it, which readmits it whenever that root comes up, so a
+    root of its own on the same file is a second writer: the one thing that can
+    corrupt a log that is now the child's only record.
+
+    Refused from the header, before anything is mounted or claimed — so every file
+    is byte for byte what its root left — and the refusal names the **root**, the
+    one id worth attaching instead, even for a grandchild whose spawner is itself
+    a sub-agent.
+
+    Sabotage: drop the header check in `_start`, and the child mounts as a root.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        written = _stored_line("lead", "helper", "nested")
+
+        for child in ("helper", "nested"):
+            with pytest.raises(NotARoot, match=rf"{child} is a sub-agent's log.*root lead;"):
+                await supervisor.start(child)
+
+        assert supervisor.roots == {}, "a child was mounted as a root"
+        sessions = resolve_roots().sessions_dir()
+        family = SessionHeader(id="lead", created_at=1).family
+        assert {
+            session_id: session_path(sessions, session_id, family).read_bytes()
+            for session_id in written
+        } == written, "a refused attach wrote to the family's logs"
+        # The root it names is the one attach that is still served.
+        assert (await supervisor.start("lead")).session.id == "lead"

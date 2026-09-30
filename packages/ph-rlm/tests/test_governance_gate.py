@@ -258,7 +258,7 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(
     everything and still cannot.
 
     The target is a **grandchild** — genuinely one generation too far. Two roots
-    would be siblings under the rule, and an empty roster refuses for the wrong
+    would be siblings under the rule, and a parent with no children refuses for the wrong
     reason, so neither would exercise the boundary.
 
     **The children are held on their first model call** (`gate`), so the family is

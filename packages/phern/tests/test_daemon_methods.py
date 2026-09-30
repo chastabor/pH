@@ -113,6 +113,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
         "session/readings",
         "commands/list",
         "screens/list",
+        "session/children",
         "tools/list",
         "skills/list",
         "presets/list",

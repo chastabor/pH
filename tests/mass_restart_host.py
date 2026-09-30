@@ -47,7 +47,7 @@ from ph.llm.types import (
     StreamChunk,
     ToolCallBlock,
 )
-from ph.seams.subagents import SubagentRequest, subagent_roster
+from ph.seams.subagents import SubagentRequest
 from ph.session.kinds import SHELL_COMMAND
 from ph.testing import simple_tool
 from ph.tools import ToolExecution, ToolExecutionInput
@@ -145,17 +145,22 @@ async def main(project: Path, children_on: str) -> None:
 
         def settled_into_place() -> bool:
             types = {event.type for event in root.events}
-            roster = subagent_roster(root)
+            # Each child as its own log tells it: nothing about them is in the root's.
+            children = ctx.require(SUBAGENTS).children(root.id)
             return (
                 {"tool/call", "approval/asked", "tool/effect", "shell/command"} <= types
                 and (project / "notes.md").exists()
-                and roster.get(first.id, {}).get("status") == "running"
-                and roster.get(second.id, {}).get("status") == "queued"
+                and first.id in children
+                and children[first.id].status == "running"
+                and second.id in children
+                and children[second.id].status == "queued"
             )
 
         with anyio.fail_after(30):
             while not settled_into_place():
                 await anyio.sleep(0.02)
+        # Every log, the children's among them: a restart finds a root's children by
+        # their own logs on disk (`children_of`), and the root's names none of them.
         for session in sessions.list():
             await sessions.flush(session)
         print(

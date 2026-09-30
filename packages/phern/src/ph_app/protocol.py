@@ -79,7 +79,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -142,6 +142,25 @@ asks that decision with `profile/ask` (answered `adopt`, `keep` or `later`), and
 `session/adopt` records a version for a held root's next start. A 0.4.x client
 reading a 5 daemon refuses the `modelKey` it does not know, since every model is
 `extra="forbid"`; restarting the daemon on the same release fixes that.
+
+**6 (0.6.0): each session owns its log** (Phase 11). A root's stream no longer
+carries anything about its children: `subagent/admitted`, `subagent/status` and
+`subagent/deleted` are in each child's own log, and `subagent/usage-attributed` is
+gone, so a client that folded its panel from the root's `session.event` frames sees
+an empty family. The family comes from the daemon instead, read from the children's
+own logs, through two doors with one payload: `session/children` answers it for a
+client that has just attached, and a `session.children` notice pushes it whole
+whenever a row moves. Each row (`ChildRow`) carries `runId`, `sessionId`,
+`parentId` — the root for a child, a child for a grandchild, since the list is the
+whole family, a parent before its own children — `name`, `model`, `grantedAccess`,
+`downgradeReason`, `status`, `cause`, `detail`, `deleted`, `deletedReason`,
+`awaiting` and `tokens`. A sub-agent's log is refused as a root (P11-08):
+`session/attach` or `session/new` naming one answers `not_a_root`, naming the root
+whose mount writes it, and `sessions/browse` rows carry `origin` (`subagent`), so a
+picker shows a child without offering it. A 0.5.x client refuses the `origin` it
+does not know and never asks for the family; restarting the daemon on the same
+release fixes that. Released with the session log's format 3, so each number moves
+once.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

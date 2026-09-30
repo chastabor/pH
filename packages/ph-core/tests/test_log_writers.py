@@ -312,17 +312,15 @@ def test_the_walk_follows_an_imported_constant() -> None:
     assert "ph_app.daemon.supervisor" in WALK.static["supervisor/retry"]
 
 
-@pytest.mark.parametrize(
-    "record",
-    ["subagent/admitted", "subagent/status", "subagent/deleted", "subagent/usage-attributed"],
-)
-def test_a_childs_roster_has_one_writer(record: str) -> None:
-    """S10 and after: a provider reports its child through `ph.seams.subagents`' doors
-    — `record_started` flushes a restart before the attempt it counts,
-    `record_settled` writes the child's log before its ending, `record_deleted`
-    lands a tombstone with its ending in one batch, and the service flushes an
-    admission before the child's gate opens — so no provider appends a roster record
-    of its own, and none can skip the rule the record carries.
+@pytest.mark.parametrize("record", ["subagent/admitted", "subagent/status", "subagent/deleted"])
+def test_a_childs_records_have_one_writer(record: str) -> None:
+    """S10 and after: a provider reports its child, in the child's own log, through
+    `ph.seams.subagents`' doors — `record_started` flushes a restart before the
+    attempt it counts, `record_ended` flushes an ending before the parent is handed
+    the result, `record_deleted` lands a tombstone with its ending in one batch, and
+    the service writes and flushes the admission before the child's gate opens — so no
+    provider appends one of these records of its own, and none can skip the rule it
+    carries.
 
     Sabotage: append any of these from `ph_rlm.subagents` again.
     """

@@ -32,10 +32,10 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, TypeAlias, get_args, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, get_args, runtime_checkable
 
 import anyio
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from ..agent.types import AgentDriver, AgentHandle
 from ..cordis import (
@@ -51,9 +51,10 @@ from ..cordis import (
     releasing,
     running,
 )
-from ..json import JsonValue, as_int, as_str, thaw_json
+from ..json import JsonValue, as_str, thaw_json
 from ..keys import (
     AGENTS,
+    GOALS,
     NAMED_PROFILES,
     SANDBOX,
     SESSION_PERSISTENCE,
@@ -64,14 +65,19 @@ from ..keys import (
     SYSTEM_PROMPT,
     TOOLS,
 )
+from ..persistence.opening import open_session, stored_session
+from ..persistence.protocol import SessionPersistence
 from ..session import (
     Session,
     SessionBatch,
     SessionEvent,
     SessionFoldCache,
-    SessionObserver,
+    SessionHeader,
+    child_session_id,
+    is_child_id,
     session_written,
 )
+from ..session.kinds import CREDENTIAL_WAIT, SESSION_HOLDER, hold_of
 from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
 from ..tools.definition import Deny, call_id_of
@@ -85,30 +91,32 @@ from ..tools.errors import (
 from ..tools.registry import ToolRestriction
 from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
-from .credentials import hold_for_credential
+from .credentials import hold_for_credential, missing_credential
 from .invariants import contribute_fold_cache
 from .models import ModelChoice, ModelChoiceError, choose
 from .skills import ORDER_SKILLS, SkillRestriction, SkillService
 from .subagent_profiles import narrowing
+from .token_meter import SPENDING_TYPES, event_tokens
 
 _LOG = log_writer(__name__)
 
 __all__ = [
     "ACCESS_LEVELS",
     "ADMITTED",
+    "CHILD_EVENT_TYPES",
     "DELETED",
     "INTERRUPTED_DETAIL",
     "SETTLED_STATUSES",
     "STATUS",
     "SUSPENDED_DETAIL",
     "UNRECOVERABLE_DETAIL",
-    "USAGE",
     "Access",
-    "AttributingProvider",
+    "Admission",
+    "ChildState",
     "FamilyRole",
-    "PlainStatus",
     "ReadmittingProvider",
     "RehydratableProvider",
+    "RevokingProvider",
     "SettledStatus",
     "SpawnGuard",
     "StatusCause",
@@ -128,25 +136,24 @@ __all__ = [
     "child_is_live",
     "child_model_key",
     "child_route",
+    "child_state",
+    "child_state_of",
     "default_child_name",
     "descendants",
     "downgrade_text",
     "exhausted_detail",
+    "extend_child_state",
     "family_reach",
-    "fold_subagent_event",
+    "fold_child_event",
+    "open_child_log",
     "parent_went_away",
     "reachable_family",
-    "reconcile_usage",
     "record_admitted",
     "record_deleted",
-    "record_settled",
+    "record_ended",
     "record_started",
-    "record_status",
+    "record_waiting",
     "restarts_since_progress",
-    "roster_name",
-    "roster_of",
-    "subagent_roster",
-    "usage_mirror",
 ]
 
 log = logging.getLogger("ph.seams.subagents")
@@ -159,13 +166,27 @@ list of other things last."""
 ADMITTED = "subagent/admitted"
 DELETED = "subagent/deleted"
 STATUS = "subagent/status"
-USAGE = "subagent/usage-attributed"
-"""The four durable records a delegation leaves in its *parent's* log.
+"""The three records a delegation leaves — in the **child's own** log (Phase 11).
+
+Each session owns its log: a child records what it was asked, each start, each
+wait, its ending and its deletion in its own log, and nothing about it is written
+to its parent's. A parent, the resume sweep, budgets, caps and front ends read a
+child's state from the child's log (`child_state`). The parent's copy this
+replaces was a second account of the child that every durability rule — the
+admission's flush (S2), a restart's (S10), the child's log before the parent's
+`done` (F1), the usage catch-up after a crash (L5) — existed to keep in step.
 
 Named here rather than spelled at each `append` site, because the fold below and
 every producer have to agree on them exactly."""
 
-_ROSTER_TYPES = frozenset({ADMITTED, DELETED, STATUS, USAGE})
+_ANSWER = "assistant/message"
+CHILD_EVENT_TYPES = frozenset(
+    {ADMITTED, DELETED, STATUS, *SPENDING_TYPES, CREDENTIAL_WAIT.opened, CREDENTIAL_WAIT.settled}
+)
+"""What a child's state is folded from (`fold_child_event`): the three records; the ones
+that spend tokens (`SPENDING_TYPES`) — an answer among them, which is also what forgives
+the ladder; and a credential hold's pair. Any other record leaves a child's state as it
+was, so a reader of a stored log parses only these, and a watcher skips the rest."""
 
 Access: TypeAlias = Literal["read", "write"]
 """What a child asks of the parent's workspace. `read` is the default (E4)."""
@@ -182,6 +203,14 @@ feeds is `_take_workspace`'s `access`, the difference between a child getting a
 writable checkout of the project and a read-only one."""
 
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "canceled"]
+"""A child's lifecycle, as its own log records it and its parent and the TUI panel
+read it.
+
+Lifecycle only. *Why* a child is live — woken to answer a question rather than
+still on its first task — is a separate `cause` on the same record, because a
+child's state folds status last-write-wins: a `rehydrated` member would have meant a
+woken child that is actively working reads as not-running to every consumer that
+branches on `"running"`."""
 
 UNRECOVERABLE_DETAIL = (
     "the harness stopped while this child was running, and no provider here can "
@@ -199,7 +228,7 @@ INTERRUPTED_DETAIL = "the harness stopped while this child was running; it did n
 """Why a child that was mid-turn at shutdown did not finish.
 
 A sentence rather than a code, because its reader is a person or a model looking
-at a roster and asking what happened to a child that never answered."""
+at a child's state and asking what happened to a child that never answered."""
 
 
 SUSPENDED_DETAIL = (
@@ -267,36 +296,37 @@ def child_model_key(request: SubagentRequest) -> str:
     return request.parent.options.model_key
 
 
-def child_is_live(row: Mapping[str, Any]) -> bool:
-    """Whether this roster row is still working.
+class _Standing(Protocol):
+    """What `child_is_live` reads: a child's state, or a front end's row of it."""
 
-    Deletion is a tombstone rather than a status — `fold_subagent_event` sets
+    @property
+    def deleted(self) -> bool: ...
+
+    @property
+    def status(self) -> SubagentStatus: ...
+
+
+def child_is_live(state: _Standing) -> bool:
+    """Whether this child is still working.
+
+    Deletion is a tombstone rather than a status — `fold_child_event` sets
     `deleted` and leaves `status` alone — so both have to be read, which is the
     other half a hand-written copy got wrong.
 
-    An unrecognized status counts as **live**, deliberately: a caller that
-    releases a parent on the strength of this must fail towards keeping one
-    alive. Getting it backwards abandons a running child; getting it this way
-    costs memory until the child settles.
+    A status the fold does not recognize leaves the one before it standing
+    (`fold_child_event`), and a child admitted with none yet reads `queued`, so
+    the failure direction is kept: a caller that releases a parent on the strength
+    of this must fail towards keeping one alive. Getting it backwards abandons a
+    running child; getting it this way costs memory until the child settles.
     """
-    if row.get("deleted"):
-        return False
-    return as_str(row.get("status"), "queued") not in SETTLED_STATUSES
+    return not state.deleted and state.status not in SETTLED_STATUSES
 
-
-"""A child's lifecycle, as the parent's roster and the TUI panel see it.
-
-Lifecycle only. *Why* a child is live — woken to answer a question rather than
-still on its first task — is a separate `cause` on the same record, because the
-roster folds status last-write-wins: a `rehydrated` member would have meant a
-woken child that is actively working reads as not-running to every consumer that
-branches on `"running"`."""
 
 StatusCause: TypeAlias = Literal["rehydrated", "resumed"]
 """Why a child entered its current status, when it is not simply "it started".
 
 `resumed` is a child put back on its feet after its harness stopped mid-turn —
-the ladder below, and the reason a reader of the roster can tell that run from a
+the ladder below, and the reason a reader of its log can tell that run from a
 first attempt."""
 
 DowngradeReason: TypeAlias = Literal["workspace-not-mounted"]
@@ -424,7 +454,7 @@ class SubagentRequest:
     this seam; `_delegating_boundary` resolves it.
     """
     name: str | None = None
-    """A stable label for the roster. Defaulted by the provider when omitted."""
+    """A stable label among its siblings. Defaulted by the provider when omitted."""
     provider: str | None = None
     model: str | None = None
     """Exact selector. A provider must not silently fall back to another model —
@@ -481,8 +511,8 @@ class SubagentRequest:
     """The tool call that asked for this child: a `task` call, or the dispatch of an
     `rlm.run` inside a cell (S2).
 
-    Recorded on the admission so the call can be answered from the roster after a
-    restart (`admitted_by`) — the admission is on disk before the child runs, so a
+    Recorded on the admission so the call can be answered from the child's own log
+    after a restart (`admitted_by`) — the admission is on disk before the child runs, so a
     call with no admission started no child, and one with an admission started this
     one. Without it, a delegating call cut short by a crash could only be answered
     "unknown", and the model delegated the same task again beside the child the
@@ -527,7 +557,7 @@ class SubagentRun(WireForm):
     The fields are the admission facts a parent can act on immediately: what to
     call it, where its log is, and which guarantees it actually got. `granted`
     may differ from what was asked when the available tier cannot honor the
-    request, and it is the value the roster and the child's own prompt report.
+    request, and it is the value its admission and the child's own prompt report.
     """
 
     id: str
@@ -545,10 +575,11 @@ class SubagentRun(WireForm):
     """Which `ctx.subagents` provider owns this run, stamped by the service.
 
     Not `provider` — `SubagentRequest.provider` is the *LLM* provider, and one
-    word for both is how `rehydrate` looked up the wrong one. Not on the wire
-    either: the provider appends the admission from inside its own `start()`,
-    before the service could stamp this, so a serialized copy would read `""` in
-    every log. It is a routing stamp, not a fact about the child."""
+    word for both is how `rehydrate` looked up the wrong one. Not in `to_wire`,
+    which is the handle a caller is given; the service writes it onto the
+    admission (`record_admitted`), because readmission after a restart has to find
+    the provider that owns the child. It was missing from the log once, and a
+    readmit then worked only while exactly one provider was mounted."""
     downgrade_reason: DowngradeReason | None = None
     """Why `granted` is narrower than `requested`, as a code rather than prose.
 
@@ -585,17 +616,17 @@ class SubagentRun(WireForm):
     A provider starts the drive before it hands the run back, and only then can the
     seam bound it (`_enforce` needs `scope`), so without this a child ran ahead of
     its own ceiling. Set once the child is bounded; for a readmitted child, once its
-    own children have been swept as well (L5b), so the roster its first prompt
-    describes is the reconciled one. A child released before this is set — refused,
+    own children have been swept as well (L5b), so the children its first prompt
+    describes are the settled ones. A child released before this is set — refused,
     or its admission unwritten — has it set by the release, and its drive, let
     through, finds itself released and runs nothing."""
 
     def to_wire(self) -> dict[str, JsonValue]:
-        """The admission facts, for an event or a roster row.
+        """The admission facts, for a caller holding the handle.
 
-        No `status`: a child's state is the fold over `subagent/status`, and a
-        second copy on the handle would be a value frozen at whatever the last
-        in-process update left."""
+        No `status`: a child's state is the fold over its own `subagent/status`
+        records, and a second copy on the handle would be a value frozen at whatever
+        the last in-process update left."""
         wire: dict[str, JsonValue] = {
             "runId": self.id,
             "name": self.name,
@@ -610,252 +641,235 @@ class SubagentRun(WireForm):
             wire["downgradeReason"] = self.downgrade_reason
         return wire
 
-    @classmethod
-    def of(cls, row: Mapping[str, Any]) -> SubagentRun:
-        """The admission facts back off a roster row — `to_wire`, read back.
 
-        For a caller that answers from the log what the live path answers from the
-        handle: a delegating tool's `reconcile` builds the value its `execute` would
-        have, from one reader of these keys rather than its own copy of them.
-        """
-        return cls(
-            id=as_str(row.get("runId")),
-            name=as_str(row.get("name")),
-            session_id=as_str(row.get("sessionId")),
-            parent_id=as_str(row.get("parentId")),
-            model_provider=as_str(row.get("modelProvider")),
-            model=as_str(row.get("model")),
-            requested_access=ACCESS_LEVELS.get(as_str(row.get("requestedAccess")), "read"),
-            granted_access=ACCESS_LEVELS.get(as_str(row.get("grantedAccess")), "read"),
-            downgrade_reason=_DOWNGRADE_REASONS.get(as_str(row.get("downgradeReason"))),
-        )
+class Admission(WireModel):
+    """A child's `subagent/admitted` record: the run, the task, **the narrowing**, and
+    what the seam stamps beside them.
 
+    One model for the writer and every reader — `ChildState`, the readmission that
+    rebuilds a request from it — so a key one side spells and the other looks for
+    cannot come apart. `CodeDispatchRef` states the same argument for the same
+    reason.
 
-def admission_payload(run: SubagentRun, request: SubagentRequest) -> dict[str, JsonValue]:
-    """The `subagent/admitted` record: the run, the task, and **the narrowing**.
-
-    One function because there are now two readers of these keys and they must not
-    drift — the writer is a provider, and `_readmit_children` reconstructs a request
-    from what it wrote. `CodeDispatchRef` states the same argument for the same
-    reason: a hand-written payload on one side and a hand-written reader on the
-    other unpair silently.
+    **No session id and no parent id**: the record is in the child's own log, whose
+    id is the one and whose header names the other (`delegating_parent`).
 
     **The narrowing is logged because a restart re-derives the ceiling from this
-    record and nothing else.** `preset`, `skills` and `tools` are what
-    `grant_for` resolves a child's reach from, and an admission that recorded
-    only the run would come back after a restart with the parent's *whole* set —
-    a child quietly wider than the one that was admitted, which is §6.5 broken by
-    a power cut. Absent keys mean "inherited everything", which is what `None`
-    already means on the request, so a log written before this stays readable and
-    a child admitted then is refused a readmit rather than widened.
+    record and nothing else.** `preset`, `skills` and `tools` are what `grant_for`
+    resolves a child's reach from, and an admission that recorded only the run would
+    come back after a restart with the parent's *whole* set — a child quietly wider
+    than the one that was admitted, which is §6.5 broken by a power cut. `None`
+    means "inherited everything", as it does on the request.
     """
-    payload: dict[str, JsonValue] = {**run.to_wire(), "prompt": request.prompt.strip()}
-    if request.preset is not None:
-        payload["preset"] = request.preset
-    if request.profile is not None:
-        payload["profile"] = request.profile
-    if request.model_key is not None:
-        # Beside the route `run.to_wire()` carries: the key a spawn named and what it
-        # resolved to, for the audit (item 8).
-        payload["modelKey"] = request.model_key
-    if request.skills is not None:
-        payload["skills"] = list(request.skills)
-    if request.tools is not None:
-        payload["tools"] = list(request.tools)
-    if request.paths is not None:
-        payload["paths"] = list(request.paths)
-    if request.reasoning_effort is not None:
-        payload["reasoningEffort"] = request.reasoning_effort
-    if request.call_id is not None:
-        payload["callId"] = request.call_id
-    return payload
+
+    run_id: str
+    name: str = ""
+    owner: str = ""
+    """The provider row that runs it, so a readmission asks that one (P11-04)."""
+    prompt: str = ""
+    model_provider: str = ""
+    model: str = ""
+    model_key: str | None = None
+    """The key a spawn named beside the route it resolved to, for the audit (item 8)."""
+    reasoning_effort: str | None = None
+    requested_access: Access = "read"
+    granted_access: Access = "read"
+    downgrade_reason: DowngradeReason | None = None
+    preset: str | None = None
+    profile: str | None = None
+    skills: tuple[str, ...] | None = None
+    tools: tuple[str, ...] | None = None
+    paths: tuple[str, ...] | None = None
+    call_id: str | None = None
+    """The call that asked for it, which a cut-short call is answered by (S2)."""
+    parent_turn: int | None = None
+    """The seq of the parent's latest `turn/start` at admission: the turn a spawn cap
+    counts it in."""
+    goal_id: str | None = None
+    """The parent's goal open at admission: the one its spend is charged to."""
 
 
-# -------------------------------------------------- a child's status, recorded --
+def admission_payload(
+    run: SubagentRun,
+    request: SubagentRequest,
+    *,
+    owner: str = "",
+    parent_turn: int | None = None,
+    goal_id: str | None = None,
+) -> dict[str, JsonValue]:
+    """The `subagent/admitted` payload for `run`, admitted on `request` — an `Admission`,
+    in the log's spelling."""
+    admission = Admission(
+        run_id=run.id,
+        name=run.name,
+        owner=owner,
+        prompt=request.prompt.strip(),
+        model_provider=run.model_provider,
+        model=run.model,
+        model_key=request.model_key,
+        reasoning_effort=request.reasoning_effort,
+        requested_access=run.requested_access,
+        granted_access=run.granted_access,
+        downgrade_reason=run.downgrade_reason,
+        preset=request.preset,
+        profile=request.profile,
+        skills=request.skills,
+        tools=request.tools,
+        paths=request.paths,
+        call_id=request.call_id,
+        parent_turn=parent_turn,
+        goal_id=goal_id,
+    )
+    # Lists rather than the model's tuples: the log's own spelling of a sequence.
+    thawed = thaw_json(admission.to_wire())
+    assert isinstance(thawed, dict)
+    return dict[str, JsonValue](thawed)
 
 
-PlainStatus: TypeAlias = Literal["queued", "error"]
-"""A status with no rule about when it reaches disk — what `record_status` takes.
-
-`running` goes through `record_started`, `done` through `record_settled` and
-`canceled` through `record_deleted`, so no caller can write any of them without its
-rule. `error` is plain as well as settled: the seam's own give-up has no drive, and
-no child log, behind it."""
+# ------------------------------------------- a child's records, in its own log --
 
 
-def record_status(parent: Session, run_id: str, status: PlainStatus, /, **extra: JsonValue) -> None:
-    """A child's status, in its parent's log — **the one module that writes
-    `subagent/status`**, and this door for the statuses no rule is attached to.
+def record_admitted(
+    ctx: Context,
+    child: Session,
+    run: SubagentRun,
+    request: SubagentRequest,
+    *,
+    owner: str,
+) -> SessionEvent:
+    """A child's admission, in its own log — the record a resume finds it by (S2).
 
-    Every status the roster folds comes through here: a provider's as its child
-    moves, and the seam's own when it gives up on one. One writer, so the shape the
-    fold reads has one spelling, and so the writers-of-record table can hold a
-    provider to it — a provider that appends a status of its own fails
-    `test_log_writers`, which is what keeps the doors below — `record_started`,
-    `record_settled`, `record_deleted` — from being optional.
-
-    No barrier: `queued`, or the seam's own `error` for a child it gives up on, rides
-    the parent's next flush like any record. The two statuses whose place on
-    disk decides something have their own doors — `record_started` for a restart the
-    ladder counts, `record_settled` for an ending the child's own log must back.
+    Written by the seam (`SubagentService._admit`), not by a provider: the seam
+    holds the resolved request and the provider's run both, and it is the one that
+    knows `owner`. Beside the payload it stamps what a reader of the child needs
+    from its parent's side *at this moment*: the parent's latest `turn/start`
+    (`parentTurn`, which the spawn caps count a turn by) and the parent's open goal
+    (`goalId`, which the child's spend is charged to). Made durable by the seam
+    before the child's gate opens; a child whose admission cannot be written is
+    refused.
     """
-    _append_status(parent, run_id, status, **extra)
+    parent = request.parent.session
+    turn = parent.latest("turn/start") if parent is not None else None
+    goals = ctx.get(GOALS)
+    goal = goals.open(parent) if goals is not None and parent is not None else None
+    payload = admission_payload(
+        run,
+        request,
+        owner=owner,
+        parent_turn=turn.seq if turn is not None else None,
+        goal_id=goal.goal.id if goal is not None else None,
+    )
+    return _LOG.append(child, ADMITTED, payload)
+
+
+def record_waiting(child: Session, /, **extra: JsonValue) -> None:
+    """`queued`, for a child that is waiting: for a slot (`slots`), or stopped with
+    its mount (`SUSPENDED_DETAIL`).
+
+    No barrier: a wait decides nothing a crash could get wrong. The statuses whose
+    place on disk does decide something have their own doors — `record_started` for
+    a restart the ladder counts, `record_ended` for an ending its parent is about to
+    be told, `record_deleted` for a revocation.
+
+    **The one module that writes `subagent/status`**, so the shape the fold reads
+    has one spelling, and so the writers-of-record table can hold a provider to it:
+    a provider that appends a status of its own fails `test_log_writers`, which is
+    what keeps these doors from being optional.
+    """
+    _append_status(child, "queued", **extra)
 
 
 def _append_status(
-    log: Session | SessionBatch, run_id: str, status: SubagentStatus, /, **extra: JsonValue
+    log: Session | SessionBatch, status: SubagentStatus, /, **extra: JsonValue
 ) -> SessionEvent:
-    return _LOG.append(log, STATUS, {"runId": run_id, "status": status, **extra})
+    return _LOG.append(log, STATUS, {"status": status, **extra})
 
 
 async def record_started(
-    ctx: Context, parent: Session, run_id: str, *, cause: StatusCause | None = None
+    ctx: Context, child: Session, /, *, cause: StatusCause | None = None
 ) -> SessionEvent:
-    """`running`, for a child about to take its turn — **on disk first when it is a
-    restart** (S10). The caller starts the attempt after this returns.
+    """`running`, for a child about to take its turn — **on its own disk first when it
+    is a restart** (S10). The caller starts the attempt after this returns.
 
     The ladder counts `running` records with `cause: "resumed"`
     (`restarts_since_progress`), and a restart that reached only memory before the
     child took the daemon down again was never counted: a crash loop never advanced
     the count on disk, so `CHILD_RETRY_LIMIT` never tripped. A first start counts
-    nothing, and neither does a woken (`rehydrated`) one, so those ride the parent's
-    next flush.
+    nothing, and neither does a woken (`rehydrated`) one, so those ride the child's
+    next flush — its first model request, which is before anything they describe.
 
-    Best effort: a parent whose log cannot be written has bigger problems than this
-    count, and refusing the child its turn would not write the record either.
+    Best effort: a log that cannot be written has bigger problems than this count,
+    and refusing the child its turn would not write the record either.
     """
-    event = _append_status(parent, run_id, "running", **({} if cause is None else {"cause": cause}))
+    event = _append_status(child, "running", **({} if cause is None else {"cause": cause}))
     if cause == "resumed":
-        await session_written(ctx, parent)
+        await session_written(ctx, child)
     return event
 
 
-async def record_settled(
-    ctx: Context,
-    parent: Session,
-    run_id: str,
-    status: SettledStatus,
-    /,
-    *,
-    child: Session | None,
-    **extra: JsonValue,
+async def record_ended(
+    ctx: Context, child: Session, status: SettledStatus, /, **extra: JsonValue
 ) -> SessionEvent:
-    """A child's ending, in its parent's log — **after the child's own account of it
-    is on disk** (F1).
+    """A child's ending, in its own log — **on its disk before the caller hands the
+    result to the parent** (F1).
 
     Nothing else writes the child's log at that point: its last barrier was *before*
-    its last model request, and a parent's flush walks ancestors, never children. So
-    a parent could read "done, here is a preview" while the child's log ended before
-    the answer, and repair called the child interrupted on the next open. `child` is
-    `None` for a child with no log of its own. Best effort, for `record_started`'s
-    reason: an ending that cannot be backed is still the ending.
+    its last model request. A parent told "done, here is the answer" by a child whose
+    log ended before the answer is one repair would call interrupted on the next
+    open, and readmit to do the work again. The caller delivers the result after
+    this returns. Best effort, for `record_started`'s reason: an ending that cannot
+    be written is still the ending.
     """
-    if child is not None:
-        await session_written(ctx, child)
-    return _append_status(parent, run_id, status, **extra)
+    event = _append_status(child, status, **extra)
+    await session_written(ctx, child)
+    return event
 
 
-def record_admitted(parent: Session, run: SubagentRun, request: SubagentRequest) -> SessionEvent:
-    """A child's admission, in its parent's log — the record a resume finds it by (S2).
-
-    Appended by the provider once its child exists and can be named, so a child that
-    could not be built leaves no phantom row. `SubagentService.start` makes it durable
-    before the child's gate opens, and refuses the child when it cannot; the payload
-    is `admission_payload`'s, which readmission reads back.
-    """
-    return _LOG.append(parent, ADMITTED, admission_payload(run, request))
-
-
-def record_deleted(parent: Session, run_id: str, reason: str, *, ended: bool) -> None:
+async def record_deleted(ctx: Context, child: Session, /, reason: str) -> None:
     """A child's tombstone — with the `canceled` that ends it, for a child that had not
-    ended — **in one batch** (S14): apart, a flush between them left a child
-    `canceled` and not deleted. A child that already settled is not settled again: a
-    `canceled` over its `done` turned a finished child into a revoked one."""
-    with parent.batch() as batch:
+    ended — **in one batch** (S14), in its own log, and on its disk before the caller
+    releases anything.
+
+    Apart, a flush between them left a child `canceled` and not deleted. A child
+    that already settled is not settled again: a `canceled` over its `done` turned a
+    finished child into a revoked one. Whether it ended is read from its own log,
+    not from a caller's flag, so the rule has one reader — through the seam's cached
+    fold when there is one, since a long log refolded per revocation is a parent's
+    teardown paying for every child it had.
+    """
+    service = ctx.get(SUBAGENTS)
+    state = service.state(child.id) if service is not None else None
+    ended = (state if state is not None else child_state(child)).status in SETTLED_STATUSES
+    with child.batch() as batch:
         if not ended:
-            _append_status(batch, run_id, "canceled", reason=reason)
-        _LOG.append(batch, DELETED, {"runId": run_id, "reason": reason})
+            _append_status(batch, "canceled", reason=reason)
+        _LOG.append(batch, DELETED, {"reason": reason})
+    await session_written(ctx, child)
 
 
-_UsageOrigin: TypeAlias = Literal["spawn_task", "reconciled"]
-"""How an answer came to be charged: as the child made it, or by the resume's
-reconcile from the child's stored log (L5)."""
+async def open_child_log(
+    ctx: Context, parent: Session, run_id: str, /, **meta: JsonValue
+) -> Session:
+    """A child's own log, opened — resumed when one survived, else created — named and
+    filed the way its parent finds it by (Phase 11).
 
-
-def _answer_usage(event: SessionEvent) -> Mapping[str, object] | None:
-    """What an answer spent: a child's `assistant/message` that reports usage, or `None`.
-
-    The one test of "this is an answer", for the live mirror and the resume reconcile
-    both, so the two cannot count different things. `Mapping`, not `dict`: a committed
-    event's data is frozen into `MappingProxyType`, which is a Mapping and is *not* a
-    dict instance, so an `isinstance(..., dict)` guard silently attributed nothing.
+    The id is its parent's with its run's after (`child_session_id`), and the header
+    names the parent and says it is a sub-agent, with its parent's family, since the
+    store files a child with its parent only while the parent is live in it. Every
+    provider opens its children here, so none can name one a restart would not find;
+    `meta` adds what a provider says of its own (`agentPreset`).
     """
-    if event.type != "assistant/message":
-        return None
-    usage = event.data.get("usage")
-    return usage if isinstance(usage, Mapping) else None
-
-
-def _record_usage(
-    log: Session | SessionBatch,
-    run_id: str,
-    seq: int,
-    usage: Mapping[str, object],
-    origin: _UsageOrigin = "spawn_task",
-) -> SessionEvent:
-    """One child answer charged to its parent — the one writer of `USAGE`, for the live
-    mirror and the resume reconcile alike."""
-    return _LOG.append(
-        log,
-        USAGE,
-        {"runId": run_id, "targetSeq": seq, "childUsage": thaw_json(usage), "origin": origin},
+    return await open_session(
+        ctx,
+        child_session_id(parent.id, run_id),
+        meta={
+            "parentSession": parent.id,
+            "family": parent.header.family,
+            "origin": "subagent",
+            "delegationDepth": (parent.header.delegation_depth or 0) + 1,
+            **meta,
+        },
     )
-
-
-def usage_mirror(parent: Session, run_id: str) -> SessionObserver:
-    """An observer for a child's session that charges each answer to `parent` as the
-    child makes it. Holds the two names it needs and nothing else."""
-
-    def observer(_source: Session, event: SessionEvent) -> None:
-        usage = _answer_usage(event)
-        if usage is not None:
-            _record_usage(parent, run_id, event.seq, usage)
-
-    return observer
-
-
-async def reconcile_usage(
-    ctx: Context, parent: Session, run_id: str, *, session_id: str, through: int
-) -> int:
-    """Charge the answers the child's *stored* log holds past `through` (L5). Returns
-    how many were added.
-
-    The mirror charges each answer as the child makes it, into the parent's log in
-    memory, while the child's own log reaches disk before each request. A crash
-    between the two left the answer on the child's disk and missing from the
-    parent's, so the goal budget did not count it and the ladder read the restart as
-    fruitless. Read from the store, which is what the child's log holds after a
-    crash, and written in one batch, so the parent's account moves all at once or not
-    at all. Marked `reconciled` so a reader can tell them from the live ones.
-    """
-    persistence = ctx.get(SESSION_PERSISTENCE)
-    if persistence is None:
-        return 0
-
-    def stored() -> list[SessionEvent]:
-        return persistence.read(session_id)[1] if persistence.exists(session_id) else []
-
-    events = await anyio.to_thread.run_sync(stored)
-    missing = [
-        (event.seq, usage)
-        for event in events
-        if event.seq > through and (usage := _answer_usage(event)) is not None
-    ]
-    if missing:
-        with parent.batch() as batch:
-            for seq, usage in missing:
-                _record_usage(batch, run_id, seq, usage, "reconciled")
-    return len(missing)
 
 
 def parent_went_away(name: str) -> SubagentSpawnError:
@@ -865,22 +879,21 @@ def parent_went_away(name: str) -> SubagentSpawnError:
     )
 
 
-def admitted_by(
-    roster: Mapping[str, Mapping[str, Any]], call: SessionEvent
-) -> Mapping[str, Any] | None:
-    """The roster row of the child a call record admitted, or `None` if it admitted none.
+def admitted_by(children: Mapping[str, ChildState], call: SessionEvent) -> ChildState | None:
+    """The child a call record admitted, or `None` if it admitted none.
 
     For a delegating tool's `reconcile` (S2): `call` is the record a crash left
     unanswered — a `tool/call`, or a Code Mode dispatch's
-    `tool/code-dispatch-start` — and `roster` is the parent's. The admission reaches
-    disk before the child takes a step (`SubagentService.start`), so no row means no
-    child ran, and the call is safe to make again.
+    `tool/code-dispatch-start` — and `children` are the parent's, read from their
+    own logs. The admission reaches the child's disk before the child takes a step
+    (`SubagentService._admit`), so no child means none ran, and the call is safe to
+    make again.
     """
     call_id = call_id_of(call)
     if not call_id:
         return None
     # One at most: a readmit writes no second admission.
-    return next((row for row in roster.values() if row.get("callId") == call_id), None)
+    return next((state for state in children.values() if state.call_id == call_id), None)
 
 
 @runtime_checkable
@@ -888,10 +901,10 @@ class ReadmittingProvider(Protocol):
     """A provider that can take an admitted child back from the log alone (P5-04).
 
     A daemon that stopped between a child's admission and its first turn left the
-    work described in the parent's log and running nowhere. `readmit` is how the
-    next daemon puts it back: the run id and the session id come from the record,
-    so the child keeps its identity, its name and its place in the roster rather
-    than arriving as a second child the parent never asked for.
+    work described in the child's own log and running nowhere. `readmit` is how the
+    next daemon puts it back: the run id and the session id come from that log, so
+    the child keeps its identity, its name and its log rather than arriving as a
+    second child the parent never asked for.
 
     Its own Protocol, and not a method on `SubagentProvider`, for
     `RehydratableProvider`'s reason exactly — resuming an *un-run* child is not
@@ -909,28 +922,18 @@ class ReadmittingProvider(Protocol):
 
 
 @runtime_checkable
-class AttributingProvider(Protocol):
-    """A provider that charges a child's answers to its parent's log, and can bring
-    that account level with the child's own log after a crash (L5).
+class RevokingProvider(Protocol):
+    """A provider that can stop a child it is running and tombstone it (Phase 11).
 
-    Each answer is attributed in the parent's log (`USAGE`) as the child makes it,
-    in memory, while the child's log reaches disk before each of its requests. A
-    crash in between keeps answers in the child's log that the parent's never
-    counted, and two decisions read that count: a goal's token budget, and the
-    ladder, which treats an answer as progress (`restarts_since_progress`). So the
-    resume sweep asks the provider to append what is missing before it decides.
-
-    `through` is the child's seq of the latest answer the parent has on record
-    (`lastAnswerSeq`, `-1` for none); only answers past it are appended, so asking
-    twice appends nothing twice. Returns how many were appended.
-
-    Its own Protocol for `ReadmittingProvider`'s reason: not every way of running a
-    child attributes its usage upward.
+    `SubagentService.delete` is the door a revocation goes through: a child this
+    process is running is its provider's to stop — its job, its agent — and the
+    provider writes the tombstone into the child's log as it lets go
+    (`record_deleted`). A child nothing is running here, settled by an earlier
+    process, is tombstoned by the seam itself. `False` means the provider holds no
+    such child.
     """
 
-    async def reconcile_answers(
-        self, parent: Session, run_id: str, *, session_id: str, through: int
-    ) -> int: ...
+    async def revoke(self, run_id: str, reason: str) -> bool: ...
 
 
 @runtime_checkable
@@ -958,18 +961,6 @@ class SubagentProvider(Protocol):
     """
 
     async def start(self, request: SubagentRequest) -> SubagentRun: ...
-
-
-def _optional(row: Mapping[str, Any], key: str) -> str | None:
-    """One optional string off a roster row: the value, or `None` for absent.
-
-    `None` and not `""`, because these feed `SubagentRequest`'s optional fields
-    where the two mean different things — absent inherits from the parent, empty
-    would be a name of no characters. Six fields on the readmission path spelled
-    this out as `as_str(row.get(k)) or None`, which is one typo'd key away from
-    reading as a deliberate `None`.
-    """
-    return as_str(row.get(key)) or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1001,6 +992,16 @@ class _SpawnGuard:
     by: Running
 
 
+@dataclass(frozen=True, slots=True)
+class _Readmitter:
+    """The provider a child's admission names, able to readmit it: its name, its row,
+    and itself as a `ReadmittingProvider` — asked once per child, and carried."""
+
+    name: str
+    by: Running
+    provider: ReadmittingProvider
+
+
 @dataclass(slots=True)
 class SubagentService:
     """The service published as `ctx.subagents`.
@@ -1014,15 +1015,24 @@ class SubagentService:
     _providers: dict[str, _Registered] = field(default_factory=dict)
     _runs: dict[str, SubagentRun] = field(default_factory=dict)
     _guards: list[_SpawnGuard] = field(default_factory=list)
-    _rosters: SessionFoldCache[dict[str, dict[str, Any]]] = field(
-        default_factory=lambda: SessionFoldCache(subagent_roster)
+    _folds: SessionFoldCache[ChildState] = field(
+        default_factory=lambda: SessionFoldCache(child_state, extend=extend_child_state)
     )
-    """The roster fold, cached per session. The prompt, the model's roster tool
-    and every name lookup ask for the same fold several times per model step.
+    """Each live child's state, folded from its own log and cached per session. The
+    prompt, the model's roster tool, the spawn caps and every name lookup read it
+    several times per model step.
 
-    The *fold* stays a pure function of a log — `subagent_roster` has to keep
-    working on a fork slice and on a stored log, which is what a cache attached
-    to `Session` could not have done."""
+    The *fold* stays a pure function of one log — `child_state_of` has to work on a
+    stored log too — so drift is checked per child (I6), with no key spanning logs."""
+    _live: dict[str, set[str]] = field(default_factory=dict)
+    """The live children of each parent, by session id: kept as sessions are
+    published and let go (`_published`, `_let_go`), since a child's parent link
+    never changes. A parent's children cost its own children, not every session the
+    mount holds."""
+    _stored: dict[str, dict[str, ChildState]] = field(default_factory=dict)
+    """Children this process is not running, by parent id and then session id. A
+    parent is here once its stored children were read (`load_children`), and a child
+    of it that is let go leaves its last state here (`_let_go`)."""
 
     def register_provider(
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
@@ -1331,31 +1341,52 @@ class SubagentService:
             ),
         )
 
-    def _settle_unadmitted(
-        self,
-        session: Session | None,
-        run_id: str,
-        detail: str,
-        *,
-        status: PlainStatus = "error",
-        session_id: JsonValue = None,
-    ) -> None:
-        """Write the terminal status for a child the seam is giving up on.
+    async def _end_child(self, session_id: str, detail: str) -> None:
+        """End, in its own log, a child the seam is giving up on.
 
         **A child with an admission and no ending is one nothing can release.**
-        The provider has already logged `subagent/admitted`, so the roster has a
-        row; a fold reads it as live, `child_is_live` stays true, and the parent
-        is held out of passivation by a child that no longer exists (K3, K4).
-        The row has to *end*, and only the log can end it.
+        Its log says it was admitted, so `child_is_live` reads it as working, and
+        its parent is held out of passivation by a child that no longer exists
+        (K3, K4). It has to *end*, and only its log can end it.
 
-        One writer, because `resume_children` was already writing this row inline
-        and the two had already disagreed: it carries `sessionId` so a person
-        looking for the work can still find the child's transcript, and the K3/K4
-        rows were dropping it — the same fact under two shapes in one log.
+        Best effort, and never raised: this is how the seam gives up on a child —
+        refused, unresumable, spent — and a root coming back must not be held
+        hostage by a log it could not write. A child whose spawn was refused before
+        it had a log leaves nothing to end.
         """
-        if session is None:
+        try:
+            await self._write_child(
+                session_id, lambda child: record_ended(self.ctx, child, "error", detail=detail)
+            )
+        except Exception:
+            log.exception("ph.seams.subagents: %s could not be ended in its own log", session_id)
+
+    async def _write_child(
+        self, session_id: str, write: Callable[[Session], Awaitable[object]]
+    ) -> None:
+        """Write to a child's own log, whether or not this process is running it.
+
+        A live child's session is written as it is. One this process does not hold —
+        settled by an earlier process, or not readmitted yet — is claimed and loaded
+        without being resumed (`stored_session`), written, flushed, and let go: the
+        sweep ends a child it will not readmit this way, and records a hold on one
+        waiting for a credential, and neither is a reason to rebuild its runtime.
+        Nothing to write to — no live session, and none stored — is a no-op.
+        """
+        sessions = self.ctx.require(SESSIONS)
+        live = sessions.get(session_id)
+        if live is not None:
+            await write(live)
             return
-        record_status(session, run_id, status, detail=detail, sessionId=session_id)
+        store = self.ctx.get(SESSION_PERSISTENCE)
+        if store is None or not store.exists(session_id):
+            return
+        child = await stored_session(self.ctx, session_id)
+        try:
+            await write(child)
+            await session_written(self.ctx, child)
+        finally:
+            sessions.dispose(session_id)
 
     async def _abandon(self, run: SubagentRun) -> None:
         """Release a child this seam has decided not to admit (K3).
@@ -1378,9 +1409,7 @@ class SubagentService:
         grant: Grant,
         held: tuple[tuple[str, ...], tuple[str, ...]],
         boundary: Context,
-        session: Session | None,
-        session_id: JsonValue = None,
-        written: bool = False,
+        request: SubagentRequest | None = None,
     ) -> SubagentRun:
         """Bind a child a provider has already started, or release it (K3, L6).
 
@@ -1394,20 +1423,19 @@ class SubagentService:
         `start` had all three and `_readmit_one` had none of them: it called
         `_enforce` bare, so a `check_grant` refusal after a profile edit left the
         child running unbounded and undisposed while `resume_children`'s
-        `except` closed its roster row — the K3 shape arriving through the path
+        `except` ended its record — the K3 shape arriving through the path
         K4 had already been written for. Two spawners with one admission each
         was the defect; one admission both call is the fix.
 
-        `session_id` because a readmitted child has a transcript somebody may
-        want to read, and the ending is the only place left to name it.
-
-        `written` is `start`'s: the provider has just appended the admission, and it
-        is the one record a resume finds a child by (S2). It rode the parent's log in
-        memory while the child ran — a child's flushes never write its parent, since
-        a subagent inherits no prefix — so a crash mid-run left a child with a log, a
-        tree and a branch that no roster named. So it reaches disk before the gate
-        opens, fail-closed as a durable intent is: one that cannot be written is a
-        refusal like the ceiling's. A readmit writes no admission, and asks nothing.
+        `request` is `start`'s, and with it **the seam writes the child's admission,
+        into the child's own log** (S2, Phase 11) — the one record a resume finds a
+        child by. The seam rather than the provider, because it holds both halves:
+        the resolved request and the provider's run, and `owner`, which is how a
+        readmission finds the provider again. It reaches the child's disk before the
+        gate opens, fail-closed as a durable intent is: one that cannot be written is
+        a refusal like the ceiling's. A provider that opened no log for its child is
+        refused too, since that log is the child's only record. A readmit writes no
+        admission — the one it was rebuilt from is already there — and passes none.
 
         The caller opens the child's gate (`SubagentRun.ready`) once this returns:
         `start` at once, a readmission after its own children are swept.
@@ -1416,21 +1444,42 @@ class SubagentService:
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider.
         run.owner = owner
+        child = self.ctx.require(SESSIONS).get(run.session_id)
+        # A parent with no log of its own has nothing a child could be found by, and
+        # nothing is recorded for its child: the one case a spawn is not durable.
+        parent = request.parent.session if request is not None else None
         try:
+            if request is not None and parent is not None:
+                if child is None or not _names_parent(child, parent.id):
+                    # Its log is how its parent finds it after a restart
+                    # (`SessionArchive.children_of`), so a child with no log, or one
+                    # that does not name its parent, is one nothing could bring back.
+                    raise SubagentSpawnError(
+                        f'subagent {run.name}: the "{owner}" provider opened no log for it '
+                        "that names its parent, and a child's own log is its only record, "
+                        "so it was not started"
+                    )
+                # Before the ceiling: a child refused below reads as admitted and then
+                # ended, rather than as a log with no account of what it was.
+                record_admitted(self.ctx, child, run, request, owner=owner)
             try:
                 self._enforce(grant, run, held, boundary)
             except InactiveScopeError as gone:
                 # The ceiling registers on the child's scope, which a parent that went
                 # away took with it: the same refusal a provider's own builds get.
                 raise parent_went_away(run.name) from gone
-            if written and session is not None and not await session_written(self.ctx, session):
+            if (
+                parent is not None
+                and child is not None
+                and not await session_written(self.ctx, child)
+            ):
                 raise SubagentSpawnError(
-                    f"subagent {run.name}: its admission could not be written to the "
-                    "parent's log, so it was not started"
+                    f"subagent {run.name}: its admission could not be written to its "
+                    "own log, so it was not started"
                 )
         except SubagentSpawnError as refused:
             await self._abandon(run)
-            self._settle_unadmitted(session, run.id, str(refused), session_id=session_id)
+            await self._end_child(run.session_id, str(refused))
             raise
         self._runs[run.id] = run
         return run
@@ -1483,6 +1532,12 @@ class SubagentService:
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
         request = self.resolve_model(self.resolve_preset(await self.resolve_profile(request)))
+        parent = request.parent.session
+        if parent is not None:
+            # Every child the parent has, on disk as well as in memory, before anything
+            # counts them — a spawn cap, a provider keeping sibling names unique. Once
+            # per mount (`load_children`); a parent resumed through the sweep has it.
+            await self.load_children(parent.id, parent.header.family)
         # Guards first: a refusal here has nothing to unwind, which is the
         # contract `SubagentSpawnError` states. Bound to the registering row, as
         # every registry-invoked body is (P6-29).
@@ -1519,44 +1574,147 @@ class SubagentService:
             # is owed the spawn's own answer, with a code, not a raw scope error.
             raise parent_went_away(request.name or "a child") from gone
         admitted = await self._admit(
-            run,
-            owner=name,
-            grant=grant,
-            held=held,
-            boundary=boundary,
-            session=request.parent.session,
-            written=True,
+            run, owner=name, grant=grant, held=held, boundary=boundary, request=request
         )
         admitted.ready.set()
         return admitted
 
-    def roster(self, session: Session) -> dict[str, dict[str, Any]]:
-        """`subagent_roster(session)`, folded at most once per appended event.
+    def children(self, parent_id: str) -> dict[str, ChildState]:
+        """One parent's children by run id, as their own logs tell it (Phase 11).
 
-        The read every consumer should use when it has a `ctx`.
+        The read every consumer should use when it has a `ctx`. A child this process
+        runs through its own cached fold; one it does not, from what
+        `load_children` read off the store or what its session held when it was let
+        go — a live child's state winning over a stored copy of it. A log with no
+        admission is not a child. In admission order.
         """
-        return self._rosters.read(session)
+        found = dict(self._stored.get(parent_id, {}))
+        sessions = self.ctx.get(SESSIONS)
+        for session_id in self._live.get(parent_id, ()):
+            session = sessions.get(session_id) if sessions is not None else None
+            if session is not None:
+                found[session_id] = self._folds.read(session)
+        admitted = sorted(
+            (state for state in found.values() if state.admitted),
+            key=lambda state: (state.admitted_at, state.session_id),
+        )
+        return {state.run_id: state for state in admitted}
+
+    def family(self, parent_id: str) -> list[ChildState]:
+        """Everything beneath `parent_id` — its children, theirs, and so on — each
+        before its own children, siblings in admission order.
+
+        The one walk of a delegation tree: a goal's spend, the daemon's panel, what
+        holds a root, what waits for a credential. Cycle-safe for `descendants`'
+        reason — a log claiming an ancestor as its child costs a wasted lookup, not a
+        hang. As deep as this process has read (`load_children`).
+        """
+        found: list[ChildState] = []
+        seen = {parent_id}
+        stack = list(reversed(self.children(parent_id).values()))
+        while stack:
+            state = stack.pop()
+            if state.session_id in seen:
+                continue
+            seen.add(state.session_id)
+            found.append(state)
+            stack.extend(reversed(self.children(state.session_id).values()))
+        return found
+
+    async def load_children(self, parent_id: str, family: str) -> dict[str, ChildState]:
+        """`children`, with the ones on disk this process is not running read in.
+
+        Once per parent per mount: a stored child changes only when this process
+        opens it, and then it is live — or when its session is let go, which hands
+        its state back (`_let_go`). A resumed session's are read as it opens
+        (`open_session`); the sweep, a spawn, a revocation and the crash checks ask
+        again, which then costs a lookup. On a worker thread, and only the records a
+        child's state is folded from (`CHILD_EVENT_TYPES`): a child's log is mostly
+        streamed chunks, and a mount runs on the loop every root of a daemon shares.
+
+        `family` is the parent's (`SessionHeader.family`) — a child's too, since a
+        child is filed with its parent — and is where the store looks.
+        """
+        if parent_id not in self._stored:
+            store = self.ctx.get(SESSION_PERSISTENCE)
+            live = set(self._live.get(parent_id, ()))
+            self._stored[parent_id] = (
+                {}
+                if store is None
+                else await anyio.to_thread.run_sync(
+                    lambda: _stored_children(store, parent_id, family, live)
+                )
+            )
+        return self.children(parent_id)
+
+    def delegated_tokens(self, parent_id: str, goal_id: str | None = None) -> int:
+        """What `parent_id`'s children spent — only those admitted under `goal_id`, when
+        one is named — and everything beneath them, from their own logs.
+
+        **Every level**: a goal is a budget for a delegation tree, and a grandchild's
+        answers are part of what the goal asked for. The roster this replaces charged
+        one level only — a child's own answers, mirrored into its parent's log — so a
+        grandchild's spend, and every child's compactions, reached no goal at all.
+        As deep as `family` reaches.
+        """
+        return sum(
+            state.tokens + sum(below.tokens for below in self.family(state.session_id))
+            for state in self.children(parent_id).values()
+            if goal_id is None or state.goal_id == goal_id
+        )
+
+    def state(self, session_id: str) -> ChildState | None:
+        """One child's state by its session id, live or stored, or `None`."""
+        sessions = self.ctx.get(SESSIONS)
+        live = sessions.get(session_id) if sessions is not None else None
+        if live is not None and live.header.delegating_parent:
+            state = self._folds.read(live)
+            return state if state.admitted else None
+        for stored in self._stored.values():
+            if session_id in stored:
+                return stored[session_id]
+        return None
+
+    def _published(self, session: Session) -> None:
+        """A session was published: index it under its parent when it is a child."""
+        parent_id = session.header.delegating_parent
+        if parent_id:
+            self._live.setdefault(parent_id, set()).add(session.id)
+
+    def _let_go(self, session: Session) -> None:
+        """A session was let go: forget its fold, and keep a child's last state as its
+        stored copy — the state its log now holds, which nothing will change until
+        this process opens it again. Kept only for a parent whose stored children
+        were read; for any other, the store answers when they are."""
+        parent_id = session.header.delegating_parent
+        if parent_id:
+            self._live.get(parent_id, set()).discard(session.id)
+            stored = self._stored.get(parent_id)
+            state = self._folds.read(session)
+            if stored is not None and state.admitted:
+                stored[session.id] = state
+        self._folds.forget(session.id)
 
     def forget_session(self, session_id: str) -> None:
-        """Drop what this service cached about one session."""
-        self._rosters.forget(session_id)
+        """Drop what this service cached about one session: its own fold, and the
+        stored children it read for it."""
+        self._folds.forget(session_id)
+        self._stored.pop(session_id, None)
 
     def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
-        """Cached rosters that no longer equal their fold (I6).
+        """Cached child states that no longer equal the fold of their log (I6).
 
-        Asked of the cache rather than reconstructed here. The roster is what the
-        prompt tells a parent about its children and what the interruption ladder
-        counts starts against, so a drifted one is a parent reasoning about a
-        family the log does not describe.
+        Asked of the cache rather than reconstructed here. A child's state is what
+        the prompt tells its parent about it and what the interruption ladder counts
+        starts against, so a drifted one is a parent reasoning about a child its log
+        does not describe.
         """
-        return self._rosters.stale(sessions)
+        return self._folds.stale(sessions)
 
-    def name_of(self, sessions: Iterable[Session], agent_id: str) -> str:
-        """`roster_name`, through the cached fold. The live path."""
-        by_id = {session.id: session for session in sessions}
-        session = by_id.get(agent_id)
-        parent = by_id.get(session.header.delegating_parent or "") if session else None
-        return _name_in(self.roster(parent), agent_id) if parent is not None else agent_id
+    def name_of(self, agent_id: str) -> str:
+        """What an agent is called — the name its own admission records — or its id."""
+        state = self.state(agent_id)
+        return (state.name or agent_id) if state is not None else agent_id
 
     def get(self, run_id: str) -> SubagentRun | None:
         return self._runs.get(run_id)
@@ -1582,7 +1740,7 @@ class SubagentService:
         return bool(run is not None and await self.rehydrate(run.id))
 
     async def resume_children(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
-        """What a resumed root owes the children in its log (P5-04). Returns the revived.
+        """What a resumed root owes its unfinished children (P5-04). Returns the revived.
 
         Two opposite answers to two states, which is why this exists rather than
         one sweep over "everything unsettled":
@@ -1606,10 +1764,14 @@ class SubagentService:
         of passivation for the life of the process while the parent waits on a
         reply nobody is writing.
 
-        **An interrupted child becomes a queued one**, which is why the sweep
-        below needs no second branch: "admitted and not running" is one state to
-        re-drive, and the ladder's only job is to decide whether this child is
-        allowed to reach it again.
+        **Every decision is written in the log it is about** (Phase 11). The ladder
+        reads a child's starts and answers from the child's own log, which is where
+        they are, so nothing has to be caught up first. A child it gives up on is
+        ended in its own log; one it puts back is readmitted, and its drive writes
+        the restart on its own disk before the attempt (S10). Nothing orders one
+        child's records against another's or against the parent's, so a crash
+        mid-sweep leaves each child decided or undecided, and the next start decides
+        the undecided the same way.
 
         `retry_limit` has **no default**, and that is P6-32's rule rather than an
         inconvenience: how many attempts work is worth is the host's policy, and
@@ -1621,82 +1783,8 @@ class SubagentService:
         session = parent.session
         if session is None:
             return []
-        # One fold for both halves. Read again after the appends below it would
-        # be a guaranteed cache miss — `session.seq` has moved — so the whole log
-        # would be folded twice on exactly the restarts that have work to do.
-        # The one exception is answers the reconcile adds, which the ladder must
-        # see: folded again only when there were some.
-        roster = dict(self.roster(session))
-        if await self._reconcile_answers(session, roster):
-            roster = dict(self.roster(session))
-        for run_id, row in roster.items():
-            if row.get("deleted") or row.get("status") != "running":
-                continue
-            # **Decided where the answer is known, and written once.** Marking a
-            # child `queued` and discovering afterwards that nothing can readmit
-            # it leaves a row that is live to `child_is_live`, claiming to wait
-            # for a slot no one will ever give it — the parent held out of
-            # passivation by a child nothing will move, which is the state this
-            # whole sweep exists to end.
-            spent = restarts_since_progress(row) >= retry_limit
-            recoverable = self._readmitter(row) is not None
-            resumable = recoverable and not spent
-            detail = INTERRUPTED_DETAIL
-            if spent:
-                detail = exhausted_detail(retry_limit)
-            elif not recoverable:
-                detail = UNRECOVERABLE_DETAIL
-            row["status"] = "queued" if resumable else "error"
-            self._settle_unadmitted(
-                session,
-                run_id,
-                detail,
-                # Not always terminal here — a resumable child goes back on the
-                # ladder — which is why the status is the caller's to state.
-                status="queued" if resumable else "error",
-                session_id=row.get("sessionId"),
-            )
-        # The sweep's decisions reach disk before any child is driven again (S10): a
-        # child failed for a spent ladder must not read as still `running` to the
-        # next start, which would weigh it all over again.
-        await session_written(self.ctx, session)
-        return await self._readmit_children(parent, roster, retry_limit=retry_limit)
-
-    async def _reconcile_answers(self, session: Session, roster: Mapping[str, Any]) -> int:
-        """Bring the parent's account of each interrupted child level with the child's
-        own log, before the ladder reads it (L5). Returns how many answers were added.
-
-        **Only `running` rows.** A child whose settled status is on disk has every
-        answer before it on disk too, since they are one log and a log is written in
-        order; a `queued` one was reconciled by the sweep that queued it.
-
-        **Before this sweep's own records**, and that order is what makes the ladder
-        exact. The answers are appended as of the restarts counted so far, and the
-        `resumed` record this restart writes comes after them. The parent's log is
-        written in order, so after another crash both are on disk or neither is,
-        and a child's answers are never credited to a restart that came after them.
-
-        A child whose log cannot be read is logged and left as it is: the sweep is
-        starting a root, and one unreadable log must not stop the rest.
-        """
-        added = 0
-        for run_id, row in roster.items():
-            if row.get("deleted") or row.get("status") != "running":
-                continue
-            entry = self._readmitter(row)
-            if entry is None or not isinstance(entry.provider, AttributingProvider):
-                continue
-            try:
-                with running(entry.by):
-                    added += await entry.provider.reconcile_answers(
-                        session,
-                        run_id,
-                        session_id=as_str(row.get("sessionId")),
-                        through=as_int(row.get("lastAnswerSeq"), -1),
-                    )
-            except Exception:
-                log.exception("ph.seams.subagents: %s's answers could not be reconciled", run_id)
-        return added
+        await self.load_children(session.id, session.header.family)
+        return await self._resume(parent, retry_limit=retry_limit)
 
     async def readmit_waiting(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
         """Put back to work the children of `parent` held for a credential that has
@@ -1708,116 +1796,87 @@ class SubagentService:
         credential — the daemon's `credentials/store`.
 
         **Every level** (L5b): a child that is running may hold children of its own
-        waiting for the same name, and they are in its log, not in `parent`'s. So
-        each live child of `parent` is asked too. `retry_limit` is the host's, for
-        the sweep a readmitted child's own children get.
+        waiting for the same name. So each live child of `parent` is asked too.
+        `retry_limit` is the host's, for the sweep a readmitted child's own children
+        get.
         """
-        if parent.session is None:
+        session = parent.session
+        if session is None:
             return []
-        revived = list(
-            await self._readmit_children(
-                parent, dict(self.roster(parent.session)), retry_limit=retry_limit
-            )
-        )
-        for run in self.list(parent_id=parent.id):
-            child = self.ctx.require(AGENTS).get(run.session_id)
+        await self.load_children(session.id, session.header.family)
+        revived = list(await self._resume(parent, retry_limit=retry_limit))
+        for state in self.children(session.id).values():
+            child = self.ctx.require(AGENTS).get(state.session_id)
             if child is not None:
                 revived.extend(await self.readmit_waiting(child, retry_limit=retry_limit))
         return revived
 
-    async def _readmit_children(
-        self, parent: AgentDriver, roster: Mapping[str, Any], *, retry_limit: int
-    ) -> Sequence[str]:
-        """Put this parent's un-run children back to work. `resume_children`'s second half.
+    async def _resume(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
+        """Decide, child by child, what each of `parent`'s unfinished children becomes:
+        ended, held, or running again. Returns the run ids running again.
 
-        A daemon that stopped between a child's admission and its first turn left
-        that work described in the parent's log and running nowhere: the roster
-        shows it, the parent is waiting for it, and nothing will ever drive it.
-        This is the sweep that answers, and it is called where a root is resumed.
+        **Only children this process is not running**, `queued` or interrupted
+        `running`. For each, in its own log:
 
-        **Only `queued` rows**, which by the time this runs means both children
-        that never started and the ones `resume_children` has just put back on
-        the ladder — it converts a `running` row to `queued` precisely so there
-        is one state to re-drive rather than two branches here.
+        * **Nothing can readmit it** — ended. Left live, it holds its parent out of
+          passivation for a reply nobody is writing.
+        * **Interrupted, and its ladder spent** — ended, saying how many times.
+          Re-presenting the task is what makes a restart real, and the count is what
+          stops it being infinite; an answer forgives the restarts before it
+          (`restarts_since_progress`).
+        * **Its route names a credential this deployment cannot supply** (T5) — held,
+          not readmitted: readmitted, it would spend its ladder failing on a key a
+          person could supply in a second. It stays live, no start is counted, and
+          its own log says which name it waits for. `readmit_waiting` asks again.
+        * **Otherwise readmitted**, with the ceiling re-derived from its admission —
+          `check_grant`, `grant_for`, `_enforce` — so a child comes back from a power
+          cut no wider than it was admitted (§6.5). The spawn guards do not run: they
+          gate new work, and a cap would count the child against itself. Its own
+          children are swept before its first step (L5b, `_sweep_readmitted`).
 
-        **The ceiling is re-derived** — `check_grant`, `grant_for` and `_enforce`,
-        from a request rebuilt out of the admission record. That is why the
-        narrowing is logged (`admission_payload`): a readmit that reconstructed
-        only the run would hand the child its parent's whole reach, so a child
-        would come back from a power cut wider than it was admitted (§6.5).
-
-        **The spawn guards do not run, and that is deliberate.** A guard answers
-        "may this delegation happen", and this one already did — its admission is
-        in the log. Asking again would count the child against a cap its own
-        record fills, so `ChildLimits` would refuse to restore the very work it
-        once allowed, and the child would stay queued for good. Guards gate new
-        work; a readmit is old work resuming.
-
-        **A child whose route names a credential this deployment cannot supply is held,
-        not readmitted** (T5). Readmitted, it would fail at its first request and
-        spend its retry ladder on a key a person could supply in a second, had
-        anything said it was missing. Held, it stays `queued` — live, so its parent
-        is not released under it — no start is counted, and the parent's log says
-        which name it waits for (`hold_for_credential`). `readmit_waiting` asks again when a
-        credential arrives.
-
-        **Then each readmitted child's own children** (L5b), with the same
-        `retry_limit`, before the child takes its first step (`SubagentRun.ready`).
-        A child's roster is in its own log, so a sweep of the root's alone left a
-        grandchild the crash interrupted `running` with nothing to drive, readmit or
-        fail it, shown to its parent's model as still working.
-
-        Returns the run ids that are running again. One child that cannot be
-        rebuilt is logged and skipped rather than failing the sweep: a root
-        coming back must not be held hostage by the least recoverable thing in
-        its log.
+        One child that cannot be rebuilt is logged and ended rather than failing the
+        sweep (K4): a root coming back must not be held hostage by the least
+        recoverable thing it holds, and **a provider that declines is an ending too**
+        (L6).
         """
+        session = parent.session
+        if session is None:
+            return []
         revived: list[str] = []
-        for run_id, row in roster.items():
-            if row.get("deleted") or row.get("status") != "queued" or run_id in self._runs:
+        for state in self.children(session.id).values():
+            if state.deleted or state.status not in ("queued", "running"):
                 continue
-            try:
-                request = self._request_of(parent, row)
-                # Only for a child something can readmit: one nothing can is settled
-                # below as unresumable, and holding it would leave it `queued` forever.
-                if self._readmitter(row) is not None and await self._held_for_credential(
-                    parent, run_id, request
-                ):
-                    continue
-                run = await self._readmit_one(parent, run_id, row, request)
-            except Exception as error:
-                # **Logged *and* settled** (K4). Skipping alone left the row
-                # `queued`, which `child_is_live` reads as waiting for a slot —
-                # so a `check_grant` refusal after a profile edit, or any
-                # provider error, held the parent out of passivation for good.
-                # One child that cannot be rebuilt must not hold a root, and the
-                # honest way to say that is in the log the roster folds.
-                log.exception("ph.seams.subagents: %s could not be readmitted", run_id)
-                self._settle_unadmitted(
-                    parent.session,
-                    run_id,
-                    f"this child could not be resumed: {error}",
-                    session_id=row.get("sessionId"),
+            if state.run_id in self._runs:
+                continue
+            readmitter = self._readmitter(state)
+            interrupted = state.status == "running"
+            spent = interrupted and restarts_since_progress(state) >= retry_limit
+            if readmitter is None or spent:
+                await self._end_child(
+                    state.session_id,
+                    exhausted_detail(retry_limit)
+                    if spent
+                    else UNRECOVERABLE_DETAIL
+                    if interrupted
+                    else "no provider here can start this child; its transcript is on disk",
                 )
                 continue
+            try:
+                request = self._request_of(parent, state)
+                if await self._held_for_credential(state, request):
+                    continue
+                run = await self._readmit_one(state, request, readmitter)
+            except Exception as error:
+                log.exception("ph.seams.subagents: %s could not be readmitted", state.run_id)
+                await self._end_child(state.session_id, f"this child could not be resumed: {error}")
+                continue
             if run is None:
-                # **A provider that declines is still an ending** (L6). This fell
-                # through the `is not None` it used to be guarded by and left the
-                # row `queued`, which `child_is_live` reads as waiting for a
-                # slot — the third path to the state K4 exists to end, after the
-                # two the `except` above closes. `_readmitter` is asked before a
-                # row is queued, so reaching here means the provider itself
-                # declined, or the profile changed under a log written by
-                # another one.
-                self._settle_unadmitted(
-                    parent.session,
-                    run_id,
-                    "the provider that owns this child could not resume it",
-                    session_id=row.get("sessionId"),
+                await self._end_child(
+                    state.session_id, "the provider that owns this child could not resume it"
                 )
                 continue
             await self._sweep_readmitted(run, retry_limit=retry_limit)
-            revived.append(run_id)
+            revived.append(state.run_id)
         return revived
 
     async def _sweep_readmitted(self, run: SubagentRun, *, retry_limit: int) -> None:
@@ -1837,92 +1896,119 @@ class SubagentService:
         finally:
             run.ready.set()
 
-    def _request_of(self, parent: AgentDriver, row: Mapping[str, Any]) -> SubagentRequest:
-        """The request a child was admitted with, rebuilt from its roster row."""
+    def _request_of(self, parent: AgentDriver, state: ChildState) -> SubagentRequest:
+        """The request a child was admitted with, rebuilt from its own admission."""
+        admission = state.admission or Admission(run_id=state.run_id)
         return self.resolve_preset(
             SubagentRequest(
-                prompt=as_str(row.get("prompt")),
+                prompt=admission.prompt,
                 parent=parent,
-                name=_optional(row, "name"),
-                provider=_optional(row, "modelProvider"),
-                model=_optional(row, "model"),
-                model_key=_optional(row, "modelKey"),
-                reasoning_effort=_optional(row, "reasoningEffort"),
-                access=ACCESS_LEVELS.get(as_str(row.get("requestedAccess")), "read"),
-                preset=_optional(row, "preset"),
-                # `None` inherits everything, which is what an absent key means —
-                # and what a log written before the narrowing was recorded says.
-                skills=None if row.get("skills") is None else tuple(row["skills"]),
-                tools=None if row.get("tools") is None else tuple(row["tools"]),
-                paths=None if row.get("paths") is None else tuple(row["paths"]),
+                name=admission.name or None,
+                provider=admission.model_provider or None,
+                model=admission.model or None,
+                model_key=admission.model_key,
+                reasoning_effort=admission.reasoning_effort,
+                access=admission.requested_access,
+                preset=admission.preset,
+                skills=admission.skills,
+                tools=admission.tools,
+                paths=admission.paths,
+                call_id=admission.call_id,
             )
         )
 
-    async def _held_for_credential(
-        self, parent: AgentDriver, run_id: str, request: SubagentRequest
-    ) -> bool:
-        """Whether this child waits for a credential, with the log made to say so."""
-        session = parent.session
-        if session is None:
-            return False
-        held = await hold_for_credential(self.ctx, session, run_id, *child_route(request))
-        return held is not None
+    async def _held_for_credential(self, state: ChildState, request: SubagentRequest) -> bool:
+        """Whether this child waits for a credential, with its own log made to say so.
+
+        Asked of the route first, without opening anything: a child whose log already
+        says what is true — waiting for this name, or for nothing — needs nothing
+        written, and most readmitted children are that. Only a hold that starts or
+        ends opens the child's log to record it. A held child that was interrupted
+        mid-turn is marked `queued` beside the hold, since it is not running.
+        """
+        name = missing_credential(self.ctx, *child_route(request))
+        if name == state.awaiting:
+            return name is not None
+
+        async def record(child: Session) -> None:
+            await hold_for_credential(self.ctx, child, SESSION_HOLDER, *child_route(request))
+            if name is not None and state.status == "running":
+                record_waiting(child, detail=INTERRUPTED_DETAIL)
+
+        await self._write_child(state.session_id, record)
+        return name is not None
 
     async def _readmit_one(
-        self, parent: AgentDriver, run_id: str, row: Mapping[str, Any], request: SubagentRequest
+        self, state: ChildState, request: SubagentRequest, readmitter: _Readmitter
     ) -> SubagentRun | None:
         """One child, through the admission path it originally took."""
-        owner = as_str(row.get("owner"))
-        name = self.resolve(owner or None)
-        entry = self._providers.get(name or "")
-        if entry is None or not isinstance(entry.provider, ReadmittingProvider):
-            return None
         boundary = self._delegating_boundary(request)
         held = self.held_by(request, boundary)
         self.check_grant(request, held)
         grant = self.grant_for(request, held, boundary=boundary)
-        with running(entry.by):
-            run = await entry.provider.readmit(
+        with running(readmitter.by):
+            run = await readmitter.provider.readmit(
                 request,
-                run_id=run_id,
-                session_id=as_str(row.get("sessionId")),
+                run_id=state.run_id,
+                session_id=state.session_id,
                 # How many times this child has *already* been started, which is
                 # what tells a restart from a first run — and it is `starts`,
                 # never `restarts_since_progress`: an answer forgives the ladder,
                 # so a child that got somewhere and was then stopped again would
                 # otherwise be readmitted as though it had never run, its restart
                 # go unrecorded, and the ladder never count it again.
-                restarts=as_int(row.get("starts")),
+                restarts=state.starts,
             )
         if run is None:
             return None
         return await self._admit(
-            run,
-            owner=name or "",
-            grant=grant,
-            held=held,
-            boundary=boundary,
-            session=parent.session,
-            session_id=row.get("sessionId"),
+            run, owner=readmitter.name, grant=grant, held=held, boundary=boundary
         )
 
-    def _readmitter(self, row: Mapping[str, Any]) -> _Registered | None:
+    def _readmitter(self, state: ChildState) -> _Readmitter | None:
         """The provider that could put this child back, or `None` if none can.
 
-        Asked *before* a child is re-queued, so the sweep never labels one
-        `queued` that nothing will ever pick up — see `resume_children`.
+        By the `owner` its admission records, so it is the provider that ran it — not
+        whichever one happens to be mounted alone.
         """
-        name = self.resolve(_optional(row, "owner"))
+        name = self.resolve(state.owner or None)
         entry = self._providers.get(name or "")
-        if entry is None or not isinstance(entry.provider, ReadmittingProvider):
+        if name is None or entry is None or not isinstance(entry.provider, ReadmittingProvider):
             return None
-        return entry
+        return _Readmitter(name=name, by=entry.by, provider=entry.provider)
+
+    async def delete(self, parent: Session, run_id: str, *, reason: str) -> bool:
+        """Revoke one of `parent`'s children, with a tombstone in its own log. Its
+        transcript stays on disk. `False` when there is no such child, or it was
+        revoked already.
+
+        A tombstone rather than a removal, because the child's log and artifacts
+        outlive it: a parent looking for what a revoked child did should find the
+        revocation, not a gap. **Any child, live or not** (Phase 11): one this process
+        runs is its provider's to stop (`RevokingProvider`), which writes the
+        tombstone as it lets go; one settled by an earlier process is tombstoned
+        here. A revocation used to reach only children this process held in memory.
+        """
+        state = (await self.load_children(parent.id, parent.header.family)).get(run_id)
+        if state is None or state.deleted:
+            return False
+        run = self._runs.get(run_id)
+        entry = self._providers.get(run.owner) if run is not None else None
+        if entry is not None and isinstance(entry.provider, RevokingProvider):
+            with running(entry.by):
+                if await entry.provider.revoke(run_id, reason):
+                    return True
+        await self._write_child(
+            state.session_id, lambda child: record_deleted(self.ctx, child, reason)
+        )
+        self.forget(run_id)
+        return True
 
     async def rehydrate(self, run_id: str) -> bool:
         """Make a settled child addressable again (P3-13).
 
         A child that finished had its agent released, so it has no inbox to steer
-        into — but its session, its log and its roster row are all still there.
+        into — but its session and its log are both still there.
         Rehydration is the provider re-attaching a runtime to that state; a
         provider that cannot do it says so by not implementing the method, and
         the caller gets `False` rather than an exception it has to interpret.
@@ -2002,11 +2088,12 @@ async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
     service = SubagentService(ctx=ctx)
     ctx.provide(SUBAGENTS, service)
-    # A disposed session's last projection is a value nobody can reach; the cache
-    # is bounded either way, but holding it is holding it for nothing.
-    ctx.on("session/disposed", lambda session: service.forget_session(session.id))
+    # A child let go keeps its last state as its stored copy, and its fold goes: a
+    # disposed session's cached projection is a value nobody can reach.
+    ctx.on("session/created", service._published)
+    ctx.on("session/disposed", service._let_go)
     contribute_fold_cache(
-        ctx, id="subagent-fold-cache", subject="subagent roster", stale=service.stale_folds
+        ctx, id="subagent-fold-cache", subject="subagent state", stale=service.stale_folds
     )
 
 
@@ -2093,108 +2180,265 @@ def _brief_text(
     )
 
 
-def subagent_roster(session: Session) -> dict[str, dict[str, Any]]:
-    """One parent's children, folded from its own log (A11, P3-13).
+_UNADMITTED = Admission(run_id="")
+"""What a `ChildState` with no admission reads as — never handed out by a reader."""
 
-    Admission creates a row, status updates it, deletion tombstones it. A deleted
-    child stays visible as a tombstone: its transcript is still on disk, and a
-    parent asking what happened to the one it revoked deserves an answer other
-    than silence.
+_STATUSES: Mapping[str, SubagentStatus] = literal_lookup(SubagentStatus)
+_CAUSES: Mapping[str, StatusCause] = literal_lookup(StatusCause)
 
-    `starts`, `resumes` and `resumesAtLastAnswer` ride on the row and are the
-    interruption ladder's whole state, all folded rather than carried and all
-    totals: the log already records one `running` per drive and one usage record
-    per model answer, so "how many times has this been started" and "how many
-    restarts had there been at its last answer" are questions about events that
-    are already there. What the ladder *makes* of them is
-    `restarts_since_progress`, beside the sweep that decides (P3). A counter
-    written onto a payload would be a second account of the same events, free to
-    disagree with them. `lastAnswerSeq`, the child's seq of the latest answer
-    attributed here, says where the parent's account stops, which is what a resume
-    reconciles from (`AttributingProvider`, L5).
 
-    In the seam rather than in the bundle that produces the events, because the
-    two consumers live in different packages — the model's roster tool in the
-    RLM bundle, the subagent panel in the app, which cannot import the bundle. A
-    second copy is exactly the "two projections of one fold that disagree" that
-    A11 exists to forbid.
+@dataclass(frozen=True, slots=True)
+class ChildState:
+    """One child, as its own log tells it (Phase 11).
+
+    The fold of a child's own log — its admission, its statuses, its tombstone, its
+    answers, its credential hold — and of nothing else. No parent keeps a copy, so
+    there is no second account of the child to disagree with this one: every rule
+    that used to keep a parent's roster in step with its child's log (S2, S10, F1,
+    L5) is a rule about one log now.
+
+    `admission` is `None` for a log that has none — or one no `Admission` parses —
+    which is not a child: a workspace can reach the disk before the admission does,
+    and a spawn refused before it was admitted leaves such a log behind. Every reader
+    skips it; the properties below read an admitted child's record.
+
+    `starts`, `resumes` and `resumes_at_last_answer` are the interruption ladder's
+    whole state, all folded and all totals: the log already records one `running`
+    per drive and one `assistant/message` per answer, so "how many times has this
+    been started" and "how many restarts had there been at its last answer" are
+    questions about records that are already there. What the ladder *makes* of them
+    is `restarts_since_progress`, beside the sweep that decides (P3).
     """
-    return roster_of(session.events)
 
+    session_id: str
+    parent_id: str
+    admission: Admission | None = None
+    admitted_at: float = 0.0
+    status: SubagentStatus = "queued"
+    """`queued` until its first status: admitted, and not yet started."""
+    cause: StatusCause | None = None
+    detail: str | None = None
+    answer_preview: str | None = None
+    deleted: bool = False
+    deleted_reason: str | None = None
+    awaiting: str | None = None
+    """The credential this child is held for (T5), by name, or `None`."""
+    starts: int = 0
+    resumes: int = 0
+    resumes_at_last_answer: int = 0
+    tokens: int = 0
+    """What it spent — its answers and its compactions — by `TokenUsage.total`."""
 
-def roster_of(events: Iterable[SessionEvent]) -> dict[str, dict[str, Any]]:
-    """`subagent_roster` over events rather than a session: a log read from the
-    store, which a resume holds before any `Session` is built for it."""
-    roster: dict[str, dict[str, Any]] = {}
-    for event in events:
-        fold_subagent_event(roster, event)
-    return roster
+    @property
+    def admitted(self) -> bool:
+        return self.admission is not None
 
+    @property
+    def _record(self) -> Admission:
+        return self.admission or _UNADMITTED
 
-def fold_subagent_event(roster: dict[str, dict[str, Any]], event: SessionEvent) -> None:
-    """Fold one event into a roster, in place. The rules, in one place.
+    @property
+    def run_id(self) -> str:
+        return self._record.run_id
 
-    Exported because there is a second consumer with a different *shape* — the
-    TUI's panel folds incrementally, one event at a time, and cannot call the
-    whole-log version. Sharing the step rather than the loop is what stops the
-    two from being two implementations of one fold (A11): the app's panel and
-    the model's roster now cannot disagree about `cause`, seeding or tombstones,
-    because there is nothing for them to disagree with.
-    """
-    # The type test first: a long parent log is mostly `assistant/chunk`, and
-    # reading `data["runId"]` off every one of them to discover it is absent
-    # costs a mapping get and a string per event.
-    if event.type not in _ROSTER_TYPES:
-        return
-    run_id = as_str(event.data.get("runId"))
-    if event.type == ADMITTED:
-        # `queued` by default: `to_wire()` deliberately omits status, and the
-        # first `subagent/status` comes from a detached job — so without this
-        # a reader between the two sees a child with no status at all.
-        roster[run_id] = {"status": "queued", **event.data}
-        return
-    row = roster.get(run_id)
-    if row is None:
-        return
-    if event.type == USAGE:
-        # A model answer attributed to this child, marked by how many restarts
-        # it had had by then. A fact, not a reset: whether an answer forgives
-        # the restarts before it is `restarts_since_progress`'s rule, asked by
-        # the sweep that decides (P3).
-        row["resumesAtLastAnswer"] = as_int(row.get("resumes"))
-        # And where in the child's own log the parent's account stops, which is
-        # what a resume reconciles from (L5).
-        row["lastAnswerSeq"] = max(
-            as_int(row.get("lastAnswerSeq"), -1), as_int(event.data.get("targetSeq"), -1)
+    @property
+    def name(self) -> str:
+        return self._record.name
+
+    @property
+    def owner(self) -> str:
+        return self._record.owner
+
+    @property
+    def call_id(self) -> str | None:
+        return self._record.call_id
+
+    @property
+    def goal_id(self) -> str | None:
+        return self._record.goal_id
+
+    @property
+    def parent_turn(self) -> int | None:
+        return self._record.parent_turn
+
+    @property
+    def model(self) -> str:
+        return self._record.model
+
+    @property
+    def granted_access(self) -> Access:
+        return self._record.granted_access
+
+    @property
+    def downgrade_reason(self) -> DowngradeReason | None:
+        return self._record.downgrade_reason
+
+    def run(self) -> SubagentRun:
+        """The admission facts as the handle a spawn returned — for a caller that
+        answers from the log what the live path answers from the handle: a
+        delegating tool's `reconcile` builds the value its `execute` would have."""
+        record = self._record
+        return SubagentRun(
+            id=record.run_id,
+            name=record.name,
+            session_id=self.session_id,
+            parent_id=self.parent_id,
+            model_provider=record.model_provider,
+            model=record.model,
+            requested_access=record.requested_access,
+            granted_access=record.granted_access,
+            owner=record.owner,
+            downgrade_reason=record.downgrade_reason,
         )
-    elif event.type == STATUS:
-        row.update({key: value for key, value in event.data.items() if key != "runId"})
-        if event.data.get("status") == "running":
-            # Every drive writes one of these, so counting them *is* the answer
-            # to "how many times has this child been started" — a fact the log
-            # already carried and nothing had yet read.
-            row["starts"] = as_int(row.get("starts")) + 1
-        if event.data.get("cause") == "resumed":
-            # And how many of those starts were restarts. Never cleared, like
-            # `starts`: a total the ladder reads beside `resumesAtLastAnswer`.
-            row["resumes"] = as_int(row.get("resumes")) + 1
-    else:
-        row["deleted"] = True
-        row["deletedReason"] = event.data.get("reason")
+
+    def to_wire(self) -> dict[str, JsonValue]:
+        """The child as a row: its admission, where it is, and how it stands — for
+        the model's roster tool and a front end's panel."""
+        admission = thaw_json(self.admission.to_wire()) if self.admission is not None else {}
+        assert isinstance(admission, dict)
+        row: dict[str, JsonValue] = {
+            **admission,
+            "sessionId": self.session_id,
+            "parentId": self.parent_id,
+            "status": self.status,
+            "starts": self.starts,
+            "resumes": self.resumes,
+            "tokens": self.tokens,
+        }
+        optional: dict[str, JsonValue | None] = {
+            "cause": self.cause,
+            "detail": self.detail,
+            "answerPreview": self.answer_preview,
+            "deletedReason": self.deleted_reason,
+            "awaiting": self.awaiting,
+        }
+        row.update({key: value for key, value in optional.items() if value is not None})
+        if self.deleted:
+            row["deleted"] = True
+        return row
 
 
-def restarts_since_progress(row: Mapping[str, Any]) -> int:
+def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
+    """One event of a child's own log folded into its state. The rules, in one place.
+
+    **Each field is set by its own record, and replaced whole.** A status carries its
+    `cause` and `detail` or it carries none, so a later status never keeps an
+    earlier one's reason: the roster this replaces merged each status into its row,
+    and a child woken after a restart went on saying `resumed`. A status this fold
+    does not know leaves the one before it standing — a child is never read as
+    settled by a record nobody can read, which is `child_is_live`'s direction.
+
+    An `assistant/message` is an answer: it forgives the restarts before it, and it
+    and a compaction are what the child spent.
+    """
+    kind = event.type
+    # The type test first: a child's log is mostly `assistant/chunk`.
+    if kind not in CHILD_EVENT_TYPES:
+        return state
+    data = event.data
+    if kind == ADMITTED:
+        try:
+            admission = Admission.model_validate(data)
+        except ValidationError:
+            return state
+        return replace(state, admission=admission, admitted_at=float(event.time))
+    if kind == STATUS:
+        status = _STATUSES.get(as_str(data.get("status")))
+        if status is None:
+            return state
+        cause = _CAUSES.get(as_str(data.get("cause")))
+        return replace(
+            state,
+            status=status,
+            cause=cause,
+            detail=as_str(data.get("detail")) or None,
+            answer_preview=as_str(data.get("answerPreview")) or None,
+            starts=state.starts + (status == "running"),
+            resumes=state.resumes + (cause == "resumed"),
+        )
+    if kind == DELETED:
+        return replace(state, deleted=True, deleted_reason=as_str(data.get("reason")) or None)
+    if kind == _ANSWER:
+        return replace(
+            state, resumes_at_last_answer=state.resumes, tokens=state.tokens + event_tokens(event)
+        )
+    if kind in SPENDING_TYPES:
+        return replace(state, tokens=state.tokens + event_tokens(event))
+    holder, name = hold_of(event)
+    if holder != SESSION_HOLDER:
+        return state
+    if kind == CREDENTIAL_WAIT.opened:
+        return replace(state, awaiting=name)
+    return replace(state, awaiting=None) if state.awaiting == name else state
+
+
+def child_state(log: Session) -> ChildState:
+    """A child's state, folded from its own log. See `ChildState`."""
+    return child_state_of(log.id, log.header, log.events)
+
+
+def child_state_of(
+    session_id: str, header: SessionHeader | None, events: Iterable[SessionEvent]
+) -> ChildState:
+    """`child_state` over a header and events rather than a session: a log read from
+    the store, which a resume holds before any `Session` is built for it."""
+    parent = header.delegating_parent if header is not None else None
+    state = ChildState(session_id=session_id, parent_id=parent or "")
+    for event in events:
+        state = fold_child_event(state, event)
+    return state
+
+
+def extend_child_state(previous: ChildState, log: Session, start: int) -> ChildState:
+    """`child_state` continued from a prefix — what `SubagentService`'s cache folds a
+    new slice with. Extending the fold of a prefix equals folding the whole log."""
+    state = previous
+    for event in log.events_from(start):
+        state = fold_child_event(state, event)
+    return state
+
+
+def _stored_children(
+    store: SessionPersistence, parent_id: str, family: str, live: set[str]
+) -> dict[str, ChildState]:
+    """The children of `parent_id` on disk that this process is not running, by session
+    id, each folded from its stored log. On a worker thread (`load_children`)."""
+    found: dict[str, ChildState] = {}
+    for row in store.children_of(parent_id, family):
+        if row.session_id in live:
+            continue
+        # A child's log starts at seq 0, so its own file is the whole of it — read by
+        # its family, which the listing already found, rather than searched for, and
+        # only for what its state is folded from.
+        header, events = store.read_own(row.session_id, family=row.family, types=CHILD_EVENT_TYPES)
+        state = child_state_of(row.session_id, header, events)
+        if state.admitted:
+            found[row.session_id] = state
+    return found
+
+
+def _names_parent(child: Session, parent_id: str) -> bool:
+    """Whether a child's log names `parent_id` the way the store finds it by.
+
+    The header's parent link decides (`delegating_parent`); the id's `<parent>-`
+    prefix is how `SessionArchive.children_of` narrows the family directory before it
+    reads a header, so a child without it is one the listing never reaches.
+    """
+    return child.header.delegating_parent == parent_id and is_child_id(parent_id, child.id)
+
+
+def restarts_since_progress(state: ChildState) -> int:
     """How many times a child has been restarted since it last answered (P3).
 
     **The ladder's rule, stated where the ladder is decided** rather than folded
-    into the roster: a child stopped, working an hour, then stopped again met two
-    incidents, not a lifetime's, so an answer forgives the restarts before it. A
-    usage record is the answer — a model reply attributed to this child, which a
-    turn that did nothing cannot produce. The roster keeps both facts as totals
-    (`resumes`, `resumesAtLastAnswer`), so a different rule is a change here and
+    into the state: a child stopped, working an hour, then stopped again met two
+    incidents, not a lifetime's, so an answer forgives the restarts before it. An
+    `assistant/message` in its own log is the answer — a model reply, which a turn
+    that did nothing cannot produce. The state keeps both facts as totals
+    (`resumes`, `resumes_at_last_answer`), so a different rule is a change here and
     not to the fold.
     """
-    return as_int(row.get("resumes")) - as_int(row.get("resumesAtLastAnswer"))
+    return state.resumes - state.resumes_at_last_answer
 
 
 FamilyRole: TypeAlias = Literal["self", "parent", "sibling", "child"]
@@ -2301,36 +2545,6 @@ def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> lis
                 seen.add(child)
                 found.append(child)
     return found
-
-
-def roster_name(sessions: Iterable[Session], agent_id: str) -> str:
-    """What an agent is called, or its id when nobody named it.
-
-    The name is a fact the *parent* recorded at admission, so it is only knowable
-    from the parent's roster fold — which is why it lives beside that fold rather
-    than in whichever module needed it first.
-
-    **Prefer `SubagentService.name_of`**, which asks the same question through
-    the cached fold; every live caller does. This is the variant for a reader
-    holding stored sessions and no `ctx` — the trajectory view (P3-24) is the
-    one that will want it. Both delegate to `_name_in`, so the two cannot answer
-    differently: two copies of one lookup is how a prompt names one agent while
-    a send delivers to another.
-    """
-    by_id = {session.id: session for session in sessions}
-    session = by_id.get(agent_id)
-    parent = by_id.get(session.header.delegating_parent or "") if session else None
-    if parent is None:
-        return agent_id
-    return _name_in(subagent_roster(parent), agent_id)
-
-
-def _name_in(roster: dict[str, dict[str, Any]], agent_id: str) -> str:
-    """The name a folded roster gives one session, or the id."""
-    for row in roster.values():
-        if row.get("sessionId") == agent_id:
-            return as_str(row.get("name") or agent_id)
-    return agent_id
 
 
 def family_reach(

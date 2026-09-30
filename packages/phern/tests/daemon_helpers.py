@@ -33,7 +33,7 @@ from ph.llm.types import StreamChunk
 from ph.paths import resolve_roots
 from ph.session import Session
 from ph.session_profile import BASE as PROFILE_BASE
-from ph.testing import logged_events, not_none
+from ph.testing import admitted_child, logged_events, not_none
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
@@ -49,6 +49,7 @@ __all__ = [
     "running",
     "serving",
     "shut_down",
+    "spawned",
     "supervised",
     "until",
 ]
@@ -395,6 +396,25 @@ async def serving(
     private_runtime(tmp_path, monkeypatch)
     async with running(tmp_path, path=daemon_socket(), **options) as daemon:
         yield daemon
+
+
+def spawned(root: Root, run_id: str, *, under: Session | None = None, name: str = "") -> Session:
+    """A sub-agent's own log in `root`'s mount, admitted — and nothing about it in its
+    spawner's log (Phase 11).
+
+    In the shape a provider opens one: its spawner in `parentSession`, `origin:
+    "subagent"`, and an id under its spawner's, which is how a family is found.
+    `under` is the spawner when it is not the root — a child, for a grandchild.
+    Written through `log_event`, so a test says what the child's log holds rather
+    than running a provider to get there.
+    """
+    spawner = under if under is not None else root.session
+    return admitted_child(
+        root.ctx,
+        spawner,
+        run_id,
+        {"name": name or run_id, "prompt": "look", "modelProvider": "fake", "model": "fake-1"},
+    )
 
 
 def break_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:

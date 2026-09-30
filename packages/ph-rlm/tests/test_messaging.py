@@ -373,8 +373,9 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
     """P3-13: a completed child stays addressable, and a send is the trigger.
 
     Settlement releases the agent — which is what holds an inbox — but the
-    session, the log and the roster row all survive it. So addressing the child
-    rehydrates it rather than telling the sender to go read a transcript.
+    child's session and its log survive it, and its log is its whole record. So
+    addressing the child rehydrates it rather than telling the sender to go read a
+    transcript.
     """
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
@@ -390,23 +391,21 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
     assert ctx.require(AGENTS).get(run.session_id) is not None, "the child was not woken"
 
     await ctx.drain()
-    # The roster says it was *woken*, distinctly from a child still on its first
-    # task, so a parent reading the roster can tell the two apart.
-    statuses = [
-        event.data["status"]
-        for event in session.events
-        if event.type == "subagent/status" and event.data["runId"] == run.id
+    # The child's log says it was *woken*, distinctly from a child still on its
+    # first task, so a parent reading its children can tell the two apart.
+    records = [
+        event.data
+        for event in not_none(ctx.require(SESSIONS).get(run.session_id)).events
+        if event.type == "subagent/status"
     ]
-    assert statuses == ["running", "done", "running", "done"]
-    # `running` with a *cause*, not a `rehydrated` status: the roster folds
+    assert [record["status"] for record in records] == ["running", "done", "running", "done"]
+    # `running` with a *cause*, not a `rehydrated` status: a child's state folds
     # status last-write-wins, so a woken child that is working must still read as
     # running to anything that branches on it.
-    causes = [
-        event.data.get("cause")
-        for event in session.events
-        if event.type == "subagent/status" and event.data["runId"] == run.id
-    ]
-    assert causes == [None, None, "rehydrated", None]
+    assert [record.get("cause") for record in records] == [None, None, "rehydrated", None]
+    assert not [event for event in session.events if event.type.startswith("subagent/")], (
+        "the wake was recorded in the parent's log"
+    )
 
 
 async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) -> None:
@@ -447,12 +446,12 @@ async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted
 
 
 async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime) -> None:
-    """The tombstone is the parent's record that it revoked the child; waking one
-    behind that record would make the record false."""
+    """The tombstone in the child's log is the record that its parent revoked it;
+    waking one behind that record would make the record false."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     await ctx.drain()
-    assert await ctx.require(RLM_CHILDREN).delete(session, run.id, reason="user") is True
+    assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user") is True
 
     # Both doors: the service refuses because `forget()` dropped the run, and the
     # provider refuses because `_release` dropped the child.

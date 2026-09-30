@@ -17,9 +17,11 @@ from runtime_helpers import run_cell
 
 from ph.agent.types import AgentDriver, AgentHandle
 from ph.cordis import Context
-from ph.keys import SYSTEM_PROMPT, TOOLS
+from ph.keys import SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.seams.subagents import admitted_by
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
+from ph.testing import not_none
 from ph.tools import Deny, ToolExecution
 from ph.tools.registry import ToolRestriction
 from ph_rlm.bindings import DELETE_TOOL, LIST_TOOL, NAMESPACE, RUN_TOOL
@@ -119,10 +121,14 @@ async def test_a_spawn_from_a_cell_is_a_durable_dispatch(
     settles = [e for e in session.events if e.type == "tool/code-dispatch"]
     assert [e.data["name"] for e in starts] == [RUN_TOOL]
     assert len(settles) == 1
-    # And the admission the dispatch caused is in the same log.
-    admitted = [e for e in session.events if e.type == "subagent/admitted"]
-    assert len(admitted) == 1
-    assert admitted[0].data["name"] == "scout"
+    # And the admission the dispatch caused is in the child's own log, naming the
+    # dispatch — which is how a resume finds the child a cut-short dispatch admitted.
+    child = admitted_by(ctx.require(SUBAGENTS).children(session.id), starts[0])
+    assert child is not None, "no child's admission names the dispatch that caused it"
+    assert child.name == "scout"
+    assert [e for e in session.events if e.type.startswith("subagent/")] == [], (
+        "the admission is the child's record, not its parent's"
+    )
 
 
 async def test_the_handle_is_not_the_answer(delegating_runtime: MountedRuntime) -> None:
@@ -201,7 +207,7 @@ async def test_a_policy_row_can_deny_spawning(delegating_runtime: MountedRuntime
     assert result.is_error is True
     assert "does not allow subagents" in repr(result.content)
     # Nothing was admitted, and the cell did not get to report success.
-    assert [e for e in session.events if e.type == "subagent/admitted"] == []
+    assert ctx.require(SUBAGENTS).children(session.id) == {}
 
 
 async def test_the_spawn_budget_bounds_one_cell(delegating_runtime: MountedRuntime) -> None:
@@ -217,7 +223,7 @@ async def test_the_spawn_budget_bounds_one_cell(delegating_runtime: MountedRunti
     )
     assert result.is_error is True
     assert "max_subagent_spawns_per_run=2" in repr(result.content)
-    assert len([e for e in session.events if e.type == "subagent/admitted"]) == 2
+    assert len(ctx.require(SUBAGENTS).children(session.id)) == 2
 
 
 async def test_a_refused_spawn_is_the_programs_to_handle(
@@ -245,6 +251,8 @@ async def test_a_refused_spawn_is_the_programs_to_handle(
 
 
 async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: MountedRuntime) -> None:
+    """Each child as its own log tells it — no side table, and no copy in the
+    parent's log to fall out of step with the child's."""
     ctx, session, agent = await delegating_runtime()
     await _cell(
         ctx,
@@ -281,8 +289,14 @@ async def test_deleting_from_a_cell_tombstones_the_child(
     )
     assert result.value["value"] is True
 
-    tombstones = [e for e in session.events if e.type == "subagent/deleted"]
-    assert [e.data["runId"] for e in tombstones] == [child_id]
+    # In the child's own log, which alone then tells its whole story.
+    child = ctx.require(SUBAGENTS).children(session.id)[child_id]
+    assert (child.deleted, child.deleted_reason) == (True, "user")
+    child_log = not_none(ctx.require(SESSIONS).get(child.session_id))
+    assert [e.type for e in child_log.events if e.type == "subagent/deleted"] == [
+        "subagent/deleted"
+    ]
+    assert [e for e in session.events if e.type.startswith("subagent/")] == []
     # The dispatch is recorded under the governed tool name, not the cell's.
     names = [e.data["name"] for e in session.events if e.type == "tool/code-dispatch-start"]
     assert DELETE_TOOL in names

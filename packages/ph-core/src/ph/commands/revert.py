@@ -125,8 +125,13 @@ async def apply(ctx: Context, config: None) -> None:
             summary="Restore this agent's workspace to a per-run checkpoint.",
             argument_hint="<seq>",
             # Bare, it lists — a question; with a seq it restores. One body for both,
-            # because the checks ahead of either are the same.
-            run=Verbs({"": CommandVerb(revert, reads=True)}, otherwise=revert),
+            # because the checks ahead of either are the same. The restore's record
+            # rides its act's: the seam opens `WORKSPACE_RESTORE` before the tree is
+            # touched, and that one barrier writes `command/run` with it.
+            run=Verbs(
+                {"": CommandVerb(revert, record="after")},
+                otherwise=CommandVerb(revert, record="with-act"),
+            ),
         ),
         scope=ctx,
     )

@@ -39,21 +39,18 @@ from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams._restriction import NameFilter
 from ph.seams.skills import SkillRestriction
 from ph.seams.subagents import (
-    ADMITTED,
+    ChildState,
     Grant,
     SubagentRequest,
     SubagentRun,
     SubagentSpawnError,
-    admission_payload,
     child_is_live,
-    subagent_roster,
 )
 from ph.system_prompt import render_prompt
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
     StubSubagentProvider,
-    log_event,
     run_tool,
     simple_tool,
     skill,
@@ -679,10 +676,17 @@ async def test_a_guard_refuses_before_the_provider_is_asked(mount: MountProfile)
 # --------------------------------------------- a spawn the seam decides against --
 
 
+def _child(ctx: Context, parent: Any, run_id: str) -> ChildState:  # noqa: ANN401
+    """One of `parent`'s children, as its own log tells it."""
+    assert parent.session is not None
+    return ctx.require(SUBAGENTS).children(parent.session.id)[run_id]
+
+
 @dataclass(slots=True)
 class _RealisticProvider:
     """`StubSubagentProvider`, plus what the two real providers do before `start`
-    returns: the admission in the parent's log, and a disposer somebody holds.
+    returns: a disposer somebody holds. The child's own log, which the stub opens, is
+    where the seam writes its admission (Phase 11).
 
     A wrapper rather than a second `SubagentRun` builder — the stub already
     argues where a child's scope nests (P6-27) and which fields a run carries,
@@ -697,9 +701,6 @@ class _RealisticProvider:
     async def start(self, request: SubagentRequest) -> SubagentRun:
         run = await self.inner.start(request)
         run.dispose = lambda: self.released.append(run.id)
-        session = request.parent.session
-        assert session is not None, "a spawn is made by an agent, and an agent has a log"
-        log_event(session, ADMITTED, admission_payload(run, request))
         return run
 
 
@@ -708,8 +709,8 @@ async def test_a_spawn_the_ceiling_refuses_leaves_no_child_behind(mount: MountPr
 
     What this pins is the three things that are already true when it refuses: a
     disposer only the provider holds, a run the seam has not taken, and an
-    admission in the parent's roster. Raising alone left all three, and the
-    third is the one with no bound — the parent reads that row as live for the
+    admission in the child's own log. Raising alone left all three, and the
+    third is the one with no bound — the parent reads that child as live for the
     rest of its life.
 
     The refusal itself is asserted first: a cleanup that swallowed it would be a
@@ -726,9 +727,9 @@ async def test_a_spawn_the_ceiling_refuses_leaves_no_child_behind(mount: MountPr
 
     assert provider.released == ["run-1"], "the child was left running"
     assert ctx.require(SUBAGENTS).get("run-1") is None, "a refused spawn is not a live run"
-    row = subagent_roster(parent.session)["run-1"]
-    assert row["status"] == "error"
-    assert not child_is_live(row), "the parent cannot passivate while this reads live"
+    child = _child(ctx, parent, "run-1")
+    assert child.status == "error"
+    assert not child_is_live(child), "the parent cannot passivate while this reads live"
 
 
 @dataclass(slots=True)
@@ -768,8 +769,8 @@ async def test_a_readmit_the_ceiling_refuses_leaves_no_child_behind(
     `_enforce` reads `run.scope`, so it cannot run before the provider has
     produced a child. `start` has had the whole answer to that since K3: release
     the child, *end* its admission, re-raise. `_readmit_one` called `_enforce`
-    bare, and `resume_children`'s `except` closed the roster row and nothing
-    else — so the row ended (K4 saw to that) while the child it described kept
+    bare, and `resume_children`'s `except` ended the child's record and nothing
+    else — so the record ended (K4 saw to that) while the child it described kept
     driving, unbounded, with a disposer only the provider held. Two spawners with
     one admission each; the fix is one `_admit` both call.
 
@@ -782,8 +783,6 @@ async def test_a_readmit_the_ceiling_refuses_leaves_no_child_behind(
     for name in ("review", "deploy"):
         ctx.require(SKILLS).register(skill(name))
     provider = _ReadmittingProvider(inner=StubSubagentProvider(root=ctx))
-    # The only provider mounted, so the roster row's absent `owner` still
-    # resolves back to it — `resolve` refuses to guess between two.
     ctx.require(SUBAGENTS).register_provider("realistic", provider)
     parent = _agent(ctx)
     run = await ctx.require(SUBAGENTS).start(
@@ -798,9 +797,9 @@ async def test_a_readmit_the_ceiling_refuses_leaves_no_child_behind(
 
     assert provider.released == [run.id], "the readmitted child was left running"
     assert ctx.require(SUBAGENTS).get(run.id) is None, "a refused readmit is not a live run"
-    row = subagent_roster(parent.session)[run.id]
-    assert row["status"] == "error"
-    assert not child_is_live(row), "the parent cannot passivate while this reads live"
+    child = _child(ctx, parent, run.id)
+    assert child.status == "error"
+    assert not child_is_live(child), "the parent cannot passivate while this reads live"
 
 
 async def test_a_provider_that_declines_a_readmit_ends_the_row_it_cannot_revive(
@@ -830,6 +829,6 @@ async def test_a_provider_that_declines_a_readmit_ends_the_row_it_cannot_revive(
     revived = await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
 
     assert revived == [], "nothing came back"
-    row = subagent_roster(parent.session)[run.id]
-    assert row["status"] == "error"
-    assert not child_is_live(row), "the parent cannot passivate while this reads live"
+    child = _child(ctx, parent, run.id)
+    assert child.status == "error"
+    assert not child_is_live(child), "the parent cannot passivate while this reads live"

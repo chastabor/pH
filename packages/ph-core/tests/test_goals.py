@@ -29,10 +29,12 @@ events** `Root.accepted` measured.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, GOALS, SESSIONS
 from ph.seams.goals import (
     Budget,
@@ -42,9 +44,8 @@ from ph.seams.goals import (
     TokenSource,
     goals,
 )
-from ph.seams.subagents import USAGE as CHILD_USAGE
 from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, log_event, not_none
+from ph.testing import MountProfile, admitted_child, assistant_payload, log_event, not_none
 
 
 def _open(session: Session, service: GoalService, gates: list[str] | None = None) -> Goal:
@@ -111,38 +112,82 @@ def test_spend_is_folded_from_the_log_not_carried_by_the_loop() -> None:
     assert spent.tokens["own"] == 1_400
 
 
-def _spent_by_three_sources(session: Session, service: GoalService) -> Spent:
-    """A goal whose run spent 100 own, 50 on a compaction and 30 in a child."""
-    goal = _open(session, service)
+def _answered(session: Session, tokens: int) -> None:
     log_event(
         session,
         "assistant/message",
-        {**assistant_payload("done", "m1"), "usage": {"inputTokens": 90, "outputTokens": 10}},
+        {**assistant_payload("done", "m1"), "usage": {"inputTokens": tokens, "outputTokens": 0}},
         SurfaceIntent("append"),
     )
+
+
+def _spent_by_two_sources(session: Session, service: GoalService) -> Spent:
+    """A goal whose own log spent 100 on its replies and 50 on a compaction."""
+    goal = _open(session, service)
+    _answered(session, 100)
     log_event(
         session,
         "compaction/summarized",
         {"trigger": "pressure", "usage": {"inputTokens": 50, "outputTokens": 0}},
     )
-    log_event(
-        session,
-        CHILD_USAGE,
-        {"runId": "r1", "targetSeq": 3, "childUsage": {"inputTokens": 0, "outputTokens": 30}},
-    )
     return goals(session)[goal.id].spent
 
 
-def test_the_fold_counts_every_source_of_tokens() -> None:
+def _spent_by_three_sources() -> Spent:
+    """100 own, 50 on a compaction and 30 in a child — the child's as `GoalService.spent`
+    joins it, beside the goal's own fold."""
+    spent = _spent_by_two_sources(Session("g"), GoalService())
+    return replace(spent, tokens=spent.tokens + Counter({"children": 30}))
+
+
+def test_the_fold_counts_the_sources_in_its_own_log() -> None:
     """P2 — the fold reports what each source spent, and decides nothing.
 
-    It read only `assistant/message`, so a compaction's summary and a child's
-    work were outside `max_tokens` by omission rather than by anyone's choice.
-    Sabotage: drop either type from `_COUNTED` and its total stays zero.
+    It read only `assistant/message`, so a compaction's summary was outside
+    `max_tokens` by omission rather than by anyone's choice. A child's spend is not in
+    this log at all (Phase 11) — `test_a_goal_counts_what_was_spent_under_it_at_every_
+    level` covers that half. Sabotage: drop either type from `_COUNTED` and its total
+    stays zero.
     """
-    spent = _spent_by_three_sources(Session("g"), GoalService())
+    spent = _spent_by_two_sources(Session("g"), GoalService())
 
-    assert spent.tokens == {"own": 100, "compaction": 50, "children": 30}
+    assert spent.tokens == {"own": 100, "compaction": 50}
+
+
+def _admitted_child(ctx: Context, parent: Session, run_id: str, goal_id: str | None) -> Session:
+    """A child's own log, admitted under `goal_id`, as the seam writes one."""
+    return admitted_child(ctx, parent, run_id, {"goalId": goal_id} if goal_id else None)
+
+
+@pytest.mark.anyio
+async def test_a_goal_counts_what_was_spent_under_it_at_every_level(mount: MountProfile) -> None:
+    """Phase 11 — a goal's `children` are the sub-agents admitted under it and everything
+    beneath them, read from their own logs.
+
+    The roster this replaced charged one level: each child's answers were mirrored into
+    its parent's log, so a grandchild's spend reached no goal, and whichever goal was
+    open when an answer landed took it. Now each child's admission names the goal it
+    was spawned under, and its spend — its answers and its compactions — is its own.
+
+    Sabotage: stop `delegated_tokens` descending, and the grandchild's 7 goes missing;
+    drop the goal filter, and the child admitted under another goal is charged too.
+    """
+    ctx = await mount()
+    service: GoalService = ctx.require(GOALS)
+    parent = ctx.require(SESSIONS).create("lead")
+    goal = _open(parent, service)
+    child = _admitted_child(ctx, parent, "r1", goal.id)
+    _answered(child, 30)
+    grandchild = _admitted_child(ctx, child, "r2", None)
+    _answered(grandchild, 7)
+    elsewhere = _admitted_child(ctx, parent, "r3", "another-goal")
+    _answered(elsewhere, 1000)
+
+    spent = service.spent(parent, not_none(service.open(parent)))
+
+    assert spent.tokens["children"] == 37
+    assert spent.tokens["own"] == 0
+    assert "children" not in not_none(service.open(parent)).spent.tokens
 
 
 @pytest.mark.parametrize(
@@ -161,7 +206,7 @@ def test_the_budget_decides_whose_tokens_it_charges(
     Sabotage: charge `spent.tokens["own"]` in `exhausted` and the wider budgets
     stop at 100 — the run spends 180 and is told it spent 100.
     """
-    spent = _spent_by_three_sources(Session("g"), GoalService())
+    spent = _spent_by_three_sources()
     budget = (
         Budget(max_tokens=charged)
         if sources is None

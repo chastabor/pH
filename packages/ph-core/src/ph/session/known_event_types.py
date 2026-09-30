@@ -275,13 +275,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # reader is ph-core and ph-app, neither of which depends on ph-rlm, and a
         # second provider emitting `rlm/…` would be lying about its identity in
         # an append-only log. The provider names itself in the payload instead.
-        # The roster a parent reads back *is* this fold — there is no side
-        # table — so the admission and the tombstone are required reading, while
-        # status and usage attribution are informational.
+        # Each is in the **child's own** log (Phase 11): a child's state *is* the
+        # fold of these, with no parent's copy beside it, so all three are required
+        # reading — the ladder counts starts off the statuses.
         "subagent/admitted",
         "subagent/deleted",
         "subagent/status",
-        "subagent/usage-attributed",
         # The Continual Harness (P3-16). Its state *is* this fold — there is no
         # side file to fall back on — so a reader that skipped one would show a
         # harness the session does not have. A rollback is a refinement with
@@ -386,12 +385,6 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "credential/supplied",
         "kernel/snapshot",
         "kernel/restored",
-        # Status mirroring and usage bookkeeping. `subagent/admitted` and
-        # `subagent/deleted` are deliberately NOT here: they are the roster's
-        # only record of a child existing and of it being revoked, and a reader
-        # that skipped either would show a parent the wrong family.
-        "subagent/status",
-        "subagent/usage-attributed",
         "harness/refine-considered",
         "context/loaded",
         "offload/spilled",
@@ -571,18 +564,12 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.seams.schedule": frozenset(
             {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
         ),
-        # Every record of the roster, and from nowhere else: a provider reports its
-        # child through this module's doors (`record_admitted`, `record_status`,
-        # `record_started`, `record_settled`, `record_deleted`, `usage_mirror`,
-        # `reconcile_usage`), which keep the durability rules each record carries —
-        # and the seam writes the terminal status for a child it gave up on.
+        # Every record of a child, in the child's own log, and from nowhere else: the
+        # seam writes the admission, and a provider reports its child through this
+        # module's doors (`record_waiting`, `record_started`, `record_ended`,
+        # `record_deleted`), which keep the durability rules each record carries.
         "ph.seams.subagents": frozenset(
-            {
-                "subagent/admitted",
-                "subagent/deleted",
-                "subagent/status",
-                "subagent/usage-attributed",
-            }
+            {"subagent/admitted", "subagent/deleted", "subagent/status"}
         ),
         "ph.seams.workspace": frozenset(
             {

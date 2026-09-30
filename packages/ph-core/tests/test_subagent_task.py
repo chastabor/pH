@@ -40,6 +40,7 @@ from ph.testing import (
     MountProfile,
     StubSubagentProvider,
     log_event,
+    not_none,
     reconciled_call,
     run_tool,
 )
@@ -310,16 +311,16 @@ async def test_a_task_call_carries_its_own_id_into_the_admission(mount: MountPro
     assert provider.last().call_id == "call-1"
 
 
-async def test_a_task_call_a_crash_cut_short_is_answered_from_the_roster(
+async def test_a_task_call_a_crash_cut_short_is_answered_from_its_childs_log(
     mount: MountProfile,
 ) -> None:
     """S2 — a `task` call left open by a crash read as "outcome unknown".
 
     So the model delegated the same task again, beside the child the resume had
-    already put back to work. The admission names its call and reaches disk before
-    the child runs, so the roster answers: a live child is the wait's honest ending,
-    one that ended is `Unknown` as a failed wait would read, and no admission is a
-    call that started nothing.
+    already put back to work. The admission names its call and reaches the child's
+    disk before the child runs, so the children's own logs answer: a live child is
+    the wait's honest ending, one that ended is `Unknown` as a failed wait would read,
+    and no admission is a call that started nothing.
 
     Sabotage: drop `callId` from `admission_payload`, and the live child is not found.
     """
@@ -329,8 +330,9 @@ async def test_a_task_call_a_crash_cut_short_is_answered_from_the_roster(
     session = agent.session
     request = SubagentRequest(prompt="look", parent=agent, call_id="call-1")
     run = await provider.start(request)
-    log_event(session, ADMITTED, admission_payload(run, request))
-    log_event(session, STATUS, {"runId": run.id, "status": "running"})
+    child = not_none(ctx.require(SESSIONS).get(run.session_id))
+    log_event(child, ADMITTED, admission_payload(run, request))
+    log_event(child, STATUS, {"status": "running"})
 
     async def reconciled(call_id: str) -> Any:  # noqa: ANN401
         return await reconciled_call(ctx, session, "task", {"prompt": "look"}, call_id=call_id)
@@ -340,5 +342,5 @@ async def test_a_task_call_a_crash_cut_short_is_answered_from_the_roster(
     assert "do not delegate the same task again" in text_of(list(live))
     assert isinstance(await reconciled("call-2"), NotDone)
 
-    log_event(session, STATUS, {"runId": run.id, "status": "error", "detail": "fell over"})
+    log_event(child, STATUS, {"status": "error", "detail": "fell over"})
     assert await reconciled("call-1") is None, "an ended child is not an answer"

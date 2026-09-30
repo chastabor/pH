@@ -330,7 +330,9 @@ async def apply(ctx: Context, config: Config) -> None:
             # the show is the whole harness either way; everything else, instructions
             # and a rollback, acts. A `--show` behind `--global` is still shown, through
             # the durable path an act takes: unsure is the safe side.
-            run=Verbs({"--show": CommandVerb(show, reads=True)}, otherwise=command),
+            run=Verbs(
+                {"--show": CommandVerb(show, record="after")}, otherwise=CommandVerb(command)
+            ),
             argument_hint="[--global] [--show] [--rollback <id>] [instructions]",
         )
     )

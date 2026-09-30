@@ -53,8 +53,6 @@ from pydantic import ValidationError
 
 from ph.json import JsonObject, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
 from ph.seams.approval import INTERRUPTED
-from ph.seams.subagents import downgrade_text, fold_subagent_event
-from ph.seams.token_meter import reported_usage
 from ph.session import (
     Session,
     SessionEvent,
@@ -1034,72 +1032,6 @@ class TuiEventAdapter:
         reason = as_str(event.data.get("reason") or event.data.get("code"), "no reason given")
         self._row("compaction", "notice", f"Compaction declined: {reason}", event)
 
-    def _on_subagent_admitted(self, event: SessionEvent, frame: Frame) -> None:
-        """A delegation the human should see starting.
-
-        Rendered rather than left to the panel because a spawn is a *decision*:
-        it is the point at which work left this conversation, and reading the
-        transcript later without it makes the child's eventual reply arrive from
-        nowhere.
-        """
-        name = as_str(event.data.get("name") or event.data.get("runId"), "child")
-        model = as_str(event.data.get("model"), "?")
-        access = as_str(event.data.get("grantedAccess"), "read")
-        self._fold_roster(event)
-        text = f"Delegated to {name} on {model} ({access} workspace)."
-        reason = event.data.get("downgradeReason")
-        if reason:
-            # The sentence is generated from the code, here and in the model's
-            # own result, so the two never disagree and neither goes stale.
-            text = f"{text} {downgrade_text(str(reason))}"
-        self._row("subagent", "notice", text, event)
-
-    def _fold_roster(self, event: SessionEvent) -> None:
-        """Fold one delegation record through the *seam's* rule (A11).
-
-        `fold_subagent_event` is `subagent_roster`'s own per-event step, so the
-        panel and the roster the model reads cannot disagree about seeding,
-        tombstones or `cause` — there is one rule, not two kept in step by a
-        test. `SubagentRow` is the drawn projection of those rows, plus `tokens`,
-        which is the panel's own sum over the same records the seam folds.
-        """
-        fold_subagent_event(self.state.roster, event)
-        self.state.sync_subagents()
-
-    def _on_subagent_status(self, event: SessionEvent, frame: Frame) -> None:
-        """A child moved. Panel only — see `RECORDLESS` for why not a row."""
-        self._fold_roster(event)
-
-    def _on_subagent_usage(self, event: SessionEvent, frame: Frame) -> None:
-        """Attributed tokens, summed per child (P3-11) — and the seam's fold.
-
-        **Both**, because usage stopped being outside the roster: the retry
-        ladder reads it as the one marker a stalled child cannot forge, so it is
-        in `_ROSTER_TYPES` now and marks `resumesAtLastAnswer`. Summing it here without
-        folding it left this panel showing a restart count that only ever went
-        up, which is the disagreement `_fold_roster` exists to prevent (A11).
-
-        The sum stays the panel's own, but the *definition* of a token is not:
-        through `reported_usage` and `TokenUsage.total`, the four-term count
-        `/autonomous` charges `children` with, so the panel and the budget agree
-        on a cache-heavy child (P2 review) — and a malformed payload adds nothing
-        rather than raising.
-        """
-        self._fold_roster(event)
-        row = self.state.subagents.get(as_str(event.data.get("runId")))
-        if row is None:
-            return
-        usage = reported_usage(event, "childUsage")
-        row.tokens += 0 if usage is None else usage.total
-
-    def _on_subagent_deleted(self, event: SessionEvent, frame: Frame) -> None:
-        """A revoked child. The transcript stays on disk; the row says it went."""
-        run_id = as_str(event.data.get("runId"), "child")
-        reason = as_str(event.data.get("reason"), "user")
-        # A tombstone, not a removal — the seam's rule, applied by the seam.
-        self._fold_roster(event)
-        self._row("subagent", "notice", f"Revoked child {run_id} ({reason}).", event)
-
     def _on_todo_write(self, event: SessionEvent, frame: Frame) -> None:
         # Emitted by ph-stabilize's `tool-todo` (P4-01); folded here so the
         # sidebar and the model's prompt context read one list.
@@ -1162,7 +1094,7 @@ class EventRule:
 
     **One row, because two tables drifted.** What an event *draws* and what it
     *changes* were declared apart for a day, and in that day two entries went
-    wrong the same way: `subagent/admitted` draws "Delegated to X" and was
+    wrong the same way: `subagent/admitted` drew "Delegated to X" and was
     declared a panel change alone, so the row would have waited in the fold
     until something unrelated marked the transcript. A handler and its surfaces
     cannot be edited apart when they are one value.
@@ -1241,14 +1173,6 @@ RULES: Mapping[str, EventRule] = {
     "harness/refined": EventRule(TuiEventAdapter._on_harness_refined),
     "harness/refine-considered": EventRule(TuiEventAdapter._on_harness_refine_considered),
     "context/loaded": EventRule(TuiEventAdapter._on_context_loaded),
-    "subagent/admitted": EventRule(
-        TuiEventAdapter._on_subagent_admitted, Surface.TRANSCRIPT | Surface.SIDEBAR
-    ),
-    "subagent/deleted": EventRule(
-        TuiEventAdapter._on_subagent_deleted, Surface.TRANSCRIPT | Surface.SIDEBAR
-    ),
-    "subagent/status": EventRule(TuiEventAdapter._on_subagent_status, Surface.SIDEBAR),
-    "subagent/usage-attributed": EventRule(TuiEventAdapter._on_subagent_usage, Surface.SIDEBAR),
 }
 """Every event type this front end reacts to at all.
 
@@ -1333,6 +1257,15 @@ RECORDLESS: frozenset[str] = frozenset(
         # A skill's nudge budget (D16). The nudges it bounds each render as
         # their own row; the number behind them is the auditor's.
         "skill-steps/budget",
+        # A sub-agent's own records (Phase 11), which only its own log holds: a
+        # root's log has none, so a transcript drawn from one never meets them.
+        # Its spawn and its revocation are the root's tool calls, whose cards
+        # already say so; the family is the daemon's `session.children`, drawn by
+        # the panel; and a child's own log is read in the trajectory view (P11-08),
+        # which renders every one of them.
+        "subagent/admitted",
+        "subagent/status",
+        "subagent/deleted",
     }
 )
 """Known types that produce no transcript row on purpose — the auditor's records
@@ -1349,10 +1282,9 @@ Three entries are here for reasons of their own:
   summary rides on. Its sibling `compaction/declined` is **not** record-less,
   because a compaction that did not happen leaves no row of its own and the
   reader is about to hit the limit it would have relieved.
-* `subagent/status` and `subagent/usage-attributed` produce no transcript row —
-  eight children ticking through `queued → running → done` would push the
-  conversation off screen — but they are not record-less: they fold into
-  `TuiState.subagents`, which the sidebar's panel draws. `subagent/admitted` and
-  `subagent/deleted` do both, and the same split decides ignorability in
-  `ph.session.known_event_types`.
+* `subagent/*` — a sub-agent's own records, in its own log and never in a
+  root's (Phase 11). The panel that used to fold them is fed by the daemon's
+  `session.children` instead, read from each child's log; the "Delegated to …"
+  and "Revoked child …" rows they drew are the spawning and revoking tool calls'
+  own cards now, which already said the same thing from the root's own log.
 """

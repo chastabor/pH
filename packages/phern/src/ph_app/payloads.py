@@ -49,6 +49,13 @@ from ph.seams.commands import CommandSchema
 from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
+from ph.seams.subagents import (
+    Access,
+    ChildState,
+    DowngradeReason,
+    StatusCause,
+    SubagentStatus,
+)
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
@@ -65,6 +72,7 @@ __all__ = [
     "AskSettledNotice",
     "AttachReply",
     "AttachmentStored",
+    "ChildRow",
     "CommandShown",
     "ConfigRow",
     "CredentialStored",
@@ -92,6 +100,7 @@ __all__ = [
     "ScheduleCanceled",
     "SessionAsk",
     "SessionBrowse",
+    "SessionChildrenNotice",
     "SessionCommandsNotice",
     "SessionDetached",
     "SessionEventNotice",
@@ -626,6 +635,74 @@ class SessionScreensNotice(SessionNotice):
     screens: list[ScreenSchema] = Field(default_factory=list)
 
 
+class ChildRow(WireModel):
+    """One sub-agent beneath a root, as its own log tells it (P11-07).
+
+    **Built from the child's log and nothing else** (`ChildState`, Phase 11): a
+    root's log no longer holds any record of its children, so a front end cannot
+    fold them from the stream it watches. The daemon folds each child's own log
+    and sends this — which is also why the panel draws the same states the resume
+    sweep, the passivation check and the budgets read.
+
+    **A narrowing of `ChildState.to_wire()`, on purpose.** That is the row a model
+    reads from `list_subagents`, carrying the task prompt, the paths, the tools and
+    the retry ladder's counts; a panel pushed to every watcher on every change has
+    no use for any of it, and a prompt is the one field that can be large. What is
+    here is what a person watching the fan-out reads: who, on what, allowed what,
+    where it stands and why, what it cost, and whether it was revoked.
+
+    The closed sets are the seam's own `Literal`s, so a status or a cause this
+    build does not know is refused at the edge rather than drawn as a blank glyph.
+    Daemon and front ends ship together (`PROTOCOL_VERSION` 6).
+    """
+
+    run_id: str
+    session_id: str
+    parent_id: str
+    """The agent that spawned it: the root for a child, a child for a grandchild. A
+    list of a whole family is a tree, and this is the edge that draws it."""
+    name: str = ""
+    model: str = ""
+    granted_access: Access = "read"
+    downgrade_reason: DowngradeReason | None = None
+    status: SubagentStatus = "queued"
+    """`queued` until its first status: admitted, and not yet started."""
+    cause: StatusCause | None = None
+    detail: str | None = None
+    deleted: bool = False
+    """Revoked. A tombstone, not a removal: the row stays, and so does `status`."""
+    deleted_reason: str | None = None
+    awaiting: str | None = None
+    """The credential it is held for, by name (T5), or `None`."""
+    tokens: int = 0
+    """What it spent — its answers and its compactions — by `TokenUsage.total`,
+    the count `/autonomous` charges a goal's `children` with."""
+
+    @classmethod
+    def of(cls, state: ChildState) -> ChildRow:
+        """One child's state as the row a front end draws — read off the state by the
+        names the two share, so a field added to both needs no third line here."""
+        return cls.model_validate(state, from_attributes=True)
+
+
+class SessionChildrenNotice(SessionNotice):
+    """`session.children` — every sub-agent beneath the root, whole (P11-07).
+
+    Pushed when a descendant's log moves in a way its row shows, and answered by
+    `session/children` for a client that has just attached — the two doors
+    `session.screens` has, and whole for its reason: each frame is a snapshot, so it
+    is correct in whatever order it arrives and a client keeps no deltas.
+
+    **A parent before its own children, siblings in admission order**, so a reader
+    draws the tree in one pass. Only what this daemon has read: every child of the
+    root, and the children of every child it has run or readmitted — a grandchild
+    beneath a child that ended in an earlier process is on disk and not listed.
+    """
+
+    METHOD: ClassVar[str] = "session.children"
+    children: list[ChildRow] = Field(default_factory=list)
+
+
 class SessionReadingsReply(SessionNotice):
     """`session/readings` — the footer, asked for rather than pushed.
 
@@ -695,6 +772,7 @@ NOTICES: Mapping[str, type[SessionNotice]] = {
         SessionStatusNotice,
         SessionCommandsNotice,
         SessionScreensNotice,
+        SessionChildrenNotice,
         SessionStagedNotice,
         AskSettledNotice,
     )
@@ -706,8 +784,8 @@ each name *takes*, and this says what each name *carries*. Both dispatchers had
 the pairing written out branch by branch — `if method == X.METHOD: X.model_validate(...)`
 — which is the mechanism, once per reader, with nothing checking that a notice
 the daemon publishes has a reader that knows its model. `test_payloads` holds
-this against every `SessionNotice` subclass that declares a `METHOD`, so a
-seventh notice cannot be added without appearing here.
+this against every `SessionNotice` subclass that declares a `METHOD`, so an
+eighth notice cannot be added without appearing here.
 
 The asks cannot appear here — `SessionAsk` is a sibling of `SessionNotice`,
 not a subclass — which is the point of the split: a reader that found
@@ -722,8 +800,8 @@ FED: frozenset[str] = frozenset({SessionEventNotice.METHOD, SessionStatusNotice.
 Named once because two readers gate on it and both were spelling it inline —
 and because a class-attribute load off a pydantic model never specializes
 (`ModelMetaclass` defines `__getattr__`), so the tuple those branches built per
-notification measured 0.105 µs against 0.021 for this. The other four notices
-are palette and tray snapshots a feed has no use for; validating them to find
+notification measured 0.105 µs against 0.021 for this. The other five notices
+are palette, family and tray snapshots a feed has no use for; validating them to find
 that out measured **129x** the string test it replaced, on a `session.commands`
 carrying a 25-command palette."""
 

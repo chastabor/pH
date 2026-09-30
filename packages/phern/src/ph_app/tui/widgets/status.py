@@ -20,7 +20,6 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from ph.json import as_str
-from ph.seams.subagents import child_is_live
 from ph.seams.tui_status import StatusReading
 from ph.text import duration, thousands
 
@@ -73,25 +72,26 @@ def children_heading(state: TuiState) -> str:
     is how much is moving and how much is waiting.
 
     **"pending", never "queued"**, and that is the whole reason this reads oddly
-    next to the roster it counts. The status bar already says "queued" for the
+    next to the rows it counts. The status bar already says "queued" for the
     person's *own* prompts waiting on a busy agent, and two counts on one screen
-    using one word for two different things is worse than a synonym. The roster's
-    own vocabulary is untouched — `queued` is what the log says and what every
+    using one word for two different things is worse than a synonym. The children's
+    own vocabulary is untouched — `queued` is what their logs say and what every
     other reader folds; this is a heading, and headings are for the reader.
 
     Settled children are not counted at all. They stay listed, because a parent
     asking what happened to one deserves an answer, but "how busy is this
-    fan-out" is a question about the ones still going.
+    fan-out" is a question about the ones still going — at every depth, since a
+    grandchild working is the fan-out working.
 
-    **`child_is_live` decides which those are, rather than a literal here.** The
-    seam counts an *unrecognized* status as live on purpose, so a status this
-    package has not heard of lands in `pending` — where a hand-written
-    `status in {running, queued}` would have counted it as neither and quietly
-    under-reported a fan-out that is still working. Counted off `state.roster`,
-    the seam's own fold, for the reason the panel draws from it (A11).
+    **`child_is_live`'s rule decides which those are, rather than a literal
+    here** (`SubagentRow.live`): not revoked, and not in the seam's settled set,
+    so `queued` and anything else unsettled land in `pending` — where a
+    hand-written `status in {running, queued}` would count a status added to the
+    seam as neither and quietly under-report a fan-out that is still working.
+    Counted off the rows the panel draws, which are the daemon's (A11).
     """
-    live = [row for row in state.roster.values() if child_is_live(row)]
-    running = sum(1 for row in live if row.get("status") == "running")
+    live = [row for row in state.subagents.values() if row.live]
+    running = sum(1 for row in live if row.child.status == "running")
     counts = [
         f"{count} {word}"
         for count, word in ((running, "running"), (len(live) - running, "pending"))
@@ -101,20 +101,31 @@ def children_heading(state: TuiState) -> str:
 
 
 def render_subagents(state: TuiState) -> str:
-    """The delegation panel: one line per child, admission order (P3-19).
+    """The delegation panel: one line per sub-agent, a grandchild indented under the
+    child that spawned it (P3-19, P11-09).
 
     A *panel*, not transcript rows, because a fan-out of eight ticking through
     `queued → running → done` would push the conversation off screen — and
     because the interesting thing about a family is its current shape, which is
-    a projection rather than a history. Folded from the same `subagent/*` events
-    `subagent_roster` folds; a tombstoned child stays listed, since a parent
-    asking what happened to the one it revoked deserves an answer.
+    a projection rather than a history. Drawn from the daemon's `session.children`,
+    which it reads from each child's own log — the states the resume sweep and the
+    budgets read too; a tombstoned child stays listed, since a parent asking what
+    happened to the one it revoked deserves an answer.
+
+    A child held for a credential says which (T5): `queued` alone reads exactly
+    like a child waiting for a slot, and only one of the two needs a person.
     """
     lines: list[str] = []
     for row in state.subagents.values():
-        detail = row.cause or (row.model if row.status == "queued" else row.status)
-        tokens = f" {thousands(row.tokens)}" if row.tokens >= 1000 else ""
-        lines.append(f"{row.glyph} {row.name} {detail}{tokens}".rstrip())
+        child = row.child
+        detail = (
+            f"needs {child.awaiting}"
+            if child.awaiting
+            else child.cause or (child.model if child.status == "queued" else child.status)
+        )
+        tokens = f" {thousands(child.tokens)}" if child.tokens >= 1000 else ""
+        indent = "  " * row.depth
+        lines.append(f"{indent}{row.glyph} {child.name or child.run_id} {detail}{tokens}".rstrip())
     return "\n".join(lines)
 
 

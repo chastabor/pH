@@ -275,6 +275,28 @@ async def test_open_is_on_disk_before_the_claim_is_handed_out(mount: MountProfil
 
 
 @pytest.mark.usefixtures("kinds")
+async def test_a_deferred_open_is_written_by_the_next_barrier(mount: MountProfile) -> None:
+    """`open_deferred`: a durable intent whose barrier is its act's own. Nothing is
+    flushed for it, and the durable open its act makes writes both, in order — the
+    claim settles like any other. A kind with no barrier has none to defer.
+
+    Sabotage: give `open_deferred` the barrier `open` has, and the first store read
+    finds the record."""
+    ctx, journal, session = await _journal(mount)
+    persistence = ctx.require(SESSION_PERSISTENCE)
+
+    held = journal.open_deferred(session, DURABLE, EFFECT)
+
+    assert not persistence.exists(session.id) or persistence.read(session.id)[1] == []
+    await journal.open(session, DURABLE, _effect("send:m2", "c2"))
+    assert [one.data["key"] for one in persistence.read(session.id)[1]] == ["send:m1", "send:m2"]
+    journal.settle(session, held, _effect_done("send:m1"))
+    assert journal.pending(session, DURABLE)[0].key == "send:m2"
+    with pytest.raises(IntentError, match="no barrier to defer"):
+        journal.open_deferred(session, BUFFERED, _dispatch("r1:code:0"))
+
+
+@pytest.mark.usefixtures("kinds")
 async def test_a_failed_barrier_hands_out_no_claim_and_closes_the_pair(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:

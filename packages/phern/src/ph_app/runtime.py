@@ -19,9 +19,10 @@ from pydantic import ValidationError
 
 from ph.cordis import Context, LoaderError, MountRefusal, Profile
 from ph.keys import AGENTS, NAMED_PROFILES, SESSIONS
+from ph.paths import resolve_roots
 from ph.persistence import open_session, stored_session
 from ph.seams.models import ModelChoice, choose, start_on
-from ph.session import Session
+from ph.session import Session, SessionForkError
 from ph.session_profile import (
     LoggedEnvironment,
     logged_environment,
@@ -33,6 +34,7 @@ from ph.wire import validation_summary
 from .attach import ingest, prompt_message
 from .console import err
 from .profiles import NAMED, StartingProfile, host_rows, kept_note, session_profile
+from .sessions import not_a_root, recorded_start
 
 __all__ = ["mount_session", "mounted", "prompted"]
 
@@ -99,7 +101,16 @@ async def mount_session(
     the version it had; `StartingProfile.withdrawn` says so, for a host with somebody
     to tell. Only the profile's own refusals withdraw (`_REFUSED`): anything else fails
     the start as any start fails, and takes nothing back the next might mount.
+
+    **A sub-agent's log is refused before anything is mounted** (P11-08): its one
+    writer is the mount of the root that spawned it, and it is that child's only
+    record. The daemon refuses first, with its own code (`NotARoot`); this is the same
+    refusal for `phern -p --session <child>` and an rpc peer, which open through here.
     """
+    if session_id and recorded is None:
+        owner = recorded_start(resolve_roots().sessions_dir(), session_id).owner
+        if owner is not None:
+            raise SessionForkError(not_a_root(session_id, owner), "SESSION_IS_SUBAGENT")
     starting = session_profile(session_id, requested, recorded=recorded)
     try:
         ctx = await exits.enter_async_context(mounted(starting.profile, project=project))

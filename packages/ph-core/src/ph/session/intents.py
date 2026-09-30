@@ -94,7 +94,8 @@ Barrier: TypeAlias = Literal["durable", "buffered", "tools-execute"]
 """When the opening record must be on disk (decision 3).
 
 * `durable` — before the act: the journal flushes before handing out the claim,
-  and refuses the claim if the flush fails.
+  and refuses the claim if the flush fails. Or, opened with `open_deferred`, the
+  act's own durable intent flushes it, for an opener whose act carries one.
 * `buffered` — whenever the next flush happens: accounting, where losing the
   record in a crash loses a line of history and never an act.
 * `tools-execute` — the checkpoint policy's barrier before tools execute, which

@@ -21,7 +21,7 @@ from ph.commands.sandbox import denial_count, extend_denial_count
 from ph.seams.goals import GATE, Goal, GoalService, extend_goals, goals
 from ph.seams.sandbox import DENIED
 from ph.seams.schedule import Schedule, ScheduleService, schedules
-from ph.seams.subagents import ADMITTED, DELETED, STATUS, USAGE, subagent_roster
+from ph.seams.subagents import ADMITTED, DELETED, STATUS, child_state, extend_child_state
 from ph.session import Session, SessionFoldCache, SessionHeader, SurfaceIntent, now_ms
 from ph.testing import (
     VerifyingFoldCache,
@@ -294,24 +294,26 @@ def test_the_schedule_fold_obeys_the_laws() -> None:
     assert_fold_laws(session, schedules)
 
 
-def test_the_subagent_roster_obeys_the_laws() -> None:
-    session = Session("parent")
-    for run_id, name in (("r1", "scout"), ("r2", "recon")):
-        log_event(
-            session,
-            ADMITTED,
-            {"runId": run_id, "name": name, "model": "fake-1", "grantedAccess": "read"},
-        )
-    log_event(session, STATUS, {"runId": "r1", "status": "running"})
+def test_a_childs_state_obeys_the_laws() -> None:
+    """A child's state is the fold of its own log (Phase 11), cached per child."""
+    session = Session("parent-r1")
     log_event(
-        session, USAGE, {"runId": "r1", "childUsage": {"inputTokens": 400, "outputTokens": 2}}
+        session,
+        ADMITTED,
+        {"runId": "r1", "name": "scout", "model": "fake-1", "grantedAccess": "read"},
     )
-    log_event(session, STATUS, {"runId": "r1", "status": "running", "cause": "resumed"})
-    log_event(session, STATUS, {"runId": "r1", "status": "done"})
-    log_event(session, STATUS, {"runId": "r2", "status": "done"})
-    log_event(session, DELETED, {"runId": "r2", "reason": "user"})
+    log_event(session, STATUS, {"status": "running"})
+    log_event(
+        session,
+        "assistant/message",
+        {**assistant_payload("found it", "m1"), "usage": {"inputTokens": 400, "outputTokens": 2}},
+        SurfaceIntent("append", ()),
+    )
+    log_event(session, STATUS, {"status": "running", "cause": "resumed"})
+    log_event(session, STATUS, {"status": "done", "answerPreview": "found it"})
+    log_event(session, DELETED, {"reason": "user"})
 
-    assert_fold_laws(session, subagent_roster)
+    assert_fold_laws(session, child_state, extend_child_state)
 
 
 def test_the_sandbox_refusal_count_obeys_the_laws() -> None:

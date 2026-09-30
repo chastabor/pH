@@ -230,6 +230,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "ModelApplied": {"sessionId": "s1", "key": "", "route": {"provider": "p", "model": "m"}},
         "Schedule": {"id": "s1", "kind": "interval", "spec": "300000", "prompt": "go"},
         "Goal": {"id": "g1", "objective": "make the tests pass"},
+        "Admission": {"runId": "r1", "name": "scout", "owner": "rlm-child", "prompt": "look"},
         "Budget": {},
         "ReasoningBlock": {"text": "thinking"},
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},
