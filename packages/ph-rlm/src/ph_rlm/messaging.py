@@ -47,11 +47,14 @@ from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock, PluginSource, create_user_message, text_of
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import (
+    STATUS,
     FamilyRole,
+    StatusCause,
     reachable_family,
 )
-from ph.session import Session, SessionEvent, derive_event_message, session_written
+from ph.session import Session, SessionEvent, derive_event_message, session_written, settle_of
 from ph.tools import (
+    TOOL_DISPATCH_EVENT_TYPES,
     Done,
     NotDone,
     Reconciled,
@@ -62,21 +65,22 @@ from ph.tools import (
     Unknown,
     call_id_of,
     define_tool,
+    recorded_arguments,
     text_content,
 )
 from ph.tools.code_mode import CodeBindingsRequest, ToolCallError, governed_binding
 from ph.wire import WireModel
-
-from .keys import RLM_CHILDREN
 
 __all__ = [
     "MAX_MESSAGE_CHARS",
     "MAX_PENDING_PER_SESSION",
     "MESSAGE_NAMESPACE",
     "OBSERVE_NAMESPACE",
+    "SEND_TOOL",
     "Config",
     "apply",
     "render_received",
+    "replied_to_parent",
 ]
 
 log = logging.getLogger("ph_rlm.messaging")
@@ -377,11 +381,6 @@ async def apply(ctx: Context, config: Config) -> None:
         # not tell the sender it was not sent.
         if target.session is not None:
             await session_written(ctx, target.session)
-        # A child answering its parent is a reply, which is what decides whether
-        # the parent gets a "finished without replying" notice.
-        children = ctx.get(RLM_CHILDREN)
-        if children is not None and sender_role == "child":
-            children.mark_replied(sender_id)
         return Receipt(
             delivery_status="queued" if target.status == "running" or pending else "delivered",
             receiver_id=target_id,
@@ -634,6 +633,51 @@ def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:
             break
     rows.reverse()
     return rows
+
+
+def replied_to_parent(child: Session) -> bool:
+    """Whether `child` sent its parent a message since it was last handed a task: the
+    reply that makes "completed without sending a reply" untrue of it.
+
+    **Read from the child's own log** (Phase 11), where a send is the call it was: a
+    native `tool/call` and its `tool/result`, or a Code Mode dispatch's start and
+    settle, each named for the tool. A send counts once it addressed the parent and
+    settled without an error. One a crash cut off counts once its resume has
+    reconciled it from the parent's inbox (`reconcile_send`), which settles it as
+    done. It was a flag on the provider's in-memory child, so a child readmitted after
+    a restart had forgotten a reply it sent, and its parent was told it never replied.
+
+    **Since it was last handed a task**: a rehydration asks a settled child something
+    new, so its start begins the count again. A resumed start carries on the task the
+    child had, and a reply from before the restart still counts.
+    """
+    asked: set[str] = set()
+    replied = False
+    for event in child.events:
+        if event.type == STATUS and event.data.get("cause") == _NEW_TASK:
+            asked.clear()
+            replied = False
+        elif event.type in TOOL_DISPATCH_EVENT_TYPES:
+            if event.data.get("name") == SEND_TOOL and _to_parent(event):
+                asked.add(call_id_of(event))
+        elif (settled := settle_of(event)) is not None:
+            call_id, failed = settled
+            if call_id in asked and not failed:
+                replied = True
+    return replied
+
+
+_NEW_TASK: StatusCause = "rehydrated"
+"""The start that hands a settled child a new task. Typed, so a rename of the seam's
+causes fails the type check here rather than quietly ending the reset."""
+
+
+def _to_parent(call: SessionEvent) -> bool:
+    """Whether a send's record addressed the sender's parent."""
+    try:
+        return SendArgs.model_validate(recorded_arguments(call)).receiver_role == "parent"
+    except ValidationError:
+        return False
 
 
 def _render_receipt(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401

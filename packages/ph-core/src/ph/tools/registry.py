@@ -79,6 +79,7 @@ from .definition import (
     budget_result,
     denied_result,
     error_result,
+    recorded_arguments,
     text_content,
 )
 from .errors import (
@@ -88,7 +89,6 @@ from .errors import (
     error_info,
     error_message,
 )
-from .json_schema import parse_arguments
 
 __all__ = [
     "RUN_CODE",
@@ -1227,9 +1227,9 @@ class ToolRuntime:
             return None
         bound = boundary_of(scope, self.ctx)
         by = view.by.get(name) or Running(bound, bound)
-        raw = record.data.get("arguments")
-        arguments = parse_arguments(raw) if isinstance(raw, str) else thaw_json(raw)
-        return await self._answer(definition, by, bound, arguments, record, session)
+        return await self._answer(
+            definition, by, bound, recorded_arguments(record), record, session
+        )
 
     async def _answer(
         self,

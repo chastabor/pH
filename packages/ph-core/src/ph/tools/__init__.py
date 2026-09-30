@@ -32,6 +32,7 @@ from .definition import (
     define_tool,
     denied_result,
     error_result,
+    recorded_arguments,
     text_content,
 )
 from .errors import (
@@ -113,6 +114,7 @@ __all__ = [
     "error_result",
     "execute_tool_calls",
     "parse_arguments",
+    "recorded_arguments",
     "schema_of",
     "simple_views",
     "text_content",

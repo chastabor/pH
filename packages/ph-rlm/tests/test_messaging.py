@@ -12,36 +12,56 @@ from __future__ import annotations
 import itertools
 import json
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 import pytest
-from rlm_fixtures import MESSAGING_ROW, PROVIDER_ROW, MountedRuntime, logs_after_a_crash
+from rlm_fixtures import (
+    MESSAGING_ROW,
+    PROVIDER_ROW,
+    MountedRuntime,
+    logs_after_a_crash,
+    reply_to_parent,
+)
 
 from ph.agent.types import AgentDriver
+from ph.cancel import CancelToken
 from ph.cordis import Context
 from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
-from ph.llm.types import text_of
+from ph.llm.types import ToolCallBlock, text_of
 from ph.persistence import resume_session
-from ph.seams.subagents import SubagentRequest, family_reach, reachable_family
-from ph.session import Session, SessionHeader, outcome_of
+from ph.seams.subagents import (
+    STATUS,
+    FamilyRole,
+    StatusCause,
+    SubagentRequest,
+    family_reach,
+    reachable_family,
+)
+from ph.session import Session, SessionHeader, SurfaceIntent, outcome_of
 from ph.session.kinds import TOOL_DISPATCH
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
+    assistant_payload,
+    log_event,
     log_interrupted_call,
     not_none,
     reconciled_call,
     result_text,
     run_tool,
     stored_events,
+    tool_result_payload,
 )
 from ph.tools import Allow, NotDone
+from ph.tools.batch import execute_tool_calls
 from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.messaging import (
     OBSERVE_GET_TOOL,
     OUT_OF_REACH,
     SEND_TOOL,
     render_received,
+    replied_to_parent,
 )
 from ph_rlm.subagents import PROVIDER_NAME
 
@@ -567,30 +587,93 @@ async def test_a_target_at_the_pending_cap_refuses_more(family_ctx: MountedRunti
 # ------------------------------------------------------------------ replies --
 
 
-async def test_a_childs_send_records_that_it_replied(family_ctx: MountedRuntime) -> None:
-    """The wiring that suppresses the "finished without replying" notice.
+async def test_a_childs_send_to_its_parent_is_read_from_its_own_log(
+    family_ctx: MountedRuntime,
+) -> None:
+    """What decides the "finished without replying" notice, read where the send is
+    recorded: the child's own log, as the batch records every call it runs.
 
-    Asserted on the provider's record rather than on the notice's absence: a
-    child driven by the fake adapter settles inside the send's own await, so
-    whether the notice has already been written is a race. That the *reply* is
-    recorded is not — and `test_subagents.py` covers what the provider does with
-    it, in the one place the ordering is controllable.
+    Asserted on the fold rather than on the notice's absence: a child driven by the
+    fake adapter settles inside the send's own await, so whether the notice has been
+    written already is a race — and `test_subagents.py` covers what the provider does
+    with the answer, where the ordering is controllable.
+
+    Sabotage: have `settle_of` lose a result's call id, and the reply is not seen.
     """
     ctx, _session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
-
-    child_session = ctx.require(SESSIONS).get(run.session_id)
-    assert child_session is not None
-    sent = await _send(
-        ctx,
-        child,
+    child_session = not_none(ctx.require(SESSIONS).get(run.session_id))
+    call = ToolCallBlock(id="reply-1", name=SEND_TOOL, arguments=json.dumps({"message": "here"}))
+    log_event(
         child_session,
-        message="here it is",
-        receiver_role="parent",
+        "assistant/message",
+        assistant_payload("", "a-reply", content=[call.model_dump(mode="json", by_alias=True)]),
+        SurfaceIntent("append"),
     )
-    assert sent.is_error is False
-    assert ctx.require(RLM_CHILDREN)._children[run.id].replied is True
+
+    await execute_tool_calls(ctx, child, 1, 1, [call], CancelToken(), lambda _message: None)
+
+    assert replied_to_parent(child_session)
+
+
+def _native(child: Session, *, role: FamilyRole = "parent", failed: bool = False) -> None:
+    """A send as a native call records one: the model's arguments, then its result."""
+    arguments = json.dumps({"message": "hi", "receiver_role": role})
+    call = log_event(
+        child, "tool/call", {"callId": "n1", "name": SEND_TOOL, "arguments": arguments}
+    )
+    log_event(
+        child,
+        "tool/result",
+        tool_result_payload("sent", "m-n1", "n1", is_error=failed),
+        SurfaceIntent("append", (call.seq,)),
+    )
+
+
+def _started(child: Session, *, cause: StatusCause) -> None:
+    log_event(child, STATUS, {"status": "running", "cause": cause})
+
+
+@pytest.mark.parametrize(
+    ("steps", "replied"),
+    [
+        pytest.param([_native], True, id="a native send to the parent"),
+        pytest.param([reply_to_parent], True, id="a dispatched send to the parent"),
+        pytest.param([partial(reply_to_parent, role="sibling")], False, id="a send to a sibling"),
+        pytest.param([partial(_native, failed=True)], False, id="a send that was refused"),
+        pytest.param(
+            [reply_to_parent, partial(_started, cause="resumed")],
+            True,
+            id="a reply, then a restart",
+        ),
+        pytest.param(
+            [reply_to_parent, partial(_started, cause="rehydrated")],
+            False,
+            id="a reply, then a rehydration",
+        ),
+        pytest.param(
+            [partial(_started, cause="rehydrated"), reply_to_parent],
+            True,
+            id="a rehydration, then a reply",
+        ),
+    ],
+)
+def test_what_counts_as_a_reply_to_the_parent(
+    steps: list[Callable[[Session], None]], replied: bool
+) -> None:
+    """A send counts once it addressed the parent and settled without an error, since
+    the child was last handed a task. A rehydration hands it a new one, so the reply
+    to the old one no longer answers; a restart carries on the task it had.
+
+    Sabotage: count every settled send, and the one to a sibling reads as a reply;
+    begin the count again at a resumed start, and the reply before the restart is lost.
+    """
+    child = Session("child")
+    for step in steps:
+        step(child)
+
+    assert replied_to_parent(child) is replied
 
 
 # ------------------------------------------------------------------ observe --

@@ -16,13 +16,14 @@ import pytest
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
-from ph.json import JsonValue
+from ph.json import JsonValue, as_obj, as_seq, as_str
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
     PARENT_TEARDOWN,
     STATUS,
+    ChildNotice,
     SubagentRequest,
     SubagentRun,
     SubagentSpawnError,
@@ -371,6 +372,67 @@ async def test_a_child_that_ends_takes_what_it_left_unfinished_with_it(
         ("done", False),
         ("queued", False),
     ], "a finished child and a running one are not the cascade's"
+
+
+def _notices(parent: Session, notice: ChildNotice) -> int:
+    """How many times `notice` reached `parent`'s inbox, as its log records it."""
+    delivered = [
+        as_str(as_obj(message).get("id"))
+        for event in parent.events
+        if event.type == "agent/inbox/spliced"
+        for message in as_seq(event.data.get("inserted"))
+    ]
+    return delivered.count(notice.id)
+
+
+async def test_an_ending_carries_its_notice_to_the_parent(mount: MountProfile) -> None:
+    """What a child's ending tells its parent is on the child's own record, on its
+    disk, and then in the parent's inbox. It was an inject beside the ending, so a
+    crash after the child's ending reached its disk and before the parent's did lost
+    it for good: the sweep skips a child that ended.
+
+    Sabotage: leave the notice off the ending record, and the stored child says
+    nothing of it.
+    """
+    ctx = await mount()
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1")
+    notice = ChildNotice(text="[the child finished]", summary="finished")
+
+    await record_ended(ctx, child, "done", notice=notice)
+
+    assert _notices(parent.session, notice) == 1
+    await _as_an_earlier_process_left_them(ctx, parent.session, child)
+    stored = await ctx.require(SUBAGENTS).load_children(
+        parent.session.id, parent.session.header.family
+    )
+    assert stored["r1"].notice == notice, "on the child's disk, where a restart reads it"
+
+
+async def test_a_notice_a_crash_kept_from_the_parent_reaches_it_once(mount: MountProfile) -> None:
+    """A crash between the child's ending and the parent's next write left a notice
+    the child's log holds and the parent's does not. The sweep that brings the parent
+    back delivers it — and a second sweep, finding it in the parent's log, does not
+    deliver it again.
+
+    Sabotage: skip the notice in the sweep, and it never arrives; deliver it without
+    asking the parent's log, and it arrives twice.
+    """
+    ctx = await mount()
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1")
+    notice = ChildNotice(text="[the child finished]", summary="finished")
+    log_event(child, STATUS, {"status": "done", "notice": notice.to_wire()})
+    await _as_an_earlier_process_left_them(ctx, parent.session, child)
+    subagents = ctx.require(SUBAGENTS)
+
+    await subagents.resume_children(parent, retry_limit=3)
+    subagents.forget_session(parent.session.id)
+    await subagents.resume_children(parent, retry_limit=3)
+
+    assert _notices(parent.session, notice) == 1
 
 
 async def test_a_stored_child_that_is_deleted_takes_its_children_with_it(

@@ -57,16 +57,15 @@ from ph.agent.types import (
     RequestFailure,
 )
 from ph.cordis import Context, Next, plugin
-from ph.json import as_bool, as_str
+from ph.json import as_str
 from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
-from ph.llm.types import ToolResultBlock
 from ph.seams._registry import contribute_via
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import SubagentRequest, SubagentService
 from ph.seams.tui_status import StatusField, StatusReading
-from ph.session import Session, SessionEvent, SessionFoldCache, derive_event_message
+from ph.session import Session, SessionFoldCache, settle_of
 from ph.session.writers import log_writer
-from ph.tools import TOOL_DISPATCH_EVENT_TYPES
+from ph.tools import TOOL_DISPATCH_EVENT_TYPES, call_id_of
 from ph.tools.definition import Deny, PreToolDecision, ToolExecution
 from ph.wire import WireModel
 
@@ -398,15 +397,15 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
             name = as_str(event.data.get("name"))
             # `callId` for a model's call, `subCallId` for a dispatch: the id the
             # settling record will cite, so the breaker can pair them.
-            call_id = as_str(event.data.get("callId") or event.data.get("subCallId"))
+            call_id = call_id_of(event)
             if call_id:
                 names[call_id] = name
             session_tools += 1
             turn_tools += 1
             per_session[name] = per_session.get(name, 0) + 1
             per_turn[name] = per_turn.get(name, 0) + 1
-        elif event.type in ("tool/result", "tool/code-dispatch"):
-            call_id, is_error = _result_facts(event)
+        elif (settled := settle_of(event)) is not None:
+            call_id, is_error = settled
             # Popped, not read: the map exists to carry a name from a call to
             # the settle that answers it, and both are in the same turn — which
             # is also the reset above, for the dispatch that never settles.
@@ -423,30 +422,6 @@ def _extend(previous: Counts, session: Session, from_seq: int) -> Counts:
         consecutive_failures=failures,
         names_by_call=names,
     )
-
-
-def _result_facts(event: SessionEvent) -> tuple[str, bool]:
-    """The call a settled call answers, and whether it failed — both doors.
-
-    Through `derive_event_message` — THE projection — rather than by indexing
-    the payload. This module was the *fourth* reader of that shape and reached
-    the call id by a different route than the other three, so a change to
-    `_append_result` would have left the breaker silently counting nothing.
-    Paid once per settle, because the fold visits each event once.
-
-    A Code Mode dispatch settles as `tool/code-dispatch`, which is its own shape
-    and not a `ToolResultBlock` — so the branch is here, where this module's one
-    reader of "what did a settle say" already lives, rather than in the fold. The
-    start branch unified the same way, on `callId or subCallId`.
-    """
-    if event.type == "tool/code-dispatch":
-        return as_str(event.data.get("subCallId")), as_bool(event.data.get("isError"))
-    message = derive_event_message(event)
-    block = next(
-        (one for one in (message.content if message else ()) if isinstance(one, ToolResultBlock)),
-        None,
-    )
-    return ("", False) if block is None else (block.tool_call_id, bool(block.is_error))
 
 
 def counts_of(session: Session) -> Counts:

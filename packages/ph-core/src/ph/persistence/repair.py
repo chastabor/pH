@@ -90,6 +90,7 @@ from ..session import (
     is_in_place_rewrite,
     key_of,
     open_intents,
+    settle_of,
 )
 from ..session.json import freeze_json_value
 from ..session.known_event_types import INTENT_PAIRS, IntentPair
@@ -320,9 +321,8 @@ def _tail(events: Sequence[SessionEvent]) -> _Tail:
             entry = pending.get(as_str(event.data.get("callId")))
             if entry is not None:
                 entry.call_seq = event.seq
-        elif event.type == "tool/result":
-            source = as_obj(as_obj(event.data.get("message")).get("source"))
-            pending.pop(as_str(source.get("callId")), None)
+        elif (settled := settle_of(event)) is not None:
+            pending.pop(settled[0], None)
     return tail
 
 

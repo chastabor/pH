@@ -202,7 +202,10 @@ Obligations a provider carries, in order:
    keeps its record's durability rule, so no provider hand-writes a flush.
    `ph.seams.subagents` is the one writer of these types (`_WRITTEN_BY`), so a
    provider that appends one itself fails `test_log_writers`. Nothing goes into the
-   parent's log.
+   parent's log but what an ending tells it: a `ChildNotice` the provider hands
+   `record_ended`, which rides on the ending and is delivered into the parent's own
+   inbox. The resume sweep delivers one a crash kept from the parent, and never one
+   the parent's log already has.
 
 A child's spend needs no obligation: its answers carry their `usage` in its own
 log.
@@ -217,7 +220,7 @@ that skipped one would miscount the retry ladder or bring back a deleted child.
 | record | carries | door | durable when |
 |---|---|---|---|
 | `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`) and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
-| `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
+| `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `notice`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
 | `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |
 
 - **The admission** has no `sessionId` or `parentId`: the log's own id is one, and

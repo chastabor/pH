@@ -19,12 +19,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ..json import as_obj
+from ..json import as_bool, as_obj, as_seq, as_str
 from ..llm.types import Message
 from .events import SessionEvent
 from .surface import is_append_surface_event
 
-__all__ = ["derive_event_message", "derive_transcript"]
+__all__ = ["derive_event_message", "derive_transcript", "settle_of"]
 
 
 def derive_event_message(event: SessionEvent) -> Message | None:
@@ -65,3 +65,27 @@ def derive_transcript(events: Iterable[SessionEvent]) -> tuple[Message, ...]:
         if message is not None:
             messages.append(message)
     return tuple(messages)
+
+
+def settle_of(record: SessionEvent) -> tuple[str, bool] | None:
+    """The call a settle answers, and whether it failed — for either record a call
+    settles with, and `None` for any other record, or one too damaged to say.
+
+    **The one reader of that shape.** Five readers each reached the call id by a
+    route of their own, so a change to the result's shape left some of them counting
+    nothing, with no error. A `tool/result` is read at its `tool-result` block, the
+    one `batch._append_result` and repair's closer both write, off the wire rather
+    than through `derive_event_message`: repair folds every record of a log on each
+    resume, and a projection that validated each result paid 8 µs apiece and raised
+    on the damage repair exists to read past. A Code Mode dispatch settles as
+    `tool/code-dispatch`, a shape of its own.
+    """
+    if record.type == "tool/code-dispatch":
+        return as_str(record.data.get("subCallId")), as_bool(record.data.get("isError"))
+    if record.type != "tool/result":
+        return None
+    content = as_seq(as_obj(record.data.get("message")).get("content"))
+    block = next((as_obj(one) for one in content if as_obj(one).get("type") == "tool-result"), None)
+    return (
+        None if block is None else (as_str(block.get("toolCallId")), as_bool(block.get("isError")))
+    )

@@ -59,6 +59,7 @@ from ph.session import (
     SurfaceReplace,
     is_in_place_rewrite,
     is_replacement_surface_event,
+    settle_of,
     unsettled_why,
 )
 from ph.session.kinds import SESSION_HOLDER, hold_of
@@ -356,18 +357,16 @@ class TuiEventAdapter:
         card.input_text = view.body or ""
 
     def _on_tool_result(self, event: SessionEvent, frame: Frame) -> None:
-        message = as_obj(event.data.get("message"))
-        call_id = as_str(as_obj(message.get("source")).get("callId"))
-        # One `tool_result` block carries both the text and the error flag; read
-        # it once rather than indexing the content twice.
-        result = result_block(message)
-        body = text_of_wire(result.get("content"))
+        # Which call, and whether it failed, through the one reader of a settle
+        # (`settle_of`); the text is the card's own business.
+        call_id, is_error = settle_of(event) or ("", False)
+        body = text_of_wire(result_block(as_obj(event.data.get("message"))).get("content"))
         card = self.state.card(call_id)
         if card is None:
             self._row("tool", "tool", body, event)
             return
         card.settled = True
-        card.is_error = as_bool(result.get("isError"))
+        card.is_error = is_error
         card.failure_kind = as_str(event.data.get("failureKind"))
         card.body = body
         self._present_result(card, as_obj(event.data.get("meta")), frame.view)

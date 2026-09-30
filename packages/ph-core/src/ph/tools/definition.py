@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict
 from ..agent.types import AgentHandle
 from ..cancel import CancelToken
 from ..cordis import Boundary, Context, Running, maybe_await
-from ..json import JsonObject, JsonValue, as_obj, as_str
+from ..json import JsonObject, JsonValue, as_obj, as_str, thaw_json
 from ..llm.types import ContentBlock, Message, TextBlock, ToolSchema
 from ..session import Session, SessionEvent
 
@@ -45,7 +45,7 @@ from .errors import (
     FailureKind,
     ToolOutputError,
 )
-from .json_schema import schema_of, validate_json_schema_value
+from .json_schema import parse_arguments, schema_of, validate_json_schema_value
 from .presentation import ToolCallView, ToolResultView
 
 __all__ = [
@@ -331,6 +331,14 @@ def call_id_of(record: SessionEvent) -> str:
     `callId`, or a Code Mode dispatch's `subCallId` — the id the call's own body saw
     as `ToolRunContext.call_id`. Empty when the record names neither."""
     return as_str(record.data.get("subCallId")) or as_str(record.data.get("callId"))
+
+
+def recorded_arguments(record: SessionEvent) -> JsonValue:
+    """A call record's arguments, as the call ran with them: a `tool/call`'s are the
+    model's text, parsed as the batch parses it, and a Code Mode dispatch's the object
+    its program passed."""
+    raw = record.data.get("arguments")
+    return parse_arguments(raw) if isinstance(raw, str) else thaw_json(raw)
 
 
 @dataclass(slots=True)

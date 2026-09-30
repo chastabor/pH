@@ -59,6 +59,7 @@ from rlm_fixtures import (
     ModelGate,
     MountedRuntime,
     logs_after_a_crash,
+    reply_to_parent,
 )
 
 from ph.agent_loop.driver import ReactLoopAgent
@@ -126,7 +127,6 @@ from ph.testing import (
 from ph.testing.git import WORKTREE_ROWS, git_repo
 from ph.tools.definition import NotDone
 from ph_rlm.bindings import RUN_TOOL
-from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.subagents import (
     PROVIDER_NAME,
     TASK_PREFIX,
@@ -611,13 +611,14 @@ async def test_the_notice_reaches_the_parents_context_on_its_next_step(
 async def test_a_child_that_replied_is_not_announced_as_silent(delegating: MountedRuntime) -> None:
     """The reply is the notice, so the parent is not told the same thing twice.
 
-    `mark_replied` is called here directly, which is the only way to fix the
-    ordering: `rlm-messaging` calls it from a send, and a fake-adapter child
-    settles inside that send's own await.
+    The reply is written into the child's log before it runs, which is the only way to
+    fix the ordering: a fake-adapter child settles inside a real send's own await.
+
+    Sabotage: decide the notice from anything but the child's own log, and it fires.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say something")
-    ctx.require(RLM_CHILDREN).mark_replied(run.session_id)
+    reply_to_parent(not_none(ctx.require(SESSIONS).get(run.session_id)))
     await ctx.drain()
 
     assert _notices(session) == [], "a child that replied was announced as silent"
@@ -1411,6 +1412,34 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     assert len(tasks) == 2, "the task was not presented again, so the retry answers nothing"
     assert "the harness stopped while you were working on this" in tasks[-1]
     assert "this is attempt 2" in tasks[-1]
+
+
+async def test_a_child_that_replied_before_a_restart_is_not_announced_as_silent(
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+) -> None:
+    """Whether a child replied was a flag on its in-memory `_Child`, and a readmitted
+    child is a new one: a child that answered its parent, was caught by a restart and
+    then finished was announced as having finished without a reply. The reply is in
+    the child's own log, which comes back with it.
+
+    Sabotage: decide the notice from anything the readmitted `_Child` holds in memory,
+    and it is announced as silent.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    run = await _spawn(ctx, parent, "only")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    child = not_none(ctx.require(SESSIONS).get(run.session_id))
+    reply_to_parent(child)
+    await ctx.require(SESSIONS).flush(child)
+    await _persisted(ctx, session)
+
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+    await _until(gate.twice, "the readmitted child to reach the model")
+    gate.release_all()
+    await revived_ctx.drain()
+
+    assert _statuses(revived_ctx, run)[-1] == "done"
+    assert _notices(revived) == [], "a child that replied before the restart was announced"
 
 
 async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_them(

@@ -22,6 +22,7 @@ from typing import Any
 
 import anyio
 import pytest
+from runtime_helpers import DISPATCH_SETTLED, DISPATCH_START
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
@@ -30,12 +31,14 @@ from ph.llm.fake import FakeAdapter
 from ph.orphans import OrphanJournal
 from ph.paths import resolve_roots
 from ph.persistence.lease import LEASES
+from ph.seams.subagents import FamilyRole
 from ph.session import Session
-from ph.testing import FAKE_OPTIONS, MountProfile
+from ph.testing import FAKE_OPTIONS, MountProfile, log_event
 from ph_rlm import BUNDLE
 from ph_rlm.harness import HarnessEdit
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
 from ph_rlm.kernel.venv import resolve_interpreter
+from ph_rlm.messaging import SEND_TOOL
 
 type MakeKernel = Callable[..., Awaitable["Kernel"]]
 """`await make_kernel(...)` → a live kernel. Awaitable, because `make` is
@@ -97,6 +100,31 @@ INVARIANT_ROW: dict[str, Any] = {"id": "rlm-harness-invariant", "name": "rlm-har
 """I6's harness half (P6-01). Mounted only by the module that asserts on it."""
 
 Harnessed = Callable[..., Any]
+
+
+def reply_to_parent(
+    child: Session,
+    sub_call_id: str = "reply-1",
+    *,
+    role: FamilyRole = "parent",
+    failed: bool = False,
+) -> None:
+    """A send in `child`'s own log, as a Code Mode dispatch records one: its start,
+    naming the receiver, then its settle. The dispatch's shape rather than a native
+    call's, because it derives no message — so a log a test writes it into stays one
+    the model could have produced, mid-turn or across a restart."""
+    ref = {
+        "rootCallId": "cell",
+        "parentCallId": "cell",
+        "subCallId": sub_call_id,
+        "name": SEND_TOOL,
+    }
+    log_event(
+        child,
+        DISPATCH_START,
+        {**ref, "arguments": {"message": "here it is", "receiver_role": role}},
+    )
+    log_event(child, DISPATCH_SETTLED, {**ref, "isError": failed, "content": []})
 
 
 def logs_after_a_crash() -> Path:

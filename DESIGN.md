@@ -1195,7 +1195,12 @@ interrupted, and readmits the child to do the work again. A crash between the tw
 can leave only the harmless half, an ended child whose parent never heard. The
 child's log says how it ended, and a `task` call the crash cut short is settled by
 that tool's crash check, which finds the child by the `callId` its admission
-carries.
+carries. **And the parent does hear**: what an ending tells the parent — "finished
+without replying", "failed" — rides on the ending record (`ChildNotice`), and the
+door delivers it into the parent's inbox. A crash before the parent's own next write
+loses that delivery and nothing else: the sweep that brings the parent back delivers
+any notice whose id its log lacks, and never one it has. The child never flushes its
+parent for it.
 
 **A child's state is a fold of its own log.** `ChildState` (`child_state`,
 `fold_child_event`) is a frozen dataclass folded from one child's log and nothing

@@ -1,13 +1,14 @@
 # Phase 11 — Each session owns its log
 
-**Status:** ten rows, all landed (2026-09-30). Four fixes landed after the phase:
+**Status:** ten rows, all landed (2026-09-30). Six fixes landed after the phase:
 the grandchildren of a child that did not come back, the descendants a child that
-ends here leaves behind, the spawn-cap race and the sibling-name race (under "What
-was traded").
+ends here leaves behind, the spawn-cap race, the sibling-name race (under "What was
+traded"), a child's reply read from its own log, and its ending's notice made
+durable (under "The things worth knowing").
 
 **Gate:** `ruff` + `ruff format` + `mypy` across the tree, and `./test.sh test`: 3,747
 passed after the `/simplify` pass, 8 opt-in skips, green on linux (from 3,713 before
-the phase). The four later fixes add 18 tests, and the suite stays green. Every new
+the phase). The six later fixes add 28 tests, and the suite stays green. Every new
 gate was sabotage-checked by reverting the mechanism it holds; the plan and the tests'
 docstrings name each sabotage.
 
@@ -82,6 +83,24 @@ scope that already holds the id is now a no-op; the store still refuses a second
 `update`, so a child woken after a restart went on reading `resumed`, and a refused
 spawn's `sessionId: None` overwrote the admission's. Each field is now set by its own
 record, whole.
+
+**A child's reply is read from its own log, too** — found by the seam-logging audit
+after the phase. Whether a child had answered its parent, which decides the "completed
+without sending a reply" notice, was a flag on the provider's in-memory child, so a
+readmitted child had forgotten a reply it sent before the restart. The send is in the
+child's log already, as the tool call it was, so the provider reads it there
+(`ph_rlm.messaging.replied_to_parent`): a send to the parent that settled without an
+error, since the child was last handed a task. A rehydration begins the count again,
+and a resumed start does not. No record was added, since the send is its own record.
+
+**An ending's notice rides on the ending.** "Finished without replying" and "failed"
+were injected into the parent's inbox beside the child's ending, so a crash after the
+ending reached the child's disk and before the parent's next write lost the notice
+for good: the sweep skips a child that ended. The notice is on the ending record now
+(`ChildNotice`, with its message id), `record_ended` delivers it, and the resume
+sweep delivers one the parent's log lacks — once, since it asks that log first. The
+child never flushes its parent's log for it: a parent that read the notice wrote it
+at the barrier before the request that read it.
 
 **A sub-agent's log was mountable as a root.** `session/attach` on a child's id mounted
 it and appended to it — a second writer on what is now the child's only record. The

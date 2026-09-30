@@ -52,7 +52,7 @@ from ..cordis import (
     releasing,
     running,
 )
-from ..json import JsonValue, as_str, thaw_json
+from ..json import JsonValue, as_obj, as_seq, as_str, thaw_json
 from ..keys import (
     AGENTS,
     GOALS,
@@ -65,6 +65,12 @@ from ..keys import (
     SUBAGENTS,
     SYSTEM_PROMPT,
     TOOLS,
+)
+from ..llm.types import (
+    CONTEXT_SUMMARY_MAX_CHARS,
+    PluginSource,
+    create_user_message,
+    new_message_id,
 )
 from ..persistence.opening import open_session, stored_session
 from ..persistence.protocol import SessionPersistence
@@ -116,6 +122,7 @@ __all__ = [
     "Access",
     "Admission",
     "ChildCounts",
+    "ChildNotice",
     "ChildState",
     "FamilyRole",
     "ReadmittingProvider",
@@ -654,6 +661,24 @@ class SubagentRun(WireForm):
         return wire
 
 
+class ChildNotice(WireModel):
+    """What a child's ending tells its parent: a message into the parent's inbox,
+    carried on the ending itself (`record_ended`).
+
+    On the child's record because the child is what ended: its own log says what its
+    parent is owed, and the id says whether the parent's log has it. So a crash
+    between the child's ending and the parent's write costs the parent nothing — the
+    sweep that brings the parent back delivers what its log lacks
+    (`SubagentService._resume`).
+    """
+
+    text: str
+    summary: str
+    """The line a transcript shows for it (`PluginSource.summary`)."""
+    id: str = Field(default_factory=new_message_id)
+    """The message's own id, which the parent's inbox records it by."""
+
+
 class Admission(WireModel):
     """A child's `subagent/admitted` record: the run, the task, **the narrowing**, and
     what the seam stamps beside them.
@@ -826,7 +851,13 @@ async def record_started(
 
 
 async def record_ended(
-    ctx: Context, child: Session, status: SettledStatus, /, **extra: JsonValue
+    ctx: Context,
+    child: Session,
+    status: SettledStatus,
+    /,
+    *,
+    notice: ChildNotice | None = None,
+    **extra: JsonValue,
 ) -> SessionEvent:
     """A child's ending, in its own log — **on its disk before the caller hands the
     result to the parent** (F1).
@@ -838,12 +869,56 @@ async def record_ended(
     this returns. Best effort, for `record_started`'s reason: an ending that cannot
     be written is still the ending.
 
-    **What it left unfinished beneath it ends with it** (`_end_beneath`).
+    **What it left unfinished beneath it ends with it** (`_end_beneath`). **And what
+    it tells its parent** (`notice`) rides on the ending, on the child's disk first,
+    and is then delivered into the parent's inbox (`_deliver_notice`).
     """
-    event = _append_status(child, status, **extra)
+    fields: dict[str, JsonValue] = dict(extra)
+    if notice is not None:
+        fields["notice"] = notice.to_wire()
+    event = _append_status(child, status, **fields)
     await session_written(ctx, child)
     await _end_beneath(ctx, child)
+    if notice is not None:
+        agents = ctx.get(AGENTS)
+        parent_id = child.header.delegating_parent
+        parent = agents.get(parent_id) if agents is not None and parent_id else None
+        if parent is not None:
+            _deliver_notice(parent, notice)
     return event
+
+
+def _deliver_notice(parent: AgentDriver, notice: ChildNotice) -> None:
+    """A child's ending notice into `parent`'s inbox, without waking it.
+
+    **Not flushed here**: a child never writes its parent's log, and it need not. The
+    notice is on the child's ending, on the child's disk, so one the parent's log lost
+    to a crash before its own next barrier — or one whose parent was not live to take
+    it — is delivered by the sweep that brings the parent back, which finds its id
+    missing. And a parent that read it had written it first, at the barrier before the
+    request that read it, so it is never delivered twice.
+    """
+    parent.inject(
+        create_user_message(
+            content=[{"type": "text", "text": notice.text}],
+            source=PluginSource(
+                plugin="ph.seams.subagents",
+                form="notice",
+                summary=notice.summary[:CONTEXT_SUMMARY_MAX_CHARS],
+            ),
+            message_id=notice.id,
+        )
+    )
+
+
+def _inbox_ids(log: Session) -> set[str]:
+    """The id of every message delivered into `log`'s inbox."""
+    return {
+        as_str(as_obj(message).get("id"))
+        for event in log.events
+        if event.type == "agent/inbox/spliced"
+        for message in as_seq(event.data.get("inserted"))
+    }
 
 
 async def record_deleted(ctx: Context, child: Session, /, reason: str) -> None:
@@ -1982,6 +2057,10 @@ class SubagentService:
         recoverable thing it holds, and **a provider that declines is an ending too**
         (L6).
 
+        **An ended child's notice reaches its parent** (`ChildNotice`): one its parent's
+        log lacks — a crash came between the child's ending and the parent's write — is
+        delivered now, and one the log has is not delivered again.
+
         **An ended child's unfinished descendants are revoked** (`_revoke_beneath`):
         one given up on here takes them with it as its ending is written
         (`record_ended`), and one that ended in an earlier process left them to a
@@ -1991,11 +2070,16 @@ class SubagentService:
         if session is None:
             return []
         revived: list[str] = []
+        delivered: set[str] | None = None
         for state in self.children(session.id).values():
             if state.run_id in self._runs:
                 continue
             if not child_is_live(state):
                 await self._revoke_beneath(state.session_id)
+                if state.notice is not None and not state.deleted:
+                    delivered = _inbox_ids(session) if delivered is None else delivered
+                    if state.notice.id not in delivered:
+                        _deliver_notice(parent, state.notice)
                 continue
             readmitter = self._readmitter(state)
             interrupted = state.status == "running"
@@ -2396,6 +2480,8 @@ class ChildState:
     cause: StatusCause | None = None
     detail: str | None = None
     answer_preview: str | None = None
+    notice: ChildNotice | None = None
+    """What its ending told its parent (`record_ended`), or `None`."""
     deleted: bool = False
     deleted_reason: str | None = None
     awaiting: str | None = None
@@ -2530,6 +2616,7 @@ def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
             cause=cause,
             detail=as_str(data.get("detail")) or None,
             answer_preview=as_str(data.get("answerPreview")) or None,
+            notice=_notice_of(data.get("notice")),
             starts=state.starts + (status == "running"),
             resumes=state.resumes + (cause == "resumed"),
         )
@@ -2547,6 +2634,16 @@ def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
     if kind == CREDENTIAL_WAIT.opened:
         return replace(state, awaiting=name)
     return replace(state, awaiting=None) if state.awaiting == name else state
+
+
+def _notice_of(recorded: JsonValue) -> ChildNotice | None:
+    """An ending's notice, or `None` when it carries none or one this build cannot read."""
+    if recorded is None:
+        return None
+    try:
+        return ChildNotice.model_validate(thaw_json(recorded))
+    except ValidationError:
+        return None
 
 
 def child_state(log: Session) -> ChildState:

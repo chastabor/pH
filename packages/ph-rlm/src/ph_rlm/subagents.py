@@ -54,11 +54,12 @@ from ph.cordis import Context, InactiveScopeError, plugin
 from ph.json import JsonValue
 from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
-from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
+from ph.llm.types import PluginSource, create_user_message, text_of
 from ph.seams.subagents import (
     PARENT_TEARDOWN,
     SUSPENDED_DETAIL,
     Access,
+    ChildNotice,
     DowngradeReason,
     StatusCause,
     SubagentAwaiter,
@@ -84,6 +85,7 @@ from ph.session import (
 from ph.wire import WireModel
 
 from .keys import RLM_CHILDREN
+from .messaging import replied_to_parent
 
 __all__ = [
     "PROVIDER_NAME",
@@ -157,8 +159,11 @@ class _Child:
     run: SubagentRun
     finished: anyio.Event
     options: AgentOptions
-    """The child's resolved options, because at rehydration time the parent agent
-    may be gone and `reasoning_effort` survives nowhere else."""
+    """The options the child's agent was built with: its parent's at spawn, with the
+    child's route resolved over them. Kept for a rehydration, which rebuilds the agent
+    after the parent that lent them may have gone. The admission records the route and
+    the reasoning effort the spawn *asked* for (`Admission.reasoning_effort`); an
+    effort it left unnamed was its parent's, and survives only here."""
     agent: AgentDriver | None = None
     session: Session | None = None
     job_id: str | None = None
@@ -166,12 +171,6 @@ class _Child:
     scope is disposed *by* the drive job's own last act, and a job that abandoned
     itself would report `canceled` for work that finished."""
     result: SubagentResult | None = None
-    replied: bool = False
-    """Whether the child sent its parent a message (`rlm-messaging` sets it).
-
-    Held here rather than folded, because it decides whether the terminal notice
-    fires — a decision made at completion, in this process, about a child this
-    process ran."""
 
 
 @dataclass(slots=True)
@@ -595,12 +594,23 @@ class RlmChildProvider:
                 return
             answer = _last_assistant_text(own)
             child.result = SubagentResult(status="done", answer=answer)
+            # Silence is indistinguishable from a hang from the parent's side,
+            # so a child that never sent a message is announced. A child that
+            # *did* reply needs no notice — the reply is the notice — and its own
+            # log says whether it did, across a restart too.
+            tail = f" Last assistant text: {answer}" if answer else ""
+            silent = ChildNotice(
+                text=f"[rlm child {run.name} ({run.id}) completed without sending a reply.{tail}]",
+                summary=f"{run.name} finished without replying",
+            )
             # The child's ending is on its own disk before its parent is handed the
-            # answer (F1): `record_ended` flushes, and the waiters wake after it.
+            # answer (F1): `record_ended` flushes, and the waiters wake after it. The
+            # notice rides on the ending, so a restart delivers one a crash held back.
             await record_ended(
                 self.ctx,
                 own,
                 "done",
+                notice=None if replied_to_parent(own) else silent,
                 answerPreview=answer[: self.config.answer_preview_chars] or None,
             )
             # The other half of retain-by-default (P6-28): a child that finished
@@ -610,27 +620,22 @@ class RlmChildProvider:
             # `finally` below, which disposes the scope that holds the workspace
             # — after it there is nothing left to unmark.
             self._withdraw(child)
-            # Silence is indistinguishable from a hang from the parent's side,
-            # so a child that never sent a message is announced. A child that
-            # *did* reply needs no notice — the reply is the notice.
-            if not child.replied:
-                tail = f" Last assistant text: {answer}" if answer else ""
-                self._inject(
-                    run.parent_id,
-                    f"[rlm child {run.name} ({run.id}) completed without sending a reply.{tail}]",
-                    f"{run.name} finished without replying",
-                )
         except Exception as error:
             if child.finished.is_set():
                 return
             message = f"{type(error).__name__}: {error}"
             child.result = SubagentResult(status="error", error=message)
             # The same order for a failure: the child's account of it first.
-            await record_ended(self.ctx, own, "error", detail=message)
-            self._inject(
-                run.parent_id,
-                f"[rlm child {run.name} ({run.id}) failed: {message}{self._evidence(child)}]",
-                f"{run.name} failed",
+            await record_ended(
+                self.ctx,
+                own,
+                "error",
+                notice=ChildNotice(
+                    text=f"[rlm child {run.name} ({run.id}) failed: {message}"
+                    f"{self._evidence(child)}]",
+                    summary=f"{run.name} failed",
+                ),
+                detail=message,
             )
             log.debug("ph_rlm.subagents: child %s failed", run.id, exc_info=True)
         finally:
@@ -705,39 +710,6 @@ class RlmChildProvider:
             await agents.dispose(agent.id)
         except Exception:  # pragma: no cover - teardown must not mask an outcome
             log.debug("ph_rlm.subagents: disposing child %s failed", child.run.id, exc_info=True)
-
-    def _inject(self, parent_id: str, text: str, summary: str) -> None:
-        """Put one notice in the parent's inbox — and only if it is still there.
-
-        A parent disposed while a child was running has no inbox to deliver to;
-        the child's own log already records what it did, so the notice is dropped
-        rather than raising inside a detached task.
-        """
-        parent = self.ctx.require(AGENTS).get(parent_id)
-        if parent is None:
-            return
-        parent.inject(
-            create_user_message(
-                content=[{"type": "text", "text": text}],
-                source=PluginSource(
-                    plugin="ph_rlm.subagents",
-                    form="notice",
-                    summary=summary[:CONTEXT_SUMMARY_MAX_CHARS],
-                ),
-            )
-        )
-
-    def mark_replied(self, agent_id: str) -> None:
-        """Record that a child sent its parent a message (`rlm-messaging`).
-
-        Keyed by the child's *agent* id, which is what a sender knows about
-        itself — `_children` is keyed by run id, and deriving one from the other
-        would depend on how a session id happens to be composed.
-        """
-        for child in self._children.values():
-            if child.run.session_id == agent_id:
-                child.replied = True
-                return
 
     # ---------------------------------------------------------------- delete --
 

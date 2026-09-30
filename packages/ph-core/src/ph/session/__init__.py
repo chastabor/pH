@@ -8,7 +8,7 @@ repair must settle in it. See `ph.session.kinds` for why they live in a leaf.
 from __future__ import annotations
 
 from . import kinds as kinds
-from .derive import derive_event_message, derive_transcript
+from .derive import derive_event_message, derive_transcript, settle_of
 from .events import (
     SESSION_FORMAT_VERSION,
     SURFACE_EVENT_TYPES,
@@ -173,6 +173,7 @@ __all__ = [
     "open_turn_at",
     "outcome_of",
     "session_written",
+    "settle_of",
     "unsettled",
     "unsettled_why",
     "valid_session_id",
