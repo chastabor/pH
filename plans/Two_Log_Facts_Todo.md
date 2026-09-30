@@ -210,20 +210,16 @@ projection `harness_state.json` to disk.
   names its session and ask. A monkeypatched `os.fsync` records the global append.
   Sabotage by dropping the write, and by dropping the fsync.
 
-### L3 — a settings file rewritten whole with no lock
+### L3 — the TUI's settings file rewritten whole with no lock
 
-**Today.** `SettingsService.set` changes the tree this process loaded once and rewrites
-the whole file, atomically but with no lock, so a second process's change is lost, and
-two `set`s racing in one process can land their writes in the wrong order.
-- **Latent as written.** Nothing in shipped code calls `ctx.settings`; only its own tests
-  do.
-- **Live elsewhere.** `ph_app.tui.config.save_tui_settings` has the same shape for
-  `$PH_HOME/tui.json`. Two TUIs open at once undo each other's `/view` and sidebar
-  toggles. Only a preference is lost.
+**Today.** `ph_app.tui.config.save_tui_settings` rewrites `$PH_HOME/tui.json` whole,
+atomically but with no lock, so two TUIs open at once undo each other's `/view` and
+sidebar toggles. Only a preference is lost. (Its twin, `SettingsService.set`, had no caller
+and was removed with the `ctx.settings` seam, 2026-09-30.)
 
 **The fix (optional, low).** Read the file again under a file lock (`ph.locks.file_lock`),
-change only the key being set, and write atomically, for both files. **Gate:** two writers
-each set a different key, and both keys survive; sabotaged by writing the cached tree.
+change only the key being set, and write atomically. **Gate:** two writers each set a
+different key, and both keys survive; sabotaged by writing the cached tree.
 
 ### L7 — `/sandbox allow` is kept in a profile drop-in, not the log
 

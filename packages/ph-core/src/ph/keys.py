@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     from .seams.permission_presets import PermissionPresetService
     from .seams.sandbox import SandboxSeam
     from .seams.schedule import ScheduleService
-    from .seams.settings import SettingsService
     from .seams.shell import ShellService
     from .seams.skills import SkillService
     from .seams.spill import SpillStore
@@ -111,7 +110,6 @@ __all__ = [
     "SESSIONS",
     "SESSION_PERSISTENCE",
     "SESSION_TELEMETRY",
-    "SETTINGS",
     "SHELL",
     "SKILLS",
     "SPILL_STORE",
@@ -155,7 +153,6 @@ SCHEDULE: ServiceKey[ScheduleService] = ServiceKey("schedule")
 SESSION_PERSISTENCE: ServiceKey[SessionPersistence] = ServiceKey("session_persistence")
 SESSION_TELEMETRY: ServiceKey[SessionTelemetry] = ServiceKey("session_telemetry")
 SESSIONS: ServiceKey[SessionStore] = ServiceKey("sessions")
-SETTINGS: ServiceKey[SettingsService] = ServiceKey("settings")
 SHELL: ServiceKey[ShellService] = ServiceKey("shell")
 SKILLS: ServiceKey[SkillService] = ServiceKey("skills")
 SPILL_STORE: ServiceKey[SpillStore] = ServiceKey("spill_store")

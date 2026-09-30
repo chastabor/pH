@@ -583,7 +583,9 @@ class JsonlSessionStore:
     def exists(self, session_id: str) -> bool:
         return locate_session(self.root, session_id) is not None
 
-    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    def read(
+        self, session_id: str, *, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         """The session's full log, following its lineage when it stores a reference.
 
         `read_own` is this backend's one-file read; `materialize` decides whether
@@ -591,7 +593,7 @@ class JsonlSessionStore:
         0 is complete and is returned unchanged, which is every log written so
         far — so this is a no-op until something writes a reference-fork.
         """
-        return materialize(self.read_own, session_id)
+        return materialize(self.read_own, session_id, family=family)
 
     def read_own(
         self,

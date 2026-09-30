@@ -18,6 +18,7 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
+from ..session.session import CWD_TAG_LENGTH
 from ..session.store import child_session_id
 
 __all__ = [
@@ -154,22 +155,38 @@ def locate_under(root: Path, name: str, suffix: str) -> Path | None:
     """The log for one id, wherever it sits. `None` if there is none.
 
     **The cost of the family layout, stated in one place.** An id alone does not
-    determine a path, so a read that has only an id has to look: a root is answered in
-    one `stat` — its family is its own id, so it names its own directory — and
-    anything else falls through to a scan that is O(families).
+    determine a path, so a read that has only an id has to look — and callers
+    holding a family skip the looking entirely, through `path_under`.
 
-    That scan is worth avoiding, and callers holding a family avoid it entirely
-    through `path_under`.
+    **Its lineage's directories first.** A family is `<cwd-tag>-<root>` or a bare
+    `<root>` (`family_for`), and every id beneath a root begins with the root's id
+    and a dash (`child_session_id`), so the directory a root or any of its
+    descendants is in says so in its name. Those are tried first, one `stat` each;
+    every other directory only after, which is where a fork is — a new id filed in
+    its source's family. Before, only a bare root was found without that scan, and
+    since format 1 a root with a cwd is not bare, so nearly every lookup by id
+    `stat`ed every family.
     """
     own = path_under(root, name, name, suffix)
     if own.is_file():
         return own
     wanted = f"{name}{suffix}"
-    for family in family_dirs(root):
+    families = family_dirs(root)
+    likely = [one for one in families if _holds_lineage_of(Path(one).name, name)]
+    for family in [*likely, *(one for one in families if one not in likely)]:
         candidate = Path(family) / wanted
         if candidate.is_file():
             return candidate
     return None
+
+
+def _holds_lineage_of(family: str, name: str) -> bool:
+    """Whether a family directory's name says it holds `name`'s lineage: its root
+    (the name, less a cwd tag) is `name` or an ancestor's id of it. Only an
+    ordering — `locate_under` looks everywhere else after."""
+    tag, dash, rest = family.partition("-")
+    roots = {family, rest} if dash and len(tag) == CWD_TAG_LENGTH else {family}
+    return any(name == root or name.startswith(f"{root}-") for root in roots)
 
 
 def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> list[str]:

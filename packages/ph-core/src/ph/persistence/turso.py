@@ -272,7 +272,9 @@ class TursoSessionStore:
     def exists(self, session_id: str) -> bool:
         return locate_db(self.root, session_id) is not None
 
-    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    def read(
+        self, session_id: str, *, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         """The session's full log, following its lineage when it stores a reference.
 
         The same walk JSONL uses, over a different one-database read — which is
@@ -282,7 +284,7 @@ class TursoSessionStore:
         # No release loop here any more: `read_own` closes what it opened, which
         # is where the rule belongs — this walk is not the only caller that reads
         # a database it does not own. See `read_own`.
-        return materialize(self.read_own, session_id)
+        return materialize(self.read_own, session_id, family=family)
 
     def read_own(
         self,

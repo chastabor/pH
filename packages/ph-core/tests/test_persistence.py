@@ -1047,3 +1047,34 @@ async def test_disposing_an_agent_writes_what_its_teardown_appended(
     await ctx.require(AGENTS).dispose(agent.id)
 
     assert stored_types(ctx, "s")[-1] == DISPOSED
+
+
+def test_a_log_is_found_in_its_lineage_before_every_other_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read by id alone looks in the directories whose names carry the id's root
+    first. Only a bare root was found without a scan, and since format 1 a root with
+    a cwd is filed as `<tag>-<id>`, so nearly every lookup `stat`ed every family.
+
+    Sabotage: look in the families in listing order, and this probes all of them.
+    """
+    from ph.persistence.families import locate_under
+    from ph.session import family_for
+
+    for index in range(40):
+        (tmp_path / family_for(f"other{index}", "/elsewhere")).mkdir()
+    lineage = tmp_path / family_for("lead", "/work")
+    lineage.mkdir()
+    child = lineage / "lead-child-ab.jsonl"
+    child.write_text("", encoding="utf-8")
+    probed: list[Path] = []
+    real = Path.is_file
+
+    def counted(path: Path) -> bool:
+        probed.append(path)
+        return real(path)
+
+    monkeypatch.setattr(Path, "is_file", counted)
+
+    assert locate_under(tmp_path, "lead-child-ab", ".jsonl") == child
+    assert len(probed) <= 2, probed

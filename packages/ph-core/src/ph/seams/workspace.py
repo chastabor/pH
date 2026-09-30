@@ -2207,7 +2207,14 @@ def stored_survivors(
         if entry.session_id not in wanted:
             continue
         try:
-            header, events = store.read(entry.session_id)
+            filed = entry.family or None
+            # Its own tree-making records first, which is a fraction of the read: a
+            # log that never made a tree of its own leaves none, whether or not it
+            # would reopen, and is not read and seeded whole to say so.
+            _header, own = store.read_own(entry.session_id, family=filed, types=_OPENERS)
+            if not any(_makes_a_tree(event) for event in own):
+                continue
+            header, events = store.read(entry.session_id, family=filed)
             survivors.extend(workspace_survivors(Session(entry.session_id, events, header)))
         except Exception:
             log.warning(
@@ -2290,6 +2297,16 @@ nothing, and a fold over the pair must ignore it.
 
 
 _SURVIVOR_TYPES = frozenset({ACQUIRING, ACQUIRED, DISPOSED, RETAINED})
+
+_OPENERS = frozenset({ACQUIRING, ACQUIRED})
+"""The records that name a tree, which `stored_survivors` reads first."""
+
+
+def _makes_a_tree(event: SessionEvent) -> bool:
+    """Whether `event` puts a tree on disk: an acquire of a kind that is not the base."""
+    kind = _WORKSPACE_KINDS.get(as_str(event.data.get("kind")))
+    return event.type in _OPENERS and kind is not None and fresh_root(kind)
+
 
 _WORKSPACE_KINDS: Mapping[str, WorkspaceKind] = literal_lookup(WorkspaceKind)
 """Every `WorkspaceKind` by its own spelling — the read-side check for a kind

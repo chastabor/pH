@@ -24,7 +24,7 @@ import pytest
 
 from ph.cordis import Context
 from ph.llm.types import AttachmentRef, MediaBlock, create_user_message
-from ph.persistence.protocol import StoredSession, descendants_among, stored_row
+from ph.persistence.protocol import StoredSession
 from ph.seams.attachments import (
     LISTING_LIMIT,
     MIN_AGE,
@@ -42,70 +42,12 @@ from ph.session import (
     SurfaceIntent,
     is_surface_eligible_type,
 )
-from ph.testing import log_event
+from ph.testing import StoredLogs, log_event
 
 pytestmark = pytest.mark.anyio
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pixels" * 32
 OTHER = PNG + b"different"
-
-
-class _Store:
-    """A persistence stub: logs in memory, one of them optionally unreadable.
-
-    `SessionArchive`, and nothing beyond it — a test that had to stand up a JSONL
-    backend to assert a reference rule would be testing the backend. That the fold
-    names the read-only half rather than `SessionPersistence` is what keeps this
-    to three methods instead of ten.
-    """
-
-    def __init__(self, *sessions: Session, broken: str = "", truncate: bool = False) -> None:
-        self.sessions = {one.id: one for one in sessions}
-        self.broken = broken
-        self.truncate = truncate
-        self.asked: dict[str, str | None] = {}
-        """What `family` each read was given — the fold's half of "an id plus a
-        family is a path", which nothing else would notice going missing."""
-
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
-        # Real `StoredSession` rows, not a stand-in with the two fields this test
-        # happened to read: a hand-rolled row went stale the moment the listing
-        # grew `family`, and the fold read the resulting `AttributeError` as an
-        # unreadable log — a stub drifting into a *finding*.
-        rows = [StoredSession(session_id=one, modified=0.0, family=one) for one in self.sessions]
-        return rows * limit if self.truncate else rows
-
-    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
-        """Declared because `SessionArchive` carries it; the fold never asks. Answered
-        through the backends' own filter all the same, so a test that starts asking
-        gets the store's answer rather than a stub's."""
-        return descendants_among(
-            parent_id,
-            (
-                stored_row(one.id, one.header, 0.0)
-                for one in self.sessions.values()
-                if one.header.family == family
-            ),
-        )
-
-    def read_own(
-        self,
-        session_id: str,
-        upto: int | None = None,
-        family: str | None = None,
-        *,
-        types: frozenset[str] | None = None,
-    ) -> tuple[SessionHeader, list[SessionEvent]]:
-        self.asked[session_id] = family
-        if session_id == self.broken:
-            raise ValueError("torn log")
-        session = self.sessions[session_id]
-        return session.header, list(session.events)
-
-    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        """Whole logs in memory, so the materialized read *is* the unchained one.
-        Declared because `SessionArchive` carries both; the fold uses `read_own`."""
-        return self.read_own(session_id)
 
 
 def _session(session_id: str, *events: tuple[str, Any]) -> Session:
@@ -194,7 +136,7 @@ async def test_a_referenced_blob_is_never_collected_however_old(tmp_path: Path) 
     takes first, and it is content the session cannot be opened without.
     """
     store, (kept, dead) = await _stored(tmp_path, PNG, OTHER)
-    logs = _Store(_session("old", ("user/message", {"content": [{"a": kept.attachment_id}]})))
+    logs = StoredLogs(_session("old", ("user/message", {"content": [{"a": kept.attachment_id}]})))
 
     survey = survey_attachments(store, logs, now=AGED)
 
@@ -218,7 +160,7 @@ async def test_a_new_blob_is_left_alone(tmp_path: Path) -> None:
     """
     store, _refs = await _stored(tmp_path, PNG)
 
-    survey = survey_attachments(store, _Store())
+    survey = survey_attachments(store, StoredLogs())
 
     assert not survey.collect and len(survey.recent) == 1
     assert MIN_AGE == 86_400.0
@@ -238,7 +180,7 @@ async def test_a_blob_attached_again_is_new_again(tmp_path: Path) -> None:
 
     await store.save_bytes(content=PNG, mime="image/png", name="again.png")
 
-    survey = survey_attachments(store, _Store())
+    survey = survey_attachments(store, StoredLogs())
     assert not survey.collect and len(survey.recent) == 1
 
 
@@ -251,7 +193,7 @@ async def test_a_log_that_will_not_read_stops_the_collection(tmp_path: Path) -> 
     conversation permanently unopenable.
     """
     store, _refs = await _stored(tmp_path, PNG)
-    logs = _Store(_session("good"), _session("torn"), broken="torn")
+    logs = StoredLogs(_session("good"), _session("torn"), broken="torn")
 
     survey = survey_attachments(store, logs, now=AGED)
 
@@ -270,7 +212,9 @@ async def test_a_listing_that_was_cut_short_stops_the_collection(tmp_path: Path)
     """
     store, _refs = await _stored(tmp_path, PNG)
 
-    survey = survey_attachments(store, _Store(_session("one"), truncate=True), limit=8, now=AGED)
+    survey = survey_attachments(
+        store, StoredLogs(_session("one"), truncate=True), limit=8, now=AGED
+    )
 
     assert survey.truncated and not survey.safe
     assert collect_attachments(survey) == (0, 0)
@@ -281,7 +225,7 @@ async def test_a_store_that_cannot_be_listed_collects_nothing(tmp_path: Path) ->
     """ "No sessions" and "could not ask" are indistinguishable from here, and only
     one of them makes collection safe."""
 
-    class _Broken(_Store):
+    class _Broken(StoredLogs):
         """A store whose listing fails. The reader is inherited and holds no logs,
         so there is nothing for the fold to find if it wrongly got that far."""
 
@@ -314,7 +258,7 @@ async def test_collection_removes_the_blob_and_its_upload_handles(tmp_path: Path
     await uploads._store(handle)
     entry = uploads.path_for("anthropic", dead.attachment_id)
 
-    survey = survey_attachments(store, _Store(_session("empty")), uploads=uploads, now=AGED)
+    survey = survey_attachments(store, StoredLogs(_session("empty")), uploads=uploads, now=AGED)
     removed = collect_attachments(survey, uploads)
 
     assert removed == (1, 1)
@@ -331,7 +275,7 @@ async def test_a_file_that_is_not_ours_is_left_alone(tmp_path: Path) -> None:
     stray = store.root / "README"
     stray.write_text("mine", encoding="utf-8")
 
-    survey = survey_attachments(store, _Store(_session("empty")), now=AGED)
+    survey = survey_attachments(store, StoredLogs(_session("empty")), now=AGED)
     collect_attachments(survey)
 
     assert stray.exists()

@@ -244,12 +244,15 @@ class SessionArchive(Protocol):
         """
         ...
 
-    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+    def read(
+        self, session_id: str, *, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
         """The full log, **materialized**: dense from seq 0, chain followed.
 
         A backend whose file stores only its own run must walk `parent_session`
-        to assemble the rest — `materialize(self.read_own, session_id)` is that
-        walk, and both backends' `read` is exactly that one line.
+        to assemble the rest — `materialize(self.read_own, session_id, family=…)`
+        is that walk, and both backends' `read` is exactly that one line.
+        `family` locates the first file, as `read_own`'s does; a listing row carries it.
         """
         ...
 

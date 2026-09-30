@@ -387,9 +387,9 @@ def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
     **The append path is what this is for now** (O2). `append=False` truncates
     in place, which for a whole document another process reads without
     coordination is a window where the file is neither the old one nor the new
-    one; the five JSON and YAML writers that took it — the trust roots, the TUI
-    settings, the theme profile, `$PH_HOME/settings.json` and the sandbox
-    profile drop-in — are on `write_atomic` below, and
+    one; the JSON and YAML writers that took it — the trust roots, the TUI
+    settings, the theme profile and the sandbox profile drop-in — are on
+    `write_atomic` below, and
     `tests/test_atomic_documents.py` is the gate that keeps a sixth from
     arriving. Truncating remains the right call for a file only this process
     reads, which is why the parameter stays.

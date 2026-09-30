@@ -1,8 +1,8 @@
 """Reading a document a person wrote: JSON or YAML, strictly or leniently.
 
-The read side of `ph.paths.write_text_under`, and the third home for a shape that
-had been written out three times — `$PH_HOME/tui.json`, `$PH_HOME/settings.json`
-and `$PH_HOME/themes/theme-profile.yaml` each carried their own
+The read side of `ph.paths.write_text_under`, and the one home for a shape that
+had been written out several times — `$PH_HOME/tui.json` and
+`$PH_HOME/themes/theme-profile.yaml` among them each carried their own
 `read_text` → decode → `except FileNotFoundError` → `except (decode, OSError)`
 ladder, with the log line and the caught set drifting between them.
 
@@ -12,10 +12,10 @@ ladder, with the log line and the caught set drifting between them.
 *which* file failed and why — a theme directory where one bad file is skipped and
 named, or a shipped document whose failure is a bug rather than a preference.
 
-`read_document` answers `None`. It is for a preference file, where the rule is the
-one `ph.seams.settings` states: *defaults are always a valid answer for a
-preference*, so a document somebody hand-edited into invalid YAML costs them
-their customization and not their session. An **absent** file is not logged —
+`read_document` answers `None`. It is for a preference file, where the rule is
+that *defaults are always a valid answer for a preference*, so a document
+somebody hand-edited into invalid YAML costs them their customization and not
+their session. An **absent** file is not logged —
 that is the ordinary first run — while an unreadable one is, because a person who
 edited a file and saw no change deserves the reason.
 

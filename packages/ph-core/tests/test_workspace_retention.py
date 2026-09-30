@@ -35,7 +35,6 @@ from typing import Any
 import pytest
 
 from ph.persistence.families import descendants
-from ph.persistence.protocol import StoredSession, descendants_among, stored_row
 from ph.seams.subagents import reachable_family
 from ph.seams.workspace import (
     WorkspaceRecord,
@@ -44,8 +43,9 @@ from ph.seams.workspace import (
     workspace_leaks,
     workspace_survivors,
 )
-from ph.session import Session, SessionEvent, SessionHeader
+from ph.session import Session, SessionHeader
 from ph.testing import (
+    StoredLogs,
     log_event,
     workspace_acquired,
     workspace_seam,
@@ -359,7 +359,7 @@ def test_a_fork_s_trees_are_its_own_and_not_its_source_s_leftovers() -> None:
         log_event(session, *_disposed(agent, kept=True, retained="error"))
 
     live = family_survivors([parent, kid, branch], "p")
-    stored, _touched = stored_survivors(_Store([parent, kid, branch]), family="p")
+    stored, _touched = stored_survivors(StoredLogs(parent, kid, branch), family="p")
 
     assert [str(one.root) for one in live] == ["/trees/p", "/trees/k"]
     assert sorted(str(one.root) for one in stored) == ["/trees/k", "/trees/p"]
@@ -508,49 +508,24 @@ async def test_collecting_without_a_reclaiming_tier_removes_nothing(
 # --------------------------------------------------------------- the store fold --
 
 
-class _Store:
-    """`SessionArchive`, in memory, including one log that will not read."""
+def test_a_log_that_made_no_tree_is_not_read_whole() -> None:
+    """The fold reads each log's own tree-making records first, a fraction of the
+    read, and reads and seeds the whole log only when one made a tree. A `shared`
+    acquire makes none: its root is the base. Measured on a 4,446-event log, the
+    whole read and seed was 64 ms against 8.5 ms filtered, per log, for every log
+    `phern workspaces gc` and doctor look at.
 
-    def __init__(self, sessions: list[Session], *, unreadable: str = "") -> None:
-        self.sessions = {session.id: session for session in sessions}
-        self.unreadable = unreadable
+    Sabotage: read every listed log whole, and the shared one is read.
+    """
+    worktree = _log(_acquired("a", "/trees/a"), session_id="worktree")
+    shared = _log(_acquired("b", "/base", kind="shared"), session_id="shared")
+    store = StoredLogs(worktree, shared)
 
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
-        """Rows as both backends build them: one header peek each (`stored_row`)."""
-        return [
-            stored_row(one, session.header, float(index))
-            for index, (one, session) in enumerate(self.sessions.items())
-        ][:limit]
+    survivors, touched = stored_survivors(store)
 
-    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
-        """Declared because `SessionArchive` carries it; the fold walks the listing.
-        Answered through the backends' own filter, over the same rows `stored` builds."""
-        return descendants_among(
-            parent_id,
-            (
-                stored_row(one, session.header, float(index))
-                for index, (one, session) in enumerate(self.sessions.items())
-                if session.header.family == family
-            ),
-        )
-
-    def read(self, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
-        if session_id == self.unreadable:
-            raise ValueError("a half-written log")
-        session = self.sessions[session_id]
-        return session.header, list(session.events)
-
-    def read_own(
-        self,
-        session_id: str,
-        upto: int | None = None,
-        family: str | None = None,
-        *,
-        types: frozenset[str] | None = None,
-    ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """Whole logs in memory, so the unchained read *is* the materialized one.
-        Declared because `SessionArchive` carries both; the fold uses `read`."""
-        return self.read(session_id)
+    assert store.whole == ["worktree"]
+    assert [one.session_id for one in survivors] == ["worktree"]
+    assert sorted(touched) == ["shared", "worktree"]
 
 
 def test_the_store_fold_skips_a_log_it_cannot_read() -> None:
@@ -566,7 +541,12 @@ def test_the_store_fold_skips_a_log_it_cannot_read() -> None:
     )
     bad = _log(_acquired("b", "/trees/b"), session_id="bad")
 
-    survivors, touched = stored_survivors(_Store([good, bad], unreadable="bad"))
+    store = StoredLogs(good, bad, broken="bad")
+    survivors, touched = stored_survivors(store)
 
+    # The listing's family reaches the read, which turns a search of every family
+    # directory into a path. Only the cost would change without it, so this is
+    # what notices. Sabotage: read by id alone, and the families are `None`.
+    assert store.asked == {"good": good.header.family, "bad": bad.header.family}
     assert [one.session_id for one in survivors] == ["good"]
     assert sorted(touched) == ["bad", "good"], "a log that would not read was still listed"

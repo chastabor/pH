@@ -55,7 +55,6 @@ from ph.seams.credentials import CredentialService
 from ph.seams.jobs import Job, JobService, JobState
 from ph.seams.permission_presets import PermissionPresetService
 from ph.seams.sandbox import SandboxError, SandboxPolicy, SandboxSeam
-from ph.seams.settings import SettingsService
 from ph.seams.skills import NAME_MAX, NAME_PATTERN, Skill, SkillService
 from ph.seams.spill import SpillStore
 from ph.seams.subprocess import (
@@ -1655,34 +1654,7 @@ async def test_a_canceled_job_reports_canceled() -> None:
     assert job.state == "canceled"
 
 
-# ------------------------------------------------------- settings and skills --
-
-
-async def test_settings_round_trip_a_dotted_key(tmp_path: Path) -> None:
-    service = SettingsService(ctx=Context(), path=tmp_path / "settings.json")
-    await service.set("model.provider", "deepseek")
-    assert service.get("model.provider") == "deepseek"
-    assert service.get("model.absent", "fallback") == "fallback"
-
-    reloaded = SettingsService(ctx=Context(), path=tmp_path / "settings.json")
-    assert reloaded.get("model.provider") == "deepseek"
-
-
-async def test_a_corrupt_settings_file_does_not_stop_startup(tmp_path: Path) -> None:
-    path = tmp_path / "settings.json"
-    path.write_text("{not json", encoding="utf-8")
-    # Defaults are always a valid answer for a preference.
-    assert SettingsService(ctx=Context(), path=path).get("anything", "default") == "default"
-
-
-async def test_a_settings_file_that_is_not_an_object_reads_as_empty(tmp_path: Path) -> None:
-    # Valid JSON, wrong shape: the tree `set` walks must still be a mapping.
-    path = tmp_path / "settings.json"
-    path.write_text("[1, 2, 3]", encoding="utf-8")
-    service = SettingsService(ctx=Context(), path=path)
-    assert service.get("anything", "default") == "default"
-    await service.set("theme", "dark")
-    assert service.get("theme") == "dark"
+# ------------------------------------------------------------------ skills --
 
 
 async def test_skill_bounds_are_enforced() -> None:

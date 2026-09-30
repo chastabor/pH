@@ -1114,6 +1114,33 @@ async def test_a_turso_seq_is_written_once(tmp_path: Path) -> None:
     assert [(event.seq, event.data) for event in events] == [(0, {"turn": 1})]
 
 
+async def test_a_read_given_its_family_does_not_search_for_the_log(
+    store: SessionPersistence, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listing row carries its family, and a read handed it reads a path. Without
+    it the log was searched for across every family directory — per row, so a
+    listing's reads cost the size of the store times the rows it holds.
+
+    Sabotage: drop `family` from `materialize`'s first read, and the search runs.
+    """
+    from ph.persistence import jsonl, turso
+
+    session = _session(store, "rooted")
+    _append(store, session, "turn/start", {"turn": 0})
+    await store.flush(session)
+    store.forget("rooted")
+
+    def searched(*_args: object) -> None:
+        raise AssertionError("searched every family for a log whose family was given")
+
+    monkeypatch.setattr(jsonl, "locate_under", searched)
+    monkeypatch.setattr(turso, "locate_under", searched)
+
+    _header, events = store.read("rooted", family=session.header.family)
+
+    assert [event.type for event in events] == [event.type for event in session.events]
+
+
 async def test_a_bounded_read_stops_at_the_boundary(store: SessionPersistence) -> None:
     """**What keeps a chained read from parsing an ancestor whole.**
 

@@ -46,6 +46,7 @@ from ..persistence.jsonl import (
     session_path,
 )
 from ..persistence.lease import lease_path
+from ..persistence.protocol import StoredSession, descendants_among, stored_row
 from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
 from ..seams.subagents import ADMITTED
@@ -88,6 +89,7 @@ from ..tools.registry import ToolRuntime
 __all__ = [
     "FAKE_OPTIONS",
     "FarSide",
+    "StoredLogs",
     "StubAgent",
     "assistant_payload",
     "code_mode_stub",
@@ -794,6 +796,73 @@ def noting[I, T](bucket: list[I], item: I, answer: Callable[[], T]) -> T:
     """
     bucket.append(item)
     return answer()
+
+
+class StoredLogs:
+    """A `SessionArchive` in memory: whole logs, one optionally unreadable, and every
+    read's `family` recorded — the fold's half of "an id plus a family is a path",
+    which nothing else would notice going missing.
+
+    One stand-in for the folds over stored sessions (the attachments and workspace
+    collectors), so a change to the archive's surface is made once here rather than
+    in a copy per test module. Rows are built as both backends build them
+    (`stored_row`), and `read_own` keeps only the `types` asked for, as they do.
+    """
+
+    def __init__(self, *sessions: Session, broken: str = "", truncate: bool = False) -> None:
+        self.sessions = {one.id: one for one in sessions}
+        self.broken = broken
+        """A session id whose every read raises, as a torn log does."""
+        self.truncate = truncate
+        """Answer every listing as though it filled its `limit`."""
+        self.asked: dict[str, str | None] = {}
+        """What `family` each read of each session was given, the latest winning."""
+        self.whole: list[str] = []
+        """The sessions read whole (`read`), in order."""
+
+    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+        rows = [
+            stored_row(one.id, one.header, float(index))
+            for index, one in enumerate(self.sessions.values())
+        ]
+        return rows * limit if self.truncate else rows[:limit]
+
+    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        return descendants_among(
+            parent_id,
+            (
+                stored_row(one.id, one.header, 0.0)
+                for one in self.sessions.values()
+                if one.header.family == family
+            ),
+        )
+
+    def read_own(
+        self,
+        session_id: str,
+        upto: int | None = None,
+        family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        header, events = self._open(session_id, family)
+        return header, [one for one in events if types is None or one.type in types]
+
+    def read(
+        self, session_id: str, *, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        """Whole logs in memory, so the materialized read *is* the unchained one."""
+        self.whole.append(session_id)
+        return self._open(session_id, family)
+
+    def _open(
+        self, session_id: str, family: str | None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        self.asked[session_id] = family
+        if session_id == self.broken:
+            raise ValueError("a torn log")
+        session = self.sessions[session_id]
+        return session.header, list(session.events)
 
 
 def stored_events(ctx: Context, session_id: str) -> list[SessionEvent]:

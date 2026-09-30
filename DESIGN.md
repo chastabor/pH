@@ -602,8 +602,7 @@ routing mechanism" (`seams/approval.py`).
 
 **Service-only** — no third-party registration surface: `attachments`,
 `containment`, `credentials`, `goals`, `jobs`, `permission_presets`, `schedule`,
-`settings`, `shell`, `spill_store`, `subagent_presets`, `subprocess`,
-`token_meter`.
+`shell`, `spill_store`, `subagent_presets`, `subprocess`, `token_meter`.
 
 > **One provider seam lives outside `ph/seams/`.** `LlmAdapter` is a `Protocol`
 > but **not** `@runtime_checkable`, and `LlmRuntime.register_adapter` uses no

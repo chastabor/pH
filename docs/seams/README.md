@@ -86,7 +86,6 @@ caller's own content hash.
 | [`ctx.user_questions`](user_questions.md) | `seams/user_questions.py` | Asking the human something that is not an approval. |
 | [`ctx.commands`](commands.md) | `seams/commands.py` | Human slash commands that spend no model turn. |
 | [`ctx.permission_presets`](permission_presets.md) | `seams/permission_presets.py` | One name for a sandbox mode *and* an approval policy. |
-| [`ctx.settings`](settings.md) | `seams/settings.py` | Durable user preferences, read as data. |
 
 ## Agents and work
 

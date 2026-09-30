@@ -96,8 +96,13 @@ class LineageError(Exception):
         self.session_id = session_id
 
 
-def materialize(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list[SessionEvent]]:
+def materialize(
+    read_one: ReadOne, session_id: str, *, family: str | None = None
+) -> tuple[SessionHeader, list[SessionEvent]]:
     """One session's full log, following its lineage to a file that starts at 0.
+
+    `family` is the first file's, when the caller holds it (`SessionArchive.read`);
+    each ancestor is found by the family its child's header names.
 
     Returns the *child's* header — the lineage supplies events, never identity. A
     materialized log is what every reader already expects: dense from `seq == 0` and
@@ -116,7 +121,7 @@ def materialize(read_one: ReadOne, session_id: str) -> tuple[SessionHeader, list
     hand-edited header naming a cycle should meet a bound rather than the
     interpreter's stack.
     """
-    header, events = read_one(session_id, None, None)
+    header, events = read_one(session_id, None, family)
     # A file that starts at 0 says it holds its own history. Cross-check that
     # against the header before believing it: `Session._append` mints
     # `seq = len(self._log)`, so a reference-forked child built with an empty

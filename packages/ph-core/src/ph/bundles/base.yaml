@@ -165,9 +165,6 @@
 - id: jobs
   name: jobs-local
 
-- id: settings
-  name: settings-local
-
 - id: credentials
   name: credentials-env
 
