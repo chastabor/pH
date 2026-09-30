@@ -11,8 +11,9 @@ name, and a name is a rendering choice — this bundle's own Code Mode transport
 renamed in place by a presentation row — so a gate keyed on it alone goes quietly
 inert for the surface that most needs one. Everything after that already
 exists — the seam records `approval/asked` and `approval/decided`, fails closed
-on a missing answerer, and re-asks on resume because an `asked` with no `decided`
-*is* the pending state.
+on a missing answerer, and settles an ask a crash left open rather than asking it
+again: repair closes an `asked` with no `decided` as `interrupted` on resume, since
+the turn that was waiting on it is gone (`ph.seams.approval`).
 
 **Four decisions, not two.** `approve` and `reject` were already reachable;
 P4-05 adds `edit` (run it with these arguments instead) and `respond` (do not

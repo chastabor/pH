@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -40,7 +40,7 @@ from pydantic import ValidationError
 from ..cordis import DEPLOYMENT, Context, plugin
 from ..json import JsonObject, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SESSIONS, TOOLS
-from ..paths import resolve_roots, sync_directory, write_all
+from ..paths import make_directories, resolve_roots, sync_directory, write_all
 from ..session import (
     BatchRef,
     Session,
@@ -74,6 +74,7 @@ __all__ = [
     "read_records",
     "read_session",
     "read_stored",
+    "records_in",
     "resumption_of",
     "session_logs",
     "session_path",
@@ -407,19 +408,16 @@ class JsonlSessionStore:
         never advances, so a second store instance for a live session is told
         the boundary that was true when the session was built. See `flush`.
 
-                `TursoSessionStore` needs none of this — its `_write` is
-        `INSERT OR REPLACE` keyed by seq, so writing a row twice is harmless there.
+                `TursoSessionStore` needs none of this — its `_write` skips a row
+        the database already holds as it was, so writing one twice is harmless there.
         """
         if session.id in self._progress:
             return
         path = session_path(self.root, session.id, session.header.family)
-        # The **family directory**, not just the root: a log now lives one level
-        # down, and creating only the root left every flush raising into
-        # `session/flush`'s listener set.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # No `header_written=path.exists()`: the first flush measures the file
-        # anyway, and a second statement of "is this log new" is one that can
-        # disagree with the first — see `_append_and_sync`.
+        # Its directories are made by the write that creates the log, off the loop
+        # and durably (`_append_and_sync`). No `header_written=path.exists()`: the
+        # first flush measures the file anyway, and a second statement of "is this
+        # log new" is one that can disagree with the first — see `_append_and_sync`.
         self._progress[session.id] = _Progress(path=path, cursor=session.durable_length)
 
     async def flush(self, session: Session) -> None:
@@ -612,7 +610,9 @@ def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) 
     first write to a new log: the bytes are durable and the directory entry
     naming them may not be, so an unclean shutdown can leave a session that was
     flushed and is not there. Syncing the directory is the cheap half of the
-    promise and only matters once per log.
+    promise and only matters once per log. **The first write makes the log's
+    directories too**, each new name synced in its parent (`make_directories`,
+    S20): a family directory the sessions root never recorded took the log with it.
 
     `fresh` is told rather than sensed. `flush` already holds it — a header is
     owed on exactly the write whose directory entry is new — and a `path.exists()`
@@ -630,6 +630,8 @@ def _append_and_sync(path: Path, records: list[dict[str, Any]], *, fresh: bool) 
     to be known exactly and a buffered writer may hold bytes of its own.
     """
     payload = "".join(f"{dumps(record)}\n" for record in records).encode("utf-8")
+    if fresh:
+        make_directories(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
     try:
         start = os.fstat(fd).st_size
@@ -675,7 +677,6 @@ def append_records(path: Path, records: Sequence[JsonObject]) -> None:
     sessions act on, such as the Continual Harness's global log, needs all of them.
     Blocking; call it through `anyio.to_thread.run_sync` from async code.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     _append_and_sync(path, [dict(record) for record in records], fresh=not path.exists())
 
 
@@ -705,16 +706,22 @@ def read_records(path: Path) -> Iterator[dict[str, Any]]:
     except OSError:
         return
     with handle:
-        for line in handle:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                record = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict):
-                yield record
+        yield from records_in(handle)
+
+
+def records_in(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
+    """The JSON objects among `lines`, a line that is not one skipped: `read_records`'
+    rule, for a caller already holding the lines."""
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            yield record
 
 
 def _peek_header(path: Path) -> SessionHeader | None:

@@ -924,6 +924,96 @@ async def test_reading_a_log_nobody_writes_does_not_hold_it_open(tmp_path: Path)
     assert set(store._connections) == {"live"}
 
 
+async def test_a_turso_commit_runs_under_the_durability_it_states(tmp_path: Path) -> None:
+    """S19(a). A flush that returned is on disk because the database syncs every
+    commit to its write-ahead log, and the backend says so rather than inheriting
+    it: the driver's defaults agree today, and a default that changed would have
+    weakened every flush with nothing saying so.
+
+    Sabotage: set `synchronous=NORMAL` in `DURABILITY`, and it reads 1.
+    """
+    from ph.persistence.turso import TursoSessionStore
+
+    store = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    session = _session(store)
+    _append(store, session, "turn/start", {"turn": 1})
+    await store.flush(session)
+
+    cursor = store._connections[session.id].cursor()
+    cursor.execute("PRAGMA journal_mode")
+    assert cursor.fetchall() == [("wal",)]
+    cursor.execute("PRAGMA synchronous")
+    assert cursor.fetchall() == [(2,)], "FULL: every commit synced"
+
+
+async def test_a_new_turso_database_is_on_disk_with_its_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S20, on the other backend: the family directory's name synced in the sessions
+    root, and the database's in its family, as a JSONL log's first write syncs its
+    own. A second session in the family makes no directory, and syncs only its own
+    name.
+
+    Sabotage: make the family directory with a plain `mkdir(parents=True)`, and the
+    root is never synced.
+    """
+    from ph import paths
+    from ph.persistence import turso
+    from ph.persistence.turso import TursoSessionStore
+
+    synced: list[Path] = []
+    real = paths.sync_directory
+
+    def record(directory: Path) -> None:
+        synced.append(directory)
+        real(directory)
+
+    monkeypatch.setattr(paths, "sync_directory", record)
+    monkeypatch.setattr(turso, "sync_directory", record)
+    root = tmp_path / "sessions"
+    store = TursoSessionStore(ctx=None, root=root)  # type: ignore[arg-type]
+    session = _session(store)
+    _append(store, session, "turn/start", {"turn": 1})
+    await store.flush(session)
+
+    family = store._path_for(session.id).parent
+    assert synced == [tmp_path, root, family]
+
+
+async def test_a_turso_seq_is_written_once(tmp_path: Path) -> None:
+    """S19(b) and (c). A row owed again as it was — a second store for a live
+    session — is skipped. One owed differently is refused, as a JSONL log with two
+    events at one seq is refused on read, where `INSERT OR REPLACE` put it over the
+    old one and said nothing. And the refused flush is rolled back: left open, its
+    rows sat on the cached handle for every read that borrowed it, and the next
+    flush's commit made them durable after all.
+
+    Sabotage: write events with `INSERT OR REPLACE` and no comparison, and the
+    second event at seq 0 replaces the first; drop the rollback, and the refusing
+    store's handle is left mid-transaction.
+    """
+    from ph.persistence.turso import TursoSessionStore
+
+    store = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    first = _session(store)
+    _append(store, first, "turn/start", {"turn": 1})
+    await store.flush(first)
+
+    again = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    again.track(first)
+    await again.flush(first)
+
+    other = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    diverged = _session(other)
+    _append(other, diverged, "turn/start", {"turn": 2})
+    with pytest.raises(ValueError, match="different event at seq 0"):
+        await other.flush(diverged)
+    assert not other._connections[diverged.id].in_transaction, "the refused write is open"
+
+    _header, events = store.read_own(first.id)
+    assert [(event.seq, event.data) for event in events] == [(0, {"turn": 1})]
+
+
 async def test_a_bounded_read_stops_at_the_boundary(store: SessionPersistence) -> None:
     """**What keeps a chained read from parsing an ancestor whole.**
 

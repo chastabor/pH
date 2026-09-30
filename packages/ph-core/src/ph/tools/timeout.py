@@ -21,6 +21,7 @@ import anyio
 from ..cordis import Context, Next, plugin
 from ..keys import TOOLS
 from .definition import ToolExecution, ToolExecutionResult, error_result
+from .errors import TOOL_TIMEOUT
 
 __all__ = ["apply"]
 
@@ -63,7 +64,7 @@ async def apply(ctx: Context, config: None) -> None:
                 child.cancel("timeout")
             return error_result(
                 f'tool "{execution.name}" exceeded its {budget} ms budget',
-                {"name": "Timeout", "code": "TIMEOUT"},
+                {"name": "Timeout", "code": TOOL_TIMEOUT},
             )
         return result
 

@@ -57,6 +57,7 @@ __all__ = [
     "holds",
     "is_atomic_temp",
     "is_under",
+    "make_directories",
     "replace_durably",
     "resolve_roots",
     "sync_directory",
@@ -135,6 +136,11 @@ class PathRoots:
         """Create whatever is missing, with the mode its tier requires."""
         self.home.mkdir(parents=True, exist_ok=True)
         self.cache.mkdir(parents=True, exist_ok=True)
+        return self.ensure_runtime()
+
+    def ensure_runtime(self) -> PathRoots:
+        """`$PH_RUNTIME` alone, created if missing with the mode its tier requires —
+        for a writer under it that must not make it itself (`ph.orphans`)."""
         if self.runtime_tier == "tmp-uid":
             # Tier 3 is only ever created by us, never adopted: `resolve_roots`
             # refused anything pre-existing that failed the check.
@@ -476,9 +482,11 @@ def write_atomic(
     after any editor that saves by rename. Off by default, because a runtime or blob
     writer must not follow a link somebody planted at its path.
 
-    Parents are created at the default mode. A path under a directory whose mode
-    matters — `$PH_RUNTIME` at 0700 — is ensured by its owner first;
-    `PathRoots.ensure()` is still the one place that happens.
+    Parents are created at the default mode, and **durably when the file is**
+    (`make_directories`, S20): a blob synced inside a directory whose own name was
+    never synced is lost with it. A path under a directory whose mode matters —
+    `$PH_RUNTIME` at 0700 — is ensured by its owner first; `PathRoots.ensure()` is
+    still the one place that happens.
     """
     data = payload.encode("utf-8") if isinstance(payload, str) else payload
     mode: int | None = None
@@ -488,7 +496,10 @@ def write_atomic(
             mode = stat.S_IMODE(path.stat().st_mode)
     if skip_if_present and holds(path, len(data)):
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if durable:
+        make_directories(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{secrets.token_hex(_TEMP_SUFFIX_BYTES)}.tmp")
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
@@ -535,6 +546,27 @@ def sync_directory(directory: Path) -> None:
             os.fsync(handle)
         finally:
             os.close(handle)
+
+
+def make_directories(directory: Path) -> None:
+    """`directory` and every ancestor it lacks, **each new name durable in its parent**
+    (S20).
+
+    `mkdir(parents=True)` leaves a new directory's name in its parent's cache only, so
+    a power cut can take the directory back with every file synced inside it: a log
+    flushed as durable, gone with its family directory. Each directory made here has
+    its parent synced, from the top down. Blocking, and it pays only for directories
+    it makes.
+    """
+    missing: list[Path] = []
+    current = directory
+    while not current.is_dir():
+        missing.append(current)
+        current = current.parent
+    for one in reversed(missing):
+        with suppress(FileExistsError):
+            one.mkdir()
+        sync_directory(one.parent)
 
 
 def holds(path: Path, size: int) -> bool:

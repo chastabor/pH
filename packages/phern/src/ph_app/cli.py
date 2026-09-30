@@ -345,6 +345,7 @@ def default(
     # layer, and `route` is about to import it anyway.
     from ph.persistence import SessionBusy  # noqa: PLC0415
     from ph.session import SessionForkError  # noqa: PLC0415
+    from ph.session_profile import OverrideNotRecorded  # noqa: PLC0415
 
     try:
         outcome = anyio.run(route)
@@ -360,6 +361,7 @@ def default(
         LoaderError,
         ModelChoiceError,
         OSError,
+        OverrideNotRecorded,
         SessionBusy,
         SessionForkError,
     ) as error:
@@ -370,7 +372,8 @@ def default(
         # now that `profile_or_exit` composes. A session another process holds is
         # the same shape again (I-5): refused before a byte is written, as the
         # one sentence the daemon would have sent, not a traceback — and so is a
-        # sub-agent's log, which only its root's mount writes (P11-08).
+        # sub-agent's log, which only its root's mount writes (P11-08), and a start
+        # option the log could not record, which is not run on.
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
     if mode == "json":

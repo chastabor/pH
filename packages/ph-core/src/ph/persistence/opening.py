@@ -82,8 +82,14 @@ async def open_session(
     # this is the door every root comes through, and a root from before the record
     # gets its first on the way in.
     # Then this start's own options, logged where they differ, and the mount brought
-    # to what the log says (S4) — `opened` is the whole of it, in that order.
-    await opened(ctx, session)
+    # to what the log says (S4) — `opened` is the whole of it, in that order. A start
+    # it refuses lets the session go, and with it the records it refused to follow:
+    # left in the store, a peer that asked again ran on the start it was refused.
+    try:
+        await opened(ctx, session)
+    except BaseException:
+        ctx.require(SESSIONS).dispose(session.id)
+        raise
     return session
 
 

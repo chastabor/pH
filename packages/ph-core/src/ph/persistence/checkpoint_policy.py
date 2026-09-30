@@ -79,12 +79,8 @@ async def apply(ctx: Context, config: None) -> None:
             tools.effect_free(execution.name, scope=execution.scope)
             or (
                 has_restore_point(execution.session, execution.root_call_id)
-                and tools.restore_covers(
-                    execution.name,
-                    execution.arguments,
-                    scope=execution.scope,
-                    agent=execution.agent,
-                )
+                # As the dispatch's record says (`ToolExecution.restore_covered`).
+                and execution.restore_covered
             )
         ):
             # Nothing a crash could leave half done: a read changes nothing, and an

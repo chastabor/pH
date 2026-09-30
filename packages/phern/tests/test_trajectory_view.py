@@ -23,13 +23,14 @@ from tui_helpers import until
 from ph.cordis import Context
 from ph.keys import SESSIONS
 from ph.persistence import LineageError, read_session
-from ph.session import Session, SurfaceIntent
+from ph.session import Session, SessionStore, SurfaceIntent
 from ph.testing import (
     MountProfile,
     assistant_payload,
     log_event,
     store_root,
     stored_log,
+    stored_types,
     user_payload,
     write_reference_fork,
 )
@@ -261,10 +262,11 @@ async def test_a_fork_at_a_boundary_produces_a_byte_identical_prefix(mount: Moun
         # Through the action the key invokes, and taking the *session* back:
         # recovering the child by string-parsing a notification made the
         # user-facing wording part of the test's contract.
-        child = app.trajectory.action_fork()
+        child = await app.trajectory.action_fork()
 
     assert child is not None
     assert "forked at" in app.trajectory.notice
+    assert stored_types(ctx, child.id), "told it exists before it was written"
 
     # Byte-identical, through the wire form the log is written in.
     source_prefix = [
@@ -272,6 +274,38 @@ async def test_a_fork_at_a_boundary_produces_a_byte_identical_prefix(mount: Moun
     ]
     child_prefix = [event.to_wire(thaw=False) for event in child.events[: len(source_prefix)]]
     assert child_prefix == source_prefix
+
+
+async def test_a_fork_its_log_cannot_hold_is_not_kept(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fork is on disk before the person is told it exists; one that cannot be
+    written is let go and reported as not kept, rather than handed over to be lost
+    at the next crash.
+
+    Sabotage: report the fork before writing it, and "forked at" is shown.
+    """
+    ctx: Context = await mount()
+    sessions = ctx.require(SESSIONS)
+    session = _log(sessions.create("unwritable"))
+    records = build_trajectory(session)
+    boundary = next(record for record in records if record.fork_point)
+    app = TrajectoryApp(records, session_id=session.id, sessions=sessions)
+
+    async def unwritten(_store: SessionStore, _session: Session) -> bool:
+        return False
+
+    monkeypatch.setattr(SessionStore, "written", unwritten)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.trajectory.panel.query_one("#trajectory-table", DataTable)
+        table.move_cursor(row=app.trajectory.panel.visible_records.index(boundary))
+        await pilot.pause()
+        child = await app.trajectory.action_fork()
+
+    assert child is None
+    assert "not kept" in app.trajectory.notice
+    assert [one.id for one in sessions.list()] == [session.id], "the unwritten fork was kept"
 
 
 async def test_forking_without_a_harness_says_so() -> None:

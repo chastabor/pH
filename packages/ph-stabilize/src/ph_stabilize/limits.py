@@ -486,7 +486,8 @@ def _over(budget: CallBudget | None, turn: int, session: int, *, noun: str = "ca
 
 
 def _record(session: Session, kind: str, posture: str, detail: dict[str, Any]) -> None:
-    """One breach, durably (D7/N2).
+    """One breach, in the log (D7/N2), and on disk at the next barrier: the pre-step
+    reject's flush, or the next request's.
 
     **`posture` is not decoration.** `limits/exceeded` had come to mean two
     different things — a breach that ended the turn and one that did not — with
@@ -520,7 +521,7 @@ async def apply(ctx: Context, config: Config) -> None:
         **Recorded before it is raised** (N2). D7 made this move on the tool
         limit and left its sibling as it was, so the one posture that surfaces
         the breach most loudly to the model was still the one that left no
-        durable trace of it — a raise unwinds the turn, and an unwound turn
+        trace of it in the log — a raise unwinds the turn, and an unwound turn
         appends nothing.
         """
         settings = config.model_calls

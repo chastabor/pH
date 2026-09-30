@@ -30,10 +30,9 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any
 
-from ..agent.types import AgentHandle
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_str
-from ..keys import COMMANDS, SUBPROCESS, TOOLS, WORKSPACE
+from ..keys import COMMANDS, SUBPROCESS, WORKSPACE
 from ..seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
 from ..seams.workspace import checkpoints, workspace_of
 from ..session import IntentNotDurable, Session
@@ -114,9 +113,7 @@ async def apply(ctx: Context, config: None) -> None:
         lines = [f"restored the workspace to the state before call {call_id or '?'}"]
         if removed:
             lines.append(f"removed {len(removed)} file(s) the run created")
-        lines.extend(
-            _not_undone(ctx, session, call_id, scope=invocation.scope, agent=invocation.agent)
-        )
+        lines.extend(_not_undone(session, call_id))
         return "\n".join(lines)
 
     ctx.require(COMMANDS).register(
@@ -147,32 +144,27 @@ def _listing(points: dict[int, dict[str, Any]]) -> str:
     return "\n".join(["seq    agent            run", *rows])
 
 
-def _not_undone(
-    ctx: Context, session: Session, call_id: str, *, scope: Context, agent: AgentHandle | None
-) -> list[str]:
+def _not_undone(session: Session, call_id: str) -> list[str]:
     """The run's dispatches a tree restore does not cover, in the order they ran.
 
-    Asked of each tool's own declaration, so a deployment that renamed `bash` or
-    an MCP server that added a publish tool is covered without this module
-    knowing either name — and an *unknown* tool counts as not covered, which is
-    the direction a person checking whether "revert" meant it needs. Asked of each
-    call's own arguments (S4), so a `write` whose path left the tree is listed.
+    **As each dispatch answered when it ran** (`restoreCovered`, S4), not asked again
+    after the restore, when a link the run made and the restore removed would hide a
+    write that left the tree. The answer is the tool's own declaration for that call
+    (`ToolRuntime.restore_covers`), so a deployment that renamed `bash`, or an MCP
+    server that added a publish tool, is covered without this module knowing either
+    name. A record without one counts as not covered, which is the direction a person
+    checking whether "revert" meant it needs.
     """
     if not call_id:
         return []
-    # Stated by the dispatch, not derived from the approval-routing target
-    # (P6-24). This is a policy read — which tools a revert covers — so the
-    # boundary has to be the one the caller named.
-    tools = ctx.require(TOOLS)
     outside: list[tuple[str, JsonValue]] = []
     for event in session.events:
         if event.type != "tool/code-dispatch-start":
             continue
         if as_str(event.data.get("parentCallId")) != call_id:
             continue
-        name, arguments = as_str(event.data.get("name"), "?"), event.data.get("arguments")
-        if not tools.restore_covers(name, arguments, scope=scope, agent=agent):
-            outside.append((name, arguments))
+        if event.data.get("restoreCovered") is not True:
+            outside.append((as_str(event.data.get("name"), "?"), event.data.get("arguments")))
     if not outside:
         return []
     return [

@@ -42,7 +42,7 @@ from ph.seams.token_meter import (
     TokenMeter,
     estimate_media_tokens,
 )
-from ph.testing import MountProfile
+from ph.testing import MountProfile, disk_fills_midway
 
 pytestmark = pytest.mark.anyio
 
@@ -261,13 +261,7 @@ async def test_an_interrupted_write_does_not_become_the_stored_blob(
     """
     store = _store(tmp_path)
     ref = AttachmentRef(attachment_id=digest_of(PNG), mime="image/png", bytes=len(PNG))
-    whole = paths.write_all
-
-    def truncated(fd: int, data: bytes) -> None:
-        whole(fd, data[: len(data) // 2])
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(paths, "write_all", truncated)
+    monkeypatch.setattr(paths, "write_all", disk_fills_midway)
     with pytest.raises(OSError, match="No space"):
         await store.save_bytes(content=PNG, mime="image/png")
     monkeypatch.undo()

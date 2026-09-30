@@ -243,6 +243,100 @@ def test_the_journal_is_compacted_to_what_is_outstanding(tmp_path: Path) -> None
     assert journal.path.read_text().strip() == ""
 
 
+def _pids(journal: OrphanJournal) -> list[int]:
+    return [json.loads(line)["pid"] for line in journal.path.read_text().splitlines()]
+
+
+def test_a_spawn_recorded_while_a_sweep_compacts_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S22(a). A sweep renames a compacted copy over the journal, and a spawn recorded
+    as it did went into the file being replaced: a child started then was never
+    swept. Here another thread records one just as the sweep rewrites; it waits for
+    the compaction, and lands in the journal that is left.
+
+    Sabotage: take the compaction's lock off, and the record is gone.
+    """
+    import threading
+
+    from ph import orphans
+    from ph.paths import write_atomic
+
+    journal = _journal(tmp_path)
+    reaped = _dead_pid()
+    journal.record(pid=reaped, argv=["x"], label=None)
+    journal.forget(reaped)
+    late = _dead_pid()
+    recorder = threading.Thread(
+        target=journal.record, kwargs={"pid": late, "argv": ["late"], "label": None}
+    )
+
+    def rewrite(path: Path, payload: bytes, **options: bool) -> None:
+        recorder.start()
+        recorder.join(timeout=0.2)
+        write_atomic(path, payload, **options)
+
+    monkeypatch.setattr(orphans, "write_atomic", rewrite)
+    journal.sweep()
+    recorder.join()
+
+    assert _pids(journal) == [late]
+
+
+def test_a_spawn_recorded_while_a_sweep_judges_is_carried_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S22(a), and the reason the lock is held only to compact. A sweep reads and
+    judges the journal unlocked — held from the read, the lock stalled every appender
+    for the whole `/proc` walk — so a spawn can be recorded while it judges. The
+    compaction carries it over rather than leaving it on the file renamed away.
+
+    Sabotage: compact to the records judged alone, and the late spawn is gone.
+    """
+    from ph import orphans
+
+    journal = _journal(tmp_path)
+    held = _dead_pid()
+    journal.record(pid=held, argv=["x"], label=None)
+    late = _dead_pid()
+    judged = orphans._owner_alive
+
+    def judging(record: dict[str, object]) -> bool:
+        if record.get("pid") == held:
+            journal.record(pid=late, argv=["late"], label=None)
+        return judged(record)
+
+    monkeypatch.setattr(orphans, "_owner_alive", judging)
+    journal.sweep()
+
+    assert _pids(journal) == [held, late]
+
+
+def test_the_host_journal_makes_the_runtime_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S22(b). The journal made `$PH_RUNTIME` itself when nothing else had yet, at the
+    default mode, and on the `/tmp` fallback the next start failed that directory's
+    owner-only check and refused to run. `host_journal` has `PathRoots` make it
+    first, as `ensure` makes it.
+
+    Sabotage: build the journal on `resolve_roots()` alone, and nothing makes the
+    directory.
+    """
+    from ph.orphans import host_journal
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("PH_RUNTIME", str(runtime))
+    previous = os.umask(0o022)
+    try:
+        journal = host_journal()
+    finally:
+        os.umask(previous)
+
+    assert journal is not None and journal.path.parent == runtime
+    assert runtime.stat().st_mode & 0o777 == 0o700
+
+
 def test_a_missing_journal_sweeps_to_nothing(tmp_path: Path) -> None:
     assert _journal(tmp_path / "nowhere").sweep().killed == ()
 

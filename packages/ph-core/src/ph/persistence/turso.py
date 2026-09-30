@@ -36,7 +36,7 @@ import json
 import logging
 import os
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,7 +46,7 @@ import anyio
 from ..cordis import Context, plugin
 from ..json import dumps
 from ..keys import SESSIONS
-from ..paths import resolve_roots
+from ..paths import make_directories, resolve_roots, sync_directory
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
@@ -75,6 +75,12 @@ SCHEMA = (
 """Two tables, one session. `seq INTEGER PRIMARY KEY` clusters the log by its
 own sequence number, so reading it back in order needs no sort and holding two
 events at one number is impossible."""
+
+DURABILITY = ("PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL")
+"""What a commit promises, stated rather than inherited (S19): the write-ahead log,
+synced on every commit, so a flush that returned is on disk as a JSONL flush's
+`fsync` is. They are the driver's defaults today, and set here so that a default
+that changed could not weaken a flush with nothing saying so."""
 
 
 def session_db(root: Path, session_id: str, family: str) -> Path:
@@ -164,11 +170,11 @@ class TursoSessionStore:
         before it queues the work, so a cancellation arriving with passivation or
         teardown raises before anything is written, and the cursor has not moved.
 
-        **Cheaper to be sure of here than in the JSONL backend**, because
-        `_write` is `INSERT OR REPLACE` keyed by `seq`: a row written twice is
-        harmless, so nothing measures what the database already holds. The lock
-        is for cost, not correctness — without it two overlapping flushes each
-        commit the same batch.
+        **Cheaper to be sure of here than in the JSONL backend**, because `_write`
+        compares what it owes with what the database holds at those seqs: a row
+        written again as it was is skipped, so nothing measures the database first.
+        The lock is for cost, not correctness — without it two overlapping flushes
+        each commit the same batch.
         """
         buffer = self._progress.get(session.id)
         if buffer is None:
@@ -185,24 +191,52 @@ class TursoSessionStore:
                 buffer.cursor = owed[-1].seq + 1
 
     def _write(self, session: Session, events: Sequence[SessionEvent]) -> None:
-        cursor = self._connect(session.id).cursor()
-        # Unconditionally: `INSERT OR REPLACE` is idempotent, so writing the
-        # header row every flush costs one statement — and the flag that skipped
-        # it was answered by opening the database on the event loop.
-        cursor.execute(
-            "INSERT OR REPLACE INTO header VALUES (?, ?)",
-            (session.id, dumps(session.header.to_wire())),
-        )
-        # **The whole envelope.** Storing only `data` dropped `surfaceOp`,
-        # `ignorable` and `sourceEventSeqs`, so a session holding any real
-        # `user/message` came back unmarked and `Session(seed=…)` refused it —
-        # which is every resumable session. `executemany` because the per-row
-        # loop measured twice the batched write.
-        cursor.executemany(
-            "INSERT OR REPLACE INTO events VALUES (?, ?)",
-            [(event.seq, dumps(event.to_wire(thaw=False))) for event in events],
-        )
-        self._connections[session.id].commit()
+        """One flush, in one transaction: all of it committed, or none of it.
+
+        **A write that fails is rolled back** (S19). Left open, its rows sat on the
+        cached handle, where every read borrowing it saw them as if written, and
+        the next flush's commit made them durable after all.
+
+        **A seq is written once.** A row owed again as it was — a second store for
+        a live session is told the boundary true when the session was built — is
+        skipped. One owed differently is refused, as a JSONL log with two events at
+        one seq is refused on read: `INSERT OR REPLACE` put the new one over the
+        old, and nothing said so.
+        """
+        connection = self._connect(session.id)
+        cursor = connection.cursor()
+        try:
+            # Unconditionally: writing the header row every flush costs one
+            # statement — and the flag that skipped it was answered by opening
+            # the database on the event loop.
+            cursor.execute(
+                "INSERT OR REPLACE INTO header VALUES (?, ?)",
+                (session.id, dumps(session.header.to_wire())),
+            )
+            # **The whole envelope.** Storing only `data` dropped `surfaceOp`,
+            # `ignorable` and `sourceEventSeqs`, so a session holding any real
+            # `user/message` came back unmarked and `Session(seed=…)` refused it —
+            # which is every resumable session. `executemany` because the per-row
+            # loop measured twice the batched write.
+            rows = [(event.seq, dumps(event.to_wire(thaw=False))) for event in events]
+            if rows:
+                cursor.execute("SELECT seq, wire FROM events WHERE seq >= ?", (rows[0][0],))
+                held = dict(cursor.fetchall())
+                for seq, wire in rows:
+                    if seq in held and held[seq] != wire:
+                        raise ValueError(
+                            f"session {session.id}: the database holds a different "
+                            f"event at seq {seq}; not written over"
+                        )
+                cursor.executemany(
+                    "INSERT INTO events VALUES (?, ?)",
+                    [(seq, wire) for seq, wire in rows if seq not in held],
+                )
+            connection.commit()
+        except BaseException:
+            with suppress(Exception):
+                connection.rollback()
+            raise
 
     def forget(self, session_id: str) -> None:
         self._progress.pop(session_id, None)
@@ -421,14 +455,19 @@ class TursoSessionStore:
             # backend opens nothing.
             import turso  # noqa: PLC0415
 
-            # the family directory is created with the path in `_path_for`
             path = path if path is not None else self._path_for(session_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
+            # Every new name durable in its parent, as a JSONL log's first write makes
+            # its own (S20): the family directory in the sessions root, and the
+            # database in its family.
+            fresh = not path.exists()
+            make_directories(path.parent)
             connection = turso.connect(str(path))
             cursor = connection.cursor()
-            for statement in SCHEMA:
+            for statement in (*DURABILITY, *SCHEMA):
                 cursor.execute(statement)
             connection.commit()
+            if fresh:
+                sync_directory(path.parent)
             self._connections[session_id] = connection
         return connection
 

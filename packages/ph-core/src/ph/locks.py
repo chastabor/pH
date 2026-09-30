@@ -22,6 +22,10 @@ giving up means building over another process's tree. And each caller raises the
 error its own callers already catch. So this owns the mechanism and `LockBusy`
 is the one thing it throws, for the caller to translate.
 
+**One lock is spelled elsewhere: the orphan journal's** (`OrphanJournal._locked`).
+Its appends share a lock that its compaction takes whole, which `filelock` does not
+offer, and it is taken on every spawn, where this measured 80 µs.
+
 @module ph.locks
 """
 

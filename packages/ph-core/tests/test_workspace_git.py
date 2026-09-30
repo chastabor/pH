@@ -36,7 +36,7 @@ from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
 from ph.seams.workspace import ReclaimingProvider, redirection_env, workspace_survivors
 from ph.seams.workspace_git import sanitize_ref, tree_hash
 from ph.session import Session
-from ph.testing import FAKE_OPTIONS, MountProfile, stored_events, stored_types
+from ph.testing import FAKE_OPTIONS, MountProfile, disk_fills_midway, stored_events, stored_types
 from ph.testing.git import git, git_repo
 
 pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
@@ -1232,6 +1232,38 @@ async def test_a_checkpoint_stages_in_one_command_and_asks_git_to_apply_the_rule
     assert "ls-files" not in verbs, "the tracked set is the index's to remember, not ours"
     # And the rule really is the exclude file, not an accident of the pathspec.
     assert "check-ignore" not in verbs, "pH is re-deriving what git already applies"
+
+
+async def test_a_checkpoint_index_seeded_part_way_is_seeded_again(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pH seeds its checkpoint index from the worktree's own once: an index under that
+    name is never seeded again. A copy cut off part-way — a full disk, a kill — left a
+    torn one there for good, and every checkpoint after it staged against it. It is
+    written whole or not at all, so the next checkpoint seeds it.
+
+    Sabotage: seed with `shutil.copyfile` again, which writes in place, and the write
+    this test cuts off is not the seed's.
+    """
+    from ph import paths
+
+    ctx = await mount(TIER_ROW)
+    base = await git_repo(ctx, tmp_path / "repo")
+    workspace = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="a1", base=base, access="write"
+    )
+    git_dir = await workspace_git._git_dir(ctx, workspace.root)
+    assert git_dir is not None
+    index = git_dir / workspace_git._INDEX
+
+    with monkeypatch.context() as patch:
+        patch.setattr(paths, "write_all", disk_fills_midway)
+        with pytest.raises(OSError, match="No space left"):
+            await workspace_git._checkpoint_index(ctx, workspace.root, git_dir, ())
+    assert not index.exists(), "a torn seed was left under the index's name"
+
+    await workspace_git._checkpoint_index(ctx, workspace.root, git_dir, ())
+    assert index.read_bytes() == (git_dir / "index").read_bytes()
 
 
 async def test_a_provisioned_path_the_repo_tracks_is_excluded_too(

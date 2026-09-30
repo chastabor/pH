@@ -267,6 +267,11 @@ class _Effect:
     unsure_of: str | None = None
     """The call id of the earlier attempt nobody saw finish, when this retries one."""
 
+    def unknown(self) -> None:
+        """Settled `outcome-unknown`: the effect may have happened, so a repeat is
+        `reconcile`'s to decide, or runs with the note, as after a crash."""
+        self.journal.abandon(self.session, self.claim, "outcome-unknown")
+
 
 def _effect_settle(
     key: str, call_id: str, *, is_error: bool, content: Sequence[ContentBlock]
@@ -769,9 +774,11 @@ class ToolRuntime:
         path leaves the tree is not one a restore takes back. A call that changes
         nothing (`effect_free`) is covered: there is nothing to take back.
 
-        One rule for its two readers, which must not drift apart: `/revert`, listing
-        what a restore did not undo, and the checkpoint policy's barrier before a
-        nested Code Mode dispatch, which exists so a crash cannot empty that list.
+        Asked once per nested call, by `prepare` (`ToolExecution.restore_covered`), for
+        its two readers, which must not drift apart: `/revert`, listing what a restore
+        did not undo from each dispatch's record, and the checkpoint policy's barrier
+        before a nested Code Mode dispatch, which exists so a crash cannot empty that
+        list.
         """
         definition = self.get(name, scope=scope)
         return definition is not None and (
@@ -991,6 +998,12 @@ class ToolRuntime:
         and a caller that drives the stages itself needs the same hook.
         """
         prepared = await self._gate(call)
+        execution = prepared.run.execution
+        if execution.parent is not None:
+            # Of the call as it will run, once (`ToolExecution.restore_covered`).
+            execution.restore_covered = self.restore_covers(
+                execution.name, execution.arguments, scope=execution.scope, agent=execution.agent
+            )
         if write_ahead is not None:
             write_ahead(prepared)
         return prepared
@@ -1129,10 +1142,9 @@ class ToolRuntime:
         except BaseException:
             # Canceled with the body entered: the effect may have happened. Left
             # open, the intent would read as still running in this process and
-            # refuse every repeat until a restart; settled `unknown`, a repeat is
-            # asked of `reconcile` or runs with the note, as after a crash.
+            # refuse every repeat until a restart.
             if effect is not None:
-                effect.journal.abandon(effect.session, effect.claim, "outcome-unknown")
+                effect.unknown()
             raise
         if effect is not None:
             prepared = self._settle_effect(run, effect, prepared)
@@ -1165,14 +1177,18 @@ class ToolRuntime:
         # process whose resume had no kind for it — so the tool is asked whether it
         # happened (P10-13) before a new attempt is decided for it.
         again = journal.record(session, TOOL_EFFECT, data)
-        said = await self._answer(
-            run.definition,
-            run.by,
-            run.execution.scope,
-            thaw_json(run.execution.arguments),
-            opened.opened,
-            session,
-        )
+        # A cancel while the tool is asked leaves the first attempt as unknown as it
+        # was; left open instead, this one read as running here and refused every
+        # repeat.
+        async with journal.settling_on_failure(session, again):
+            said = await self._answer(
+                run.definition,
+                run.by,
+                run.execution.scope,
+                thaw_json(run.execution.arguments),
+                opened.opened,
+                session,
+            )
         if isinstance(said, tuple):
             journal.settle(
                 session,
@@ -1262,6 +1278,11 @@ class ToolRuntime:
     ) -> PreparedCall:
         result = prepared.result
         assert result is not None
+        if run._cut_off:
+            # Entered and not finished: settled `failed` as its result says, a repeat
+            # ran it again with nothing asked.
+            effect.unknown()
+            return prepared
         effect.journal.settle(
             effect.session,
             effect.claim,
@@ -1298,7 +1319,11 @@ class ToolRuntime:
                 # structural. The execution already carries the right scope; it
                 # was simply never made current.
                 with running(run.by, dispatch_exec.scope):
-                    value = await definition.execute(dispatch_exec.arguments, run)
+                    try:
+                        value = await definition.execute(dispatch_exec.arguments, run)
+                    except BaseException as left:
+                        run._cut_off = not isinstance(left, Exception)
+                        raise
                     content = definition.render(dispatch_exec.arguments, value)
                     meta = (
                         None

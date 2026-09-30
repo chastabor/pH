@@ -19,9 +19,10 @@ from ph.json import JsonValue, as_str
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.llm.types import text_of
 from ph.persistence import interrupted_turn_closers
-from ph.session import Session, unsettled_why
+from ph.session import Session, SessionEvent, unsettled_why
 from ph.testing import FAKE_OPTIONS, MountProfile, external_tool, log_event, run_tool, simple_tool
-from ph.tools import ToolExecutionResult
+from ph.tools import Reconciled, ToolExecutionResult, Unknown
+from ph.tools.errors import TOOL_TIMEOUT
 from ph.tools.registry import EFFECT_MAY_HAVE_HAPPENED
 
 pytestmark = pytest.mark.anyio
@@ -238,3 +239,79 @@ async def test_a_canceled_keyed_call_leaves_its_effect_unknown_not_running(
         result = await _call(ctx, session, "c2", SEND)
     assert far == ["the quarterly numbers"]
     assert EFFECT_MAY_HAVE_HAPPENED.format(call_id="c1") in text_of(result.content)
+
+
+async def test_a_keyed_call_that_timed_out_leaves_its_effect_unknown(mount: MountProfile) -> None:
+    """A body its `timeout_ms` cut off was entered, so its effect may have happened.
+    Settled `failed` as its result said, the effect's kind reopened it and the repeat
+    ran again with nothing asked. Settled unknown, the repeat carries the note, and a
+    tool that can tell is asked first.
+
+    Sabotage: settle a timed-out call as its result says, and it reads `failed`.
+    """
+    ctx = await mount()
+    far: list[str] = []
+
+    async def deliver(args: Any, _run: Any) -> str:  # noqa: ANN401
+        far.append(as_str(args.get("message")))
+        if len(far) == 1:
+            await anyio.sleep(1.0)
+        return f"delivered {as_str(args.get('id'))}"
+
+    ctx.require(TOOLS).register(
+        simple_tool(
+            "send", deliver, idempotency_key=lambda args: as_str(args.get("id")), timeout_ms=50
+        )
+    )
+    session = ctx.require(SESSIONS).create("timed-out")
+
+    first = await _call(ctx, session, "c1", SEND)
+    assert first.error is not None and first.error.info == {"name": "Timeout", "code": TOOL_TIMEOUT}
+    settle = session.latest("tool/effect-settled")
+    assert settle is not None and unsettled_why(settle.data) == "outcome-unknown"
+
+    again = await _call(ctx, session, "c2", SEND)
+    assert EFFECT_MAY_HAVE_HAPPENED.format(call_id="c1") in text_of(again.content)
+
+
+async def test_a_cancel_while_the_tool_is_asked_leaves_the_effect_unknown(
+    mount: MountProfile,
+) -> None:
+    """A repeat of an unknown effect asks its tool first (`reconcile`), under an intent
+    of its own. A cancel arriving then left that intent open: read as running here,
+    it refused every repeat after it until a restart.
+
+    Sabotage: drop the `abandon` around the question, and the next repeat is refused
+    as still in flight.
+    """
+    ctx = await mount()
+    asking, answer = anyio.Event(), anyio.Event()
+
+    async def asked(_args: Any, _opened: SessionEvent, _session: Session) -> Reconciled:  # noqa: ANN401
+        asking.set()
+        await answer.wait()
+        return Unknown()
+
+    ctx.require(TOOLS).register(
+        simple_tool(
+            "send",
+            lambda _args, _run: "sent",
+            idempotency_key=lambda args: as_str(args.get("id")),
+            reconcile=asked,
+        )
+    )
+    session = ctx.require(SESSIONS).create("asking")
+    _unknown_prior(session)
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_call, ctx, session, "c2", SEND)
+            await asking.wait()
+            tasks.cancel_scope.cancel()
+
+    settle = session.latest("tool/effect-settled")
+    assert settle is not None and unsettled_why(settle.data) == "outcome-unknown"
+    answer.set()
+    with anyio.fail_after(5):
+        result = await _call(ctx, session, "c3", SEND)
+    assert not result.is_error, text_of(result.content)

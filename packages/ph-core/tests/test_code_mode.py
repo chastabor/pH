@@ -47,7 +47,7 @@ from ph.tools.code_mode import (
     governed_binding,
 )
 from ph.tools.definition import ToolOutput, TransportPresentation
-from ph.tools.registry import RUN_CODE, ToolRuntime
+from ph.tools.registry import RUN_CODE
 
 pytestmark = pytest.mark.anyio
 
@@ -135,6 +135,33 @@ async def test_three_binding_calls_produce_three_durable_dispatch_pairs(
         "root-1:code:2",
     ]
     assert all(e.data["parentCallId"] == "root-1" for e in settles)
+
+
+async def test_a_dispatch_records_whether_a_restore_takes_it_back(mount: MountProfile) -> None:
+    """S4. `/revert` lists what a restore did not undo from each dispatch's own start
+    record, answered as the call was about to run (`restoreCovered`): asked after the
+    restore instead, a link the run made and the restore removed could hide a write
+    that left the tree.
+
+    Sabotage: leave `restoreCovered` off the start record, and neither answer is there.
+    """
+    ctx = await _code_ctx(mount)
+    tools = ctx.require(TOOLS)
+    tools.register(simple_tool("tidy", effects_confined_to_workspace=True))
+    tools.register(simple_tool("publish"))
+
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
+        await ns["tools"].tidy()
+        await ns["tools"].publish()
+        return "done"
+
+    _result, session = await _run(ctx, "covered", program)
+
+    starts = [e for e in session.events if e.type == "tool/code-dispatch-start"]
+    assert [(e.data["name"], e.data.get("restoreCovered")) for e in starts] == [
+        ("tidy", True),
+        ("publish", False),
+    ]
 
 
 async def test_a_dispatch_whose_settle_raises_is_closed_rather_than_left_running(
@@ -762,7 +789,7 @@ async def test_a_dispatch_and_its_settle_are_paired_by_one_declaration(mount: Mo
     (settle,) = [e for e in session.events if e.type == "tool/code-dispatch"]
     identity = {info.alias or name for name, info in CodeDispatchRef.model_fields.items()}
 
-    assert set(start.data) == identity | {"arguments"}
+    assert set(start.data) == identity | {"arguments", "restoreCovered"}
     assert set(settle.data) == identity | {"isError", "content"}
     # And they agree field for field, which is what a reader pairs on.
     assert {key: start.data[key] for key in identity} == {key: settle.data[key] for key in identity}
@@ -851,9 +878,6 @@ async def test_revert_still_lists_an_orphaned_dispatch_as_not_undone() -> None:
     the run did — and one a tree restore does not take back."""
     from ph.commands.revert import _not_undone
 
-    root = Context()
-    tools = ToolRuntime(ctx=root)
-    root.provide(TOOLS, tools)
     session = Session("s")
     log_event(
         session,
@@ -870,5 +894,5 @@ async def test_revert_still_lists_an_orphaned_dispatch_as_not_undone() -> None:
         session.admit(closer)
 
     assert session.latest("tool/code-dispatch") is not None, "repair settled it"
-    listed = "\n".join(_not_undone(root, session, "c1", scope=root, agent=None))
+    listed = "\n".join(_not_undone(session, "c1"))
     assert "publish(" in listed

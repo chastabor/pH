@@ -309,6 +309,20 @@ _SOURCES: Mapping[str, OverrideSource] = literal_lookup(OverrideSource)
 class OverrideNotRecorded(RuntimeError):
     """A change was not applied, because the record of it could not be written."""
 
+    code = "OVERRIDE_NOT_RECORDED"
+    """Named, so a daemon's reply carries it (`ph_app.protocol.respond`)."""
+
+
+async def _recorded(ctx: Context, session: Session, refused: str) -> None:
+    """What was just appended, on disk — or `OverrideNotRecorded`, saying what was not
+    done. **A change the log does not hold is not made**: every door here that changes
+    the environment writes first and follows only once this returns."""
+    if not await session_written(ctx, session):
+        raise OverrideNotRecorded(
+            f"{refused}: the session log could not be written, and a change the log "
+            "does not hold is not made"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class Override:
@@ -381,11 +395,7 @@ async def override(
         command=command,
     )
     _LOG.append(session, OVERRIDE, change.to_wire())
-    if not await session_written(ctx, session):
-        raise OverrideNotRecorded(
-            f'"{row_id}" was not changed: the session log could not be written, and a '
-            "change the log does not hold is not made"
-        )
+    await _recorded(ctx, session, f'"{row_id}" was not changed')
     await mount.reconfigure(row_id, config)
     return True
 
@@ -399,7 +409,9 @@ async def opened(ctx: Context, session: Session) -> None:
     2. **This start's options** (S4): each `--patch` (`ProfileDocument.override`) that
        differs from the base and the overrides already logged is logged as one,
        source `cli` — and one given again at the next start records nothing, since it
-       is already the session's (decision 3).
+       is already the session's (decision 3). **Refused when the log cannot hold
+       them** (`OverrideNotRecorded`), for `override`'s rule: a change the log does
+       not hold is not made, and the start runs on nothing it did not record.
     3. **The mount brought to what the log says**: each row an override names is set,
        once, to the value the log's composition gives it — the last word, a start
        option included, since it was logged last.
@@ -456,7 +468,7 @@ async def opened(ctx: Context, session: Session) -> None:
         logged.append(change)
         current, recorded = after, True
     if recorded:
-        await session_written(ctx, session)
+        await _recorded(ctx, session, "this start's options were not applied")
     await _converge(mount, current, _overridden(logged))
 
 
@@ -510,10 +522,7 @@ async def clear_overrides(
     with session.batch() as batch:
         for row in cleared:
             _LOG.append(batch, CLEARED, {"row": row, "command": command})
-    if not await session_written(ctx, session):
-        raise OverrideNotRecorded(
-            f"{', '.join(cleared)}: not cleared — the session log could not be written"
-        )
+    await _recorded(ctx, session, f"{', '.join(cleared)}: not cleared")
     after = logged_environment(session)
     left = await _converge(ctx.require(MOUNT), environment(after), cleared)
     return cleared, left
@@ -716,6 +725,9 @@ async def switch_base(
     when the person chose to start the new base clean (decision 11). So a crash
     leaves the old base with its overrides or the new one with its own, never a
     mixture.
+
+    :raises OverrideNotRecorded: when the batch did not reach disk, for `override`'s
+        rule: the mount is not brought to a base the log does not hold.
     """
     kept = logged_environment(session).overrides
     cleared = _overridden(kept) if clear_all else _said_by(version, kept)
@@ -723,7 +735,7 @@ async def switch_base(
         _LOG.append(batch, BASE, version.to_wire())
         for row in cleared:
             _LOG.append(batch, CLEARED, {"row": row, "command": command})
-    await session_written(ctx, session)
+    await _recorded(ctx, session, f"the base was not changed to {version.name}")
     return cleared
 
 

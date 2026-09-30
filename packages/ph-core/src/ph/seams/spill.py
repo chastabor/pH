@@ -29,6 +29,7 @@ from ..paths import (
     default_home_path,
     holds,
     is_atomic_temp,
+    make_directories,
     replace_durably,
     sync_directory,
     write_atomic,
@@ -508,7 +509,7 @@ def _stage(final: Path, staged: Path, payload: bytes) -> None:
     """
     if holds(final, len(payload)):
         try:
-            staged.parent.mkdir(parents=True, exist_ok=True)
+            make_directories(staged.parent)
             os.link(final, staged)
         except OSError:
             pass

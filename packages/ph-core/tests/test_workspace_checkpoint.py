@@ -407,14 +407,21 @@ async def test_revert_lists_what_restoring_the_tree_did_not_undo(
     who reads "reverted" and stops there believes the run had no effect, so the
     dispatches a tree restore cannot cover are listed by name — while the ones
     it *does* cover (`edit`, and the read-only tools) are not, which is what
-    keeps the list about the calls that actually reached past the tree.
+    keeps the list about the calls that actually reached past the tree. Each as
+    its dispatch's record answered when it ran (S4).
+
+    Sabotage: ask `restore_covers` again in `_not_undone`, and the `write` through
+    a link is not listed.
     """
     ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
     seq = await _checkpointed(ctx, session, agent)
-    for name, arguments in (
-        ("edit", {"path": "tracked.txt"}),
-        ("bash", {"command": "npm publish"}),
-        ("read", {"path": "tracked.txt"}),
+    for name, arguments, covered in (
+        ("edit", {"path": "tracked.txt"}, True),
+        ("bash", {"command": "npm publish"}, False),
+        ("read", {"path": "tracked.txt"}, True),
+        # Through a link the run made to outside the tree, which the restore removes:
+        # asked again after it, this path resolves inside and would read as undone.
+        ("write", {"path": "linked.txt"}, False),
     ):
         log_event(
             session,
@@ -424,6 +431,7 @@ async def test_revert_lists_what_restoring_the_tree_did_not_undo(
                 "subCallId": f"c1:code:{name}",
                 "name": name,
                 "arguments": arguments,
+                "restoreCovered": covered,
             },
         )
 
@@ -431,10 +439,11 @@ async def test_revert_lists_what_restoring_the_tree_did_not_undo(
 
     assert "not the world" in shown
     assert "bash" in shown
-    # `edit` and `read` declare `undone_by_workspace_restore`, so listing them
-    # would be noise in the one place a person is checking for surprises.
+    # `edit` and `read` were recorded as covered, as their tools declare, so
+    # listing them would be noise in the one place a person is checking for surprises.
     assert "edit" not in shown
     assert "npm publish" in shown
+    assert "write(" in shown, "listed from its record, not asked again (S4)"
 
 
 async def test_an_unknown_tool_is_reported_as_not_undone(
@@ -442,9 +451,10 @@ async def test_an_unknown_tool_is_reported_as_not_undone(
 ) -> None:
     """The default is the safe direction.
 
-    A tool that declares nothing — an MCP server's, a row added next month — is
-    listed rather than trusted, so a new capability is over-reported instead of
-    silently assumed reversible.
+    A dispatch whose record does not say a restore takes it back — a tool that
+    declares nothing, an MCP server's, a row added next month — is listed rather
+    than trusted, so a new capability is over-reported instead of silently assumed
+    reversible.
     """
     ctx, session, agent, _workspace = await worktree_agent(mount, tmp_path)
     seq = await _checkpointed(ctx, session, agent)

@@ -11,6 +11,8 @@ the fake-provider options. Each was being re-declared per test module.
 
 from __future__ import annotations
 
+import errno
+import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -89,6 +91,7 @@ __all__ = [
     "StubAgent",
     "assistant_payload",
     "code_mode_stub",
+    "disk_fills_midway",
     "external_tool",
     "isolated_intent_kinds",
     "live_settles",
@@ -370,6 +373,13 @@ async def run_tool(
             agent=agent,
         )
     )
+
+
+def disk_fills_midway(fd: int, payload: bytes) -> None:
+    """A `write_all` for a disk that fills mid-payload: half the bytes land, then
+    `ENOSPC` — the half-written file every atomic or taken-back write must survive."""
+    os.write(fd, payload[: len(payload) // 2])
+    raise OSError(errno.ENOSPC, "No space left on device")
 
 
 def raising(error: BaseException) -> Callable[..., NoReturn]:

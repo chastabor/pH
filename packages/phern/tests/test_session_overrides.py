@@ -80,18 +80,19 @@ async def test_a_value_already_in_force_leaves_no_record(tmp_path: Path) -> None
         assert len(_logged("unchanged")) == 1
 
 
+async def _unwritten(*_args: object) -> bool:
+    """A log that cannot be written, for the doors that must then change nothing."""
+    return False
+
+
 async def test_a_change_whose_record_cannot_be_written_is_not_made(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Sabotage: apply the change before checking the write, and the host is
     reachable with nothing on disk to say so."""
-
-    async def unwritten(*_args: object) -> bool:
-        return False
-
     async with running(tmp_path) as daemon:
         root = await daemon.root("unwritable")
-        monkeypatch.setattr("ph.session_profile.session_written", unwritten)
+        monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
 
         shown = await run_command(root, "/sandbox allow host example.com")
 
@@ -152,6 +153,23 @@ def test_a_start_option_is_logged_where_it_differs_and_once() -> None:
     assert change.command == "--patch {id: tool-bash, disabled: true}"
     assert change.entry == {"id": "tool-bash", "disabled": True}
     assert _logged("plain") == []
+
+
+def test_a_start_option_the_log_cannot_hold_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A change the log does not hold is not made — `override`'s rule, which a start's
+    own options skipped: their records were appended and, written or not, the start
+    ran on with them. A start whose options cannot be recorded does not run.
+
+    Sabotage: ignore `session_written`'s answer in `opened`, and the start succeeds.
+    """
+
+    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    result = runner.invoke(
+        app, ["-p", "hi", "--session", "unrecorded", "--patch", "{id: tool-bash, disabled: true}"]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "could not be written" in result.output
 
 
 def test_a_model_chosen_at_start_is_the_session_s_from_then_on() -> None:

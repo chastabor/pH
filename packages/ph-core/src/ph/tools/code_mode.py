@@ -355,13 +355,23 @@ class DispatchBridge:
         is approval's substitution — which is exactly what this should record.
         (`batch.py`'s ternary is *not* removable for the same shape: there the
         unsubstituted branch is the model's original bytes, a different object.)
+
+        **With whether a workspace restore takes it back** (`restoreCovered`, S4), as
+        `prepare` answered for the call about to run: `/revert` reads this rather than
+        asking after its restore, when a link the run made and the restore removed
+        would hide a write that left the tree.
         """
         if self.session is None:
             return
+        execution = prepared.run.execution
         self._started[ref.sub_call_id] = self._journal.record(
             self.session,
             TOOL_DISPATCH,
-            {**ref.to_wire(), "arguments": thaw_json(prepared.run.execution.arguments)},
+            {
+                **ref.to_wire(),
+                "arguments": thaw_json(execution.arguments),
+                "restoreCovered": execution.restore_covered,
+            },
         )
 
     def _abandon(self, ref: CodeDispatchRef) -> None:

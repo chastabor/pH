@@ -27,6 +27,7 @@ from ph.session_profile import (
     OVERRIDE,
     Difference,
     Override,
+    OverrideNotRecorded,
     ProfileBase,
     ProfileChange,
     fold_environment,
@@ -151,6 +152,53 @@ async def test_a_base_switch_clears_the_overrides_the_new_base_already_says(
     switch = [event for event in session.events if event.type in (BASE, CLEARED)][-2:]
     assert [event.type for event in switch] == [BASE, CLEARED]
     assert switch[0].batch is not None and switch[0].batch == switch[1].batch, "one batch"
+
+
+async def _unwritten(*_args: object) -> bool:
+    return False
+
+
+async def test_a_base_switch_the_log_cannot_hold_is_refused(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch is a change, and `override`'s rule holds for it: the mount is not
+    brought to a base the log does not hold. It went on as if switched, and the start
+    that adopted it converged on it.
+
+    Sabotage: ignore the write's answer in `switch_base`, and it returns as if the
+    base were changed.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("unswitched")
+    await record_base(ctx, session)
+    saved = not_none(saved_base(session))
+    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+
+    with pytest.raises(OverrideNotRecorded, match="base was not changed"):
+        await switch_base(ctx, session, saved, command="adopt again")
+
+
+async def test_a_start_its_environment_refuses_leaves_no_session(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start `opened` refuses lets its session go, and the records it refused to
+    follow with it. Left in the store, an rpc peer that asked again ran on the very
+    start it had been refused.
+
+    Sabotage: drop the dispose from `open_session`, and the refused session is still
+    in the store.
+    """
+    from ph.persistence import open_session
+
+    async def refusing(*_args: object) -> None:
+        raise OverrideNotRecorded("this start's options were not applied")
+
+    ctx = await mount()
+    monkeypatch.setattr("ph.persistence.opening.opened", refusing)
+
+    with pytest.raises(OverrideNotRecorded):
+        await open_session(ctx, "refused")
+    assert ctx.require(SESSIONS).get("refused") is None
 
 
 def test_the_listing_says_each_setting_s_old_and_new_value_and_whose_it_is() -> None:

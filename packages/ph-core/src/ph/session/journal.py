@@ -307,7 +307,7 @@ class IntentJournal:
         its owner can do.
         """
         held = await self.open(session, kind, data)
-        async with self._settling_on_failure(session, held):
+        async with self.settling_on_failure(session, held):
             yield held
 
     @asynccontextmanager
@@ -320,11 +320,13 @@ class IntentJournal:
         if isinstance(held, Prior):
             yield held
             return
-        async with self._settling_on_failure(session, held):
+        async with self.settling_on_failure(session, held):
             yield held
 
     @asynccontextmanager
-    async def _settling_on_failure(self, session: Session, held: Claim) -> AsyncIterator[None]:
+    async def settling_on_failure(self, session: Session, held: Claim) -> AsyncIterator[None]:
+        """`held`, settled `outcome-unknown` if the body raises or is canceled — `claim`'s
+        settle, for a caller that opened its intent another way (`record`)."""
         try:
             yield
         except BaseException:

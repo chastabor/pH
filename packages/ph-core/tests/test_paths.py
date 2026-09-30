@@ -468,6 +468,34 @@ def test_an_atomic_write_is_on_disk_before_its_name_is(
     assert order == ["file", "rename", "dir"]
 
 
+@pytest.mark.parametrize("durable", [True, False])
+def test_a_durable_write_makes_its_directories_durably(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, durable: bool
+) -> None:
+    """S20, for every blob a log names. A blob synced in a directory whose own name
+    was never synced is lost with it on a power cut — the first spill of a session,
+    the first variable of a kernel. A durable write syncs each directory it makes in
+    its parent; one that is not durable syncs nothing.
+
+    Sabotage: make the directories with a plain `mkdir(parents=True)`, and only the
+    blob's own directory is synced.
+    """
+    from ph import paths
+
+    synced: list[Path] = []
+    real = paths.sync_directory
+
+    def record(directory: Path) -> None:
+        synced.append(directory)
+        real(directory)
+
+    monkeypatch.setattr(paths, "sync_directory", record)
+    write_atomic(tmp_path / "owner" / "blobs" / "blob", b"bytes", durable=durable)
+
+    made = [tmp_path, tmp_path / "owner", tmp_path / "owner" / "blobs"]
+    assert synced == (made if durable else [])
+
+
 def test_a_write_atomic_temp_is_recognized_by_its_own_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

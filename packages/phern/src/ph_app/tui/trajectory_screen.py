@@ -149,8 +149,13 @@ class TrajectoryScreen(Screen[None]):
             # first time this opened over anything other than the chat.
             self.dismiss()
 
-    def action_fork(self) -> Session | None:
-        """Fork the session at the selected record (A6).
+    async def action_fork(self) -> Session | None:
+        """Fork the session at the selected record (A6), **on disk before the person
+        is told it exists**.
+
+        The store's `fork` makes the child in memory, and nothing wrote it: a crash
+        after "forked at …" lost a session the person had been handed. One that cannot
+        be written is let go and reported as not kept.
 
         The refusals are the *store's*, not this view's: `fork` raises
         `SessionForkError` with a code and a sentence, and repeating that rule
@@ -174,6 +179,13 @@ class TrajectoryScreen(Screen[None]):
             child: Session = self.sessions.fork(self.session_id, record.source_seq)
         except SessionForkError as error:
             self._report(f"#{record.index}: {error}", refused=True)
+            return None
+        if not await self.sessions.written(child):
+            self.sessions.dispose(child.id)
+            self._report(
+                f"#{record.index}: the fork's log could not be written, so it was not kept",
+                refused=True,
+            )
             return None
         self._report(f"forked at #{record.index} → {child.id}")
         return child

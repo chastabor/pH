@@ -48,7 +48,14 @@ from ph.session import (
 )
 from ph.session.writers import LogWriter
 from ph.testing import FAKE_OPTIONS as FAKE
-from ph.testing import MountProfile, log_event, stored_log, user_payload, write_reference_fork
+from ph.testing import (
+    MountProfile,
+    disk_fills_midway,
+    log_event,
+    stored_log,
+    user_payload,
+    write_reference_fork,
+)
 from ph.tools import ToolRunContext
 
 pytestmark = pytest.mark.anyio
@@ -397,6 +404,52 @@ async def test_a_nested_dispatch_that_reaches_past_the_tree_is_preceded_by_a_bar
     assert durable_at_body == {"note": not restore_point, "look": False, "publish": True}
 
 
+async def test_a_dispatch_is_asked_once_whether_a_restore_covers_it(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4. A dispatch's record and the barrier before it both need to know whether a
+    restore takes the call back — and the answer follows links, which a sibling
+    dispatch can move between two asks. Asked twice, the record could say "not
+    covered" of a call the barrier let run unflushed as covered. `prepare` asks once
+    (`ToolExecution.restore_covered`), and both read that.
+
+    Sabotage: ask `restore_covers` again in the barrier, and the dispatch is asked
+    twice.
+    """
+    from collections.abc import Callable, Mapping
+
+    from ph.keys import CODE_RUNTIME_STUB
+    from ph.seams.workspace import CHECKPOINT
+    from ph.testing import code_mode_stub, run_tool, simple_tool
+    from ph.tools.registry import RUN_CODE, ToolRuntime
+
+    ctx = await mount(_root(tmp_path), code_mode_stub())
+    ctx.require(TOOLS).register(simple_tool("note", effects_confined_to_workspace=True))
+    asked: list[str] = []
+    real = ToolRuntime.restore_covers
+
+    def counted(self: ToolRuntime, name: str, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        asked.append(name)
+        return real(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(ToolRuntime, "restore_covers", counted)
+
+    async def program(ns: Mapping[str, object], _emit: Callable[[str], None]) -> str:
+        await ns["tools"].note()  # type: ignore[attr-defined]
+        return "done"
+
+    ctx.require(CODE_RUNTIME_STUB).register_program("cell", program)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    log_event(session, CHECKPOINT, {"agentId": agent.id, "tree": "t", "callId": "call-1"})
+    result = await run_tool(ctx, RUN_CODE, {"program": "cell"}, agent=agent, session=session)
+
+    assert result.is_error is False
+    assert asked == ["note"]
+    start = session.latest("tool/code-dispatch-start")
+    assert start is not None and start.data["restoreCovered"] is True
+
+
 def test_events_survive_a_wire_round_trip() -> None:
     session = Session("s")
     log_event(session, "user/message", user_payload("hi"), SurfaceIntent("append"))
@@ -494,15 +547,6 @@ def _tracked(tmp_path: Path, session: Session | None = None) -> tuple[JsonlSessi
     return store, tracked
 
 
-def _half_then_full_disk(fd: int, payload: bytes) -> None:
-    """What a disk that fills mid-payload does: some of the bytes, then the error."""
-    import errno
-    import os
-
-    os.write(fd, payload[: len(payload) // 2])
-    raise OSError(errno.ENOSPC, "No space left on device")
-
-
 async def test_a_write_that_fails_part_way_takes_its_bytes_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -527,7 +571,7 @@ async def test_a_write_that_fails_part_way_takes_its_bytes_back(
     log_event(session, "step/start", {"turn": 1, "step": 1})
     log_event(session, "step/end", {"turn": 1, "step": 1})
     with monkeypatch.context() as patch:
-        patch.setattr(jsonl, "write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "write_all", disk_fills_midway)
         with pytest.raises(OSError, match="No space left"):
             await store.flush(session)
     assert path.stat().st_size == before, "the failed write left its partial bytes behind"
@@ -535,6 +579,43 @@ async def test_a_write_that_fails_part_way_takes_its_bytes_back(
     await store.flush(session)
     _header, events = read_session(path)
     assert [event.seq for event in events] == [0, 1, 2]
+
+
+async def test_a_new_family_directory_is_on_disk_with_its_first_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S20. A log's first flush synced the log and the family directory's entry for
+    it, and never the sessions root's entry for the family directory, which a `mkdir`
+    had only just made. A power cut could take the whole directory back, with a log
+    flushed as durable inside it. Each directory the first write makes is synced in
+    its parent now, and a second write makes none.
+
+    Sabotage: make the directories with a plain `mkdir(parents=True)`, and neither the
+    root nor its parent is synced.
+    """
+    from ph import paths
+    from ph.persistence import jsonl
+
+    synced: list[Path] = []
+    real = paths.sync_directory
+
+    def record(directory: Path) -> None:
+        synced.append(directory)
+        real(directory)
+
+    monkeypatch.setattr(paths, "sync_directory", record)
+    monkeypatch.setattr(jsonl, "sync_directory", record)
+    root = tmp_path / "sessions"
+    store, session = _tracked(root)
+    log_event(session, "turn/start", {"turn": 1})
+
+    await store.flush(session)
+    family = stored_log(root, "s").parent
+    assert synced == [tmp_path, root, family]
+
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await store.flush(session)
+    assert synced == [tmp_path, root, family], "a log already made syncs no directory"
 
 
 def test_a_record_log_outside_the_store_is_synced_and_takes_a_failed_write_back(
@@ -566,7 +647,7 @@ def test_a_record_log_outside_the_store_is_synced_and_takes_a_failed_write_back(
 
     before = path.stat().st_size
     with monkeypatch.context() as patch:
-        patch.setattr(jsonl, "write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "write_all", disk_fills_midway)
         with pytest.raises(OSError, match="No space left"):
             append_records(path, [{"n": 2}])
     assert path.stat().st_size == before, "the failed write left its partial bytes behind"
@@ -593,7 +674,7 @@ async def test_a_retry_behind_a_write_nobody_took_back_still_appends_cleanly(
     await store.flush(session)
     log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     with monkeypatch.context() as patch:
-        patch.setattr(jsonl, "write_all", _half_then_full_disk)
+        patch.setattr(jsonl, "write_all", disk_fills_midway)
         patch.setattr(jsonl, "_take_back", lambda *_args: None)
         with pytest.raises(OSError):
             await store.flush(session)

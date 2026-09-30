@@ -360,6 +360,13 @@ class ToolExecution:
     sent (`Edited`, P4-05). On the execution because it qualifies the field one
     line above it, and every stage that holds an execution can ask. The
     write-ahead record reads it to log what will run — see `Allow.arguments`."""
+    restore_covered: bool = False
+    """Whether a workspace restore takes back everything this call does
+    (`ToolRuntime.restore_covers`), for a call nested in a Code Mode run. Asked once,
+    by `ToolRuntime.prepare` once the gate has decided (S4): the dispatch's record
+    carries it for `/revert`, and the checkpoint policy's barrier skips on it. Two
+    asks could disagree, since the answer follows links a sibling dispatch may
+    move between them. `False` for any other call: nothing reads it there."""
 
 
 @dataclass(slots=True)
@@ -383,6 +390,11 @@ class ToolRunContext:
     """
     _deferred: list[Message] = field(default_factory=list)
     _concluded: bool = False
+    _cut_off: bool = False
+    """Whether the body was entered and left by a cancellation rather than by returning
+    or raising: its budget ran out, or a cancel reached it. Its effect may have
+    happened, so a keyed call is settled unknown (`ToolRuntime._settle_effect`).
+    Set by the registry's own body call, the one place that knows it was entered."""
 
     @property
     def call_id(self) -> str:

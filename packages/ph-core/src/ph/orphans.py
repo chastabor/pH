@@ -7,7 +7,8 @@ host leaves a live Python process holding a model's namespace. Nothing in that
 session will ever reconcile it, because nobody is going to reopen a session that
 died.
 
-So spawns are journalled, `fsync`ed, and swept at **every** pH start.
+So spawns are journaled, and swept at **every** pH start. Not `fsync`ed: the
+journal is in `$PH_RUNTIME`, which a reboot wipes (`OrphanJournal._append`).
 
 The pid is not enough to sweep by: pids are reused, and killing the wrong
 process is far worse than leaving a stray. Each record therefore carries a
@@ -28,20 +29,21 @@ would be a second set of rules about when it is safe to kill a pid.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import logging
 import os
 import signal
 import sys
-from collections.abc import Iterator, Sequence
-from contextlib import suppress
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .json import dumps
 from .paths import RuntimeDirError, resolve_roots, write_atomic
-from .persistence import read_records
+from .persistence import records_in
 
 __all__ = [
     "JOURNAL_NAME",
@@ -67,15 +69,20 @@ def host_journal() -> OrphanJournal | None:
     is wiped on reboot, and a journal of pids that outlived a reboot would be
     actively dangerous once those pids are reused.
 
+    **`$PH_RUNTIME` is made here, owner-only** (`PathRoots.ensure_runtime`), before
+    anything is journaled: a journal that made it itself did so at the default mode,
+    and on the `/tmp` fallback the next start failed that directory's own check and
+    refused to run (S22).
+
     `None` rather than raising: a read-only `$PH_RUNTIME` is a deployment fact,
     and refusing to spawn `git` over a diagnostic would trade a working harness
     for a tidier one. The hole is open again in that deployment, which the
     `subprocess` diagnostic says out loud.
     """
     try:
-        return OrphanJournal(path=resolve_roots().runtime / JOURNAL_NAME)
-    except RuntimeDirError:
-        log.warning("ph.orphans: no $PH_RUNTIME; spawns will not be journalled")
+        return OrphanJournal(path=resolve_roots().ensure_runtime().runtime / JOURNAL_NAME)
+    except (RuntimeDirError, OSError):
+        log.warning("ph.orphans: no usable $PH_RUNTIME; spawns will not be journaled")
         return None
 
 
@@ -133,10 +140,8 @@ class OrphanJournal:
         return self._owner
 
     def record(self, *, pid: int, argv: Sequence[str], label: str | None = None) -> None:
-        """Note a spawn durably before the child can do anything.
-
-        `fsync`ed because the failure this guards against is the host dying, and
-        a buffered record would die with it.
+        """Note a spawn before the child can do anything — written and closed, which
+        outlives a `SIGKILL` of pH (`_append` says why that is enough).
 
         **The owner is recorded beside the child**, which is what makes this
         journal safe to share. One file per user per boot means a daemon's live
@@ -165,60 +170,49 @@ class OrphanJournal:
         self._append({"op": "reap", "pid": pid})
 
     def sweep(self) -> SweepReport:
-        """Kill provably-ours strays, forget the rest, and compact the journal."""
-        live = self._live()
-        killed: list[int] = []
-        stale: list[int] = []
-        unverifiable: list[int] = []
-        held: list[int] = []
-        for pid, record in sorted(live.items()):
-            if _owner_alive(record):
-                # Somebody else's live children. They are not strays, and this
-                # process has no business killing them — see `record`.
-                held.append(pid)
-                continue
-            if not process_alive(pid):
-                stale.append(pid)
-                continue
-            # Read after the liveness check, not before: a dead pid's token is a
-            # `/proc` read whose answer is discarded, and most records in a
-            # long-lived journal are dead by the time anyone sweeps.
-            token = process_start_token(pid)
-            recorded = record.get("startToken")
-            if token is None or recorded is None:
-                # No token now and no token recorded are one fact: there is no
-                # identity to match. The mismatch test below needs both sides, so
-                # this has to come first — ordered the other way, a record
-                # written without a token matched nothing and reached the kill
-                # unchecked, which is this module's rule inverted at the point it
-                # exists for. `record` writes `startToken: null` whenever `/proc`
-                # is unreadable at spawn, and a journal outlives a `SIGKILL`.
-                unverifiable.append(pid)
-                continue
-            if recorded != token:
-                # The pid came back as something else. Leaving it alone is the
-                # whole reason the token is recorded.
-                stale.append(pid)
-                continue
-            if _kill(pid):
-                killed.append(pid)
-            else:
-                stale.append(pid)
-        # A held record stays: its owner is still responsible for it, and
-        # compacting it away would hide the child from the sweep that runs after
-        # that owner finally dies.
-        keep = [live[pid] for pid in sorted(unverifiable + held)]
-        # Nothing read, nothing owed: every `phern` invocation otherwise wrote a
-        # temp file and renamed it over a journal that was absent or unchanged.
-        if live or self.path.exists():
-            self._rewrite(keep)
-        if killed or unverifiable:
+        """Kill provably-ours strays, forget the rest, and compact the journal.
+
+        **Judged unlocked, compacted under the lock** (S22). A compaction renames a
+        new file over the journal, so an append between the read and the rename
+        landed on the file renamed away, and a child spawned then was never swept.
+        Holding the lock from the read to the rename closed that, and stalled every
+        appender — a daemon's loop, at its next spawn — for as long as the read, the
+        `/proc` checks and the kills took: 240 ms at 100 000 records. So the lock is
+        held only to carry over what was appended since the read, and to rename, and
+        a journal another sweep compacted meanwhile is left as that one wrote it.
+
+        A journal it cannot read or lock is warned about and left, for
+        `host_journal`'s reason: a mount is not refused over a diagnostic.
+        """
+        try:
+            with self.path.open("rb") as handle:
+                read = handle.read()
+                identity = _identity(os.fstat(handle.fileno()))
+        except FileNotFoundError:
+            return SweepReport()
+        except OSError:
+            log.warning("ph.orphans: could not read the orphan journal", exc_info=True)
+            return SweepReport()
+        # Whole lines only: one still being written is carried over with the rest.
+        judged = read.rfind(b"\n") + 1
+        report, keep = _judge(
+            _live(records_in(read[:judged].decode(errors="replace").splitlines()))
+        )
+        # Nothing read, nothing owed: every `phern` invocation otherwise wrote a temp
+        # file and renamed it over a journal that was empty.
+        if read:
+            try:
+                with self._locked(exclusive=True):
+                    self._compact(keep, identity, judged)
+            except OSError:
+                log.warning("ph.orphans: could not compact the orphan journal", exc_info=True)
+        if report.killed or report.unverifiable:
             log.info(
                 "ph.orphans: swept %d stray runtime child(ren); %d unverifiable",
-                len(killed),
-                len(unverifiable),
+                len(report.killed),
+                len(report.unverifiable),
             )
-        return SweepReport(tuple(killed), tuple(stale), tuple(unverifiable), tuple(held))
+        return report
 
     # ------------------------------------------------------------ internals --
 
@@ -234,49 +228,123 @@ class OrphanJournal:
 
         Measured, because the cost was not small: 1023 µs per record against
         22.6 µs on a disk-backed `$PH_RUNTIME`, paid on every `git`, `jj`,
-        `bash` and `!` this seam spawns.
+        `bash` and `!` this seam spawns. For the same reason appends share their
+        lock (`_locked`) rather than taking `ph.locks.file_lock`, which measured
+        80 µs a record.
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with self.path.open("a", encoding="utf-8") as handle:
+            with self._locked(), self.path.open("a", encoding="utf-8") as handle:
                 handle.write(dumps(record) + "\n")
         except OSError:
             log.warning("ph.orphans: could not journal %r", record, exc_info=True)
 
-    def _records(self) -> Iterator[dict[str, Any]]:
-        """This journal's lines, tolerating the tail a hard kill leaves.
+    @contextmanager
+    def _locked(self, *, exclusive: bool = False) -> Iterator[None]:
+        """The journal's lock: shared by appends, which cost each other nothing, and
+        taken whole by a sweep's compaction (`sweep`).
 
-        The tolerance is `read_records`' — the journal exists precisely because
-        pH was killed mid-write, so refusing the file over its last line would
-        discard the strays it was written to find.
+        On a file beside the journal, because a compaction gives the journal a new
+        inode. Opened per use, since `flock` belongs to an open file: a descriptor
+        shared by this process's threads would let a sweep on a worker thread and an
+        append on the loop both hold it.
         """
-        return read_records(self.path)
+        handle = os.open(
+            self.path.with_name(f"{self.path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600
+        )
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(handle)
 
-    def _live(self) -> dict[int, dict[str, Any]]:
-        live: dict[int, dict[str, Any]] = {}
-        for record in self._records():
-            pid = record.get("pid")
-            if not isinstance(pid, int):
-                continue
-            if record.get("op") == "spawn":
-                live[pid] = record
-            else:
-                live.pop(pid, None)
-        return live
+    def _compact(self, keep: list[dict[str, Any]], identity: tuple[int, int], judged: int) -> None:
+        """The journal rewritten to `keep` and whatever was appended past `judged` since
+        it was read — under the exclusive lock, so no append is part-way. Left alone
+        when it is no longer the file read: another sweep compacted it meanwhile.
 
-    def _rewrite(self, keep: list[dict[str, Any]]) -> None:
-        """Compact to what is still outstanding.
-
-        Rewritten rather than appended-to because this file is swept at every
-        start: left to grow, it would accumulate one pair of lines per cell for
-        the lifetime of the installation.
+        Rewritten rather than appended-to because this file is swept at every start:
+        left to grow, it would accumulate one pair of lines per cell for the lifetime
+        of the installation.
         """
         try:
-            # Not durable: `$PH_RUNTIME` does not outlive the reboot a sync would
-            # guard against — the reason `_append` gives for not syncing either.
-            write_atomic(self.path, "".join(dumps(record) + "\n" for record in keep), durable=False)
-        except OSError:
-            log.warning("ph.orphans: could not compact the orphan journal", exc_info=True)
+            current = os.stat(self.path)
+        except FileNotFoundError:
+            return
+        if _identity(current) != identity or current.st_size < judged:
+            return
+        with self.path.open("rb") as handle:
+            handle.seek(judged)
+            since = handle.read()
+        kept = "".join(dumps(record) + "\n" for record in keep).encode()
+        # Not durable: `$PH_RUNTIME` does not outlive the reboot a sync would guard
+        # against — the reason `_append` gives for not syncing either.
+        write_atomic(self.path, kept + since, durable=False)
+
+
+def _identity(found: os.stat_result) -> tuple[int, int]:
+    """Which file a path named when it was read: a compaction gives it another."""
+    return found.st_dev, found.st_ino
+
+
+def _live(records: Iterable[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """The spawn records a journal's lines leave outstanding, by pid."""
+    live: dict[int, dict[str, Any]] = {}
+    for record in records:
+        pid = record.get("pid")
+        if not isinstance(pid, int):
+            continue
+        if record.get("op") == "spawn":
+            live[pid] = record
+        else:
+            live.pop(pid, None)
+    return live
+
+
+def _judge(live: dict[int, dict[str, Any]]) -> tuple[SweepReport, list[dict[str, Any]]]:
+    """What becomes of each outstanding record — killed, stale, unverifiable or held
+    — and the records a compacted journal keeps."""
+    killed: list[int] = []
+    stale: list[int] = []
+    unverifiable: list[int] = []
+    held: list[int] = []
+    for pid, record in sorted(live.items()):
+        if _owner_alive(record):
+            # Somebody else's live children. They are not strays, and this
+            # process has no business killing them — see `record`.
+            held.append(pid)
+            continue
+        if not process_alive(pid):
+            stale.append(pid)
+            continue
+        # Read after the liveness check, not before: a dead pid's token is a
+        # `/proc` read whose answer is discarded, and most records in a
+        # long-lived journal are dead by the time anyone sweeps.
+        token = process_start_token(pid)
+        recorded = record.get("startToken")
+        if token is None or recorded is None:
+            # No token now and no token recorded are one fact: there is no
+            # identity to match. The mismatch test below needs both sides, so
+            # this has to come first — ordered the other way, a record
+            # written without a token matched nothing and reached the kill
+            # unchecked, which is this module's rule inverted at the point it
+            # exists for. `record` writes `startToken: null` whenever `/proc`
+            # is unreadable at spawn, and a journal outlives a `SIGKILL`.
+            unverifiable.append(pid)
+            continue
+        if recorded != token:
+            # The pid came back as something else. Leaving it alone is the
+            # whole reason the token is recorded.
+            stale.append(pid)
+            continue
+        if _kill(pid):
+            killed.append(pid)
+        else:
+            stale.append(pid)
+    # A held record stays: its owner is still responsible for it, and
+    # compacting it away would hide the child from the sweep that runs after
+    # that owner finally dies.
+    keep = [live[pid] for pid in sorted(unverifiable + held)]
+    return SweepReport(tuple(killed), tuple(stale), tuple(unverifiable), tuple(held)), keep
 
 
 def _owner_alive(record: dict[str, Any]) -> bool:

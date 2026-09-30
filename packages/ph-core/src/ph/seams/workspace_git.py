@@ -48,7 +48,7 @@ import anyio
 
 from ..cordis import Context, plugin
 from ..keys import SUBPROCESS, WORKSPACE
-from ..paths import canonical, default_home_path, is_under
+from ..paths import canonical, default_home_path, is_under, write_atomic
 from ..wire import WireModel
 from .subprocess import SubprocessSpawnSpec
 from .workspace import (
@@ -829,6 +829,11 @@ async def _checkpoint_index(
 ) -> Path:
     """pH's index, seeded once from the worktree's own so the first cell is cheap.
 
+    **Seeded whole or not at all**: an index under this name is never seeded again,
+    so a copy cut off part-way — a full disk, a kill — left a torn one there for good,
+    and every checkpoint after it staged against it. Not synced: git rewrites this
+    index at once (`add -A`), by rename and without an `fsync` of its own.
+
     **And marked once, while it is new** (L9). `_mark_tracked` is a property of
     an index rather than of a checkpoint, so the moment this file comes into
     existence is the one time it has to be asked — every later `add -A` against
@@ -841,7 +846,7 @@ async def _checkpoint_index(
             return False
         live = git_dir / "index"
         if live.exists():
-            shutil.copyfile(live, index)
+            write_atomic(index, live.read_bytes(), durable=False)
         return True
 
     if await anyio.to_thread.run_sync(seed) and provisioned:

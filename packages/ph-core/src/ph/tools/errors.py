@@ -18,6 +18,7 @@ __all__ = [
     "TOOL_BUDGET_SPENT",
     "TOOL_DENIED",
     "TOOL_EFFECT_IN_FLIGHT",
+    "TOOL_TIMEOUT",
     "TOOL_TURN_CONCLUDED",
     "HarnessError",
     "ToolNotFoundError",
@@ -29,6 +30,11 @@ TOOL_ABORTED = "ABORTED"
 
 TOOL_ABORTED_BEFORE_DISPATCH = "ABORTED_BEFORE_DISPATCH"
 """Cancellation before the body ran — the call had no effect."""
+
+TOOL_TIMEOUT = "TIMEOUT"
+"""The call ran past its `timeout_ms` and was cut off. `failed` in kind, since the
+tool did not finish — though its effect may have happened, which the registry, not
+this code, tells a keyed call's record (`ToolRunContext._cut_off`)."""
 
 TOOL_DENIED = "TOOL_DENIED"
 """Policy refused the call: a `deny` decision, or a monotonic guard.
