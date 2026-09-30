@@ -324,13 +324,20 @@ async def test_arguments_that_do_not_satisfy_the_declaration_are_refused(
     The refusal names what was wanted, so the second call can be right — which is
     the trade for keeping parameters out of the catalog, where they would be paid
     for on every request instead of only by the call that got it wrong.
+
+    And no `skill/read`, which says a body reached the agent: this one never did.
+    Sabotage: record the read before rendering, and one is logged.
     """
     ctx, agent = await _release(mount, tmp_path)
+    session = not_none(ctx.require(SESSIONS).get("s"))
 
-    result = await run_tool(ctx, "skill", {"name": "release", "arguments": arguments}, agent=agent)
+    result = await run_tool(
+        ctx, "skill", {"name": "release", "arguments": arguments}, agent=agent, session=session
+    )
 
     assert result.is_error
     assert expected in text_of(result.content)
+    assert list(session.select(READ)) == []
 
 
 async def test_a_body_naming_an_undeclared_input_is_refused(

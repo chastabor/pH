@@ -328,6 +328,7 @@ class ReactLoopAgent:
         if decision.kind == "reject":
             # Refused, as a failure is: consumed, and reaching no model call.
             self.inbox.take(held, turn)
+            await self.ctx.serial("agent/step-rejected", request)
             return _PreparedStep(kind="reject", held=held)
         return _PreparedStep(kind="enter", held=held, messages=decision.messages, assembly=assembly)
 
@@ -498,6 +499,8 @@ class ReactLoopAgent:
                     raise LlmError(failure.message, failure.code, failure)
                 retries[by] += 1
                 attempt = retries.total()
+                if action.granted is not None:
+                    action.granted()
                 # The loop's own record of the call it is about to make again,
                 # beside `step/start` for the first one (P1): the log's answer
                 # to "how many model calls", whichever row asked for the retry.

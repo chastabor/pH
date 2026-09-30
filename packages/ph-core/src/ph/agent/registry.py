@@ -55,6 +55,13 @@ events.declare(
     doc="The authoritative reject-or-enter decision for one step.",
 )
 events.declare(
+    "agent/step-rejected",
+    "serial",
+    PreStepRequest,
+    owner="ph.agent",
+    doc="A step `agent/pre-step` rejected, once the decision is final and its batch taken.",
+)
+events.declare(
     "agent/request",
     "waterfall",
     RequestProposal,

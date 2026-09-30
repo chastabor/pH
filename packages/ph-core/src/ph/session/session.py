@@ -259,6 +259,17 @@ class _LatestFold[T]:
         return self.value
 
 
+def _marked(log: Sequence[SessionEvent]) -> bool:
+    """Whether a seed already ends in its `session/end-seed` — past only the
+    `session/resumed` each reopen records after it. Read as the last event alone,
+    every reopen found `resumed` there and marked the boundary again, so a cold
+    session gained two events per open instead of the one that records it."""
+    for event in reversed(log):
+        if event.type != "session/resumed":
+            return event.type == "session/end-seed"
+    return False
+
+
 class Session:
     """An event-sourced session: an append-only log of `SessionEvent`s."""
 
@@ -379,10 +390,9 @@ class Session:
         self.header = base.validated(session_id)
 
         # Appended here so the marker is already in `events` when a backend
-        # captures the creation seed: no load-time write. A seed already ending
-        # in one is not re-marked, so repeatedly opening a cold session does not
-        # grow its log per open.
-        if seed is not None and (not self._log or self._log[-1].type != "session/end-seed"):
+        # captures the creation seed: no load-time write. Not again for a seed
+        # that has one (`_marked`).
+        if seed is not None and not _marked(self._log):
             _LOG.append(self, "session/end-seed", {})
 
     # -------------------------------------------------------------- identity --

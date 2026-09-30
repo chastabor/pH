@@ -5,7 +5,7 @@ Definition, Provider, Consumer (invariant I5). The *definition* is
 the *consumer* is the loop, which never learns which adapter answered.
 
 Every call goes through the `llm/stream` waterfall, which is where retry,
-replay, checkpoint policy and session-title all attach in dsh. An adapter that
+replay and session-title attach, then `llm/send`, where a barrier waits. An adapter that
 raises is normalized into a terminal `finish{error}` chunk before any consumer
 sees it, so a consumer never handles two shapes for the same failure.
 
@@ -42,6 +42,14 @@ events.declare(
     GenerateOptions,
     owner="ph.llm",
     doc="Wraps every model call. Retry, replay and recording attach here.",
+)
+events.declare(
+    "llm/send",
+    "serial",
+    GenerateOptions,
+    owner="ph.llm",
+    doc="A request about to reach its adapter, once every `llm/stream` listener has had its "
+    "say. A barrier that must cover what they appended waits here.",
 )
 events.declare(
     "llm/adapters-updated",
@@ -295,6 +303,7 @@ class LlmRuntime:
 
         async def inner(request: GenerateOptions) -> AsyncIterator[StreamChunk]:
             handle = self._route(request.provider)
+            await self.ctx.serial("llm/send", request)
             # The binding goes *inside* the generator (C10). Both
             # `adapter.stream(...)` and `_normalized(...)` are async-generator
             # calls, so this line only constructs them — nothing of the adapter

@@ -339,6 +339,9 @@ async def test_a_refused_retry_costs_no_backoff(mount: MountProfile) -> None:
     `llm-retry` slept inside the waterfall and then granted, so a ceiling that
     refused afterwards had already paid the wait. Here the wait would be ten
     seconds. Sabotage: sleep in `llm-retry` again and the deadline trips.
+
+    Nor is it recorded as a retry: `llm-retry` recorded `llm/retry` as it granted,
+    so the log showed one that never ran. Sabotage: append it in the listener again.
     """
     with anyio.fail_after(2):
         session = await _fail_once_at_the_ceiling(
@@ -347,6 +350,7 @@ async def test_a_refused_retry_costs_no_backoff(mount: MountProfile) -> None:
 
     (breach,) = events_of(session, "limits/exceeded")
     assert breach.data["retry"] is True
+    assert events_of(session, "llm/retry") == events_of(session, "step/retry") == []
 
 
 async def test_the_session_limit_outlives_the_turn(mount: MountProfile) -> None:

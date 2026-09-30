@@ -284,7 +284,8 @@ async def test_a_second_restart_before_the_key_arrives_holds_again_and_grows_not
     }
 
     assert grown == {
-        "root": ["session/end-seed", "session/resumed"],
+        # The record of the reopen, and no second seed marker (`Session._marked`).
+        "root": ["session/resumed"],
         sessions[1]: [],
         sessions[2]: [],
     }, grown

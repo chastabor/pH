@@ -123,17 +123,17 @@ async def apply(ctx: Context, config: Config) -> None:
             # bucket refills.
             delay_ms = max(delay_ms, failure.provider_retry_after_ms)
 
-        _LOG.append(
-            session,
-            RETRIED,
-            {
-                "turn": failure_payload.turn,
-                "step": failure_payload.step,
-                "attempt": seen + 1,
-                "delayMs": delay_ms,
-                "code": failure.code,
-            },
-        )
-        return RequestErrorAction(kind="retry", delay_ms=delay_ms)
+        account = {
+            "turn": failure_payload.turn,
+            "step": failure_payload.step,
+            "attempt": seen + 1,
+            "delayMs": delay_ms,
+            "code": failure.code,
+        }
+
+        def record() -> None:
+            _LOG.append(session, RETRIED, account)
+
+        return RequestErrorAction(kind="retry", delay_ms=delay_ms, granted=record)
 
     ctx.on("agent/request-error", on_error)

@@ -101,7 +101,7 @@ from ._registry import claim_entry, claim_key
 from .credentials import hold_for_credential, missing_credential
 from .invariants import contribute_fold_cache
 from .models import ModelChoice, ModelChoiceError, choose
-from .skills import ORDER_SKILLS, SkillRestriction, SkillService
+from .skills import ORDER_SKILLS, Skill, SkillRestriction, SkillService, record_read
 from .subagent_profiles import narrowing
 from .token_meter import SPENDING_TYPES, event_tokens
 
@@ -1519,15 +1519,13 @@ class SubagentService:
         named = request.skills
         skills = self.ctx.get(SKILLS)
         target = boundary if boundary is not None else self._delegating_boundary(request)
+        brief, briefed = _brief(skills, named, target) if named and skills is not None else ("", ())
         return Grant(
             skills=named if named is not None else held_skills,
             tools=request.tools if request.tools is not None else held_tools,
             paths=request.paths,
-            brief=(
-                _brief_text(skills, named, target, request.parent.session)
-                if named and skills is not None
-                else ""
-            ),
+            brief=brief,
+            briefed=briefed,
         )
 
     async def _end_child(self, session_id: str, detail: str) -> None:
@@ -1779,6 +1777,8 @@ class SubagentService:
             )
         finally:
             self._landed(parent, child_name)
+        # Read into the child's prompt, now that it has one (S8).
+        grant.record_brief(request.parent.session)
         admitted.ready.set()
         return admitted
 
@@ -2221,9 +2221,11 @@ class SubagentService:
             )
         if run is None:
             return None
-        return await self._admit(
+        admitted = await self._admit(
             run, owner=readmitter.name, grant=grant, held=held, boundary=boundary
         )
+        grant.record_brief(request.parent.session)
+        return admitted
 
     def _readmitter(self, state: ChildState) -> _Readmitter | None:
         """The provider that could put this child back, or `None` if none can.
@@ -2384,6 +2386,15 @@ class Grant:
     paths: tuple[str, ...] | None = None
     """The extra writable directories, where an assigned profile narrowed them."""
     brief: str = ""
+    briefed: tuple[tuple[Skill, str], ...] = ()
+    """The skills `brief` holds, and exactly what of each was read — recorded as
+    `skill/read` (`via="brief"`) once the child is admitted (`record_brief`), not
+    when read: a spawn refused before then put nothing in any child's prompt."""
+
+    def record_brief(self, session: Session | None) -> None:
+        """Say, in `session`, what of each skill this brief put in the child's prompt."""
+        for skill, text in self.briefed:
+            record_read(session, skill, text, via="brief")
 
     def apply(self, ctx: Context, scope: Context) -> None:
         """Bound a child's scope to this grant.
@@ -2415,10 +2426,10 @@ class Grant:
             )
 
 
-def _brief_text(
-    skills: SkillService, named: Sequence[str], scope: Context, session: Session | None
-) -> str:
-    """The named skills' instructions, read once.
+def _brief(
+    skills: SkillService, named: Sequence[str], scope: Context
+) -> tuple[str, tuple[tuple[Skill, str], ...]]:
+    """The named skills' instructions, read once, and what was read of each.
 
     **A named skill is direction, not a lookup.** G9 keeps bodies out of the
     prompt because a catalog of twenty is twenty bodies the model probably will
@@ -2427,18 +2438,19 @@ def _brief_text(
     chance it never fetches at all — so the named bodies go in its prompt, and
     everything else it can still reach stays catalog-only.
     """
-    parts = []
+    parts: list[str] = []
+    read: list[tuple[Skill, str]] = []
     for name in named:
-        # Read into a child's prompt is read at runtime, for the audit (S8).
-        body = skills.body(name, scope, session=session, via="brief")
-        if body:
+        skill, body = skills.get(name, scope), skills.body(name, scope)
+        if skill is not None and body:
             parts.append(f"## {name}\n\n{body.strip()}")
+            read.append((skill, body))
     if not parts:
-        return ""
+        return "", ()
     return (
         "You were delegated this task to follow the instructions below. "
         "They are not background reading.\n\n" + "\n\n".join(parts)
-    )
+    ), tuple(read)
 
 
 _UNADMITTED = Admission(run_id="")

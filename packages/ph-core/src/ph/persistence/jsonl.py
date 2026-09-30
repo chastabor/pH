@@ -450,7 +450,8 @@ class JsonlSessionStore:
         new".** This backend appends, so it must write each event exactly once —
         and the question is not whether the *file* exists but how much of *this
         log* is in it. `Session.durable_length` is that number, stated by
-        whoever seeded from storage.
+        whoever seeded from storage, until the first `flush` measures the file,
+        whose own tail then decides.
 
         The earlier gate — `if not path.exists(): queue everything` — encoded a
         premise that is true of two cases and false of the third. A fresh
@@ -530,9 +531,12 @@ class JsonlSessionStore:
                 #
                 # Asked of the last record's seq, which is absolute
                 # (`events[i].seq == i`), so nothing has to be mutated and no
-                # offset has to be guessed. The declared value stays a floor: a
-                # file *behind* it means events are missing, and re-writing them
-                # repairs a hole rather than duplicating anything.
+                # offset has to be guessed. **What the file holds decides, either
+                # way**: ahead of the declared value, what it holds is not written
+                # again; *behind* it, events are missing, and writing them repairs
+                # a hole that the next resume would refuse ("seed must be
+                # contiguous from 0"). The declared value stands only for a file
+                # that holds no event yet — a fork's, whose prefix is its parent's.
                 #
                 # Here rather than in `track` because `track` is a synchronous
                 # listener, and because a session that never flushes never needs
@@ -546,7 +550,7 @@ class JsonlSessionStore:
                 # No file, or one whose only line was torn: the header is owed.
                 buffer.header_written = tail is not None and tail.complete > 0
                 if tail is not None and tail.last_seq is not None:
-                    buffer.cursor = max(buffer.cursor, tail.last_seq + 1)
+                    buffer.cursor = tail.last_seq + 1
             owed = session.events_from(buffer.cursor)
             header_owed = not buffer.header_written
             records: list[dict[str, Any]] = []

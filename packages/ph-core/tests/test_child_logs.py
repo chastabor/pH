@@ -11,6 +11,7 @@ provider's.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -39,8 +40,10 @@ from ph.testing import (
     admitted_child,
     assistant_payload,
     log_event,
+    not_none,
     stored_events,
     stored_types,
+    write_skill,
 )
 
 pytestmark = pytest.mark.anyio
@@ -119,6 +122,18 @@ async def test_a_child_is_on_its_own_disk_before_its_gate_opens(mount: MountProf
     assert not [one for one in parent.session.events if one.type.startswith("subagent/")]
 
 
+@dataclass(slots=True)
+class _Logless:
+    """A provider that opens no log for its child, which `_admit` refuses."""
+
+    inner: StubSubagentProvider
+
+    async def start(self, request: SubagentRequest) -> SubagentRun:
+        run = await self.inner.start(request)
+        run.session_id = "nowhere"
+        return run
+
+
 async def test_a_provider_that_opened_no_log_for_its_child_is_refused(
     mount: MountProfile,
 ) -> None:
@@ -128,16 +143,6 @@ async def test_a_provider_that_opened_no_log_for_its_child_is_refused(
 
     Sabotage: skip the check in `_admit`, and the spawn succeeds with no record.
     """
-
-    @dataclass(slots=True)
-    class _Logless:
-        inner: StubSubagentProvider
-
-        async def start(self, request: SubagentRequest) -> SubagentRun:
-            run = await self.inner.start(request)
-            run.session_id = "nowhere"
-            return run
-
     ctx = await mount()
     ctx.require(SUBAGENTS).register_provider("logless", _Logless(StubSubagentProvider(root=ctx)))
 
@@ -145,6 +150,28 @@ async def test_a_provider_that_opened_no_log_for_its_child_is_refused(
         await ctx.require(SUBAGENTS).start(
             "logless", SubagentRequest(prompt="look", parent=_parent(ctx))
         )
+
+
+async def test_a_refused_spawn_records_no_skill_it_would_have_briefed(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A `skill/read` says a body reached an agent. The brief was read, and recorded,
+    as the grant was built — before the provider started the child or `_admit` could
+    refuse it — so a refused spawn left a read of a prompt no child ever had.
+
+    Sabotage: record the brief as it is read again, and the refused spawn leaves one.
+    """
+    write_skill(tmp_path, "sort", body="Sort by kind.")
+    ctx = await mount({"id": "skills-progressive", "config": {"paths": [str(tmp_path)]}})
+    ctx.require(SUBAGENTS).register_provider("logless", _Logless(StubSubagentProvider(root=ctx)))
+    parent = _parent(ctx)
+
+    with pytest.raises(SubagentSpawnError, match="opened no log"):
+        await ctx.require(SUBAGENTS).start(
+            "logless", SubagentRequest(prompt="look", parent=parent, skills=("sort",))
+        )
+
+    assert list(not_none(parent.session).select("skill/read")) == []
 
 
 async def test_a_spent_child_is_ended_in_its_own_log(mount: MountProfile) -> None:

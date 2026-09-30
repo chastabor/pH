@@ -15,6 +15,7 @@ alone because a person may still be composing the prompt that will mention it.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from time import time
 from typing import Any
@@ -221,6 +222,24 @@ async def test_a_new_blob_is_left_alone(tmp_path: Path) -> None:
 
     assert not survey.collect and len(survey.recent) == 1
     assert MIN_AGE == 86_400.0
+
+
+async def test_a_blob_attached_again_is_new_again(tmp_path: Path) -> None:
+    """The same guard, for bytes that were already there. An old unreferenced blob
+    attached once more is skipped as already present, and kept its old age, so a
+    sweep before the message naming it reached disk took the blob out from under it.
+
+    Sabotage: skip the write in `write_atomic` without dating the file, and the blob
+    is collected.
+    """
+    store, (ref,) = await _stored(tmp_path, PNG)
+    long_ago = time() - 400 * 86_400.0
+    os.utime(store.path_for(ref), (long_ago, long_ago))
+
+    await store.save_bytes(content=PNG, mime="image/png", name="again.png")
+
+    survey = survey_attachments(store, _Store())
+    assert not survey.collect and len(survey.recent) == 1
 
 
 async def test_a_log_that_will_not_read_stops_the_collection(tmp_path: Path) -> None:

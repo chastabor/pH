@@ -473,7 +473,11 @@ def write_atomic(
     something a live reader holds, for no gain. **Unless it is the wrong size**:
     a file torn before this synced — by a build that did not, or a disk that lied —
     is not the blob its name promises, and skipping it would keep it that way. It
-    is not safe anywhere the name does not promise the contents.
+    is not safe anywhere the name does not promise the contents. **A skipped write
+    still dates the file now** (its mtime): to anything that ages the file, the
+    bytes were just written again. Left alone, an old unreferenced blob attached
+    once more kept its old age, and `phern attachments gc` could take it before the
+    message naming it reached disk.
 
     `preserve` is for replacing a file that is somebody's (`FsService`'s `write` and
     `edit`, S5): a link is written *through*, by replacing the file it names rather
@@ -495,6 +499,8 @@ def write_atomic(
         with suppress(FileNotFoundError):
             mode = stat.S_IMODE(path.stat().st_mode)
     if skip_if_present and holds(path, len(data)):
+        with suppress(OSError):
+            os.utime(path)
         return
     if durable:
         make_directories(path.parent)

@@ -291,14 +291,12 @@ async def test_a_resume_writes_what_it_synthesized_on_top_of_what_it_read(
     assert [event.type for event in events] == [
         "turn/start",
         "turn/end",
-        # One boundary marker and one record per reopen. Two events, not one:
-        # `session/resumed` always lands after the marker, so the constructor's
-        # "a seed already ending in one is not re-marked" guard cannot fire.
+        # One boundary marker, then one record per reopen. The marker is not
+        # laid again: the guard reads past the `session/resumed` a reopen writes
+        # after it. Sabotage: read the last event alone, and each reopen adds two.
         "session/end-seed",
         "session/resumed",
-        "session/end-seed",
         "session/resumed",
-        "session/end-seed",
         "session/resumed",
     ]
 

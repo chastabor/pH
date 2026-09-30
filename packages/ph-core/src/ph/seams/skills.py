@@ -26,7 +26,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import anyio
 from pydantic import Field
@@ -79,6 +79,7 @@ __all__ = [
     "READ",
     "SKILL_FILE",
     "Skill",
+    "SkillReadVia",
     "SkillRestriction",
     "SkillService",
     "apply",
@@ -110,7 +111,11 @@ def read_summary(data: Mapping[str, JsonValue]) -> str:
     return f"{as_str(data.get('name'))} {version} sha256:{digest} ({as_str(data.get('via'))})"
 
 
-def record_read(session: Session | None, skill: Skill, body: str, *, via: str) -> None:
+SkillReadVia: TypeAlias = Literal["tool", "brief"]
+"""How a skill's body reached an agent: the `skill` tool, or a spawn's brief."""
+
+
+def record_read(session: Session | None, skill: Skill, body: str, *, via: SkillReadVia) -> None:
     """Say that `body` — `skill`'s, as read just now — reached an agent.
 
     Hashed as read, so two runs of a session can say whether they followed the same
@@ -541,9 +546,7 @@ class SkillService:
     def get(self, name: str, scope: Boundary) -> Skill | None:
         return self._skills.get(name) if self.admits(name, scope) else None
 
-    def body(
-        self, name: str, scope: Boundary, *, session: Session | None = None, via: str = ""
-    ) -> str | None:
+    def body(self, name: str, scope: Boundary) -> str | None:
         """The skill's full text, read only when asked for (G9).
 
         Capped again here rather than trusting discovery: a file is validated
@@ -552,10 +555,10 @@ class SkillService:
         `git pull`ed. `None` for an unknown name or a body that no longer fits,
         because both mean "there is nothing to hand you".
 
-        **The one place a body is read, so the one place its read is recorded**
-        (S8): with `session`, a `skill/read` names what reached an agent and how
-        (`via`) — the `skill` tool, a spawn's brief — and a third reader passing
-        its session is in the audit without anything else to remember.
+        **A read, not a record of one** (S8): a `skill/read` says a body reached an
+        agent, which only the reader knows — the `skill` tool once the arguments
+        render, a spawn once its child is admitted — so each records with
+        `record_read` when it hands the body over.
         """
         skill = self.get(name, scope)
         if skill is None or skill.path is None:
@@ -569,7 +572,6 @@ class SkillService:
         except OSError as error:
             log.warning("ph.seams.skills: %s could not be read: %s", path, error)
             return None
-        record_read(session, skill, text, via=via)
         return text
 
 
@@ -1079,7 +1081,7 @@ async def progressive(ctx: Context, config: Config) -> None:
         tools = ctx.require(TOOLS)
         scope = run.scope
         skill = skills.get(args.name, scope)
-        body = skills.body(args.name, scope, session=run.session, via="tool")
+        body = skills.body(args.name, scope)
         if skill is None or body is None:
             # Named, because "unknown skill" and "this skill has no readable
             # body" are different problems for the model: one is a typo it can
@@ -1091,6 +1093,9 @@ async def progressive(ctx: Context, config: Config) -> None:
         # declaration are refused here rather than discovered three steps into a
         # procedure that has already changed something.
         instructions, steps = rendered_skill(body, skill, dict(args.arguments))
+        # Recorded only now: arguments the declaration refuses end the call with the
+        # body never handed over, and a `skill/read` would say it had been.
+        record_read(run.session, skill, body, via="tool")
         # **Announced, not acted on.** A skill that declares `steps` is a
         # procedure, and turning one into entries the model must work through
         # belongs to `tool-todo` — which lives in ph-stabilize, a package this

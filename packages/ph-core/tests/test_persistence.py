@@ -298,18 +298,61 @@ async def test_the_checkpoint_policy_flushes_once_before_each_request(
     assert "request/header" in durable
 
 
-async def test_a_rejected_step_still_reaches_disk(mount: MountProfile, tmp_path: Path) -> None:
-    """The one step end barrier 1 never reaches: no request follows a reject."""
+@pytest.mark.parametrize("outside", [False, True], ids=["inside", "outside"])
+async def test_a_rejected_step_still_reaches_disk(
+    mount: MountProfile, tmp_path: Path, outside: bool
+) -> None:
+    """The one step end barrier 1 never reaches: no request follows a reject.
+
+    Flushed once the decision is final (`agent/step-rejected`), whichever row made
+    it. Flushed from inside `agent/pre-step`, a row outside the barrier that rejected
+    without calling on — limits, mounted in another order — was never seen, and the
+    batch the reject took was not flushed either.
+
+    Sabotage: flush from inside `agent/pre-step` again, and `outside` flushes nothing.
+    """
     from ph.agent.types import PreStepDecision
 
     ctx = await mount(_root(tmp_path))
     session = ctx.require(SESSIONS).create("s")
     written: list[int] = []
     ctx.on("session/flush", lambda target: written.append(len(target.events)))
-    ctx.on("agent/pre-step", lambda request, next_: PreStepDecision(kind="reject"))
+    ctx.on("agent/pre-step", lambda request, next_: PreStepDecision(kind="reject"), prepend=outside)
 
     await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
+
     assert written, "a rejected step was never flushed"
+    assert "agent/inbox/spliced" in [event.type for event in session.events[: written[0]]]
+
+
+async def test_what_a_stream_listener_appends_goes_out_flushed(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Barrier 1 is innermost (A4). Around `llm/stream` it was only as deep as mount
+    order put it: a stream listener registered after it wrapped inside it, and what
+    that listener appended — media-degrade's notices, on every request — went out
+    with the request unflushed. On `llm/send` it is after every one of them.
+
+    Sabotage: flush around `llm/stream` again, and the notice is not in the flush.
+    """
+    ctx = await mount(_root(tmp_path))
+    session = ctx.require(SESSIONS).create("s")
+    written: list[int] = []
+    ctx.on("session/flush", lambda target: written.append(len(target.events)))
+
+    async def notice(request: Any, next_: Any) -> Any:  # noqa: ANN401
+        log_event(
+            session,
+            "attachment/degraded",
+            {"provider": "fake", "attachmentIds": ["x"], "attachments": []},
+        )
+        return await next_()
+
+    ctx.on("llm/stream", notice)
+
+    await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
+
+    assert "attachment/degraded" in [event.type for event in session.events[: written[0]]]
 
 
 async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
@@ -771,6 +814,34 @@ async def test_a_resumed_log_appends_behind_its_torn_tail_cleanly(
     _header, reread = read_session(path)
     assert [event.seq for event in reread] == list(range(len(session.events)))
     assert path.read_bytes().endswith(b"\n"), "a record was left without its newline"
+
+
+async def test_a_log_behind_its_declared_length_is_filled_in(tmp_path: Path) -> None:
+    """The measured tail decides in both directions. A file *behind* the length its
+    session declares durable is missing events; the cursor stayed at the declared
+    value, so the flush appended past the gap and the next resume refused the log
+    ("seed must be contiguous from 0"). Now the missing events are written.
+
+    Sabotage: take the larger of the declared value and the file's tail again, and
+    the file skips seqs.
+    """
+    path = _torn(tmp_path, "")
+    header, events = read_session(path)
+    ahead = [
+        *events,
+        SessionEvent(type="step/end", seq=2, time=1, data={"turn": 1, "step": 1}),
+        SessionEvent(
+            type="turn/end", seq=3, time=1, data={"turn": 1, "reason": {"kind": "completed"}}
+        ),
+    ]
+    store, session = _tracked(
+        tmp_path, Session("torn", seed=ahead, header=header, durable=len(ahead))
+    )
+
+    await store.flush(session)
+
+    _header, reread = read_session(path)
+    assert [event.seq for event in reread] == list(range(len(session.events)))
 
 
 def _batched(tmp_path: Path, members: list[str], after: str = "") -> Path:

@@ -1516,6 +1516,10 @@ UNBOUND: dict[str, str] = {
     "InboxNotifications.claimed": "a callback back into the caller that supplied it",
     "InboxNotifications.discarded": "a callback back into the caller that supplied it",
     "InboxNotifications.inserted": "a callback back into the caller that supplied it",
+    "RequestErrorAction.granted": (
+        "the granting row's record of a retry the loop took; appends through its own "
+        "writer and registers nothing"
+    ),
     "ScheduleService.index": "the row's own index writer (K10); detaches only drain-tracked work",
     "_Entry.unobserve": "teardown; runs as its scope unwinds",
     # The roster. The one thing the registry calls on an entry is `dispose`, which

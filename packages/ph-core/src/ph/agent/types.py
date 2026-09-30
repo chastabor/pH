@@ -12,7 +12,7 @@ a listener's signature *is* the contract: the limits and permissions plugins
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
@@ -231,6 +231,10 @@ class RequestErrorAction:
     """How long the loop waits before the retry. The loop sleeps it, once the
     waterfall has settled — never the row — so a listener that refuses the retry
     costs no wait."""
+    granted: Callable[[], None] | None = None
+    """What the row that granted this retry records of it, run by the loop once the
+    retry is final — for `delay_ms`'s reason, since a later row may still refuse it,
+    and a record made as it granted would name a retry that never ran."""
 
 
 @dataclass(frozen=True, slots=True)

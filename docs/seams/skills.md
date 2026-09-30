@@ -57,7 +57,8 @@ check.
 **Every read is recorded, for the audit** (session profiles, S8, decision 12). The
 `skill` tool, and a spawn that puts a named skill's body in its child's prompt, each
 log an ignorable `skill/read {name, version, path, sha256, via}` — the hash of exactly
-the text read. It never blocks a read and never makes a restart ask: skills are meant
+the text read — once the body is handed over, so a `skill` call whose arguments its
+declaration refuses records none. It never blocks a read and never makes a restart ask: skills are meant
 to keep being refined, so a session's base records only the directories they are
 found in, and `phern profiles session <id>` lists which text of each was read.
 

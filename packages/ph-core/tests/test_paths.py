@@ -407,17 +407,18 @@ def test_an_atomic_write_replaces_the_file_rather_than_truncating_it(tmp_path: P
 def test_a_content_addressed_write_does_not_rewrite_what_is_there(tmp_path: Path) -> None:
     """`skip_if_present` — the half the content-addressed callers need.
 
-    Why: `write_atomic`'s docstring.
+    Why: `write_atomic`'s docstring. The inode is the witness, not the mtime: a
+    rewrite renames a new file into place, and a skip dates the old one now.
     """
     target = tmp_path / "digest-name"
     write_atomic(target, b"first", skip_if_present=True)
-    written_at = target.stat().st_mtime_ns
+    written = target.stat().st_ino
 
     # The same length, as the same digest's bytes always are.
     write_atomic(target, b"FIRST", skip_if_present=True)
 
     assert target.read_bytes() == b"first"
-    assert target.stat().st_mtime_ns == written_at, "the file was rewritten"
+    assert target.stat().st_ino == written, "the file was rewritten"
 
 
 def test_a_content_addressed_file_that_came_back_torn_is_written_again(tmp_path: Path) -> None:
