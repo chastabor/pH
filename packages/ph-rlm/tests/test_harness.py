@@ -16,30 +16,33 @@ prove something about the harness's imports rather than the model's.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from rlm_fixtures import Harnessed, note_edit
+from rlm_fixtures import Harnessed, agent_with_workspace, note_edit, skill_edit
+from runtime_helpers import run_in_kernel
 
 from ph.cordis import Context
 from ph.keys import APPROVAL, COMMANDS, SESSIONS, SYSTEM_PROMPT
 from ph.paths import write_atomic
 from ph.persistence import append_records
+from ph.seams.code_runtime import CodeRunRequest, CodeRunResult, CodeRuntimeSeam
+from ph.session import SessionStore
 from ph.system_prompt import (
     join_context_sections,
     render_context_sections,
     render_prompt,
 )
-from ph.testing import assert_fold_laws, not_none, stored_events
+from ph.testing import assert_fold_laws, not_none, raising, stored_events, stored_types
 from ph_rlm.harness import (
     GLOBAL_LOG_NAME,
     PROJECTION_NAME,
     REFINED,
     HarnessEdit,
     HarnessEntry,
-    HarnessReference,
     HarnessState,
     RefinementProposal,
     RefinementRefused,
@@ -217,14 +220,7 @@ async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: 
             summary="mixed",
             edits=[
                 note_edit("this-one-is-fine"),
-                HarnessEdit(
-                    action="create",
-                    kind="skill",
-                    id="imaginary",
-                    title="a skill that does not exist",
-                    content="call it",
-                    reference=HarnessReference(module="ph_nonexistent_module", callable="nope"),
-                ),
+                skill_edit("imaginary", "ph_nonexistent_module", "nope"),
             ],
         ),
         session=session,
@@ -237,6 +233,96 @@ async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: 
     logged = next(event for event in session.events if event.type == REFINED)
     assert list(logged.data["rejected"]) == record.rejected
     assert ctx.require(HARNESS).state(session).entry("skill", "imaginary") is None
+
+
+def _skill(entry_id: str, module: str, name: str) -> RefinementProposal:
+    """A proposal of one skill entry naming `module.name`."""
+    return RefinementProposal(summary=f"use {module}", edits=[skill_edit(entry_id, module, name)])
+
+
+def _on_each_run(monkeypatch: pytest.MonkeyPatch, note: Callable[[CodeRunRequest], None]) -> None:
+    """Call `note` with every program the code runtime is asked to run, first."""
+    real = CodeRuntimeSeam.run
+
+    async def spy(self: CodeRuntimeSeam, request: CodeRunRequest) -> CodeRunResult:
+        note(request)
+        return await real(self, request)
+
+    monkeypatch.setattr(CodeRuntimeSeam, "run", spy)
+
+
+async def test_h1_probes_within_the_agents_boundary_beside_its_kernel(
+    harnessed: Harnessed, tmp_path: Path
+) -> None:
+    """S21. The probe imports a module the model named, which runs its top level. So it
+    runs within the boundary of the agent that proposed it — its workspace, its
+    confinement — where from a namespace no agent owned it had none of those, and
+    the daemon's directory. And beside the agent's working kernel, not in it: a
+    module that hangs or crashes on import costs the probe's kernel, and nothing it
+    imports reaches the model's namespace or snapshots.
+
+    Shown by a module only the agent's workspace holds: the probe resolves it, and
+    the model's own kernel has not imported it.
+
+    Sabotage: build the probe's kernel from its namespace rather than its agent, and
+    it does not resolve; probe in the agent's own namespace, and the model's kernel
+    has imported it.
+    """
+    ctx, session, agent = await harnessed()
+    workspace = await agent_with_workspace(ctx, session, agent, tmp_path / "project")
+    (workspace.root / "ph_only_here.py").write_text("def here():\n    return 1\n", encoding="utf-8")
+
+    record = await ctx.require(HARNESS).apply(
+        _skill("local-helper", "ph_only_here", "here"), session=session, agent=agent
+    )
+
+    assert [edit.id for edit in record.applied_edits] == ["local-helper"], record.rejected
+    looked = await run_in_kernel(ctx, agent.id, "import sys; print('ph_only_here' in sys.modules)")
+    assert looked.logs.strip() == "False", "the probe ran in the model's own kernel"
+
+
+async def test_h1_a_probe_is_on_disk_before_it_runs(
+    harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S21. Auto-refine probes with nobody asking, so the log says what was about to
+    run before the kernel runs it, and then what it found — in the agent's own log.
+
+    Sabotage: run the probe outside `intents.claim`, and nothing is on disk.
+    """
+    ctx, session, agent = await harnessed()
+    stored_at_run: list[list[str]] = []
+    _on_each_run(monkeypatch, lambda _request: stored_at_run.append(stored_types(ctx, session.id)))
+
+    record = await ctx.require(HARNESS).apply(
+        _skill("finding-files", "glob", "glob"), session=session, agent=agent
+    )
+
+    assert stored_at_run and "harness/probe" in stored_at_run[0], "the kernel ran first"
+    probe = next(event for event in session.events if event.type == "harness/probe")
+    probed = next(event for event in session.events if event.type == "harness/probed")
+    assert probe.data["refineId"] == record.refine_id
+    assert (probe.data["module"], probe.data["callable"]) == ("glob", "glob")
+    assert (probed.data["probeSeq"], probed.data["unresolved"]) == (probe.seq, None)
+
+
+async def test_h1_a_probe_the_log_cannot_record_does_not_run(
+    harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S21. Fail-closed, as a durable intent is: no record on disk, no import — and
+    the entry it was checking is refused, since nothing saw it resolve.
+
+    Sabotage: make `HARNESS_PROBE`'s barrier `buffered`, and the kernel runs.
+    """
+    ctx, session, agent = await harnessed()
+    ran: list[str] = []
+    _on_each_run(monkeypatch, lambda request: ran.append(request.program))
+    monkeypatch.setattr(SessionStore, "flush", raising(OSError("read-only file system")))
+
+    with pytest.raises(RefinementRefused, match="could not be recorded, so it did not run"):
+        await ctx.require(HARNESS).apply(
+            _skill("finding-files", "glob", "glob"), session=session, agent=agent
+        )
+    assert ran == [], "the probe ran with no record of it on disk"
 
 
 async def test_h1_a_skill_without_a_reference_teaches_nothing(harnessed: Harnessed) -> None:
@@ -265,17 +351,7 @@ async def test_h2_a_skill_for_a_bound_tool_renders_the_binding_form(harnessed: H
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(
-            summary="how to search",
-            edits=[
-                HarnessEdit(
-                    action="create",
-                    kind="skill",
-                    id="finding-files",
-                    title="finding files by name",
-                    content="match a pattern",
-                    reference=HarnessReference(module="glob", callable="glob"),
-                )
-            ],
+            summary="how to search", edits=[skill_edit("finding-files", "glob", "glob")]
         ),
         session=session,
         agent=agent,
@@ -288,19 +364,7 @@ async def test_h2_a_skill_for_a_bound_tool_renders_the_binding_form(harnessed: H
 async def test_h2_an_unbound_reference_does_not_claim_to_be_a_binding(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
-        RefinementProposal(
-            summary="plain python",
-            edits=[
-                HarnessEdit(
-                    action="create",
-                    kind="skill",
-                    id="dumping",
-                    title="dumping json",
-                    content="use it",
-                    reference=HarnessReference(module="json", callable="dumps"),
-                )
-            ],
-        ),
+        RefinementProposal(summary="plain python", edits=[skill_edit("dumping", "json", "dumps")]),
         session=session,
         agent=agent,
     )

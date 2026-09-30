@@ -26,16 +26,17 @@ from runtime_helpers import DISPATCH_SETTLED, DISPATCH_START
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
-from ph.keys import AGENTS, SESSIONS
+from ph.keys import AGENTS, SESSIONS, WORKSPACE
 from ph.llm.fake import FakeAdapter
 from ph.orphans import OrphanJournal
 from ph.paths import resolve_roots
 from ph.persistence.lease import LEASES
 from ph.seams.subagents import FamilyRole
+from ph.seams.workspace import Workspace
 from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile, log_event
 from ph_rlm import BUNDLE
-from ph_rlm.harness import HarnessEdit
+from ph_rlm.harness import HarnessEdit, HarnessReference
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
 from ph_rlm.kernel.venv import resolve_interpreter
 from ph_rlm.messaging import SEND_TOOL
@@ -156,6 +157,32 @@ def harnessed(mounted_runtime: MountedRuntime) -> Harnessed:
         return await mounted_runtime(session_id="harness", extra_rows=[HARNESS_ROW, *rows])
 
     return build
+
+
+async def agent_with_workspace(
+    ctx: Context, session: Session, agent: AgentDriver, base: Path
+) -> Workspace:
+    """The lifecycle row acquires at an agent's first step; these tests never take
+    one, so the workspace is acquired the way the ladder tests do.
+
+    The base is created because it is where the kernel will `chdir`: the shared
+    provider hands back the directory it was given without making it, and a
+    missing cwd fails the spawn rather than the confinement.
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    return await ctx.require(WORKSPACE).acquire(session_id=session.id, agent_id=agent.id, base=base)
+
+
+def skill_edit(entry_id: str, module: str, name: str) -> HarnessEdit:
+    """One created skill entry, naming `module.name` for H1 to resolve."""
+    return HarnessEdit(
+        action="create",
+        kind="skill",
+        id=entry_id,
+        title=f"{module}.{name}",
+        content="call it",
+        reference=HarnessReference(module=module, callable=name),
+    )
 
 
 def note_edit(entry_id: str, title: str = "a thing learned") -> HarnessEdit:

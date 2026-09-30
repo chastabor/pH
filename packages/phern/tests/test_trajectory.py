@@ -171,6 +171,10 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "attachment/uploading",
         # S12: a restore about to rewrite the tree. The transcript draws its settle.
         "workspace/restoring",
+        # S21: code the harness ran as the agent. The transcript draws the
+        # refinement, which says what was refused; the auditor wants each probe.
+        "harness/probe",
+        "harness/probed",
         # Phase 11: a sub-agent's own story, which only its own log holds — a
         # root's transcript never meets them, and this is where a child is read.
         "subagent/admitted",

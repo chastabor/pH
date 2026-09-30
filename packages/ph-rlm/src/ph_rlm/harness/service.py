@@ -8,9 +8,9 @@ Four checks are pH's own, and each one closes a hole prime-agent leaves open:
 
 * **H1 — the reference must resolve.** An entry naming an import or callable that
   does not exist teaches the model to call nothing. It is checked by running a
-  probe in the *runtime the model actually uses*, not against this process:
-  `/refine` cannot conjure capability, and an unresolvable reference is the
-  knowledge layer trying to (I7, Q13). The rejection is on the event.
+  probe in the *runtime the model actually uses* (`_probe`), not against this
+  process: `/refine` cannot conjure capability, and an unresolvable reference is
+  the knowledge layer trying to (I7, Q13). The rejection is on the event.
 * **H2 — the call pattern is rendered, never accepted.** Wherever a binding of
   that name exists, an entry's `call_pattern` becomes `await tools.<name>(...)`.
   A proposal that could write its own would be able to steer the model onto the
@@ -36,7 +36,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
 
 import anyio
 
@@ -48,9 +47,16 @@ from ph.locks import file_lock
 from ph.paths import write_atomic
 from ph.persistence import append_records
 from ph.seams.code_runtime import CodeRunRequest
-from ph.session import Session, SessionFoldCache, session_written
+from ph.session import (
+    IntentNotDurable,
+    Session,
+    SessionFoldCache,
+    intents_of,
+    session_written,
+)
 from ph.session.writers import log_writer
 
+from ..kinds import HARNESS_PROBE, probe_settled
 from .state import (
     GLOBAL_LOG_NAME,
     PROJECTION_NAME,
@@ -59,6 +65,7 @@ from .state import (
     AppliedEdit,
     HarnessEdit,
     HarnessEntry,
+    HarnessReference,
     HarnessScope,
     HarnessState,
     RefinementProposal,
@@ -77,12 +84,10 @@ log = logging.getLogger("ph_rlm.harness")
 IMMUTABLE_ID = 'entry id "{entry_id}" is not editable'
 """H5, in prime-agent's shape: the id is refused, not the content."""
 
-PROBE_NAMESPACE = "harness-probe"
-"""Where H1 resolves a reference.
-
-A namespace of its own, not the agent's: a probe is the harness checking itself,
-and leaving `_m`/`_c` behind in the namespace the model is using would put them
-in its snapshots."""
+PROBE_NAMESPACE = "harness-probe:{agent}"
+"""Where H1 resolves a reference for one agent: a kernel of the agent's own beside
+its working one, within the same boundary (`CodeRunRequest.agent`), and closed with
+the agent."""
 
 
 class RefinementRefused(Exception):
@@ -185,10 +190,16 @@ class HarnessService:
 
     # -------------------------------------------------------------- validate --
 
-    async def validate(
-        self, proposal: RefinementProposal, *, scope: HarnessScope, session: Session | None
+    async def _validate(
+        self,
+        proposal: RefinementProposal,
+        *,
+        session: Session | None,
+        agent: AgentHandle | None,
+        refine_id: str,
     ) -> tuple[list[HarnessEdit], list[str]]:
-        """`(accepted, rejected)` — the checks, before anything durable happens."""
+        """`(accepted, rejected)` — the checks, before the refinement is written, bar
+        H1's probes (`_probe`), which record themselves under `refine_id`."""
         accepted: list[HarnessEdit] = []
         rejected: list[str] = []
         current = self.state(session)
@@ -210,32 +221,75 @@ class HarnessService:
                         "capability it describes, or it is teaching the model to call nothing"
                     )
                     continue
-                unresolved = await self._probe(edit.reference)
+                unresolved = await self._probe(
+                    edit.reference, agent=agent, entry_id=entry_id, refine_id=refine_id
+                )
                 if unresolved is not None:
                     rejected.append(f'skill "{entry_id}" does not resolve: {unresolved}')
                     continue
             accepted.append(edit.model_copy(update={"id": entry_id}))
         return accepted, rejected
 
-    async def _probe(self, reference: Any) -> str | None:  # noqa: ANN401
+    async def _probe(
+        self,
+        reference: HarnessReference,
+        *,
+        agent: AgentHandle | None,
+        entry_id: str,
+        refine_id: str,
+    ) -> str | None:
         """H1: resolve a reference in the runtime, or say why it does not.
 
-        A silent cell — no bindings, no dispatch records — because this is the
-        harness checking itself, not the model calling something.
+        **Within the boundary of the agent that proposed it** (S21), because an import
+        runs the module's top level and the model named the module: its workspace,
+        its confinement, and its scope as the kernel's owner. From a namespace no
+        agent owned it had none of them — code the model chose, run with more than
+        the model may, by auto-refine with nobody asking.
+
+        **Beside the agent's kernel, not in it** (`PROBE_NAMESPACE`): a module that
+        hangs or crashes on import costs the probe's kernel and not the model's, and
+        nothing it binds reaches the model's namespace or snapshots.
+
+        **On disk before it runs, in the agent's log** (`HARNESS_PROBE`), and settled
+        with what it found, so a probe that hangs or takes its kernel down still
+        shows what was started.
         """
         runtime = self.ctx.get(CODE_RUNTIME)
         if runtime is None:
             # A mounted seam with no provider is the seam's own error to word:
             # `runtime.run` raises it, and the except below reports it.
             return "no code runtime is mounted to resolve it against"
+        if agent is None or (session := agent.session) is None:
+            return "no agent to resolve it as, and record it in"
 
+        intents = intents_of(self.ctx)
         try:
-            outcome = await runtime.run(
-                CodeRunRequest(program=reference.probe(), namespace=PROBE_NAMESPACE)
-            )
+            async with intents.claim(
+                session,
+                HARNESS_PROBE,
+                {
+                    "refineId": refine_id,
+                    "entry": entry_id,
+                    "module": reference.module,
+                    "callable": reference.callable,
+                },
+            ) as held:
+                outcome = await runtime.run(
+                    CodeRunRequest(
+                        program=reference.probe(),
+                        agent=agent.id,
+                        namespace=PROBE_NAMESPACE.format(agent=agent.id),
+                    )
+                )
+                unresolved = (
+                    None if outcome.error is None else str(outcome.error).strip().splitlines()[-1]
+                )
+                intents.settle(session, held, probe_settled(held.opened.seq, unresolved))
+        except IntentNotDurable:
+            return "the probe could not be recorded, so it did not run"
         except Exception as error:
             return f"{type(error).__name__}: {error}"
-        return None if outcome.error is None else str(outcome.error).strip().splitlines()[-1]
+        return unresolved
 
     def render_call_pattern(self, entry: HarnessEntry, scope: Context) -> str | None:
         """H2: the binding form wherever a binding of that name exists.
@@ -271,7 +325,9 @@ class HarnessService:
             "a global refinement edits every future session, including other projects, and "
             "was not approved",
         )
-        accepted, rejected = await self.validate(proposal, scope=scope, session=session)
+        accepted, rejected = await self._validate(
+            proposal, session=session, agent=agent, refine_id=refine_id
+        )
         if not accepted:
             raise RefinementRefused(
                 "; ".join(rejected) or "the proposal contained no edits to apply"

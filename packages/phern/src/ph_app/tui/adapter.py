@@ -1247,6 +1247,10 @@ RECORDLESS: frozenset[str] = frozenset(
         # A restore about to run (S12). Its settle, `workspace/restored`, draws the
         # row — whether the seam wrote it or repair did.
         "workspace/restoring",
+        # H1's probe and what it found (S21). The refinement's own row says which
+        # references were refused and why; the probe is the auditor's.
+        "harness/probe",
+        "harness/probed",
         # A keyed call's effect record (P10-12). The call and its result render as
         # the tool card; that it was deduplicated rides on the result's meta.
         "tool/effect",

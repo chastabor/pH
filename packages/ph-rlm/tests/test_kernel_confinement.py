@@ -34,17 +34,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from rlm_fixtures import MountedRuntime
+from rlm_fixtures import MountedRuntime, agent_with_workspace
+from runtime_helpers import run_in_kernel
 
-from ph.agent.types import AgentDriver
-from ph.cordis import Context
-from ph.keys import AGENTS, CODE_RUNTIME, SANDBOX, WORKSPACE
+from ph.keys import AGENTS, SANDBOX
 from ph.orphans import OrphanJournal
-from ph.seams.code_runtime import CodeRunRequest
 from ph.seams.sandbox import DENIED, ConfinedArgv, SandboxPolicy
 from ph.seams.sandbox_local import Bubblewrap, Seatbelt, local_backend
 from ph.seams.workspace import workspace_policy
-from ph.session import Session
 from ph.testing import StubSandboxProvider, report_section
 from ph_rlm.kernel.manager import Kernel, KernelLimits, PythonCodeRuntime
 from ph_rlm.kernel.venv import resolve_interpreter
@@ -111,23 +108,6 @@ def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
 # ------------------------------------------------------- what it resolves --
 
 
-async def _agent_with_workspace(
-    ctx: Context,
-    session: Session,
-    agent: AgentDriver,
-    base: Path,
-) -> Any:  # noqa: ANN401
-    """The lifecycle row acquires at an agent's first step; these tests never take
-    one, so the workspace is acquired the way the ladder tests do.
-
-    The base is created because it is where the kernel will `chdir`: the shared
-    provider hands back the directory it was given without making it, and a
-    missing cwd fails the spawn rather than the confinement.
-    """
-    base.mkdir(parents=True, exist_ok=True)
-    return await ctx.require(WORKSPACE).acquire(session_id=session.id, agent_id=agent.id, base=base)
-
-
 async def _confined(mounted_runtime: MountedRuntime, tmp_path: Path) -> tuple[Any, Any, Any]:
     """A mounted runtime whose kernels will really be confined, plus the agent and
     its workspace — or a skip that says why not.
@@ -139,7 +119,7 @@ async def _confined(mounted_runtime: MountedRuntime, tmp_path: Path) -> tuple[An
     ctx, session, agent = await mounted_runtime(extra_rows=[SANDBOX_ROW, WRITABLE_ROW])
     if ctx.require(SANDBOX).provider is None:
         pytest.skip("no enforcing sandbox backend on this host")
-    workspace = await _agent_with_workspace(ctx, session, agent, tmp_path / "project")
+    workspace = await agent_with_workspace(ctx, session, agent, tmp_path / "project")
     return ctx, agent, workspace
 
 
@@ -151,7 +131,7 @@ async def test_a_kernel_is_confined_against_its_own_agents_workspace(
     `tool-bash` confined and `run_code` not."""
     ctx, session, agent = await mounted_runtime()
     ctx.require(SANDBOX).register_provider(StubSandboxProvider())
-    workspace = await _agent_with_workspace(ctx, session, agent, tmp_path)
+    workspace = await agent_with_workspace(ctx, session, agent, tmp_path)
     runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
 
     confine = runtime.confiner(agent.id)
@@ -173,7 +153,7 @@ async def test_no_backend_and_no_workspace_are_both_declines_not_passthroughs(
     ctx, session, agent = await mounted_runtime()
     runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
 
-    await _agent_with_workspace(ctx, session, agent, tmp_path)
+    await agent_with_workspace(ctx, session, agent, tmp_path)
     assert runtime.confiner(agent.id) is None, "a workspace with no backend is not confinement"
 
     ctx.require(SANDBOX).register_provider(StubSandboxProvider())
@@ -223,8 +203,8 @@ async def test_a_cell_cannot_write_an_absolute_path_outside_its_workspace(
     outside = tmp_path / "outside.txt"
     outside.write_text("host", encoding="utf-8")
 
-    escaped = await _run_cell(ctx, agent.id, f"open({str(outside)!r}, 'w').write('escaped')")
-    landed = await _run_cell(ctx, agent.id, "open('landed.txt', 'w').write('agent')")
+    escaped = await run_in_kernel(ctx, agent.id, f"open({str(outside)!r}, 'w').write('escaped')")
+    landed = await run_in_kernel(ctx, agent.id, "open('landed.txt', 'w').write('agent')")
 
     assert outside.read_text(encoding="utf-8") == "host", "an absolute write escaped the kernel"
     assert escaped.error is not None, f"the kernel must refuse this: {escaped}"
@@ -239,16 +219,10 @@ async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     from what would be true."""
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
 
-    assert (await _run_cell(ctx, agent.id, "x = 1")).error is None
+    assert (await run_in_kernel(ctx, agent.id, "x = 1")).error is None
 
     confined = report_section(ctx, "Code runtime")["cells confined by"]
     assert confined.startswith(f"{ctx.require(SANDBOX).provider.backend} —"), confined
-
-
-async def _run_cell(ctx: Context, agent_id: str, program: str) -> Any:  # noqa: ANN401
-    """One cell in this agent's own namespace — which *is* the agent id, so the
-    kernel it reaches is the one confined against that agent's workspace."""
-    return await ctx.require(CODE_RUNTIME).run(CodeRunRequest(program=program, namespace=agent_id))
 
 
 async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
@@ -267,7 +241,7 @@ async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
     session = ctx.require(AGENTS).get(agent.id).session
     outside = tmp_path / "nope.txt"
 
-    refused = await _run_cell(ctx, agent.id, f"open({str(outside)!r}, 'w').write('x')")
+    refused = await run_in_kernel(ctx, agent.id, f"open({str(outside)!r}, 'w').write('x')")
     assert refused.error is not None
 
     denials = [event for event in session.events if event.type == DENIED]
@@ -286,7 +260,7 @@ async def test_a_cell_that_merely_prints_the_words_is_not_a_refusal(
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
     session = ctx.require(AGENTS).get(agent.id).session
 
-    ran = await _run_cell(ctx, agent.id, "print('Read-only file system')")
+    ran = await run_in_kernel(ctx, agent.id, "print('Read-only file system')")
 
     assert ran.error is None
     assert not [event for event in session.events if event.type == DENIED]

@@ -1533,15 +1533,17 @@ class PythonCodeRuntime:
         self._scopes[agent.id] = agent.ctx
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
-        namespace = request.namespace or "default"
+        """Run one program in its namespace — the agent's own unless it names another —
+        within the agent's boundary either way (`CodeRunRequest.agent`, S21)."""
+        namespace = request.namespace or request.agent
         kernel = self._kernels.get(namespace)
         if kernel is None:
-            kernel = await self._acquire(namespace)
+            kernel = await self._acquire(namespace, request.agent)
         result = await kernel.run(request.program, request.bindings, request.token)
-        self._note_denial(kernel, namespace, result)
+        self._note_denial(kernel, request.agent, result)
         return result
 
-    def _note_denial(self, kernel: Kernel, namespace: str, result: CodeRunResult) -> None:
+    def _note_denial(self, kernel: Kernel, agent_id: str, result: CodeRunResult) -> None:
         """Record a boundary the cell hit, the way `ctx.shell` records one.
 
         **Here rather than in `Kernel`**, which holds a confiner and no seam: this is
@@ -1555,8 +1557,8 @@ class PythonCodeRuntime:
 
         Only for a run that failed, which is `report_denial`'s own requirement: the
         error is where `OSError: [Errno 30] Read-only file system` lands, and a cell
-        that printed those words and succeeded was refused nothing. The namespace is
-        the agent id, so the record lands in the transcript whoever wrote the cell
+        that printed those words and succeeded was refused nothing. Recorded for the
+        agent the run was for, so it lands in the transcript whoever wrote the cell
         is reading.
         """
         confined = kernel.confined
@@ -1564,11 +1566,11 @@ class PythonCodeRuntime:
             return
         seam = None if self.sandbox is None else self.sandbox()
         if seam is not None:
-            seam.report_denial(confined, (result.error, result.logs), namespace)
+            seam.report_denial(confined, (result.error, result.logs), agent_id)
 
     def confiner(
         self,
-        namespace: str,
+        agent_id: str,
         workspace: Workspace | None = None,
     ) -> Callable[[tuple[str, ...]], ConfinedArgv] | None:
         """How to bound this agent's kernel, or `None` where nothing can.
@@ -1591,15 +1593,15 @@ class PythonCodeRuntime:
         """
         seam = None if self.sandbox is None else self.sandbox()
         if workspace is None:
-            workspace = self.workspace_for(namespace)
+            workspace = self.workspace_for(agent_id)
         if seam is None or not seam.available or workspace is None:
             return None
         policy: SandboxPolicy = workspace_policy(workspace)
         # `agent=` so a host the egress proxy refuses is recorded in *this* agent's
         # session, which is the transcript whoever wrote the cell is reading.
-        return partial(seam.confine, policy=policy, agent=namespace)
+        return partial(seam.confine, policy=policy, agent=agent_id)
 
-    async def _acquire(self, namespace: str) -> Kernel:
+    async def _acquire(self, namespace: str, agent_id: str) -> Kernel:
         """The one kernel for this namespace, built once however many ask (F6).
 
         **Double-checked, because `environment()` suspends.** `run` reads
@@ -1611,7 +1613,7 @@ class PythonCodeRuntime:
         `close_namespace`: the other ran until the process exited, holding a
         socket, a pid and whatever the cell had open.
 
-        Two first runs on one namespace is ordinary — the namespace *is* the
+        Two first runs on one namespace is ordinary — a model's namespace *is* its
         agent id, and a fan-out of parallel tool calls on one agent is what Code
         Mode is for.
         """
@@ -1619,10 +1621,14 @@ class PythonCodeRuntime:
             settled = self._kernels.get(namespace)
             if settled is not None:
                 return settled
-            return await self._build(namespace)
+            return await self._build(namespace, agent_id)
 
-    async def _build(self, namespace: str) -> Kernel:
-        workspace = self.workspace_for(namespace)
+    async def _build(self, namespace: str, agent_id: str) -> Kernel:
+        """A kernel for `namespace`, within `agent_id`'s boundary: its workspace as the
+        directory and environment, its confinement, and its scope as the owner that
+        closes it. The same whether the namespace is the agent's own or another it
+        runs beside, such as the H1 probe's."""
+        workspace = self.workspace_for(agent_id)
         kernel = Kernel(
             namespace=namespace,
             environment=await self.environment(),
@@ -1630,7 +1636,7 @@ class PythonCodeRuntime:
             journal=self.journal,
             cwd=None if workspace is None else workspace.root,
             env={} if workspace is None else workspace.env,
-            confine=self.confiner(namespace, workspace),
+            confine=self.confiner(agent_id, workspace),
             snapshots=self.snapshots,
             skills=self.skill_modules,
             boot_timeout=self.boot_timeout,
@@ -1639,7 +1645,7 @@ class PythonCodeRuntime:
             probe_seconds=self.probe_seconds,
         )
         self._kernels[namespace] = kernel
-        scope = self._scopes.get(namespace)
+        scope = self._scopes.get(agent_id)
         if scope is not None:
 
             async def enter() -> Disposer:

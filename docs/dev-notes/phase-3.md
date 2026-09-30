@@ -1494,7 +1494,10 @@ namespace of its own so `_m`/`_c` never land in the namespace the model is using
 (they would otherwise show up in its snapshots). Checking the import against the
 host process instead would have been free and would have proved something about
 the harness's own `sys.path` rather than the model's. The whole module still runs
-in 1.4 s.
+in 1.4 s. *(Superseded by S21, 2026-09-30: that namespace had no workspace and no
+confinement. The probe still runs in a kernel of its own, but within the proposing
+agent's boundary (`CodeRunRequest.agent`), and is recorded first as
+`harness/probe`.)*
 
 One thing H2 is worth naming precisely: `render_call_pattern` matches on the
 callable's *name*, so an entry pointing at stdlib `glob.glob` renders

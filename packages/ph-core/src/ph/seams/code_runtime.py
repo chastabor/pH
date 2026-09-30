@@ -171,12 +171,20 @@ class CodeBindingNamespace:
 
 @dataclass(frozen=True, slots=True)
 class CodeRunRequest:
-    """One program to run."""
+    """One program to run, as one agent."""
 
     program: str
+    agent: str
+    """Whose boundary the run gets: the agent whose workspace, confinement and
+    lifetime a runtime binds it to (S21).
+
+    Required, so nothing runs code as nobody. The H1 probe once did, from a
+    namespace no agent owned, and got no workspace, no confinement and the daemon's
+    own directory for a module the model had named."""
     bindings: tuple[CodeBindingNamespace, ...] = ()
     namespace: str | None = None
-    """`None` keeps dsh's fresh-per-run contract; a key selects a persistent one."""
+    """`None` keeps dsh's fresh-per-run contract; a key selects a persistent one.
+    A namespace other than the agent's own still runs within the agent's boundary."""
     token: CancelToken | None = None
     """The caller's cancellation view for this run.
 

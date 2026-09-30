@@ -292,6 +292,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # ignorable: a reader that skips it gets one extra review pass, not a
         # harness the session does not have.
         "harness/refine-considered",
+        # H1's probe of a skill entry's reference, and what it found (S21) —
+        # `HARNESS_PROBE`, declared in `ph_rlm.kinds`. Ignorable: the refinement
+        # records what it refused, and a reader that skips these loses the account
+        # of the check, not the harness.
+        "harness/probe",
+        "harness/probed",
         # Offloading (P4-02, G2; emitted by `ph-stabilize`'s `tool-result-offload`).
         # The forwarding address for a result the model was handed a preview of.
         # Ignorable: `tool/result` already carries what the model saw, so a
@@ -386,6 +392,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "kernel/snapshot",
         "kernel/restored",
         "harness/refine-considered",
+        "harness/probe",
+        "harness/probed",
         "context/loaded",
         "offload/spilled",
         "offload/input-spilled",
@@ -494,6 +502,7 @@ INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
         "credential/needed": IntentPair("credential/supplied", "ph.session.kinds"),
         "client/command": IntentPair("client/command-settled", "ph_app.kinds"),
         "command/run": IntentPair("command/done", "ph.session.kinds"),
+        "harness/probe": IntentPair("harness/probed", "ph_rlm.kinds"),
         "attachment/uploading": IntentPair("attachment/uploaded", "ph.session.kinds"),
         "question/asked": IntentPair("question/answered", "ph.session.kinds"),
         "shell/command": IntentPair("shell/result", "ph.session.kinds"),

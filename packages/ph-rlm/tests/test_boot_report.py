@@ -238,7 +238,7 @@ async def test_two_first_runs_on_one_namespace_build_one_kernel(
     built: list[Kernel] = []
 
     async def acquire() -> None:
-        built.append(await runtime._acquire("a"))
+        built.append(await runtime._acquire("a", "a"))
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(acquire)

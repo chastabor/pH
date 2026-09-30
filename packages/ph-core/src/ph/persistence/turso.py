@@ -35,11 +35,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Sequence
+from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import anyio
 
@@ -61,6 +61,9 @@ from .protocol import (
     stored_row,
     write_on_unwind,
 )
+
+if TYPE_CHECKING:
+    from turso import Connection
 
 __all__ = ["TursoSessionStore", "apply"]
 
@@ -116,9 +119,20 @@ class _Progress:
 
     Here rather than in a dict of its own, because `forget` already clears
     these and a parallel map keyed by session id was cleared by nothing — it grew
-    for the life of the process, which is the exact leak `_release` exists to
-    argue against one method down. JSONL keeps the same fact on `_Progress.path`.
+    for the life of the process. JSONL keeps the same fact on `_Progress.path`.
     """
+    connection: Connection | None = None
+    """The writer's handle: opened by the first flush, used only under `writing`,
+    and closed when the session is forgotten. Nothing else uses it — a read opens
+    its own (`_reading`, S19(d))."""
+
+    def close(self) -> None:
+        connection, self.connection = self.connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:  # pragma: no cover - a closed handle is fine
+                log.debug("ph.persistence.turso: a writer's handle did not close cleanly")
 
 
 @dataclass(slots=True)
@@ -128,7 +142,6 @@ class TursoSessionStore:
     ctx: Context
     root: Path
     _progress: dict[str, _Progress] = field(default_factory=dict)
-    _connections: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------- writing --
 
@@ -146,8 +159,8 @@ class TursoSessionStore:
         if session.id in self._progress:
             return
         # The family is on the header in hand; remembering it here is what keeps
-        # `_connect` a pure function of what this store already knows, rather
-        # than a search on every write.
+        # the writer's `_path_for` a function of what this store already knows,
+        # rather than a search on every write.
         #
         # From `durable_length`, not from zero. What is below that line is
         # already durable *somewhere* — in this database for a resume, in the
@@ -182,15 +195,21 @@ class TursoSessionStore:
             self.track(session)
             buffer = self._progress[session.id]
         async with buffer.writing:
-            owed = session.events_from(buffer.cursor)
-            if buffer.header_written and not owed:
-                return
-            await anyio.to_thread.run_sync(self._write, session, owed)
-            buffer.header_written = True
-            if owed:
-                buffer.cursor = owed[-1].seq + 1
+            try:
+                owed = session.events_from(buffer.cursor)
+                if buffer.header_written and not owed:
+                    return
+                await anyio.to_thread.run_sync(self._write, session, owed, buffer)
+                buffer.header_written = True
+                if owed:
+                    buffer.cursor = owed[-1].seq + 1
+            finally:
+                # Forgotten while this flush held the handle, which `forget` left
+                # to it rather than close under a write in flight.
+                if self._progress.get(session.id) is not buffer:
+                    buffer.close()
 
-    def _write(self, session: Session, events: Sequence[SessionEvent]) -> None:
+    def _write(self, session: Session, events: Sequence[SessionEvent], buffer: _Progress) -> None:
         """One flush, in one transaction: all of it committed, or none of it.
 
         **A write that fails is rolled back** (S19). Left open, its rows sat on the
@@ -203,7 +222,9 @@ class TursoSessionStore:
         one seq is refused on read: `INSERT OR REPLACE` put the new one over the
         old, and nothing said so.
         """
-        connection = self._connect(session.id)
+        if buffer.connection is None:
+            buffer.connection = _open(self._path_for(session.id, buffer.family))
+        connection = buffer.connection
         cursor = connection.cursor()
         try:
             # Unconditionally: writing the header row every flush costs one
@@ -239,25 +260,12 @@ class TursoSessionStore:
             raise
 
     def forget(self, session_id: str) -> None:
-        self._progress.pop(session_id, None)
-        self._release(session_id)
-
-    def _release(self, session_id: str) -> None:
-        """Close one cached handle. **Not** the session's buffered work.
-
-        Split out of `forget` because the read paths need exactly this half and
-        emphatically not the other: an ancestor opened to satisfy a chained read,
-        or a database peeked for a listing, may also be a *live* session with
-        unflushed events, and `forget` would drop them on the floor with nothing
-        raised. One database per session means one handle per session, and a
-        daemon that ran for weeks would otherwise hold every one it ever opened.
-        """
-        connection = self._connections.pop(session_id, None)
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:  # pragma: no cover - a closed handle is fine
-                log.debug("ph.persistence.turso: %s did not close cleanly", session_id)
+        """Drop one session's buffer and close its writer's handle — unless a flush
+        holds it, which closes it when done (`flush`): closed from the loop, it went
+        out from under a transaction on a worker thread (S19(d))."""
+        buffer = self._progress.pop(session_id, None)
+        if buffer is not None and not buffer.writing.locked():
+            buffer.close()
 
     # ------------------------------------------------------------- reading --
 
@@ -286,16 +294,9 @@ class TursoSessionStore:
     ) -> tuple[SessionHeader, list[SessionEvent]]:
         """This database and nothing else, up to `upto` if one is given.
 
-        Reads through `_borrow`, so the handle it opens does not outlive the
-        call — see that method for the rule and why it is there rather than here.
+        Through a connection of its own (`_reading`), closed when the call returns.
         """
-        # One resolution, not two: the `exists` gate here searched the store and
-        # then `_connect` searched it again for the same id, so a chained read
-        # paid two full scans per ancestor.
-        path = self._path_for(session_id, family)
-        if not path.is_file():
-            raise FileNotFoundError(f"no stored session {session_id!r}")
-        with self._borrow(session_id, path) as connection:
+        with _reading(self._path_for(session_id, family)) as connection:
             cursor = connection.cursor()
             rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
             if not rows:
@@ -371,13 +372,8 @@ class TursoSessionStore:
         found = session_dbs(self.root)
         listed: list[StoredSession] = []
         for path, stat in found[:limit]:
-            # The path the scan already found, not another search for it: this
-            # loop threw it away and made `_peek_header` re-locate every row —
-            # 199 full store scans to list 200 sessions.
             session_id = path.name[: -len(SUFFIX)]
-            listed.append(
-                stored_row(session_id, self._peek_header(session_id, path), stat.st_mtime)
-            )
+            listed.append(stored_row(session_id, _peek_header(session_id, path), stat.st_mtime))
         return listed
 
     def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
@@ -388,88 +384,73 @@ class TursoSessionStore:
         than one header, since each session is its own database. A single query
         would have to `ATTACH` every candidate, which opens each file anyway and
         adds the attach limit on top. So this peeks the way `stored` does, through
-        `_borrow`, and each handle is closed again unless a writer owns it. The
-        family and the prefix are what keep the count down: only the parent's
-        descendants, and any database named after it, are opened.
+        `_reading`. The family and the prefix are what keep the count down: only
+        the parent's descendants, and any database named after it, are opened.
         """
         candidates: list[StoredSession] = []
         for path, stat in children_under(self.root, family, parent_id, SUFFIX):
             session_id = path.name[: -len(SUFFIX)]
-            candidates.append(
-                stored_row(session_id, self._peek_header(session_id, path), stat.st_mtime)
-            )
+            candidates.append(stored_row(session_id, _peek_header(session_id, path), stat.st_mtime))
         return descendants_among(parent_id, candidates)
 
-    # ----------------------------------------------------------- internals --
 
-    def _peek_header(self, session_id: str, path: Path | None = None) -> SessionHeader | None:
-        try:
-            with self._borrow(session_id, path) as connection:
-                rows = (
-                    connection.cursor()
-                    .execute("SELECT wire FROM header WHERE id = ?", (session_id,))
-                    .fetchall()
-                )
-            return SessionHeader.model_validate(json.loads(rows[0][0])) if rows else None
-        except Exception:
-            return None
+def _open(path: Path) -> Connection:
+    """A writer's connection to `path`, making the database if it is new."""
+    # The native driver, loaded on the first connection, so importing this
+    # backend opens nothing.
+    import turso  # noqa: PLC0415
 
-    @contextmanager
-    def _borrow(self, session_id: str, path: Path | None = None) -> Iterator[Any]:
-        """A connection for one read, closed again unless a writer owns it.
+    # Every new name durable in its parent, as a JSONL log's first write makes its
+    # own (S20): the family directory in the sessions root, and the database in its
+    # family.
+    fresh = not path.exists()
+    make_directories(path.parent)
+    connection = turso.connect(str(path))
+    cursor = connection.cursor()
+    for statement in (*DURABILITY, *SCHEMA):
+        cursor.execute(statement)
+    connection.commit()
+    if fresh:
+        sync_directory(path.parent)
+    return connection
 
-        **The rule lives here because `_connect` is the only thing that opens a
-        handle**, and `_connect` caches while `forget` runs only for sessions this
-        store *buffers* — so any database read by something that does not write it
-        stays open, with its `-wal` and `-shm` sidecars, for the life of the
-        process. That leak was guarded twice and differently: `read` wrapped its
-        chained walk, `stored` wrapped its header peeks, and the third reader to
-        arrive — a fold over *every* stored session (`phern attachments gc`) at a
-        limit of 100 000 — inherited neither. Two hand-rolled guards is how the
-        third caller comes to have none, so both were replaced by this.
 
-        The two also **disagreed**, which is the other reason not to keep them: the
-        set-diff version released any handle opened during its block, including a
-        session that is tracked but not yet connected — a live session's handle,
-        which `_release`'s own docstring says this half must never touch.
+def _reading(path: Path) -> closing[Connection]:
+    """A connection of its own for one read, closed when the read is done.
 
-        A buffered session is therefore exempt: its handle is the writer's, and
-        closing it mid-session makes the next flush pay a reconnect and the schema
-        DDL again.
+    **Never the writer's** (S19(d)), and so never shared between threads: the
+    writer's handle runs a flush on whichever worker thread it got, and a reader
+    borrowing it mid-flush saw rows the flush might still roll back. Under WAL a
+    reader's own sees the last commit.
 
-        A context manager rather than a line at each return, because the release
-        has to survive the raise: `read_own` refuses a database with no header
-        between opening and returning, and a post-condition on the success path
-        alone leaks exactly the handle a failing read opened.
-        """
-        try:
-            yield self._connect(session_id, path)
-        finally:
-            if session_id not in self._progress:
-                self._release(session_id)
+    **Closed every time, which is what keeps a survey from exhausting handles.**
+    A reader once went through the writer's cache and every database it peeked
+    stayed open, with its `-wal` and `-shm` sidecars, for the life of the process —
+    500 of them for a 500-session listing. Opening one costs tens of microseconds.
 
-    def _connect(self, session_id: str, path: Path | None = None) -> Any:  # noqa: ANN401
-        connection = self._connections.get(session_id)
-        if connection is None:
-            # The native driver, loaded on the first connection, so importing this
-            # backend opens nothing.
-            import turso  # noqa: PLC0415
+    **A reader writes nothing**: no schema, no pragma, and no file for a path that
+    is not there. A database whose schema never committed — a first write cut off
+    between the file and its tables — reads as damage, the driver's own error.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"no stored session at {path}")
+    import turso  # noqa: PLC0415
 
-            path = path if path is not None else self._path_for(session_id)
-            # Every new name durable in its parent, as a JSONL log's first write makes
-            # its own (S20): the family directory in the sessions root, and the
-            # database in its family.
-            fresh = not path.exists()
-            make_directories(path.parent)
-            connection = turso.connect(str(path))
-            cursor = connection.cursor()
-            for statement in (*DURABILITY, *SCHEMA):
-                cursor.execute(statement)
-            connection.commit()
-            if fresh:
-                sync_directory(path.parent)
-            self._connections[session_id] = connection
-        return connection
+    return closing(turso.connect(str(path)))
+
+
+def _peek_header(session_id: str, path: Path) -> SessionHeader | None:
+    """One database's header, or `None` when it cannot say — a listing row still."""
+    try:
+        with _reading(path) as connection:
+            rows = (
+                connection.cursor()
+                .execute("SELECT wire FROM header WHERE id = ?", (session_id,))
+                .fetchall()
+            )
+        return SessionHeader.model_validate(json.loads(rows[0][0])) if rows else None
+    except Exception:
+        return None
 
 
 class Config(WireModel):

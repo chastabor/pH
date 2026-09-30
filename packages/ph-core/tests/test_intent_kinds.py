@@ -84,9 +84,9 @@ def _declared_pairs() -> dict[str, tuple[str, str]]:
     return pairs
 
 
-def test_the_walk_finds_both_leaves() -> None:
+def test_the_walk_finds_every_leaf() -> None:
     """A walk that silently found nothing would pass every gate below."""
-    assert LEAVES == ["ph.session.kinds", "ph_app.kinds"]
+    assert LEAVES == ["ph.session.kinds", "ph_app.kinds", "ph_rlm.kinds"]
 
 
 def test_every_intent_kind_is_declared_in_a_kinds_leaf() -> None:

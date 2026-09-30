@@ -10,7 +10,8 @@ from typing import Any
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
-from ph.seams.code_runtime import CodeBindingNamespace
+from ph.keys import CODE_RUNTIME
+from ph.seams.code_runtime import CodeBindingNamespace, CodeRunRequest, CodeRunResult
 from ph.session import Session
 from ph.testing import run_tool
 from ph.tools.registry import RUN_CODE
@@ -84,3 +85,10 @@ def dispatch_names(session: Any) -> list[str]:  # noqa: ANN401
 def settled_dispatches(session: Session) -> list[Any]:
     """The settled halves of those dispatches, in the order they settled."""
     return [event for event in session.events if event.type == DISPATCH_SETTLED]
+
+
+async def run_in_kernel(ctx: Context, agent_id: str, program: str) -> CodeRunResult:
+    """One program in this agent's own namespace, straight to the runtime — below the
+    tool, for a test about the kernel rather than the call. The namespace *is* the
+    agent id, so the kernel it reaches is the one bounded by that agent."""
+    return await ctx.require(CODE_RUNTIME).run(CodeRunRequest(program=program, agent=agent_id))

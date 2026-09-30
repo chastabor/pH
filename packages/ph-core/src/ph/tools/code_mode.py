@@ -455,6 +455,7 @@ async def apply(ctx: Context, config: Config) -> None:
         outcome = await runtime.run(
             CodeRunRequest(
                 program=program,
+                agent=run.agent.id,
                 bindings=namespaces,
                 namespace=run.agent.id,
                 token=bridge.token,

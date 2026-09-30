@@ -507,6 +507,9 @@ HANDLERS: Mapping[str, Handler] = {
     "subagent/deleted": _on_harness_event,
     "harness/refined": _on_harness_event,
     "harness/refine-considered": _on_harness_event,
+    # What the harness ran as the agent to check a reference, and what it found (S21).
+    "harness/probe": _on_harness_event,
+    "harness/probed": _on_harness_event,
     "context/loaded": _on_harness_event,
     "agent/inbox/spliced": _on_harness_event,
     "todo/write": _on_harness_event,

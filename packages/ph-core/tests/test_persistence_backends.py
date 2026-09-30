@@ -78,17 +78,15 @@ failing.
 
 ## Why the Turso listing drops the handles it opened
 
-Every `_peek_header` opens a database, runs the schema DDL and caches the handle —
-**1.53 ms each, against 0.021 ms for the header `SELECT`** it was opened for, and
-never reused. Left cached, a 500-session survey holds **500 open databases and 500
-`-wal`/`-shm` sidecars** for the life of the process.
+Every header peek opens a database for one `SELECT`; `_reading` says why each is
+closed again.
 """
 
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -112,7 +110,7 @@ from ph.persistence.protocol import (
     descendants_among,
 )
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, family_for
-from ph.testing import MountProfile, log_event, reference_fork, user_payload
+from ph.testing import MountProfile, log_event, not_none, reference_fork, user_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -867,61 +865,163 @@ async def test_a_listing_row_says_the_same_thing_from_either_backend(
     assert rows["p"].family == rows["c"].family == family_for("p", "/work")
 
 
-async def test_reading_a_log_nobody_writes_does_not_hold_it_open(tmp_path: Path) -> None:
+@dataclass(slots=True)
+class _Handle:
+    """A turso connection that says whether it was closed."""
+
+    real: Any
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+        self.real.close()
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        return getattr(self.real, name)
+
+
+def _handles(monkeypatch: pytest.MonkeyPatch) -> list[_Handle]:
+    """Every turso connection opened from here on, as it is opened."""
+    import turso
+
+    opened: list[_Handle] = []
+    real = turso.connect
+
+    def connect(path: str) -> _Handle:
+        opened.append(handle := _Handle(real(path)))
+        return handle
+
+    monkeypatch.setattr(turso, "connect", connect)
+    return opened
+
+
+async def test_reading_a_log_nobody_writes_does_not_hold_it_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """**The exhaustion a third caller inherited by not knowing to guard.**
 
-    Turso keeps one database per session and `_connect` caches the handle, while
-    `forget` runs only for sessions this store *buffers* — so a log read by
-    something that does not write it stayed open, with its `-wal` and `-shm`
-    sidecars, for the life of the process. `read` guarded its chained walk and
-    `stored` guarded its header peeks; the fold behind `phern attachments gc` reads
-    one database per stored session at a limit of 100 000 and had neither.
+    Turso keeps one database per session, and a log read by something that does
+    not write it once stayed open, with its `-wal` and `-shm` sidecars, for the
+    life of the process. `read` guarded its chained walk and `stored` guarded its
+    header peeks; the fold behind `phern attachments gc` reads one database per
+    stored session at a limit of 100 000 and had neither.
 
-    A rule two callers had to remember was going to be forgotten by the third, so
-    it lives in `_borrow`, under the only thing that opens a handle — and this is
-    the assertion that keeps it there. Both readers are driven: `read_own`, and
-    the header peek behind `stored()`.
+    So every read opens a connection of its own and closes it (`_reading`), and
+    this is the assertion that keeps it so. Both readers are driven: `read_own`,
+    and the header peek behind `stored()`.
 
     Turso only: JSONL opens a file per read and closes it, so there is no handle
     to keep and nothing to pin.
     """
-    from ph.persistence.turso import TursoSessionStore
+    from ph.persistence.turso import TursoSessionStore, _open, session_db
 
+    opened = _handles(monkeypatch)
     store = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
     for index in range(3):
         session = _session(store, f"s{index}")
         _append(store, session, "turn/start", {"turn": 0})
         await store.flush(session)
         store.forget(session.id)
-    assert store._connections == {}, "the writer's own handles were released by `forget`"
+    assert opened and all(one.closed for one in opened), "`forget` closed each writer's handle"
 
     for index in range(3):
         store.read_own(f"s{index}")
-    assert store._connections == {}, "a reader left a database open"
+    assert all(one.closed for one in opened), "a reader left a database open"
 
     assert len(store.stored()) == 3
-    assert store._connections == {}, "a listing's header peek left a database open"
+    assert all(one.closed for one in opened), "a listing's header peek left a database open"
 
-    # The release has to survive the raise, which is why it is a context manager
-    # and not a line before each return. The refusal that matters is the one
-    # raised *after* the handle is open — a database that exists and holds no
-    # header — where a post-condition on the success path alone leaks it. Built
-    # by connecting and writing nothing, which is what an interrupted first
-    # write leaves behind.
-    store._connect("headerless")
-    store._release("headerless")
+    # The close has to survive the raise, which is why it is a context manager and
+    # not a line before each return. The refusal that matters is the one raised
+    # *after* the handle is open — a database that exists and holds no header —
+    # where a post-condition on the success path alone leaks it.
+    _open(session_db(tmp_path, "headerless", "headerless")).close()
     with pytest.raises(FileNotFoundError, match="has no header"):
         store.read_own("headerless")
-    assert store._connections == {}, "a read that refused mid-way left its handle open"
+    assert all(one.closed for one in opened), "a read that refused mid-way left its handle open"
 
-    # The exemption, and the reason for it: a live session's handle is the
-    # *writer's*, and closing it mid-session would make the next flush pay a
-    # reconnect and the schema DDL again.
+    # A live session's handle is the writer's, and stays open for its next flush —
+    # but a read of it is still the reader's own, and closed.
     live = _session(store, "live")
     _append(store, live, "turn/start", {"turn": 0})
     await store.flush(live)
     store.read_own("live")
-    assert set(store._connections) == {"live"}
+    still_open = [one for one in opened if not one.closed]
+    assert len(still_open) == 1 and still_open[0] is cast(
+        object, store._progress["live"].connection
+    )
+
+
+async def test_a_turso_read_never_sees_a_write_in_flight(tmp_path: Path) -> None:
+    """S19(d). A flush runs on whichever worker thread it got, and a read of the same
+    session — on the loop, or `descendants_of` on a worker — borrowed that very
+    handle. So it shared one connection across threads, and mid-flush it saw rows
+    the flush could still roll back. A read's own connection sees the last commit.
+
+    Sabotage: have `_reading` hand out the writer's handle for a live session, and
+    the read sees the uncommitted row.
+    """
+    from ph.json import dumps
+    from ph.persistence.turso import TursoSessionStore
+
+    store = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    session = _session(store, "live")
+    _append(store, session, "turn/start", {"turn": 0})
+    await store.flush(session)
+    _append(store, session, "turn/start", {"turn": 1})
+    event = session.events[-1]
+    writer = not_none(store._progress["live"].connection)
+    # What a flush holds between its insert and its commit.
+    writer.cursor().execute(
+        "INSERT INTO events VALUES (?, ?)", (event.seq, dumps(event.to_wire(thaw=False)))
+    )
+    try:
+        _header, events = await anyio.to_thread.run_sync(store.read_own, "live")
+    finally:
+        writer.rollback()
+
+    assert [one.data for one in events] == [{"turn": 0}], "a read saw an uncommitted row"
+
+
+async def test_forgetting_a_session_mid_flush_leaves_its_handle_to_the_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S19(d). `forget` runs on the loop at `session/disposed`, and closed the handle
+    whatever a worker thread was doing with it — a transaction, cut off from under
+    it. Now the flush holding it closes it when it is done.
+
+    Sabotage: have `forget` close the handle whether or not a flush holds it.
+    """
+    import threading
+
+    from ph.persistence.turso import TursoSessionStore
+
+    store = TursoSessionStore(ctx=None, root=tmp_path)  # type: ignore[arg-type]
+    session = _session(store, "live")
+    _append(store, session, "turn/start", {"turn": 0})
+    await store.flush(session)
+    buffer = store._progress["live"]
+    _append(store, session, "turn/start", {"turn": 1})
+
+    entered, release = threading.Event(), threading.Event()
+    real = TursoSessionStore._write
+
+    def held(self: TursoSessionStore, *args: Any) -> None:  # noqa: ANN401
+        entered.set()
+        release.wait(timeout=10)
+        real(self, *args)
+
+    monkeypatch.setattr(TursoSessionStore, "_write", held)
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(store.flush, session)
+        await anyio.to_thread.run_sync(entered.wait, 10)
+        store.forget("live")
+        assert buffer.connection is not None, "closed under a flush in flight"
+        release.set()
+
+    assert buffer.connection is None, "the flush closed what `forget` left it"
+    _header, events = store.read_own("live")
+    assert [one.data for one in events] == [{"turn": 0}, {"turn": 1}], "and wrote first"
 
 
 async def test_a_turso_commit_runs_under_the_durability_it_states(tmp_path: Path) -> None:
@@ -939,7 +1039,7 @@ async def test_a_turso_commit_runs_under_the_durability_it_states(tmp_path: Path
     _append(store, session, "turn/start", {"turn": 1})
     await store.flush(session)
 
-    cursor = store._connections[session.id].cursor()
+    cursor = not_none(store._progress[session.id].connection).cursor()
     cursor.execute("PRAGMA journal_mode")
     assert cursor.fetchall() == [("wal",)]
     cursor.execute("PRAGMA synchronous")
@@ -1008,7 +1108,9 @@ async def test_a_turso_seq_is_written_once(tmp_path: Path) -> None:
     _append(other, diverged, "turn/start", {"turn": 2})
     with pytest.raises(ValueError, match="different event at seq 0"):
         await other.flush(diverged)
-    assert not other._connections[diverged.id].in_transaction, "the refused write is open"
+    assert not not_none(other._progress[diverged.id].connection).in_transaction, (
+        "the refused write is open"
+    )
 
     _header, events = store.read_own(first.id)
     assert [(event.seq, event.data) for event in events] == [(0, {"turn": 1})]

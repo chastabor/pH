@@ -99,13 +99,12 @@ class HarnessReference(WireModel):
         """A program that fails unless this reference resolves.
 
         Run in the *runtime the model actually uses* rather than checked against
-        this process: an entry is only true if the kernel can reach it.
+        this process: an entry is only true if the kernel can reach it. One
+        statement, which binds nothing.
         """
         return (
-            f"import importlib\n"
-            f"_m = importlib.import_module({self.module!r})\n"
-            f"_c = getattr(_m, {self.callable!r})\n"
-            f"assert callable(_c), {self.callable!r} + ' is not callable'\n"
+            f"assert callable(getattr(__import__('importlib').import_module({self.module!r}), "
+            f"{self.callable!r})), {self.callable!r} + ' is not callable'\n"
         )
 
 
