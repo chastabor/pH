@@ -116,6 +116,7 @@ __all__ = [
     "write_host_config",
     "write_profile",
     "write_reference_fork",
+    "write_stored_log",
 ]
 
 FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
@@ -662,14 +663,24 @@ def write_reference_fork(
     one layer out. `session_path` is the one naming rule.
     """
     header, own = reference_fork(child, parent, boundary=boundary, kind=kind, family=family)
-    path = session_path(root, child, header.family)
+    return write_stored_log(root, header, own)
+
+
+def write_stored_log(root: Path, header: SessionHeader, events: Sequence[SessionEvent]) -> Path:
+    """A log as the JSONL store leaves it under `root`: `header`'s line, then `events`.
+
+    `write_reference_fork`'s reason, one level down: the header line type, the
+    encoders and the path are the store's own, so a test states only what the log
+    holds.
+    """
+    path = session_path(root, header.id, header.family)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(
             f"{dumps(record)}\n"
             for record in [
                 {"type": HEADER_LINE_TYPE, "header": header.to_wire()},
-                *(event.to_wire(thaw=False) for event in own),
+                *(event.to_wire(thaw=False) for event in events),
             ]
         ),
         encoding="utf-8",

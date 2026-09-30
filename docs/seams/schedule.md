@@ -63,6 +63,18 @@ one — a small file read per pass, rather than a scan of every stored log.
 That index is a **derived cache**: losing it costs a late wake, not a lost
 schedule, because the schedule itself is in the session's log.
 
+**A daemon rebuilds it from the logs when it can't vouch for itself** (S18), in the
+background, at most once a minute:
+* **Incomplete.** Only a rebuild writes `complete: true`, and a writer keeps what it
+  found. So a missing, corrupt or older file, or one a writer made from any of
+  those, is incomplete.
+* **An abandoned claim.** `create` leaves a locked mark in `schedules.claims/` until
+  the new appointment is written. A write that fails, or a host that dies before
+  it, leaves the mark unlocked.
+
+The rebuild reads the daemon's own `$PH_HOME/sessions` as JSONL. It keeps any entry
+for a log it didn't read, and any entry a writer changed while it read.
+
 ## What it does not do
 
 * **Nothing here creates a schedule from the model's side by default.** There is

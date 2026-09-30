@@ -56,6 +56,7 @@ from ph.keys import (
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import open_session, resumption_of
+from ph.persistence.jsonl import logs_holding
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
 from ph.seams.models import (
@@ -67,7 +68,15 @@ from ph.seams.models import (
     move_to,
     start_on,
 )
-from ph.seams.schedule import Schedule, ScheduleService, ScheduleState, state_to_wire
+from ph.seams.schedule import (
+    CREATED,
+    FOLDED,
+    Schedule,
+    ScheduleService,
+    ScheduleState,
+    rebuild_index,
+    state_to_wire,
+)
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
 from ph.seams.subagents import CHILD_EVENT_TYPES, child_is_live
@@ -125,6 +134,7 @@ from .recovery import (
     FAILED,
     PASSIVATE_AFTER,
     PASSIVATED,
+    REBUILD_EVERY,
     RECOVERED,
     RETRY,
     UNREACHABLE,
@@ -582,20 +592,6 @@ class Root:
         kind = as_obj(event.data.get("reason")).get("kind") if event is not None else None
         return str(kind) if kind else None
 
-    @property
-    def generation(self) -> str:
-        """Which incarnation of this session a cursor belongs to.
-
-        A cursor is `{generation, sequence}` and not a bare sequence because a
-        sequence alone is only meaningful against the log it counted. Two things
-        can invalidate it: a session forked from a prefix, and a log replaced
-        rather than continued. The header's `createdAt` identifies the log a
-        `seq` was counted against — stable across a resume (which continues the
-        same log, by P5-01's fix) and different for anything that is not that
-        log, which is exactly the distinction a client needs.
-        """
-        return str(self.session.header.created_at)
-
     def retry(self, *, reason: str) -> None:
         """Record that a failed turn is being run again (P5-04).
 
@@ -959,6 +955,9 @@ class Supervisor:
     cannot grow behind it."""
     _schedules: ScheduleIndex | None = None
     """The appointment index, built on first use. See `_index`."""
+    _rebuild_after: float = 0.0
+    """The earliest a rebuild of the index may start: never while one runs, and
+    `REBUILD_EVERY` after the last began. See `_doubt`."""
 
     async def start(
         self,
@@ -1374,8 +1373,8 @@ class Supervisor:
             log.warning(
                 "ph_app.daemon: resumed root %s from %s existing events%s",
                 root_id,
-                resumed.get("events", "?"),
-                " — the previous run was interrupted" if resumed.get("interrupted") else "",
+                resumed.events,
+                " — the previous run was interrupted" if resumed.interrupted else "",
             )
         return session
 
@@ -1777,10 +1776,21 @@ class Supervisor:
 
         Failures are per root and logged: a session the index names but that will
         not mount costs its own appointment, not the pass.
+
+        **An index that cannot vouch for itself is rebuilt from the logs** (S18),
+        in the background, so this pass reads what the file says and a later one
+        what the rebuild found. See `_doubt`.
         """
         stamp = now if now is not None else now_ms()
+        appointments: dict[str, Appointment] = {}
+        index = self._index()
+        if index is not None:
+            survey = index.survey()
+            appointments = survey.appointments
+            if not survey.trusted:
+                self._doubt(index, stamp)
         woken: list[str] = []
-        for entry in sorted(self.appointments().values(), key=lambda one: one.next_at):
+        for entry in sorted(appointments.values(), key=lambda one: one.next_at):
             if entry.session_id in self.roots or entry.next_at > stamp:
                 continue
             if self.wake_within is not None and stamp - entry.updated > self.wake_within * 1000:
@@ -1828,6 +1838,40 @@ class Supervisor:
                     "ph_app.daemon: no schedule index; nothing will be woken", exc_info=True
                 )
         return self._schedules
+
+    def _doubt(self, index: ScheduleIndex, stamp: int) -> None:
+        """Start a rebuild of an index that cannot vouch for itself (S18).
+
+        **Off the loop and off the pass.** A rebuild reads every stored log, and a
+        boot that waited on it would answer no connection until it finished, which
+        is the cost the index exists to spare. One at a time, `REBUILD_EVERY` apart.
+
+        **The daemon's own `$PH_HOME/sessions`, read as JSONL** — `sessions_directory`'s
+        answer, and its limit: a store elsewhere, or of another kind, has none of its
+        logs read.
+        """
+        if stamp < self._rebuild_after:
+            return
+        directory = self.sessions_directory()
+        if directory is None:
+            return
+        self._rebuild_after = math.inf
+        self.tasks.start_soon(self._rebuild, index, directory, stamp)
+
+    async def _rebuild(self, index: ScheduleIndex, directory: Path, stamp: int) -> None:
+        try:
+            written = await anyio.to_thread.run_sync(
+                lambda: rebuild_index(
+                    index, logs_holding(directory, FOLDED, gate=CREATED), now=now_ms()
+                )
+            )
+        except Exception:
+            log.warning("ph_app.daemon: could not rebuild the schedule index", exc_info=True)
+        else:
+            if written:
+                log.info("ph_app.daemon: rebuilt the schedule index from %s", directory)
+        finally:
+            self._rebuild_after = stamp + REBUILD_EVERY * 1000
 
     def appointments(self) -> dict[str, Appointment]:
         """Every appointment on record, or empty when nothing indexes."""

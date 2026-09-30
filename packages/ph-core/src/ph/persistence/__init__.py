@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from .jsonl import (
     JsonlSessionStore,
+    Resumption,
     append_records,
     read_records,
     read_session,
     records_in,
     resume_session,
     resumption_of,
+    resumptions,
     session_path,
 )
 from .lease import SessionBusy, claim_session
@@ -32,6 +34,7 @@ __all__ = [
     "JsonlSessionStore",
     "LineageError",
     "ReadOne",
+    "Resumption",
     "SessionBusy",
     "UndeclaredIntentError",
     "append_records",
@@ -46,6 +49,7 @@ __all__ = [
     "repaired",
     "resume_session",
     "resumption_of",
+    "resumptions",
     "session_path",
     "stored_session",
 ]

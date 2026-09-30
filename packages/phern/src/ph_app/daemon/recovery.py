@@ -248,3 +248,10 @@ default is that a schedule somebody deliberately created is a schedule they mean
 It only ever bites on appointments nobody has kept: one a daemon is serving
 refreshes its entry every time it fires.
 """
+
+REBUILD_EVERY: float = 60.0
+"""The least time, in seconds, between two rebuilds of the schedule index (S18).
+
+A rebuild reads every stored log, and one whose write fails leaves the index
+still in doubt. Without a floor, the next tick would start the whole scan again.
+"""

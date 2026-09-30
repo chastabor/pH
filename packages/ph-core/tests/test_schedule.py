@@ -70,20 +70,23 @@ from filelock import FileLock
 
 from ph.cordis import Context
 from ph.json import as_int
+from ph.persistence.jsonl import logs_holding
 from ph.seams.schedule import (
     CANCELED,
     CREATED,
+    FOLDED,
     TICK,
     Schedule,
     ScheduleKind,
     ScheduleService,
     due_at,
     next_at,
+    rebuild_index,
     schedules,
 )
-from ph.seams.schedule_index import INDEX_NAME, IndexWriter, ScheduleIndex
-from ph.session import Session, now_ms
-from ph.testing import log_event
+from ph.seams.schedule_index import INDEX_NAME, Appointment, IndexWriter, ScheduleIndex
+from ph.session import Session, SessionEvent, now_ms
+from ph.testing import log_event, raising, write_stored_log
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
@@ -436,14 +439,11 @@ def test_the_entry_names_the_earliest_of_a_sessions_appointments(tmp_path: Path)
 
 
 def test_opening_a_session_reconciles_its_entry(tmp_path: Path) -> None:
-    """**The rebuild path, and why it needs no scan** (I-6).
+    """**One session's entry, reconciled when the session opens** (I-6).
 
-    A log written by a build with no index, an entry deleted by hand, one left
-    stale by a crash between the append and the write — all of them correct
-    themselves the moment anything opens that session, which is exactly the
-    condition the old behavior required to fire a schedule at all. A wholesale
-    rebuild would have to read every stored log, which is the scan the index
-    exists to avoid.
+    An entry left stale by a lost write corrects itself the moment anything opens
+    that session. An index that lost more than that is a daemon's to rebuild from
+    every log (`rebuild_index`, S18), since a session nobody opens never gets here.
     """
     index = _index(tmp_path)
     session = Session("s1")
@@ -521,3 +521,162 @@ async def test_the_newest_change_per_session_is_the_one_that_lands(tmp_path: Pat
     await root.drain()
 
     assert set(index.read()) == {"s2"}
+
+
+# ---------------------------------------- S18: an index that vouches for itself --
+
+
+def _failing_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ph.seams.schedule_index.write_atomic", raising(OSError("disk full")))
+
+
+def test_only_a_rebuild_writes_an_index_that_vouches_for_itself(tmp_path: Path) -> None:
+    """A missing, corrupt or older file reads as empty, and so does the one a writer
+    makes from it. It must not look whole, or the next daemon reads a partial index
+    as the truth and a session nobody opens stays silent (S18).
+
+    Sabotage: have `record_all` write `complete=True`, and the writer's file vouches.
+    """
+    index = _index(tmp_path)
+    assert not index.survey().trusted, "missing"
+
+    index.record("s1", next_at=1_000, now=0)
+    assert index.read() == {"s1": Appointment("s1", 1_000, 0)}
+    assert not index.survey().trusted, "a writer's file over a missing one"
+
+    (tmp_path / INDEX_NAME).write_text("{ not json", encoding="utf-8")
+    index.record("s2", next_at=2_000, now=0)
+    assert not index.survey().trusted, "a writer's file over a corrupt one"
+
+    assert rebuild_index(index, [], now=0)
+    assert index.survey().trusted, "a rebuild vouches"
+    index.record("s3", next_at=3_000, now=0)
+    assert index.survey().trusted, "and a writer keeps what it found"
+
+
+def test_a_rebuild_finds_every_appointment_the_logs_hold(tmp_path: Path) -> None:
+    """Read from the logs through the JSONL backend, as a daemon does at boot.
+
+    Sabotage: stamp `updated` with the rebuild's own `now`, and an appointment
+    nobody has served since it was made looks freshly confirmed to `wake_within`.
+    """
+    sessions = tmp_path / "sessions"
+    due = Session("due")
+    ScheduleService().create(due, Schedule(id="a", kind="once", spec="9000000", prompt="go"))
+    made = schedules(due)["a"].created_at
+    withdrawn = Session("withdrawn")
+    service = ScheduleService()
+    service.create(withdrawn, Schedule(id="b", kind="once", spec="9000000", prompt="go"))
+    service.cancel(withdrawn, "b")
+    plain = Session("plain")
+    log_event(plain, "turn/start", {"turn": 0})
+    for session in (due, withdrawn, plain):
+        write_stored_log(sessions, session.header, session.events)
+    index = _index(tmp_path)
+    index.record("withdrawn", next_at=9_000_000, now=0)
+    index.record("plain", next_at=5, now=0)
+
+    assert rebuild_index(index, logs_holding(sessions, FOLDED, gate=CREATED), now=now_ms())
+
+    assert index.read() == {"due": Appointment("due", 9_000_000, made)}
+    assert index.survey().trusted
+
+
+def test_a_rebuild_keeps_what_it_did_not_read_and_what_moved_while_it_read(
+    tmp_path: Path,
+) -> None:
+    """The index is a superset in doubt: a log the rebuild never read is no evidence
+    an appointment is gone, and a writer who wrote during the scan knew better than
+    the log the scan had already read.
+
+    Sabotage: have `replace` write its own answer over every entry, and both go.
+    """
+    index = _index(tmp_path)
+    index.record("elsewhere", next_at=1_000, now=0)
+    index.record("moved", next_at=2_000, now=0)
+
+    def logs() -> Iterator[tuple[str, list[SessionEvent]]]:
+        yield "moved", []
+        index.record("moved", next_at=3_000, now=1)  # a writer, mid-scan
+        index.record("fresh", next_at=4_000, now=1)
+
+    assert rebuild_index(index, logs(), now=now_ms())
+
+    assert index.read() == {
+        "elsewhere": Appointment("elsewhere", 1_000, 0),
+        "moved": Appointment("moved", 3_000, 1),
+        "fresh": Appointment("fresh", 4_000, 1),
+    }
+
+
+def test_a_new_appointment_whose_write_failed_is_left_for_a_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`create` claims its appointment before the write, and a write that fails
+    leaves the claim unheld — which a survey reads as a loss and a rebuild answers.
+
+    Sabotage: drop `new=True` from `create`, and the failure leaves no trace.
+    """
+    index = _index(tmp_path)
+    assert rebuild_index(index, [], now=0)
+    _failing_writes(monkeypatch)
+
+    ScheduleService(index=index).create(
+        Session("s1"), Schedule(id="a", kind="once", spec="9000000", prompt="go")
+    )
+
+    survey = index.survey()
+    assert index.read() == {}, "the write did fail"
+    assert len(survey.abandoned) == 1 and not survey.trusted, "and left its mark"
+    monkeypatch.undo()
+    assert rebuild_index(index, [], now=0)
+    assert index.survey().trusted, "a rebuild takes the mark back"
+    assert list(index.claims.iterdir()) == []
+
+
+def test_a_live_writers_claim_is_not_taken_for_a_lost_one(tmp_path: Path) -> None:
+    """A claim is held with a lock for as long as its writer lives, so a survey that
+    runs mid-write does not send a daemon to rebuild over every new schedule.
+
+    Sabotage: have `_abandoned` skip the lock probe, and the live claim is abandoned.
+    """
+    index = _index(tmp_path)
+    assert rebuild_index(index, [], now=0)
+
+    claim = index.claim()
+    assert claim is not None
+    assert index.survey().trusted, "held, so its writer is alive"
+    claim.close(written=False)
+    assert index.survey().abandoned == (claim.path,), "let go unwritten: a loss"
+
+    other = index.claim()
+    assert other is not None
+    other.close(written=True)
+    assert index.survey().abandoned == (claim.path,), "a settled claim leaves nothing"
+
+
+@pytest.mark.anyio
+async def test_the_writer_settles_its_claim_once_the_appointment_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off the loop too: the claim is taken with the first new appointment and
+    settled once the drain has written it, or left behind if the write failed.
+
+    Sabotage: settle in `_drain` whether or not the write landed, and the failure
+    leaves no trace.
+    """
+    root = Context()
+    index = _index(tmp_path)
+    assert rebuild_index(index, [], now=0)
+    writer = IndexWriter(index, root)
+
+    writer.record("s1", next_at=1_000, now=0, new=True)
+    assert len(list(index.claims.iterdir())) == 1, "claimed before the writer ran"
+    await root.drain()
+    assert list(index.claims.iterdir()) == [], "settled once written"
+    assert index.survey().trusted
+
+    _failing_writes(monkeypatch)
+    writer.record("s2", next_at=2_000, now=0, new=True)
+    await root.drain()
+    assert not index.survey().trusted, "a failed write keeps its claim"

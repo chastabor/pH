@@ -38,7 +38,7 @@ import anyio
 from pydantic import ValidationError
 
 from ..cordis import DEPLOYMENT, Context, plugin
-from ..json import JsonObject, as_str, dumps
+from ..json import JsonObject, as_int, as_str, dumps
 from ..keys import SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ..paths import make_directories, resolve_roots, sync_directory, write_all
 from ..session import (
@@ -68,29 +68,69 @@ _LOG = log_writer(__name__)
 
 __all__ = [
     "JsonlSessionStore",
+    "Resumption",
     "apply",
     "family_log",
     "locate_session",
+    "logs_holding",
     "read_records",
     "read_session",
     "read_stored",
     "records_in",
     "resumption_of",
+    "resumptions",
     "session_logs",
     "session_path",
 ]
 
 
-def resumption_of(session: Session) -> dict[str, Any] | None:
+@dataclass(frozen=True, slots=True)
+class Resumption:
+    """One `session/resumed` record, as `resume_session` wrote it."""
+
+    time: int
+    """When the resume began, and so when this incarnation of the log did."""
+    events: int
+    """How many events the store held when it began: all of the log that survived."""
+    interrupted: bool
+    closed: int
+
+    @classmethod
+    def of(cls, event: SessionEvent) -> Resumption:
+        data = event.data
+        return cls(
+            time=event.time,
+            events=as_int(data.get("events")),
+            interrupted=data.get("interrupted") is True,
+            closed=as_int(data.get("closed")),
+        )
+
+
+def resumption_of(session: Session) -> Resumption | None:
     """What this session's last resume recorded, or `None` if it never was.
 
     Read from the log rather than returned from `resume_session`, so a front end
     that did not perform the resume — a TUI attaching to a daemon root, a
     trajectory reader opening a file — learns it the same way as the process
-    that did.
+    that did. Only the log's own resumes count (`resumptions`).
     """
     event = session.latest("session/resumed")
-    return dict(event.data) if event is not None else None
+    if event is None or event.seq < (session.header.seed_length or 0):
+        return None
+    return Resumption.of(event)
+
+
+def resumptions(session: Session) -> list[Resumption]:
+    """Every resume of this log, oldest first.
+
+    **Its own only.** A fork's seed carries its source's `session/resumed`, and
+    taken as the fork's they would date the fork by its source's restarts.
+    """
+    return [
+        Resumption.of(event)
+        for event in session.events_from(session.header.seed_length or 0)
+        if event.type == "session/resumed"
+    ]
 
 
 log = logging.getLogger("ph.persistence.jsonl")
@@ -134,6 +174,32 @@ def read_stored(
     if path is None or not path.is_file():
         raise FileNotFoundError(f"no stored session {session_id!r}")
     return read_session(path, upto=upto, types=types)
+
+
+def logs_holding(
+    root: Path, types: frozenset[str], *, gate: str
+) -> Iterator[tuple[str, list[SessionEvent]]]:
+    """Every stored log under `root`, by id, with its records of `types` — for a
+    reader with no store and no mount behind it, such as a daemon rebuilding its
+    schedule index (S18).
+
+    **A log whose bytes never name `gate` is not parsed**, and yields no records:
+    most logs hold none of what such a reader wants, and one search of the bytes is
+    all it costs to say so. `gate` is the record the rest mean nothing without — a
+    schedule's creation, for its ticks and its cancel. One that cannot be read is
+    logged and left out, so a reader can tell "holds none" from "could not say".
+    """
+    needle = gate.encode()
+    for path, _stat in session_logs(root):
+        try:
+            if needle not in path.read_bytes():
+                yield path.stem, []
+                continue
+            _header, events = read_session(path, types=types)
+        except (OSError, ValueError):
+            log.warning("ph.persistence.jsonl: could not read %s", path, exc_info=True)
+            continue
+        yield path.stem, events
 
 
 def locate_session(root: Path, session_id: str) -> Path | None:

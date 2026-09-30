@@ -30,7 +30,7 @@ from one stamp.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, TypeAlias
@@ -39,17 +39,18 @@ from ..cordis import Context, plugin
 from ..json import JsonValue, as_int, as_str
 from ..keys import SCHEDULE
 from ..paths import resolve_roots
-from ..session import Session, SessionFoldCache, now_ms
+from ..session import Session, SessionEvent, SessionFoldCache, now_ms
 from ..session.writers import log_writer
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
-from .schedule_index import IndexRecorder, IndexWriter, ScheduleIndex
+from .schedule_index import Appointment, IndexRecorder, IndexWriter, ScheduleIndex
 
 _LOG = log_writer(__name__)
 
 __all__ = [
     "CANCELED",
     "CREATED",
+    "FOLDED",
     "HEARTBEAT",
     "TICK",
     "Schedule",
@@ -59,6 +60,7 @@ __all__ = [
     "apply",
     "due_at",
     "next_at",
+    "rebuild_index",
     "schedules",
     "state_to_wire",
 ]
@@ -69,6 +71,9 @@ CREATED = "schedule/created"
 CANCELED = "schedule/canceled"
 TICK = "schedule/tick"
 HEARTBEAT = "schedule/heartbeat"
+
+FOLDED = frozenset({CREATED, CANCELED, TICK})
+"""The records `schedules` folds: all a reader needs of a log to know its schedules."""
 
 ScheduleKind: TypeAlias = Literal["once", "cron", "interval"]
 
@@ -148,8 +153,14 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
     # safe direction: no `schedule/created` anywhere means none after the seed.
     if session.latest(CREATED) is None:
         return {}
+    return _fold(session.events_from(session.header.seed_length or 0))
+
+
+def _fold(events: Iterable[SessionEvent]) -> dict[str, ScheduleState]:
+    """`schedules` over events alone, for a reader holding a log's records and not a
+    `Session` (`rebuild_index`). Anything outside `FOLDED` is passed over."""
     found: dict[str, ScheduleState] = {}
-    for event in session.events_from(session.header.seed_length or 0):
+    for event in events:
         data = event.data
         if event.type == CREATED:
             schedule = Schedule.model_validate(dict(data))
@@ -403,7 +414,9 @@ class ScheduleService:
         """
         _refuse_unfireable(schedule, now=now_ms())
         _LOG.append(session, CREATED, schedule.to_wire())
-        self.reindex(session)
+        # Straight after the append, with no await between: the claim this takes
+        # must be on disk before the log's flush of that record can be.
+        self.reindex(session, new=True)
         return schedule
 
     def cancel(self, session: Session, schedule_id: str) -> bool:
@@ -451,7 +464,7 @@ class ScheduleService:
             self.reindex(session, now=now)
         return claimed
 
-    def reindex(self, session: Session, *, now: int | None = None) -> None:
+    def reindex(self, session: Session, *, now: int | None = None, new: bool = False) -> None:
         """Tell the index when this session is next due, or that it is not.
 
         The earliest moment any of its live schedules wants, so one entry answers
@@ -461,16 +474,16 @@ class ScheduleService:
         `None` when nothing is outstanding, which removes the entry: a canceled
         schedule and a `once` that has fired both mean a daemon should stop
         waking for this session.
+
+        `new` is `create`'s: the one change whose loss would silence a schedule
+        (`ScheduleIndex.claim`). A lost cancel or tick costs a wake at most.
         """
         if self.index is None:
             return
         stamp = now if now is not None else now_ms()
-        moments = [
-            moment
-            for state in self.live(session)
-            if (moment := next_at(state, now=stamp)) is not None
-        ]
-        self.index.record(session.id, next_at=min(moments) if moments else None, now=stamp)
+        self.index.record(
+            session.id, next_at=_soonest(self.live(session), now=stamp), now=stamp, new=new
+        )
 
     def heartbeat(self, session: Session, *, now: int, live: int) -> None:
         """Record that the scheduler is still watching this root.
@@ -479,6 +492,38 @@ class ScheduleService:
         whether this root has any, and folding again to count them was the
         second of two folds per beat."""
         _LOG.append(session, HEARTBEAT, {"at": now, "live": live})
+
+
+def _soonest(states: Iterable[ScheduleState], *, now: int) -> int | None:
+    """The earliest moment any of `states` wants, or `None` when none wants one."""
+    moments = [moment for state in states if (moment := next_at(state, now=now)) is not None]
+    return min(moments) if moments else None
+
+
+def rebuild_index(
+    index: ScheduleIndex, logs: Iterable[tuple[str, Sequence[SessionEvent]]], *, now: int
+) -> bool:
+    """Rebuild `index` from every stored log, for an index that cannot vouch for
+    itself (S18). Blocking: it reads every log `logs` yields. Whether it was written.
+
+    `logs` yields each session's id and its `FOLDED` records: none for a log with
+    no schedule, which withdraws any entry it had. A log `logs` leaves out keeps
+    its entry (`ScheduleIndex.replace`).
+
+    **`updated` is when the log last said anything about its schedules**, not when
+    this ran: it is what `wake_within` judges an abandoned appointment by, and a
+    rebuild would otherwise make every appointment look freshly confirmed.
+    """
+    survey = index.survey()
+    read: dict[str, Appointment | None] = {}
+    for session_id, events in logs:
+        soonest = _soonest(_fold(events).values(), now=now)
+        read[session_id] = (
+            None
+            if soonest is None
+            else Appointment(session_id, soonest, max(event.time for event in events))
+        )
+    return index.replace(read, since=survey)
 
 
 class Config(WireModel):
@@ -505,10 +550,9 @@ async def apply(ctx: Context, config: Config) -> None:
     # The cache is bounded by live sessions, and this is what makes that true —
     # the same line `subagents` uses for the same reason.
     ctx.on("session/disposed", lambda session: service.forget_session(session.id))
-    # Opening a session *is* the index's rebuild path (P6-23, I-6). A log written
-    # by a build with no index, an entry deleted by hand, one left stale by a
-    # crash between the append and the write — all correct themselves here,
-    # without the scan of every stored log a wholesale rebuild would need. The
+    # Opening a session reconciles its entry (P6-23, I-6): one left stale by a
+    # tick or a cancel whose write was lost corrects itself here. An index that
+    # cannot vouch for itself is a daemon's to rebuild (`rebuild_index`, S18). The
     # write is skipped when nothing moved, so the ordinary open costs a fold the
     # cache already has.
     ctx.on("session/created", lambda session: service.reindex(session))

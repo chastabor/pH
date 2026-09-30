@@ -166,7 +166,9 @@ class DaemonSession:
     """Frames this client could not rebuild **or admit**. Counted so the warning is
     one — and read as a fact, not only as a log-quietener: see `diverged`."""
     generation: int | None = None
-    """The daemon session's `created_at`, from the `session/new` reply.
+    """The daemon session's generation, from the `session/new` reply: when its
+    running incarnation began (`generation_of`), kept as the mirror's `created_at`
+    so the mirror's `cursor_of` names the same one.
 
     **A constructor argument rather than a setter**, for the reason
     `Session.durable_length`'s own docstring gives about itself: an ordering
@@ -733,10 +735,10 @@ async def attach_session(
     # `trust` is the person's answer, which this client asked for and the daemon
     # enforces — it refuses a `cwd` nobody has vouched for (P5-14).
     # The reply carries this root's cursor, and so its generation — which is what
-    # keys the mirror below. Read rather than discarded: `created_at` is stable
-    # across a resume (`cursor_of` says so), so the number here is the one the
-    # attach reply will name, and taking it now is what lets the mirror be built
-    # whole instead of re-keyed afterwards.
+    # keys the mirror below. Read rather than discarded: nothing resumes the root
+    # between this reply and the attach, so the number here is the one the attach
+    # reply will name, and taking it now is what lets the mirror be built whole
+    # instead of re-keyed afterwards.
     created = await client.call(
         verbs.SESSION_NEW,
         NewSessionParams(

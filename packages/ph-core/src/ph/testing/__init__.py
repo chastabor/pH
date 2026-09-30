@@ -87,6 +87,7 @@ from .builders import (
     write_host_config,
     write_profile,
     write_reference_fork,
+    write_stored_log,
 )
 from .diagnostics import report_section
 from .folds import VerifyingFoldCache, assert_fold_laws, check_fold_laws, prefix_of
@@ -198,4 +199,5 @@ __all__ = [
     "write_profile",
     "write_reference_fork",
     "write_skill",
+    "write_stored_log",
 ]

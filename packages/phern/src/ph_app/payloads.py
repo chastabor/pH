@@ -339,8 +339,8 @@ class SnapshotPage(SessionScoped, _CarriesJson):
     events and a turn contributes a handful."""
     started_at: int = Field(default=0, validation_alias="from", serialization_alias="from")
     """Where the read actually began, which is not always where the cursor
-    asked: `resume_at` answers a cursor from another incarnation of the log with
-    0.
+    asked: `resume_at` answers a cursor from another log with 0, and one from an
+    earlier incarnation of this log with no more than the store kept (S17).
 
     The one field in this module whose wire name is not `wire_alias`'s answer:
     `from` is a Python keyword, so the attribute cannot be called that. Spelled

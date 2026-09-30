@@ -438,6 +438,32 @@ delegation happen", and this one already did — its admission is in its log, so
 asking again would count the child against a cap its own record fills and refuse
 to restore work that was once allowed. Guards gate new work.
 
+**Open question: which model and reasoning effort a readmitted child runs on.** It
+is decided two different ways today:
+
+* **The route is pinned at admission.** The admission records the provider and
+  model the spawn resolved to, and `resolve_model` leaves a request that already
+  carries a route as it is. So a readmitted child runs on the model it was
+  admitted with, even if the skill that chose it (`model:` in its front matter)
+  or the parent's `models` list has since moved to another.
+* **The reasoning effort is pinned only when something named it.** The admission
+  records the effort the spawn asked for, or the one the route a model key
+  resolved to carries (`Admission.reasoning_effort`). An effort nothing named was
+  the parent's, and a readmitted child takes its parent's effort as it is at the
+  restart (`RlmChildProvider._resolve_model`), not the one it first ran on.
+
+The direction to decide: whether what a child runs on is the **parent's and the
+skill's to say at each start**, rather than something the child's record fixes. A
+skill updated to fix or improve a delegation — a better model, another reasoning
+level — would then reach a child readmitted after it, as it reaches a child
+spawned after it. The admission would keep recording what was *asked* (the model
+key, the skills, a named effort), and a readmit would resolve the route and effort
+again from the parent and the skills as they are then. What it would cost: a task
+begun on one model could be finished on another, which the re-presented task
+already tells the child is a new attempt (`restarts`). Until this is decided, a
+readmitted child keeps its admitted route, and an effort it left unnamed follows
+its parent.
+
 A provider opts in by implementing `ReadmittingProvider.readmit(request, *,
 run_id, session_id, restarts)` — its own Protocol, like `RehydratableProvider`, because
 resuming an un-run child is not something every way of running one can do.

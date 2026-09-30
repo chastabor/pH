@@ -137,6 +137,12 @@ rpc refuse through `mount_session` with `SESSION_IS_SUBAGENT`.
   ones: the seam now names every child right after the guards, and a spawn in flight
   holds its name on the same list.
 - **A 0.5 client and a 0.6 daemon do not talk**, and a format-2 log is refused.
+- **Open: what a readmitted child runs on.** Its route is pinned at admission, while
+  a reasoning effort it left unnamed follows its parent at the restart — two rules
+  for one choice. The direction to decide is whether the parent and the skills it
+  runs say what a child runs on at each start, so a skill updated to a better model
+  or level reaches a readmitted child too; the admission would record what was
+  asked, and a readmit would resolve it again. See the seam doc, "Across a restart".
 
 ---
 

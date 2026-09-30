@@ -38,6 +38,7 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 from pydantic import Field, ValidationError, field_validator
 
 from ph.json import as_str
+from ph.persistence import resumption_of, resumptions
 from ph.session import Session, valid_session_id
 from ph.wire import WireModel, validation_errors
 
@@ -455,10 +456,10 @@ class Cursor(WireModel):
     """Where a reader has got to: `{generation, sequence}`.
 
     A sequence alone is only meaningful against the log that counted it, so it
-    travels with the identity of that log. `generation` is the header's
-    `createdAt` as a string: durable, already on the wire, stable across a resume
-    — which continues the same log — and different for anything that is not
-    that log.
+    travels with the identity of that log **as it ran then**: `generation` is when
+    that incarnation of the log began (`generation_of`), since a resume does not
+    always continue from where a reader left off. `resume_at` says why, and how far
+    an older incarnation's count still holds (S17).
 
     A model rather than the dict it was, so the shape has one spelling: built
     here by `cursor_of`, sent back inside a method's params, and read by
@@ -481,9 +482,17 @@ def cursor_of(session: Session, sequence: int | None = None) -> Cursor:
     have to re-derive it.
     """
     return Cursor(
-        generation=str(session.header.created_at),
+        generation=generation_of(session),
         sequence=session.seq if sequence is None else sequence,
     )
+
+
+def generation_of(session: Session) -> str:
+    """Which incarnation of `session`'s log is running: when it began — the log's
+    creation, or its latest own resume (`resumption_of`). An integer, as `createdAt`
+    alone was, so a cursor's spelling did not change."""
+    resumed = resumption_of(session)
+    return str(resumed.time if resumed is not None else session.header.created_at)
 
 
 def cursor_text(cursor: Cursor) -> str:
@@ -530,8 +539,8 @@ def parse_cursor(text: str, current: object) -> Cursor | None:
     stamped with `current`'s generation — the only thing that makes a typed number
     mean anything, and exactly what makes it unverifiable.
 
-    `generation` is `SessionHeader.created_at`, an integer, so the split is
-    unambiguous. `None` rather than a raise: what to do about an unparseable
+    `generation` is an epoch-milliseconds integer (`generation_of`), so the split
+    is unambiguous. `None` rather than a raise: what to do about an unparseable
     cursor is the caller's — the CLI exits 2, and a front end reading a stored
     position would rather start from the beginning than fail to open.
 
@@ -555,20 +564,34 @@ def parse_cursor(text: str, current: object) -> Cursor | None:
 def resume_at(session: Session, cursor: Cursor | None) -> int:
     """The index a cursor asks to resume from, or 0 when it cannot say.
 
-    A cursor from another incarnation of the log is neither honored nor
-    refused: honoring it would skip events the client never saw, refusing it
-    would strand a client that did nothing wrong. So a stale generation reads as
-    "you have seen nothing of *this* log" — the only safe reading of the two,
-    and the reply says where it actually started so the client is not left
-    inferring it from sequence numbers.
+    **A cursor from an earlier incarnation of this log holds only as far as every
+    resume since kept** (S17). Events reach a reader before they are durable, so a
+    crash can take back ones it saw, and the resume that follows writes its repair
+    closers and `session/resumed` at those very seqs: honored whole, the cursor
+    skipped them and kept events the log no longer has. Each resume records how much
+    of the log it began with on disk, so the reader resumes at the least of those and
+    its own place, and the reply saying where is what tells it to let go of the rest.
+
+    A cursor from another log altogether is neither honored nor refused: honoring it
+    would skip events the client never saw, refusing it would strand a client that
+    did nothing wrong. So it reads as "you have seen nothing of *this* log", and the
+    reply says where it actually started.
 
     Shape is the params model's business, which is why there is no `isinstance`
     here any more: a cursor that is not a cursor never reaches this.
     """
-    if cursor is None or cursor.generation != str(session.header.created_at):
+    if cursor is None:
         return 0
-    seq: int = session.seq
-    return max(0, min(cursor.sequence, seq))
+    if cursor.generation == generation_of(session):
+        # The common case, and the one a catch-up pages through, so it does not walk
+        # the log looking for resumes to bound it by: there are none since.
+        return max(0, min(cursor.sequence, session.seq))
+    resumed = resumptions(session)
+    generations = [str(session.header.created_at), *(str(one.time) for one in resumed)]
+    if cursor.generation not in generations:
+        return 0
+    since = resumed[generations.index(cursor.generation) :]
+    return max(0, min(cursor.sequence, session.seq, *(one.events for one in since)))
 
 
 def parse_params[P: WireModel](method: str, model: type[P], params: object) -> P:

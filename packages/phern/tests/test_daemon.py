@@ -162,6 +162,7 @@ from ph.paths import resolve_roots
 from ph.persistence import session_path
 from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
+from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
 from ph.seams.subagents import ADMITTED, DELETED, PARENT_TEARDOWN, STATUS, SubagentService
 from ph.session import Session, SessionEvent, SessionHeader, session_written
 from ph.session.kinds import SESSION_HOLDER, WORKSPACE_RESTORE, credential_hold
@@ -2136,6 +2137,36 @@ async def test_a_session_with_no_appointment_is_left_alone(tmp_path: Path) -> No
         # And the untouched session is still openable, which is what unleased means.
         reopened = await supervisor.start("no-appointment")
         assert reopened.id == "no-appointment"
+
+
+async def test_a_daemon_rebuilds_an_index_it_cannot_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S18: an index that lost its contents is rebuilt from the logs, not left to
+    correct itself one session at a time as each is opened — which, for a session
+    nobody opens, is the silence P6-23 closed.
+
+    Off the pass, so the first pass reads what the file says and a later one what
+    the rebuild found.
+
+    Sabotage: drop the `_doubt` call from `rehydrate`, and the appointment never fires.
+    """
+    async with supervised(tmp_path, monkeypatch) as first:
+        root = await first.start("appointed")
+        root.ctx.require(SCHEDULE).create(
+            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
+        )
+        made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
+        await first._flush(root)
+    (tmp_path / INDEX_NAME).write_text("{ not json", encoding="utf-8")
+
+    async with supervised(tmp_path, monkeypatch) as second:
+        assert await second.wake_and_tick(now=made + 600_000) == [], "the file says nothing"
+        await until(lambda: ScheduleIndex(tmp_path).survey().trusted, what="the rebuild")
+
+        fired = await second.wake_and_tick(now=made + 600_000)
+
+        assert fired == ["s"], "the logs said what the file had lost"
 
 
 async def test_catch_up_is_unbounded_by_default(tmp_path: Path) -> None:

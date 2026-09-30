@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 
-from ph.session import Session
+from ph.session import Session, SessionHeader
 from ph.testing import log_event
 from ph.wire import WireModel
 from ph_app.protocol import (
@@ -137,3 +137,56 @@ def test_a_cursor_has_one_spelling() -> None:
     assert resume_at(session, Cursor(generation="another", sequence=2)) == 0, "stale reads as 0"
     assert resume_at(session, Cursor(generation=generation, sequence=2)) == 2
     assert resume_at(session, Cursor(generation=generation, sequence=99)) == 4, "clamped"
+
+
+def _resumed(before: Session, durable: int) -> Session:
+    """`before` as a restart finds it: the store kept its first `durable` events, and
+    the resume recorded so (`resume_session`, without the store around it)."""
+    revived = Session(
+        before.id, seed=before.events[:durable], header=before.header, durable=durable
+    )
+    log_event(revived, "session/resumed", {"events": durable})
+    return revived
+
+
+def test_a_cursor_from_before_a_resume_holds_only_as_far_as_the_store_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S17: events reach a reader before they are durable, so a crash takes back ones
+    it saw and the resume writes others at those seqs. Honored whole, the old cursor
+    skipped the resume's own records and kept events the log no longer has."""
+    clock = iter(range(1_000, 2_000))
+    monkeypatch.setattr("ph.session.session.now_ms", lambda: next(clock))
+    first = Session("s")
+    for index in range(5):
+        log_event(first, "turn/start", {"turn": index})
+    seen = cursor_of(first)
+    assert seen.sequence == 5
+
+    second = _resumed(first, durable=3)
+    for index in range(5):
+        log_event(second, "turn/start", {"turn": index})
+    assert cursor_of(second).generation != seen.generation, "a resume begins an incarnation"
+    assert resume_at(second, seen) == 3, "as far as the store kept, not as far as it saw"
+    assert resume_at(second, Cursor(generation=seen.generation, sequence=2)) == 2
+    assert resume_at(second, cursor_of(second, 7)) == 7, "this incarnation's own count holds"
+
+    third = _resumed(second, durable=8)
+    assert resume_at(third, seen) == 3, "bound by every resume since, not the latest"
+    assert resume_at(third, cursor_of(second)) == 8
+    assert resume_at(third, Cursor(generation="999", sequence=4)) == 0, "never this log's"
+
+
+def test_a_fork_does_not_take_its_sources_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fork's seed carries its source's `session/resumed`; read as the fork's own,
+    the fork would answer to cursors counted in its source."""
+    clock = iter(range(1_000, 2_000))
+    monkeypatch.setattr("ph.session.session.now_ms", lambda: next(clock))
+    source = _resumed(Session("s"), durable=0)
+    log_event(source, "turn/start", {"turn": 0})
+    header = SessionHeader(
+        id="f", created_at=5_000, parent_session="s", seed_length=len(source.events)
+    )
+    fork = Session("f", seed=source.events, header=header)
+    assert cursor_of(fork).generation == "5000"
+    assert resume_at(fork, cursor_of(source)) == 0
