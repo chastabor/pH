@@ -409,6 +409,14 @@ class Workspace:
     """
     provisioned: tuple[str, ...] = ()
     """Paths the seam put in this workspace (E14) — not the agent's work."""
+    reused: bool = False
+    """Whether the tier handed back a tree it found already made for this agent — a
+    resume, a child given its workspace back — rather than one it made now.
+
+    Set by the tier, the one party that knows. What the seam provisioned when the
+    tree was made is still in it, and the agent may have edited it since, so only
+    what is missing is provisioned (`provision(fill=True)`): a copy went back over
+    those edits."""
     provision_failures: tuple[str, ...] = ()
     """Materials the seam could not put in place (E14).
 
@@ -901,21 +909,23 @@ class WorkspaceSeam:
     records durably.
     """
 
-    _reclaiming: dict[str, anyio.Event] = field(default_factory=dict)
-    """Agent ids whose leaked tree is being torn down right now (J6).
+    _claimed: dict[str, anyio.Event] = field(default_factory=dict)
+    """Agent ids whose tree is being acquired or reclaimed right now, each with the
+    event set when that is done (J6). **One act on an agent's tree at a time.**
 
-    Reconciliation is detached — `emit` schedules it and does not wait — and it
-    runs a `git worktree remove --force` per leaked tree. The first `acquire`
-    after a resume asks the provider for the *same* agent id, so on a warm
-    resume the provider was handed a root the reclaim was in the middle of
-    deleting: the agent came up in a directory that then vanished under it, or
-    the reclaim failed halfway and left a registration pointing at a tree the
-    agent was using.
+    Reconciliation is detached — `emit` schedules it and does not wait — and it runs
+    a `git worktree remove --force` per leaked tree, while the first `acquire` after
+    a resume asks the tier for the *same* agent's tree. Either order lost the tree:
+    an acquire handed a root the reclaim was deleting, or a reclaim that found no
+    holder deleting the tree an acquire had yet to hold — `acquire` awaits the
+    scratch directory, its `acquiring` flush and the tier before `_held` names it.
+    So an acquire waits out any claim on its agent and takes its own, and a reclaim
+    leaves any claimed tree alone and takes one while it deletes. Each side checks and
+    takes with no await between, so under one event loop each sees the other.
 
-    Keyed by agent id rather than by root because that is the identity both
-    sides already have — `acquire` knows it before the provider computes a root,
-    and a record carries it — so the wait can happen *before* the tree is built
-    rather than after.
+    Keyed by agent id rather than by root because that is the identity both sides
+    already have — `acquire` knows it before the tier computes a root, and a record
+    carries it — so the wait happens *before* the tree is built rather than after.
     """
 
     def of(self, agent_id: str) -> Workspace | None:
@@ -1095,10 +1105,37 @@ class WorkspaceSeam:
         one boundary (E6, `writable_roots`).
         """
         base = canonical(base)
-        # Before anything is built: a reclaim in flight for this agent owns its
-        # tree until it is done with it (J6).
-        while (reclaim := self._reclaiming.get(agent_id)) is not None:
-            await reclaim.wait()
+        # Before anything is built: an act in flight on this agent's tree owns it
+        # until it is done (J6).
+        while (claimed := self._claimed.get(agent_id)) is not None:
+            await claimed.wait()
+        done = self._claimed[agent_id] = anyio.Event()
+        try:
+            return await self._acquire(
+                session_id=session_id,
+                agent_id=agent_id,
+                base=base,
+                access=access,
+                session=session,
+                scope=scope,
+                tier=tier,
+            )
+        finally:
+            del self._claimed[agent_id]
+            done.set()
+
+    async def _acquire(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        base: Path,
+        access: WorkspaceAccess,
+        session: Session | None,
+        scope: Context | None,
+        tier: ContainmentTier | None,
+    ) -> Workspace:
+        """`acquire`, under this agent's claim (`_claimed`)."""
         scratch = await self._scratch_for(session_id, agent_id)
         chosen = self._chosen_tier(session) if tier is None else tier
         workspace = None
@@ -1246,18 +1283,21 @@ class WorkspaceSeam:
         )
         provider = self._reclaimer([record], "reclaim")
         if provider is not None:
-            await self._reclaim(provider, record, "reclaim")
+            await self._reclaim(provider, record, "reclaim", own=True)
 
     async def _provision(
         self, workspace: Workspace, base: Path, materials: Sequence[ProvisionEntry]
     ) -> Workspace:
-        """Put the configured materials in a *fresh* root (E14)."""
+        """Put the configured materials in a *fresh* root (E14) — and into one the tier
+        reused (`Workspace.reused`), only what it lacks: the rest arrived when it was
+        made, and the agent may have edited it since.
+        """
         if not materials:
             return workspace
         # Qualified: `provision` on this class is the *registration*; the module
         # function is the work.
         report: ProvisionReport = await workspace_provision.provision(
-            materials, base=base, root=workspace.root
+            materials, base=base, root=workspace.root, fill=workspace.reused
         )
         if report.failed:
             log.warning(
@@ -1452,7 +1492,11 @@ class WorkspaceSeam:
         strength of a record written by a configuration we are not running is the one
         way this could destroy the work it exists to protect.
         """
-        leaks = [one for one in workspace_leaks(session) if one.agent_id not in self._held]
+        leaks = [
+            one
+            for one in workspace_leaks(session)
+            if one.agent_id not in self._held and one.agent_id not in self._claimed
+        ]
         provider = self._reclaimer(leaks, "reclaim")
         if provider is None:
             return
@@ -1803,7 +1847,12 @@ class WorkspaceSeam:
         return any(held.workspace.root == record.root for held in self._held.values())
 
     async def _reclaim(
-        self, provider: ReclaimingProvider, record: WorkspaceRecord, verb: str
+        self,
+        provider: ReclaimingProvider,
+        record: WorkspaceRecord,
+        verb: str,
+        *,
+        own: bool = False,
     ) -> bool | None:
         """One call into a tier's teardown: whether it **kept**, or `None` if it raised.
 
@@ -1819,10 +1868,13 @@ class WorkspaceSeam:
         `collect` asks `collectable` before it removes any of them. An `acquire`
         landing in that gap gets a tree this is about to delete, so the question
         is asked again here — where "again" is worth something, because it is the
-        last line before the removal. `_reclaiming` closes the other direction,
-        making the next `acquire` wait rather than race.
+        last line before the removal, along with whether an act is in flight on it
+        (`_claimed`), and a claim is taken while it deletes.
+
+        `own` is an `acquire` taking back its own half-made tree, under the claim
+        it already has.
         """
-        if self._is_held(record):
+        if self._is_held(record) or (not own and record.agent_id in self._claimed):
             log.info(
                 "ph.seams.workspace: not reclaiming %s — an agent took it while the "
                 "%s was being prepared",
@@ -1830,8 +1882,9 @@ class WorkspaceSeam:
                 verb,
             )
             return None
-        settled = anyio.Event()
-        self._reclaiming[record.agent_id] = settled
+        done = None if own else anyio.Event()
+        if done is not None:
+            self._claimed[record.agent_id] = done
         try:
             with running(self.provider_by):
                 return await provider.reclaim(record)
@@ -1839,8 +1892,9 @@ class WorkspaceSeam:
             log.warning("ph.seams.workspace: could not %s %s", verb, record.root, exc_info=True)
             return None
         finally:
-            self._reclaiming.pop(record.agent_id, None)
-            settled.set()
+            if done is not None:
+                del self._claimed[record.agent_id]
+                done.set()
 
 
 WorkspaceOutcome: TypeAlias = Literal["leaked", "kept", "retained"]

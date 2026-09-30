@@ -26,6 +26,7 @@ from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, FS, SESSIONS, WORKSPACE
 from ph.seams.workspace import PROJECT_PROVISION_FILE, discover_provisioning
+from ph.seams.workspace_provision import ProvisionEntry
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -409,3 +410,47 @@ async def test_the_project_list_is_guarded_like_any_other(
     assert not (workspace.root / "stolen").exists()
     assert (workspace.root / ".env").exists()
     assert workspace.provision_failures == ()
+
+
+async def test_a_reused_tree_keeps_the_agents_edits_to_what_was_provisioned(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A tier that finds this agent's tree already made — a resume, a child given its
+    workspace back — hands it back, and the seam provisioned it again by its kind: a
+    copied `.env` went back over the agent's edits. Now a reused tree gets only what
+    it lacks, down to a file a crash mid-copy left out of a copied directory, and all
+    of it is still named as provisioned, so none is taken for the agent's work.
+
+    Sabotage: provision a reused tree as a fresh one, and the edit is lost.
+    """
+    ctx = await mount()
+    base = tmp_path / "project"
+    (base / "vendor").mkdir(parents=True)
+    (base / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (base / "vendor" / "a.txt").write_text("a\n", encoding="utf-8")
+    (base / "vendor" / "b.txt").write_text("b\n", encoding="utf-8")
+    (base / "shared.cfg").write_text("one\n", encoding="utf-8")
+    seam = ctx.require(WORKSPACE)
+    seam.provision(
+        [
+            ProvisionEntry(source=".env"),
+            ProvisionEntry(source="vendor"),
+            ProvisionEntry(source="shared.cfg", mode="symlink"),
+        ]
+    )
+    seam.register_provider(_tier(tmp_path))
+    first = await seam.acquire(session_id="s", agent_id="a1", base=base)
+    assert not first.reused and first.provisioned == (".env", "vendor", "shared.cfg")
+    (first.root / ".env").write_text("SECRET=edited\n", encoding="utf-8")
+    (first.root / "vendor" / "a.txt").write_text("a, edited\n", encoding="utf-8")
+    (first.root / "vendor" / "b.txt").unlink()  # what a crash mid-copy leaves
+    await seam.dispose("a1")
+
+    again = await seam.acquire(session_id="s", agent_id="a1", base=base)
+
+    assert again.reused
+    assert (again.root / ".env").read_text(encoding="utf-8") == "SECRET=edited\n"
+    assert (again.root / "vendor" / "a.txt").read_text(encoding="utf-8") == "a, edited\n"
+    assert (again.root / "vendor" / "b.txt").read_text(encoding="utf-8") == "b\n"
+    assert again.provision_failures == ()
+    assert again.provisioned == (".env", "vendor", "shared.cfg"), "none is the agent's work"

@@ -158,7 +158,7 @@ def session(
     end = events[-1].seq if events else 0
     point = end if at is None else at
     upto = [event for event in events if event.seq <= point]
-    env = fold_environment((event.type, event.data) for event in upto)
+    env = fold_environment((event.seq, event.type, event.data) for event in upto)
     if env.base is None:
         fail(
             f"[red]{session_id} has no recorded base by seq {point}: it had not started "

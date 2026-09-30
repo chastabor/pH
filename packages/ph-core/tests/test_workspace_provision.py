@@ -235,22 +235,27 @@ async def test_symlink_is_shared_and_refuses_to_clobber(trees: tuple[Path, Path]
 
     Refusing an existing destination is the second half: quietly turning a
     checked-in file into a link to somewhere else is not something a config line
-    should be able to do.
+    should be able to do. A link already to the source is in place, though, and
+    was reported as a failure whenever a tree was provisioned again.
+
+    Sabotage: drop the same-link check, and the second pass fails.
     """
     base, root = trees
+    linked = [ProvisionEntry(source="node_modules", mode="symlink")]
 
-    report = await provision(
-        [ProvisionEntry(source="node_modules", mode="symlink")], base=base, root=root
-    )
+    report = await provision(linked, base=base, root=root)
 
     assert report.provisioned == ("node_modules",)
     assert (root / "node_modules").is_symlink()
+    assert await provision(linked, base=base, root=root) == report, "already in place"
 
-    again = await provision(
-        [ProvisionEntry(source="node_modules", mode="symlink")], base=base, root=root
+    (base / "checked-in.txt").write_text("base\n", encoding="utf-8")
+    (root / "checked-in.txt").write_text("the tree's own\n", encoding="utf-8")
+    clobber = await provision(
+        [ProvisionEntry(source="checked-in.txt", mode="symlink")], base=base, root=root
     )
-    assert again.provisioned == ()
-    assert len(again.failed) == 1
+    assert clobber.provisioned == () and len(clobber.failed) == 1
+    assert not (root / "checked-in.txt").is_symlink()
 
 
 async def test_a_missing_optional_source_is_not_a_failure(trees: tuple[Path, Path]) -> None:

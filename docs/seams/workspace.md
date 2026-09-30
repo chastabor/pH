@@ -224,7 +224,10 @@ startup would delete last night's failure exactly as somebody sat down to read i
 
 `reconcile(session)` runs at session open and is the crash half of cleanup: a
 tree whose `workspace/acquired` has no `workspace/disposed` belonged to a process
-that is gone.
+that is gone. One act on an agent's tree at a time: an acquire waits out a reclaim,
+and a reclaim leaves alone a tree this process holds or is acquiring. A tree a tier
+finds already made for the agent is reused (`Workspace.reused`), and gets only the
+materials it lacks, so nothing the agent edited is copied over.
 
 ## Events
 

@@ -196,6 +196,10 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # An adopted version a start could not mount, taken back with the reason.
         # Required: a reader that skipped it would apply the adoption again.
         "profile/withdrawn",
+        # Changes the log could not hold when they were made, refused and so never
+        # in force. Required: a reader that skipped it would start the session on
+        # a change the person was told was refused.
+        "profile/refused",
         # The session's environment saved as a named profile (S7): ignorable, since
         # it changes nothing the session runs with.
         "profile/saved",
@@ -598,6 +602,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "profile/declined",
                 "profile/override",
                 "profile/override-cleared",
+                "profile/refused",
                 "profile/saved",
                 "profile/withdrawn",
             }

@@ -66,10 +66,13 @@ class StubWorkspaceProvider:
     ) -> Workspace:
         self.bases.append(base)
         tree = base if self.root is None else self.root / agent_id
+        # The real tiers' rule: a tree already at this agent's path is its own.
+        reused = self.root is not None and tree.is_dir()
         tree.mkdir(parents=True, exist_ok=True)
         return Workspace(
             root=tree,
             scratch=scratch,
+            reused=reused,
             # The tier's answer — not the request — is what everything
             # downstream reads, which is the whole point of resolving here.
             kind=self.kinds[1] if access == "read" else self.kinds[0],

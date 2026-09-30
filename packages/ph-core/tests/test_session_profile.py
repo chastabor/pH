@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from ph.json import JsonObject, JsonValue, as_obj
+from ph.json import JsonObject, JsonValue, as_obj, as_seq
 from ph.keys import SESSIONS
 from ph.session_profile import (
     ADOPTED,
@@ -25,19 +25,24 @@ from ph.session_profile import (
     CLEARED,
     DECLINED,
     OVERRIDE,
+    REFUSED,
     Difference,
     Override,
     OverrideNotRecorded,
     ProfileBase,
     ProfileChange,
+    clear_overrides,
     fold_environment,
     listing,
     logged_environment,
+    override,
+    overrides,
+    record_adopted,
     record_base,
     saved_base,
     switch_base,
 )
-from ph.testing import MountProfile, log_event, not_none
+from ph.testing import MountProfile, log_event, not_none, stored_events
 
 pytestmark = pytest.mark.anyio
 
@@ -91,15 +96,15 @@ def test_an_override_outlives_a_base_switch_until_its_row_is_cleared() -> None:
     override since the first base, less the ones a clear names. A new base settles
     what was adopted or declined against the old one. Sabotage: reset the overrides
     at each base, as S4's fold did, and `/one` is lost at the switch."""
-    records: list[tuple[str, JsonObject]] = [
-        (BASE, _base("first")),
-        (OVERRIDE, _override("x", "/one")),
-        (DECLINED, _base("offered")),
-        (ADOPTED, _base("second")),
-        (BASE, _base("second")),
-        (OVERRIDE, _override("y", "/two")),
-        (OVERRIDE, _override("z", "/three")),
-        (CLEARED, {"row": "z", "command": "adopt second"}),
+    records: list[tuple[int, str, JsonObject]] = [
+        (0, BASE, _base("first")),
+        (1, OVERRIDE, _override("x", "/one")),
+        (2, DECLINED, _base("offered")),
+        (3, ADOPTED, _base("second")),
+        (4, BASE, _base("second")),
+        (5, OVERRIDE, _override("y", "/two")),
+        (6, OVERRIDE, _override("z", "/three")),
+        (7, CLEARED, {"row": "z", "command": "adopt second"}),
     ]
 
     env = fold_environment(records)
@@ -107,7 +112,7 @@ def test_an_override_outlives_a_base_switch_until_its_row_is_cleared() -> None:
     assert not_none(env.base).name == "second"
     assert [one.command for one in env.overrides] == ["/one", "/two"]
     assert env.adopted is None and env.declined is None
-    pending = fold_environment([*records, (ADOPTED, _base("third"))])
+    pending = fold_environment([*records, (8, ADOPTED, _base("third"))])
     assert not_none(pending.starts_on).name == "third", "an adopted version is what starts next"
 
 
@@ -229,3 +234,117 @@ def test_the_listing_says_each_setting_s_old_and_new_value_and_whose_it_is() -> 
     assert "(the row)" in lines[3] and "added" in lines[3]
     assert lines[4] == "Still applied over it, from this session:"
     assert lines[5].split() == ["sandbox-allow", "/sandbox", "allow", "host", "d"]
+
+
+async def test_a_refused_override_is_not_in_force_when_its_record_is_written_later(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record of a refused change is in the log already, and the next flush that
+    succeeds writes it. Unanswered, the next start read it as in force and ran on a
+    change the person was told was refused. So the refusal is logged after it and
+    names it, and every reading of the log passes it over.
+
+    Sabotage: drop the `profile/refused` append from `_recorded`, and the stored log's
+    environment holds the refused override.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("refused-override")
+    await record_base(ctx, session)
+    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+
+    with pytest.raises(OverrideNotRecorded, match='"llm-retry" was not changed'):
+        await override(
+            ctx, session, "llm-retry", {"maxAttempts": 9}, source="command", command="/retry 9"
+        )
+    monkeypatch.undo()
+
+    asked = next(event for event in session.events if event.type == OVERRIDE)
+    refusal = next(event for event in session.events if event.type == REFUSED)
+    assert list(as_seq(refusal.data["seqs"])) == [asked.seq]
+    assert overrides(session) == [], "counted as in force the moment it was refused"
+    await ctx.require(SESSIONS).flush(session)
+    stored = stored_events(ctx, session.id)
+    assert {OVERRIDE, REFUSED} <= {event.type for event in stored}, "both written at last"
+    env = fold_environment((event.seq, event.type, event.data) for event in stored)
+    assert env.overrides == (), "the next start would run on the refused change"
+
+
+async def test_a_refused_clear_leaves_the_override_in_force(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other way round: a clear the log could not hold is not a clear.
+
+    Sabotage: drop the refusal, and the override reads as cleared.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("refused-clear")
+    await record_base(ctx, session)
+    log_event(session, OVERRIDE, _override("llm-retry", "/retry 5"))
+    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+
+    with pytest.raises(OverrideNotRecorded, match="not cleared"):
+        await clear_overrides(ctx, session, None, command="/profile clear")
+
+    assert [one.command for one in overrides(session)] == ["/retry 5"]
+
+
+async def test_a_base_the_log_cannot_hold_refuses_the_start(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_base` ignored the write's answer, so a start went on as if its base
+    were recorded. Now it is refused, as a change is, and the base it refused is not
+    the session's.
+
+    Sabotage: ignore the write's answer in `record_base` again, and it returns a base.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("unbased")
+    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+
+    with pytest.raises(OverrideNotRecorded, match="base was not recorded"):
+        await record_base(ctx, session)
+    assert saved_base(session) is None
+
+
+async def test_a_refused_adoption_is_not_what_starts_next(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same door for an adoption: its callers tell the person the version was not
+    adopted, and the next start must not run on it.
+
+    Sabotage: write `record_adopted` without `_written`, and it starts next.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("refused-adoption")
+    await record_base(ctx, session)
+    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+
+    assert not await record_adopted(ctx, session, ProfileBase("elsewhere", (), (), "0"))
+
+    assert logged_environment(session).adopted is None
+    assert not_none(logged_environment(session).starts_on).name != "elsewhere"
+
+
+async def test_a_write_that_raises_refuses_what_it_guarded(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write cut off part-way — cancelled, or raising — made no change, so what it
+    guarded is refused as a failed one is.
+
+    Sabotage: refuse only on `False`, and the override stays in force.
+    """
+
+    async def cut_off(*_args: object) -> bool:
+        raise RuntimeError("the flush was cut off")
+
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("cut-off")
+    await record_base(ctx, session)
+    monkeypatch.setattr("ph.session_profile.session_written", cut_off)
+
+    with pytest.raises(RuntimeError, match="cut off"):
+        await override(
+            ctx, session, "llm-retry", {"maxAttempts": 9}, source="command", command="/retry 9"
+        )
+
+    assert overrides(session) == []

@@ -392,7 +392,7 @@ def _on_profile_record(builder: _Builder, event: SessionEvent) -> None:
     logged up to here, folded as a restart would fold them — so an auditor reads what
     the agent ran in from this point, not only what moved.
     """
-    builder._profile.step(event.type, event.data)
+    builder._profile.step(event.seq, event.type, event.data)
     summary = record_summary(event.type, event.data)
     listing = environment_listing(builder._profile.environment)
     builder.on_event(event, event.type, summary, "\n".join([summary, "", *listing]))
@@ -449,6 +449,8 @@ HANDLERS: Mapping[str, Handler] = {
     "profile/override-cleared": _on_profile_record,
     # And an adopted version a start could not mount, taken back with why.
     "profile/withdrawn": _on_profile_record,
+    # And a change the log could not hold, refused and so never in force.
+    "profile/refused": _on_profile_record,
     # A named profile written from this session's environment (S7).
     "profile/saved": _on_profile_record,
     # A skill's body read at runtime, hashed (S8, decision 12).

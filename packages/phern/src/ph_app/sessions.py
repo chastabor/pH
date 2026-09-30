@@ -36,7 +36,7 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from ph.json import JsonObject, as_obj
+from ph.json import JsonObject, as_int, as_obj
 from ph.persistence import MAX_DEPTH, LineageError, materialize
 from ph.persistence.jsonl import (
     HEADER_LINE_TYPE,
@@ -397,8 +397,8 @@ def _environment_at(
             _header, events = materialize(partial(read_stored, sessions_dir), header.id)
         except (LineageError, OSError, ValueError):
             return LoggedEnvironment()
-        return fold_environment((event.type, event.data) for event in events)
-    records: list[tuple[str, JsonObject]] = []
+        return fold_environment((event.seq, event.type, event.data) for event in events)
+    records: list[tuple[int, str, JsonObject]] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -410,7 +410,7 @@ def _environment_at(
                     continue
                 kind, data = record.get("type"), record.get("data")
                 if isinstance(kind, str) and isinstance(data, dict):
-                    records.append((kind, data))
+                    records.append((as_int(record.get("seq")), kind, data))
     except OSError:
         return LoggedEnvironment()
     return fold_environment(records)

@@ -41,7 +41,7 @@ import fcntl
 import logging
 import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -198,20 +198,29 @@ def resolve_entry(entry: ProvisionEntry, *, base: Path, root: Path) -> tuple[Pat
     escape.
     """
     source_path = _contained(base, entry.source, label="source")
-    dest_path = _contained(root, entry.target, label="dest")
+    dest_path = _contained(root, entry.target, label="dest", leaf=False)
     if source_path == dest_path:
         raise ProvisionRefused(f"source and dest are the same path: {source_path}")
     return source_path, dest_path
 
 
-def _contained(base: Path, relative: str, *, label: str) -> Path:
+def _contained(base: Path, relative: str, *, label: str, leaf: bool = True) -> Path:
     """Resolve `relative` against `base` and refuse anything that leaves it.
 
     `label` is the *wire* key (`source`/`dest`), so a person can grep the message
     against the line of YAML that caused it.
+
+    `leaf=False` for a destination: its parent is resolved and its own name kept,
+    since what is judged is where the entry lives, not where a link already at it
+    points. Followed, a link provisioning made read as outside the tree, and every
+    later pass reported it as a failure. Nothing is written through a link at the
+    leaf — `_materialize` replaces it, or leaves it be.
     """
     root = base.resolve()
-    resolved = (base / relative).resolve()
+    joined = base / relative
+    resolved = (
+        joined.resolve() if leaf or not joined.name else joined.parent.resolve() / joined.name
+    )
     try:
         parts = resolved.relative_to(root).parts
     except ValueError:
@@ -227,19 +236,26 @@ def _contained(base: Path, relative: str, *, label: str) -> Path:
 
 
 async def provision(
-    entries: Sequence[ProvisionEntry], *, base: Path, root: Path
+    entries: Sequence[ProvisionEntry], *, base: Path, root: Path, fill: bool = False
 ) -> ProvisionReport:
     """Put every material in place, and report rather than raise.
 
     Off the event loop wholesale: a `node_modules` walk is thousands of syscalls
     and the loop has an agent waiting on it.
+
+    `fill` is for a tree the tier reused (`Workspace.reused`): only what is missing
+    is put there, down to a file inside a copied directory, and nothing present is
+    replaced. It was provisioned when it was made — or part-way, by a process that
+    crashed mid-copy — and the agent may have edited it since.
     """
     if not entries:
         return ProvisionReport()
-    return await anyio.to_thread.run_sync(lambda: _provision_sync(entries, base, root))
+    return await anyio.to_thread.run_sync(lambda: _provision_sync(entries, base, root, fill))
 
 
-def _provision_sync(entries: Sequence[ProvisionEntry], base: Path, root: Path) -> ProvisionReport:
+def _provision_sync(
+    entries: Sequence[ProvisionEntry], base: Path, root: Path, fill: bool
+) -> ProvisionReport:
     provisioned: list[str] = []
     failed: list[str] = []
     clone = _Cloner()
@@ -250,7 +266,7 @@ def _provision_sync(entries: Sequence[ProvisionEntry], base: Path, root: Path) -
                 if not entry.optional:
                     failed.append(f"{entry.target}: {entry.source} is not in the project")
                 continue
-            _materialize(source, dest, entry.mode, clone)
+            _materialize(source, dest, entry.mode, clone, fill=fill)
         except ProvisionRefused as refusal:
             failed.append(f"{entry.target}: {refusal}")
             log.warning("ph.seams.workspace_provision: refused %s (%s)", entry.target, refusal)
@@ -262,9 +278,14 @@ def _provision_sync(entries: Sequence[ProvisionEntry], base: Path, root: Path) -
     return ProvisionReport(provisioned=tuple(provisioned), failed=tuple(failed))
 
 
-def _materialize(source: Path, dest: Path, mode: ProvisionMode, clone: _Cloner) -> None:
+def _materialize(
+    source: Path, dest: Path, mode: ProvisionMode, clone: _Cloner, *, fill: bool
+) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if mode == "symlink":
+        # A link already to this source is in place, whoever made it.
+        if dest.is_symlink() and Path(os.readlink(dest)) == source:
+            return
         # Refusing to clobber rather than replacing: a destination that already
         # exists is a checked-in file, and quietly turning it into a link to
         # somewhere else is not something a config line should be able to do.
@@ -273,7 +294,10 @@ def _materialize(source: Path, dest: Path, mode: ProvisionMode, clone: _Cloner) 
         dest.symlink_to(source, target_is_directory=source.is_dir())
         return
     if dest.exists() or dest.is_symlink():
-        _remove(dest)
+        if not fill:
+            _remove(dest)
+        elif not (_real_dir(source) and _real_dir(dest)):
+            return
     copy = os.link if mode == "hardlink" else clone.copy
     if source.is_dir():
         # `shutil.copytree`, not a hand-rolled walk. `symlinks=True` is the
@@ -285,9 +309,37 @@ def _materialize(source: Path, dest: Path, mode: ProvisionMode, clone: _Cloner) 
         # "is this a symlink" from the directory entry instead of a fresh stat
         # per file. `shutil.Error` subclasses `OSError`, so the caller's handler
         # is unchanged.
-        shutil.copytree(source, dest, symlinks=True, copy_function=copy, dirs_exist_ok=True)
+        shutil.copytree(
+            source,
+            dest,
+            symlinks=True,
+            copy_function=copy,
+            dirs_exist_ok=True,
+            ignore=_present(source, dest) if fill else None,
+        )
     else:
         copy(source, dest)
+
+
+def _real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
+def _present(source: Path, dest: Path) -> Callable[[str, list[str]], set[str]]:
+    """`copytree`'s `ignore` for a fill: every name already at its destination, bar
+    a directory on both sides, which is descended into for what it lacks."""
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        here = Path(directory)
+        there = dest / here.relative_to(source)
+        return {
+            name
+            for name in names
+            if os.path.lexists(there / name)
+            and not (_real_dir(here / name) and _real_dir(there / name))
+        }
+
+    return ignore
 
 
 @dataclass(slots=True)

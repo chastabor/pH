@@ -1216,6 +1216,9 @@ RECORDLESS: frozenset[str] = frozenset(
         "profile/declined",
         "profile/override-cleared",
         "profile/withdrawn",
+        # A change the log could not hold: the command that asked already says it
+        # was refused.
+        "profile/refused",
         # `/profile save` (S7): the command's own row says what it wrote.
         "profile/saved",
         # A skill's body read, hashed for the audit (S8): the `skill` call that read

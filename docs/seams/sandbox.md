@@ -162,7 +162,8 @@ written, and only then does `Mount.reconfigure` re-apply the `sandbox-allow` row
 the new config — one slot released and refilled, no provider swapped, no probe
 rerun, no proxy restarted, and an agent mid-command notices only when its next
 command is bounded by the new statement. A change whose record cannot be written is
-not made. The session's next start puts it back from its log; `/profile save` (S7)
+not made, and a `profile/refused` record after it says so, so the next start does
+not apply it once the log can be written. The session's next start puts it back from its log; `/profile save` (S7)
 is how one session's allowances become a named profile's.
 
 Because a row's config is replaced whole rather than merged, the first edit

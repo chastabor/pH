@@ -128,6 +128,8 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         "profile/override-cleared",
         # And a version a start took back because it would not mount, with why.
         "profile/withdrawn",
+        # And a change the log could not hold: the command's reply says so.
+        "profile/refused",
         "profile/saved",
         # S8: which text of a skill was read, by hash.
         "skill/read",

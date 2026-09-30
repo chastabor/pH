@@ -37,7 +37,7 @@ from ph.seams.workspace import ReclaimingProvider, redirection_env, workspace_su
 from ph.seams.workspace_git import sanitize_ref, tree_hash
 from ph.session import Session
 from ph.testing import FAKE_OPTIONS, MountProfile, disk_fills_midway, stored_events, stored_types
-from ph.testing.git import git, git_repo
+from ph.testing.git import git, git_repo, worktree_agent
 
 pytestmark = [pytest.mark.anyio, pytest.mark.needs_git]
 
@@ -1310,3 +1310,27 @@ async def test_a_provisioned_path_the_repo_tracks_is_excluded_too(
     assert captured == "COMMITTED=ok\n", "a provisioned secret reached a tree pH wrote"
     _, work, _ = await git(ctx, workspace.root, "show", f"{hashed}:work.txt")
     assert work == "the agent did this\n", "the agent's work is not in its own checkpoint"
+
+
+@pytest.mark.needs_git
+async def test_a_worktree_found_already_made_says_it_was_reused(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The tier is the one party that knows whether it made the tree or found it, and
+    the seam provisions only what it made (`Workspace.reused`).
+
+    Sabotage: have `_add` answer `False` on the reuse path, and this reads as fresh.
+    """
+    ctx, _session, agent, workspace = await worktree_agent(mount, tmp_path)
+    tier = ctx.require(WORKSPACE).provider
+    assert tier is not None and not workspace.reused
+
+    again = await tier.acquire(
+        session_id="s1",
+        agent_id=agent.id,
+        base=tmp_path / "repo",
+        scratch=workspace.scratch,
+        access="write",
+    )
+
+    assert again is not None and again.reused and again.root == workspace.root

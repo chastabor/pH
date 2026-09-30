@@ -21,7 +21,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import pytest
@@ -387,28 +387,72 @@ async def test_a_tier_that_raised_part_way_is_taken_back_at_once(
 
 
 @dataclass(slots=True)
-class _GatedReclaim:
-    """The mounted tier, with a reclaim this test can hold open.
+class _Gated:
+    """The mounted tier, with one of its acts — `acquire` or `reclaim` — held open
+    until the test lets it finish, and every reclaim counted.
 
-    A wrapper rather than a fake provider: what J6 is about is the window
-    *inside* a real teardown — `git worktree remove --force` takes a few
-    milliseconds and an `acquire` that lands in them gets a directory being
-    deleted — so the teardown has to be the real one. `__getattr__` forwards
-    everything else, which is what keeps this from being a second implementation
-    of the tier drifting from the first.
+    A wrapper rather than a fake provider: what J6 is about is the window *inside*
+    a real act — `git worktree remove --force` takes a few milliseconds, and an
+    `acquire` that lands in them gets a directory being deleted — so the act has to
+    be the real one. `__getattr__` forwards everything else, which is what keeps
+    this from being a second implementation of the tier drifting from the first.
     """
 
     inner: Any
+    held: Literal["acquire", "reclaim"]
     entered: anyio.Event = field(default_factory=anyio.Event)
     may_finish: anyio.Event = field(default_factory=anyio.Event)
+    reclaimed: list[WorkspaceRecord] = field(default_factory=list)
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         return getattr(self.inner, name)
 
+    async def _hold(self, act: Literal["acquire", "reclaim"]) -> None:
+        if act == self.held:
+            self.entered.set()
+            await self.may_finish.wait()
+
+    async def acquire(self, **arguments: Any) -> Any:  # noqa: ANN401
+        await self._hold("acquire")
+        return await self.inner.acquire(**arguments)
+
     async def reclaim(self, record: WorkspaceRecord) -> bool:
-        self.entered.set()
-        await self.may_finish.wait()
+        self.reclaimed.append(record)
+        await self._hold("reclaim")
         return bool(await self.inner.reclaim(record))
+
+
+@dataclass(slots=True)
+class _Leaked:
+    """An agent whose worktree a crash leaked, over a tier with one act gated, and
+    an acquire of that agent's tree again, to run beside a reconcile."""
+
+    session: Session
+    seam: Any
+    gated: _Gated
+    agent_id: str
+    base: Path
+    taken: list[Path] = field(default_factory=list)
+
+    async def take(self) -> None:
+        again = await self.seam.acquire(
+            session_id="s1", agent_id=self.agent_id, base=self.base, access="write"
+        )
+        self.taken.append(again.root)
+
+
+async def _leaked(
+    mount: MountProfile, tmp_path: Path, held: Literal["acquire", "reclaim"]
+) -> _Leaked:
+    ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
+    seam = ctx.require(WORKSPACE)
+    gated = _Gated(inner=seam.provider, held=held)
+    seam.provider = gated
+    assert [one.agent_id for one in workspace_leaks(session)] == [agent.id]
+    # The crash: the tree is leaked, and this process no longer holds it.
+    await seam.dispose(agent.id)
+    log_event(session, *_acquired(agent.id, str(workspace.root), ref="ph/s1/a"))
+    return _Leaked(session, seam, gated, agent.id, tmp_path / "repo")
 
 
 @pytest.mark.needs_git
@@ -430,36 +474,73 @@ async def test_an_acquire_waits_for_the_reclaim_that_is_deleting_its_tree(
     `acquire` for the same agent must still be unfinished. Without the guard it
     returns immediately, holding a root the teardown is mid-way through.
     """
-    ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
-    seam = ctx.require(WORKSPACE)
-    gated = _GatedReclaim(inner=seam.provider)
-    seam.provider = gated
-    # The crash: the tree is leaked, and this process no longer holds it.
-    leak = workspace_leaks(session)
-    assert [one.agent_id for one in leak] == [agent.id]
-    await seam.dispose(agent.id)
-    log_event(
-        session,
-        "workspace/acquired",
-        {"agentId": agent.id, "kind": "worktree", "root": str(workspace.root), "ref": "ph/s1/a"},
-    )
-
-    taken: list[Path] = []
-
-    async def take() -> None:
-        again = await seam.acquire(
-            session_id="s1", agent_id=agent.id, base=tmp_path / "repo", access="write"
-        )
-        taken.append(again.root)
+    leaked = await _leaked(mount, tmp_path, "reclaim")
 
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(seam.reconcile, session)
+        tasks.start_soon(leaked.seam.reconcile, leaked.session)
         with anyio.fail_after(5):
-            await gated.entered.wait()
-        tasks.start_soon(take)
+            await leaked.gated.entered.wait()
+        tasks.start_soon(leaked.take)
         await anyio.sleep(0.05)
 
-        assert taken == [], "an acquire took a tree the reclaim was still deleting"
-        gated.may_finish.set()
+        assert leaked.taken == [], "an acquire took a tree the reclaim was still deleting"
+        leaked.gated.may_finish.set()
 
-    assert taken and taken[0].is_dir(), "and once the reclaim is done the agent gets its tree"
+    assert leaked.taken and leaked.taken[0].is_dir(), (
+        "and once the reclaim is done the agent gets its tree"
+    )
+
+
+@pytest.mark.needs_git
+async def test_a_reclaim_leaves_the_tree_an_acquire_is_handing_over(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """J6, the other direction. An `acquire` already past its wait awaits the scratch
+    directory, its `acquiring` flush and the tier before it holds the tree, and a
+    reconcile landing in that gap found no holder: it reclaimed the tree the acquire
+    was building or reusing, and the agent came up in a directory being deleted.
+
+    Asserted with the tier's acquire held open, so the gap is the window.
+
+    Sabotage: take no claim in `acquire`, and the reconcile reclaims it.
+    """
+    leaked = await _leaked(mount, tmp_path, "acquire")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(leaked.take)
+        with anyio.fail_after(5):
+            await leaked.gated.entered.wait()
+        await leaked.seam.reconcile(leaked.session)
+
+        assert leaked.gated.reclaimed == [], "the reconcile reclaimed a tree an acquire was taking"
+        leaked.gated.may_finish.set()
+
+    assert leaked.taken and leaked.taken[0].is_dir(), "and the agent gets its tree whole"
+
+
+@pytest.mark.needs_git
+async def test_a_reclaim_asks_again_for_an_acquire_begun_after_its_fold(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """J6, the last line. A reconcile folds its leaks and only then starts a reclaim
+    per tree, so an acquire can take its claim in between: the fold never saw it,
+    and the reclaim's own check, just before the removal, is what does.
+
+    Started in that order, the reconcile folds before the acquire runs, and its
+    reclaim runs after the acquire has taken its claim.
+
+    Sabotage: drop the claim from `_reclaim`'s check, and it reclaims the tree.
+    """
+    leaked = await _leaked(mount, tmp_path, "acquire")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(leaked.seam.reconcile, leaked.session)
+        tasks.start_soon(leaked.take)
+        with anyio.fail_after(5):
+            await leaked.gated.entered.wait()
+        await anyio.sleep(0.05)
+
+        assert leaked.gated.reclaimed == [], "the reclaim took a tree an acquire had claimed"
+        leaked.gated.may_finish.set()
+
+    assert leaked.taken and leaked.taken[0].is_dir()

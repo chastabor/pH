@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Literal, TypeAlias, cast
 
 import yaml
@@ -72,9 +72,9 @@ from .cordis import (
     compose_rows,
 )
 from .cordis.loader import Mount, entry_ids, resolve_row
-from .json import JsonObject, JsonValue, as_bool, as_obj, as_seq, as_str, thaw_json
+from .json import JsonObject, JsonValue, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
 from .keys import MOUNT
-from .session import Session
+from .session import Session, SessionEvent
 from .session.store import session_written
 from .session.writers import log_writer
 from .text import count_of
@@ -86,6 +86,7 @@ __all__ = [
     "CLEARED",
     "DECLINED",
     "OVERRIDE",
+    "REFUSED",
     "SAVED",
     "WITHDRAWN",
     "Declined",
@@ -204,8 +205,9 @@ def base_of(profile: Profile) -> ProfileBase:
 
 
 def saved_base(session: Session) -> ProfileBase | None:
-    """The base this session last recorded, or `None` for one that has none."""
-    return session.projection(BASE, lambda event: ProfileBase.of(event.data))
+    """The base this session last recorded and did not refuse, or `None` for one that
+    has none — through the fold, so a base the log could not hold is not its base."""
+    return logged_environment(session).base
 
 
 async def record_base(ctx: Context, session: Session) -> ProfileBase | None:
@@ -219,15 +221,18 @@ async def record_base(ctx: Context, session: Session) -> ProfileBase | None:
     profile means for it), and one from before this record gets its first now.
     Written, then the session written, before this returns — so the agent's first
     step comes after the log can say what it ran in.
+
+    :raises OverrideNotRecorded: when the base did not reach disk, so the start that
+        asked is refused rather than run on a base its log may never hold.
     """
     mount = ctx.get(MOUNT)
     if mount is None or session.header.is_subagent:
         return None
-    if session.latest(BASE) is not None:
+    if saved_base(session) is not None:
         return None
     base = base_of(mount.profile)
-    _LOG.append(session, BASE, base.to_wire())
-    await session_written(ctx, session)
+    record = _LOG.append(session, BASE, base.to_wire())
+    await _recorded(ctx, session, "this session's base was not recorded", [record])
     return base
 
 
@@ -313,11 +318,36 @@ class OverrideNotRecorded(RuntimeError):
     """Named, so a daemon's reply carries it (`ph_app.protocol.respond`)."""
 
 
-async def _recorded(ctx: Context, session: Session, refused: str) -> None:
-    """What was just appended, on disk — or `OverrideNotRecorded`, saying what was not
-    done. **A change the log does not hold is not made**: every door here that changes
-    the environment writes first and follows only once this returns."""
-    if not await session_written(ctx, session):
+async def _written(
+    ctx: Context, session: Session, refused: str, records: Sequence[SessionEvent]
+) -> bool:
+    """Whether `records`, just appended, reached disk — **the one door every change
+    here is written through**. When they did not, a `REFUSED` naming them follows, so
+    the next flush that succeeds writes the refusal with them and the fold passes
+    over them: a change the log could not hold is never in force. A write cut off
+    part-way is refused too, since the change it guards is not made."""
+    try:
+        if await session_written(ctx, session):
+            return True
+    except BaseException:
+        _refuse(session, refused, records)
+        raise
+    _refuse(session, refused, records)
+    return False
+
+
+def _refuse(session: Session, refused: str, records: Sequence[SessionEvent]) -> None:
+    reason = f"{refused}: the session log could not be written"
+    _LOG.append(session, REFUSED, {"seqs": [one.seq for one in records], "reason": reason})
+
+
+async def _recorded(
+    ctx: Context, session: Session, refused: str, records: Sequence[SessionEvent]
+) -> None:
+    """`_written`, or `OverrideNotRecorded` saying what was not done. **A change the log
+    does not hold is not made**: a door that changes the environment writes first and
+    follows only once this returns."""
+    if not await _written(ctx, session, refused, records):
         raise OverrideNotRecorded(
             f"{refused}: the session log could not be written, and a change the log "
             "does not hold is not made"
@@ -394,8 +424,8 @@ async def override(
         source=source,
         command=command,
     )
-    _LOG.append(session, OVERRIDE, change.to_wire())
-    await _recorded(ctx, session, f'"{row_id}" was not changed')
+    record = _LOG.append(session, OVERRIDE, change.to_wire())
+    await _recorded(ctx, session, f'"{row_id}" was not changed', [record])
     await mount.reconfigure(row_id, config)
     return True
 
@@ -451,7 +481,7 @@ async def opened(ctx: Context, session: Session) -> None:
         if document.override and document.sets == "environment"
         for entry in as_seq(document.entries)
     ]
-    recorded = False
+    records: list[SessionEvent] = []
     for entry in started:
         change = Override(
             row=", ".join(entry_ids(entry)),
@@ -464,11 +494,11 @@ async def opened(ctx: Context, session: Session) -> None:
         # was differs only in which layer last said so.
         if [row.to_entry() for row in after] == [row.to_entry() for row in current]:
             continue
-        _LOG.append(session, OVERRIDE, change.to_wire())
+        records.append(_LOG.append(session, OVERRIDE, change.to_wire()))
         logged.append(change)
-        current, recorded = after, True
-    if recorded:
-        await _recorded(ctx, session, "this start's options were not applied")
+        current = after
+    if records:
+        await _recorded(ctx, session, "this start's options were not applied", records)
     await _converge(mount, current, _overridden(logged))
 
 
@@ -520,9 +550,8 @@ async def clear_overrides(
     if not cleared or env.base is None:
         return [], []
     with session.batch() as batch:
-        for row in cleared:
-            _LOG.append(batch, CLEARED, {"row": row, "command": command})
-    await _recorded(ctx, session, f"{', '.join(cleared)}: not cleared")
+        records = [_LOG.append(batch, CLEARED, {"row": row, "command": command}) for row in cleared]
+    await _recorded(ctx, session, f"{', '.join(cleared)}: not cleared", records)
     after = logged_environment(session)
     left = await _converge(ctx.require(MOUNT), environment(after), cleared)
     return cleared, left
@@ -618,6 +647,11 @@ CLEARED = "profile/override-cleared"
 """An override that stops applying, by the row it addressed. Required: a reader that
 skipped it would rebuild a session with an override it no longer runs with."""
 
+REFUSED = "profile/refused"
+"""Records a door here appended and then refused, because the log could not hold
+them (`_recorded`): their seqs, and why. Required: a reader that skipped it would
+start the session on a change the person was told was refused."""
+
 
 @dataclass(frozen=True, slots=True)
 class Declined:
@@ -660,7 +694,8 @@ class EnvironmentFold:
     one before it; a withdrawal takes back what was adopted and declines it. An
     override applies from where it is logged, **across a base
     switch** (decision 5), until a `profile/override-cleared` names a row it
-    addresses. Other types are passed over, so a caller may hand in a whole log.
+    addresses. A refusal takes back the records it names, as if never logged.
+    Other types are passed over, so a caller may hand in a whole log.
     """
 
     base: ProfileBase | None = None
@@ -668,8 +703,23 @@ class EnvironmentFold:
     declined: Declined | None = None
     adopted_clears: bool = False
     changes: list[Override] = field(default_factory=list)
+    _taken: list[tuple[int, str, Mapping[str, JsonValue]]] = field(default_factory=list)
+    """Every record folded so far, so a refusal can fold them again without the ones
+    it names. A session's environment records are few."""
 
-    def step(self, kind: str, data: Mapping[str, JsonValue]) -> None:
+    def step(self, seq: int, kind: str, data: Mapping[str, JsonValue]) -> None:
+        if kind == REFUSED:
+            refused = {as_int(one) for one in as_seq(data.get("seqs"))}
+            fresh = EnvironmentFold()
+            for record in self._taken:
+                if record[0] not in refused:
+                    fresh.step(*record)
+            for one in fields(self):
+                setattr(self, one.name, getattr(fresh, one.name))
+            return
+        if not kind.startswith("profile/"):
+            return
+        self._taken.append((seq, kind, data))
         if kind == BASE:
             self.base, self.adopted, self.declined = ProfileBase.of(data), None, None
             self.adopted_clears = False
@@ -696,17 +746,22 @@ class EnvironmentFold:
         )
 
 
-def fold_environment(records: Iterable[tuple[str, Mapping[str, JsonValue]]]) -> LoggedEnvironment:
-    """`(type, data)` records, in log order, folded into what they say (`EnvironmentFold`)."""
+def fold_environment(
+    records: Iterable[tuple[int, str, Mapping[str, JsonValue]]],
+) -> LoggedEnvironment:
+    """`(seq, type, data)` records, in log order, folded into what they say
+    (`EnvironmentFold`). The seq is what a refusal names."""
     fold = EnvironmentFold()
-    for kind, data in records:
-        fold.step(kind, data)
+    for seq, kind, data in records:
+        fold.step(seq, kind, data)
     return fold.environment
 
 
 def logged_environment(session: Session) -> LoggedEnvironment:
     """`fold_environment` over a live session's `profile/*` records."""
-    return fold_environment((event.type, event.data) for event in session.select("profile"))
+    return fold_environment(
+        (event.seq, event.type, event.data) for event in session.select("profile")
+    )
 
 
 async def switch_base(
@@ -732,10 +787,11 @@ async def switch_base(
     kept = logged_environment(session).overrides
     cleared = _overridden(kept) if clear_all else _said_by(version, kept)
     with session.batch() as batch:
-        _LOG.append(batch, BASE, version.to_wire())
-        for row in cleared:
-            _LOG.append(batch, CLEARED, {"row": row, "command": command})
-    await _recorded(ctx, session, f"the base was not changed to {version.name}")
+        records = [_LOG.append(batch, BASE, version.to_wire())]
+        records.extend(
+            _LOG.append(batch, CLEARED, {"row": row, "command": command}) for row in cleared
+        )
+    await _recorded(ctx, session, f"the base was not changed to {version.name}", records)
     return cleared
 
 
@@ -766,8 +822,8 @@ async def record_adopted(
     payload = dict(version.to_wire())
     if clear:
         payload["clear"] = True
-    _LOG.append(session, ADOPTED, payload)
-    return await session_written(ctx, session)
+    record = _LOG.append(session, ADOPTED, payload)
+    return await _written(ctx, session, f"{version.name} was not adopted", [record])
 
 
 async def withdraw_adoption(ctx: Context, session: Session, *, reason: str) -> None:
@@ -809,8 +865,8 @@ async def record_declined(ctx: Context, session: Session, version: ProfileBase) 
 
     Its own write rather than one helper for both answers: every write names its
     type where it is made, which is what `test_log_writers` reads the table from."""
-    _LOG.append(session, DECLINED, version.to_wire())
-    return await session_written(ctx, session)
+    record = _LOG.append(session, DECLINED, version.to_wire())
+    return await _written(ctx, session, f"{version.name} was not declined", [record])
 
 
 @dataclass(frozen=True, slots=True)
@@ -892,6 +948,8 @@ def record_summary(kind: str, data: Mapping[str, JsonValue]) -> str:
         return f"took back {name}'s version: it did not start ({reason})"
     if kind == SAVED:
         return f"saved as {as_str(data.get('name'))}: {as_str(data.get('path'))}"
+    if kind == REFUSED:
+        return f"refused, so not in force: {as_str(data.get('reason'))}"
     return kind
 
 

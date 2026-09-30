@@ -347,7 +347,7 @@ class JjWorkspaceProvider:
         path, ref = site.root, site.ref
         assert ref is not None, "a jj workspace is always bookmarked"
         name = ref.removeprefix(BRANCH_PREFIX)
-        fork = await self._add(managed, base, name, path)
+        fork, reused = await self._add(managed, base, name, path)
 
         # Through `_in` like every other call made in a directory that is not ours:
         # for a fan-out *from a child*, `managed` is that child's own workspace.
@@ -369,6 +369,7 @@ class JjWorkspaceProvider:
             root=path,
             scratch=scratch,
             kind=site.kind,
+            reused=reused,
             # True for both, deliberately, and for the git tier's reason: an
             # ephemeral child writes freely and its writes simply reach nobody.
             # `False` would be a confinement claim only a sandbox can make.
@@ -644,8 +645,9 @@ class JjWorkspaceProvider:
             provisioned=record.provisioned,
         )
 
-    async def _add(self, managed: Path, base: Path, name: str, path: Path) -> str:
-        """`jj workspace add`, tolerating the two states a resume can find.
+    async def _add(self, managed: Path, base: Path, name: str, path: Path) -> tuple[str, bool]:
+        """`jj workspace add`, tolerating the two states a resume can find. The fork
+        point, and whether the workspace was already there (`Workspace.reused`).
 
         A workspace already at this path is **reused**, the git tier's rule and
         for its reason: the agent id is the key, so finding one means finding this
@@ -663,7 +665,7 @@ class JjWorkspaceProvider:
             # rather than remembered: a rehydrated child is a *new process* half the
             # time, and its release owes the same "what has this done since it forked"
             # the first one did.
-            return await self._log(path, "@-", full=True, snapshot=False) or ""
+            return await self._log(path, "@-", full=True, snapshot=False) or "", True
         # `jj workspace add` refuses a path whose parent is missing, where `git
         # worktree add` creates the chain — so the first agent of a session pays
         # one mkdir rather than a decline that reads as "jj is broken here".
@@ -688,7 +690,7 @@ class JjWorkspaceProvider:
                 reason,
             )
             raise WorkspaceDeclined(reason, detail)
-        return fork
+        return fork, False
 
     def _why(self, registered: bool, path: Path) -> DeclineReason:
         """Which decline this was, from jj's *state* rather than its prose.

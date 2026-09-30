@@ -333,12 +333,13 @@ class GitWorktreeProvider:
         site = self.locate(session_id=session_id, agent_id=agent_id, access=access)
         path, ref = site.root, site.ref
         assert ref is not None, "a checkout is always on a branch"
-        await self._add(toplevel, path, ref)
+        reused = await self._add(toplevel, path, ref)
 
         return Workspace(
             root=path,
             scratch=scratch,
             kind=site.kind,
+            reused=reused,
             # True for both, and deliberately: an ephemeral child writes freely,
             # its writes simply reach nobody. `False` here would be a
             # confinement claim only the sandbox tier can make.
@@ -539,8 +540,9 @@ class GitWorktreeProvider:
             return None
         return Path(out.strip())
 
-    async def _add(self, toplevel: Path, path: Path, ref: str) -> None:
-        """`git worktree add`, tolerating the two states a resume can find.
+    async def _add(self, toplevel: Path, path: Path, ref: str) -> bool:
+        """`git worktree add`, tolerating the two states a resume can find. Whether
+        the worktree was already there (`Workspace.reused`).
 
         A worktree already checked out at this path is *reused*: the agent id is
         the key, so finding one means finding this agent's own tree, and
@@ -550,7 +552,7 @@ class GitWorktreeProvider:
         """
         if (path / ".git").exists():
             log.info("ph.seams.workspace_git: reusing the worktree already at %s", path)
-            return
+            return True
         code, _, err = await self._git(toplevel, "worktree", "add", "-b", ref, str(path), "HEAD")
         if code != 0:
             # The recovery hangs off the failure, which is what keeps it free for
@@ -585,6 +587,7 @@ class GitWorktreeProvider:
                 reason,
             )
             raise WorkspaceDeclined(reason, detail)
+        return False
 
     async def _why(self, toplevel: Path, path: Path, ref: str) -> DeclineReason:
         """Which decline this was, asked of git's *state* rather than its prose.
