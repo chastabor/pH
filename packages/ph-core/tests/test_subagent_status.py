@@ -18,6 +18,7 @@ from ph.cordis import Context
 from ph.keys import SESSIONS
 from ph.seams.subagents import (
     ADMITTED,
+    DELETED,
     SUSPENDED_DETAIL,
     child_is_live,
     child_state,
@@ -187,6 +188,22 @@ async def test_a_tombstone_lands_whole_with_its_ending(
     assert (state.deleted, state.status) == (True, "done" if ended else "canceled")
     assert not child_is_live(state)
     assert stored_types(ctx, child.id)[-len(types) :] == types
+
+
+async def test_a_child_is_tombstoned_once(mount: MountProfile) -> None:
+    """A revocation that reaches a child already revoked — a parent's teardown and
+    the cascade from the child above it both come to one grandchild — leaves the
+    first tombstone standing rather than writing a second.
+
+    Sabotage: drop the `deleted` check from `_tombstone`, and there are two.
+    """
+    ctx = await mount()
+    child = _child(ctx)
+
+    await record_deleted(ctx, child, "not needed")
+    await record_deleted(ctx, child, "parent-teardown")
+
+    assert [one.data["reason"] for one in child.events if one.type == DELETED] == ["not needed"]
 
 
 async def test_a_log_with_no_admission_is_not_a_child(mount: MountProfile) -> None:

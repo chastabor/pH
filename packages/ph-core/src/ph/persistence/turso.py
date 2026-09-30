@@ -57,7 +57,7 @@ from .protocol import (
     SessionPersistence,
     StoredSession,
     attach,
-    children_among,
+    descendants_among,
     stored_row,
     write_on_unwind,
 )
@@ -346,9 +346,9 @@ class TursoSessionStore:
             )
         return listed
 
-    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
-        """Every stored child of `parent_id`: one `scandir` of its family, then one
-        header `SELECT` per database whose name has the parent's prefix.
+    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored session beneath `parent_id`: one `scandir` of its family, then
+        one header `SELECT` per database whose name has the parent's prefix.
 
         **One connection per candidate, not one query.** No table here holds more
         than one header, since each session is its own database. A single query
@@ -364,7 +364,7 @@ class TursoSessionStore:
             candidates.append(
                 stored_row(session_id, self._peek_header(session_id, path), stat.st_mtime)
             )
-        return children_among(parent_id, candidates)
+        return descendants_among(parent_id, candidates)
 
     # ----------------------------------------------------------- internals --
 

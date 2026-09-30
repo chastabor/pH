@@ -58,7 +58,7 @@ from .protocol import (
     SessionPersistence,
     StoredSession,
     attach,
-    children_among,
+    descendants_among,
     stored_row,
     write_on_unwind,
 )
@@ -585,15 +585,15 @@ class JsonlSessionStore:
             for path, stat in session_logs(self.root)[:limit]
         ]
 
-    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
-        """Every stored child of `parent_id`: one `scandir` of its family, then one
-        header line per log whose name has the parent's prefix.
+    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored session beneath `parent_id`: one `scandir` of its family, then
+        one header line per log whose name has the parent's prefix.
 
         The same peek `stored` makes per row, so a child's row here is the row the
         listing would have shown for it. Only the candidates are read, which are
         the parent's descendants and any log named after it.
         """
-        return children_among(
+        return descendants_among(
             parent_id,
             (
                 stored_row(path.stem, _peek_header(path), stat.st_mtime)

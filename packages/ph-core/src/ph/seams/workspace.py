@@ -49,6 +49,7 @@ from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, runn
 from ..json import JsonValue, as_seq, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
+from ..persistence.families import descendants
 from ..session import Session, SessionEvent, intents_of, session_written
 from ..session.kinds import WORKSPACE_RESTORE, restore_settled
 from ..session.writers import log_writer
@@ -66,7 +67,6 @@ from . import workspace_provision
 from ._registry import claim_entry, claim_slot
 from .diagnostics import Diagnostic, contribute
 from .sandbox import SandboxPolicy
-from .subagents import descendants
 from .telemetry import ops_record
 from .workspace_provision import ProvisionEntry, ProvisionReport
 

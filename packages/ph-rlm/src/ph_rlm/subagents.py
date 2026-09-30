@@ -56,6 +56,7 @@ from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.adapter import LlmError
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message, text_of
 from ph.seams.subagents import (
+    PARENT_TEARDOWN,
     SUSPENDED_DETAIL,
     Access,
     DowngradeReason,
@@ -67,7 +68,6 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     child_model_key,
     child_route,
-    default_child_name,
     open_child_log,
     record_deleted,
     record_ended,
@@ -86,8 +86,6 @@ from ph.wire import WireModel
 from .keys import RLM_CHILDREN
 
 __all__ = [
-    "MAX_NAME_CHARS",
-    "PARENT_TEARDOWN",
     "PROVIDER_NAME",
     "RLM_MAX_DEPTH",
     "TASK_PREFIX",
@@ -104,11 +102,8 @@ RLM_MAX_DEPTH = 2
 """Prime Agent's `RLM_MAX_DEPTH`. Depth 0 delegates, depth 1 delegates, depth 2
 does the work — three levels is already a lot of indirection between a human's
 question and the tokens that answer it."""
-MAX_NAME_CHARS = 64
 TASK_PREFIX = "[task from parent]"
 """Ported verbatim: the child's prompt recognizes this label."""
-PARENT_TEARDOWN = "parent-teardown"
-"""The release reason for a child whose parent's scope unwound under it (I2)."""
 
 
 class Config(WireModel):
@@ -232,11 +227,8 @@ class RlmChildProvider:
             raise SubagentSpawnError("a subagent needs a prompt describing its task")
 
         run_id = f"child-{secrets.token_hex(6)}"
-        taken = [
-            child.name for child in self.ctx.require(SUBAGENTS).children(parent_session.id).values()
-        ]
-        name = self._resolve_name(request.name, prompt, run_id, taken)
-        return await self._admit(request, run_id=run_id, name=name)
+        # Named by the seam, unique among its siblings, before this was asked.
+        return await self._admit(request, run_id=run_id, name=request.name or run_id)
 
     async def readmit(
         self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
@@ -411,21 +403,6 @@ class RlmChildProvider:
         `SessionBusy`, which a readmission settles as one it could not resume.
         """
         return await open_child_log(self.ctx, parent_session, run_id, agentPreset="rlm")
-
-    def _resolve_name(
-        self, requested: str | None, prompt: str, run_id: str, taken: list[str]
-    ) -> str:
-        if requested is None:
-            return default_child_name(prompt, run_id, taken=taken)
-        name = requested.strip()
-        if not name or len(name) > MAX_NAME_CHARS:
-            raise SubagentSpawnError(f"a subagent name must be 1..{MAX_NAME_CHARS} characters")
-        if name in taken:
-            raise SubagentSpawnError(
-                f'a sibling is already named "{name}"; names address children, so they '
-                "must be unique among siblings"
-            )
-        return name
 
     def _resolve_model(
         self, request: SubagentRequest, parent: AgentHandle

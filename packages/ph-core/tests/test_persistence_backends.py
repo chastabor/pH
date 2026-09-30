@@ -105,7 +105,12 @@ from ph.persistence import (
     materialize,
 )
 from ph.persistence.jsonl import JsonlSessionStore
-from ph.persistence.protocol import SURVEY_LIMIT, SessionPersistence, StoredSession
+from ph.persistence.protocol import (
+    SURVEY_LIMIT,
+    SessionPersistence,
+    StoredSession,
+    descendants_among,
+)
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, family_for
 from ph.testing import MountProfile, log_event, reference_fork, user_payload
 
@@ -1269,7 +1274,7 @@ def _child(store: SessionPersistence, child_id: str, parent: Session) -> Session
     not the log a fork was cut from. `family` is given explicitly here, and
     `SessionStore.create` does the same thing when it builds a child of a live
     parent: a child is filed in its parent's directory, and that directory is
-    where `children_of` looks.
+    where `descendants_of` looks.
     """
     return _session(
         store,
@@ -1316,7 +1321,7 @@ async def test_a_parent_lists_every_child_past_the_survey_limit(
         await store.flush(child)
         store.forget(child_id)
 
-    listed = store.children_of("p", parent.header.family)
+    listed = store.descendants_of("p", parent.header.family)
     assert [row.session_id for row in listed] == sorted(spawned), (
         "a child below the listing's cut was not listed, or the order is not by id"
     )
@@ -1328,18 +1333,20 @@ async def test_a_parent_lists_every_child_past_the_survey_limit(
     assert header.delegating_parent == "p"
 
 
-async def test_a_grandchild_is_not_its_grandparents_child(store: SessionPersistence) -> None:
-    """**The id prefix narrows the search, and the header decides.**
+async def test_a_grandchild_is_listed_beneath_its_grandparent(
+    store: SessionPersistence,
+) -> None:
+    """**The whole tree in one read, each row at its own level.**
 
-    A child's id is `<parent>-child-<hex>`, so a grandchild's id is
-    `<parent>-child-<hex>-child-<hex>`. It starts with its grandparent's id too,
-    and it is filed in the same family. Listing by name alone would give the
-    grandparent both generations, and a ladder that settled a grandchild as
-    its own child would settle it from the wrong log. Each generation lists
-    only its own children.
+    A child's id is `<parent>-child-<hex>`, so a grandchild's is
+    `<parent>-child-<hex>-child-<hex>`: it starts with its grandparent's id too, and
+    it is filed in the same family. So the scan that finds a parent's children finds
+    theirs with them, and one read gives a restart the whole family — listing one
+    level at a time left everything below the first unread after a restart. Each
+    row's header says whose child it is, which is how a reader files it.
 
-    Sabotage: drop the `delegating_parent` check from `children_among`, and the
-    grandparent lists the grandchild.
+    Sabotage: keep only rows whose `delegating_parent` is the parent, and the
+    grandchild is missing.
     """
     parent = _session(store, "p")
     _append(store, parent, "turn/start", {"turn": 0})
@@ -1349,11 +1356,33 @@ async def test_a_grandchild_is_not_its_grandparents_child(store: SessionPersiste
     await store.flush(_child(store, "p-child-a-child-b", child))
 
     family = parent.header.family
-    assert [row.session_id for row in store.children_of("p", family)] == ["p-child-a"]
-    assert [row.session_id for row in store.children_of("p-child-a", family)] == [
+    listed = store.descendants_of("p", family)
+    assert [(row.session_id, row.delegating_parent) for row in listed] == [
+        ("p-child-a", "p"),
+        ("p-child-a-child-b", "p-child-a"),
+    ]
+    assert [row.session_id for row in store.descendants_of("p-child-a", family)] == [
         "p-child-a-child-b"
     ]
-    assert store.children_of("p-child-a-child-b", family) == ()
+    assert store.descendants_of("p-child-a-child-b", family) == ()
+
+
+def test_a_chain_that_loops_is_neither_listed_nor_a_hang() -> None:
+    """A pair of logs naming each other as parent — damage, or a hand edit — is in
+    nobody's tree, and must not hang the listing. The walk goes down from the parent
+    (`families.descendants`), so it never enters the pair; the rows beside them are
+    listed as ever, at their own levels.
+
+    Sabotage: list every row whose parent is `p` or another row, rather than walking
+    down from `p`, and the pair is listed.
+    """
+
+    def row(session_id: str, spawner: str) -> StoredSession:
+        return StoredSession(session_id=session_id, modified=0.0, delegating_parent=spawner)
+
+    rows = [row("p-a", "p-b"), row("p-b", "p-a"), row("p-c", "p"), row("p-c-d", "p-c")]
+
+    assert [one.session_id for one in descendants_among("p", rows)] == ["p-c", "p-c-d"]
 
 
 async def test_a_fork_is_not_a_child(store: SessionPersistence) -> None:
@@ -1379,4 +1408,4 @@ async def test_a_fork_is_not_a_child(store: SessionPersistence) -> None:
 
     rows = {row.session_id: row for row in store.stored()}
     assert rows["p-fork"].parent == "p", "the fixture's fork does not name its source"
-    assert [row.session_id for row in store.children_of("p", family)] == ["p-child-a"]
+    assert [row.session_id for row in store.descendants_of("p", family)] == ["p-child-a"]

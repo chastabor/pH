@@ -16,9 +16,9 @@ this runs on every step and every call, and a session's log is mostly chunks.
 
 **Children are counted in their own logs, not the parent's** (Phase 11). A
 child's `subagent/admitted` is in the child's log, stamped with the seq of its
-parent's latest `turn/start`, so the child caps ask `ctx.subagents.children`
-and join that to the parent's current turn when a spawn is judged
-(`child_counts`). The fold above stays a fold over one log.
+parent's latest `turn/start`, so the child caps ask the seam for the count when a
+spawn is judged (`SubagentService.child_counts`). The fold above stays a fold over
+one log.
 
 **Two vocabularies, mapped once.** Upstream counts per *thread* (durable across
 runs) and per *run* (one invocation). pH's equivalents are the **session** and
@@ -81,12 +81,10 @@ __all__ = [
     "TOOL_DENIAL",
     "WARN_FRACTION",
     "CallBudget",
-    "ChildCounts",
     "Config",
     "Counts",
     "ModelCallLimitExceeded",
     "apply",
-    "child_counts",
     "counts_of",
 ]
 
@@ -232,7 +230,8 @@ class ToolCallLimits(CallBudget):
 class ChildLimits(CallBudget):
     """How many children an agent may spawn, per turn and per session.
 
-    Counted from the children's own admissions (`ctx.subagents.children`), so a
+    Counted from the children's own admissions and the spawns on their way
+    (`ctx.subagents.child_counts`), so a
     resumed session keeps its count once its children are loaded — which the
     resume sweep does first — and enforced as a `ctx.subagents.guard` before the
     provider is asked, so a refused spawn creates nothing. Every ceiling is unset
@@ -315,7 +314,7 @@ class Config(WireModel):
 class Counts:
     """Everything the limits ask of the session's own log, folded in one pass.
 
-    Not its children: those are in their own logs (`ChildCounts`)."""
+    Not its children: those are in their own logs (`SubagentService.child_counts`)."""
 
     session_calls: int = 0
     turn_calls: int = 0
@@ -453,43 +452,6 @@ def _result_facts(event: SessionEvent) -> tuple[str, bool]:
 def counts_of(session: Session) -> Counts:
     """The counts folded from scratch — the cache's cold path, and a test's."""
     return _extend(Counts(), session, 0)
-
-
-@dataclass(frozen=True, slots=True)
-class ChildCounts:
-    """A parent's children, as the child caps count them."""
-
-    turn: int = 0
-    """Those admitted in the parent's current turn."""
-    session: int = 0
-    """All of them, a deleted one included."""
-
-
-def child_counts(subagents: SubagentService, parent: Session) -> ChildCounts:
-    """How many children `parent` has made, this turn and in all (Phase 11).
-
-    **Read from the children's own logs, when a spawn is judged.** A parent's log
-    no longer holds `subagent/admitted`; each child's does, stamped with
-    `parentTurn`, the seq of the parent's latest `turn/start` when it was
-    admitted. Counted in the parent's log, the caps saw no children and never
-    refused. Joined here rather than inside the fold, which stays a fold over one
-    log (`SessionFoldCache` and its staleness poll).
-
-    **The turn is the parent's current `turn/start`, by seq.** A child admitted
-    before the parent had any turn carries no `parentTurn`, and counts in the
-    turn only while the parent still has none, just as the old fold reset only
-    at a `turn/start`.
-
-    `children` covers the children this process runs or has read off the store;
-    the resume sweep reads them (`load_children`) before a resumed parent runs.
-    """
-    children = subagents.children(parent.id).values()
-    opened = parent.latest("turn/start")
-    turn = opened.seq if opened is not None else None
-    return ChildCounts(
-        turn=sum(1 for child in children if child.parent_turn == turn),
-        session=len(children),
-    )
 
 
 # ------------------------------------------------------------- the breaches --
@@ -799,13 +761,14 @@ async def apply(ctx: Context, config: Config) -> None:
         """The child caps, asked before every admission (P4-04).
 
         Of the service the guard is on, which is the one that knows the children
-        (`child_counts`), rather than of the fold the other ceilings read.
+        and the spawns on their way (`child_counts`), rather than of the fold the
+        other ceilings read.
         """
         settings = config.children
         session = request.parent.session
         if session is None:
             return None
-        current = child_counts(subagents, session)
+        current = subagents.child_counts(session)
         exceeded = _over(settings, current.turn, current.session, noun="children")
         if not exceeded:
             return None

@@ -15,11 +15,19 @@ thing the two backends actually differ by here.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..session.store import child_session_id
 
-__all__ = ["children_under", "family_dirs", "locate_under", "logs_under", "path_under"]
+__all__ = [
+    "children_under",
+    "descendants",
+    "family_dirs",
+    "locate_under",
+    "logs_under",
+    "path_under",
+]
 
 
 def path_under(root: Path, family: str, name: str, suffix: str) -> Path:
@@ -94,7 +102,7 @@ def logs_under(root: Path, suffix: str, *, tag: str = "") -> list[tuple[Path, os
 def children_under(
     root: Path, family: str, parent_id: str, suffix: str
 ) -> list[tuple[Path, os.stat_result]]:
-    """The logs in one family that **may** be `parent_id`'s children: one `scandir`.
+    """The logs in one family that **may** be beneath `parent_id`: one `scandir`.
 
     Two facts narrow the store to this, and neither is the answer:
     - **A child is filed in its parent's family.** `SessionStore.create` inherits
@@ -102,9 +110,9 @@ def children_under(
     - **A child's id starts with its parent's id and a dash**
       (`<parent>-child-<hex>`), so only the names that do are `stat`ed.
 
-    The prefix only narrows. A grandchild shares it, and so can a fork someone
-    named after its source, so the header peek each backend makes afterwards
-    decides (`children_among`).
+    The prefix only narrows. A grandchild shares it, which is what lets one scan find
+    a whole tree, and so can a fork someone named after its source, so the header
+    peek each backend makes afterwards decides (`descendants_among`).
 
     Not `logs_under` with a filter. The listing `stat`s every log in the store
     and then cuts at a limit, and a parent's children fall below that cut once
@@ -162,3 +170,47 @@ def locate_under(root: Path, name: str, suffix: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> list[str]:
+    """`agent_id` and everything spawned beneath it, transitively (P6-28).
+
+    **Not `reachable_family`, and the difference is the point.** That answers "who
+    may this agent *address*" — the C7 nuclear family, including siblings and the
+    parent — which is the right rule for a message. This answers "whose leftovers are
+    mine to account for": a sibling's worktree is not this agent's to enumerate,
+    still less to collect, and borrowing the messaging rule would widen a filesystem
+    question with an answer computed for a different one (I7).
+
+    Transitive where `reachable_family` is one hop: a grandchild that failed is
+    evidence its grandparent is the only live party left to look at, because the
+    child that spawned it settled too.
+
+    An agent's id is its session's id, so the links are `delegating_parent` — the
+    agent that spawned each one — and nothing needs a side index. Not
+    `parent_session`: a fork names the log it was cut from there, and a fork's
+    trees are its own, not its source's leftovers. **`(id, parent)` pairs rather than
+    `Session` objects**, which is what lets the workspace collector and the store's
+    `descendants_among` answer this from a *listing* — a family is narrowed before a
+    single log is read rather than after all of them are.
+
+    Breadth-first, and cycle-safe by construction: `seen` is tested before descent,
+    so a log claiming its own ancestor as a child costs a wasted lookup rather than a
+    hang.
+    """
+    children: dict[str, list[str]] = {}
+    known = set()
+    for session_id, parent in lineage:
+        known.add(session_id)
+        if parent:
+            children.setdefault(parent, []).append(session_id)
+    if agent_id not in known:
+        return []
+    found = [agent_id]
+    seen = {agent_id}
+    for current in found:
+        for child in children.get(current, ()):
+            if child not in seen:
+                seen.add(child)
+                found.append(child)
+    return found

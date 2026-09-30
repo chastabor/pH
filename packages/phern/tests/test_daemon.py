@@ -162,15 +162,15 @@ from ph.paths import resolve_roots
 from ph.persistence import session_path
 from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
-from ph.seams.subagents import ADMITTED, DELETED, STATUS, SubagentService
-from ph.session import Session, SessionEvent, SessionHeader
+from ph.seams.subagents import ADMITTED, DELETED, PARENT_TEARDOWN, STATUS, SubagentService
+from ph.session import Session, SessionEvent, SessionHeader, session_written
 from ph.session.kinds import SESSION_HOLDER, WORKSPACE_RESTORE, credential_hold
 from ph.testing import ReapedHost, log_event, not_none, stored_log, stored_types
 from ph_app import runtime as runtime_module
 from ph_app import verbs
 from ph_app.daemon import recovery, server
 from ph_app.daemon.client import DaemonClient
-from ph_app.daemon.projections import family_rows
+from ph_app.daemon.projections import family_of, family_rows
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import NotARoot, Root, RootStartAbandoned, Supervisor
@@ -1416,10 +1416,9 @@ async def test_a_root_with_a_live_child_is_not_released(
     string any producer emits, and a root that had ever run a child to completion
     could never be released.
 
-    **A grandchild counts while this mount runs it, and not after.** One left
-    unsettled on disk beneath a child that has ended is work nothing will ever
-    readmit — the sweep reaches a child's children only through a child it
-    readmits — so holding the root for it would hold it for good.
+    **A grandchild counts too**, at every level: the resume sweep has revoked what
+    an ended child left unfinished, so a live one is real work
+    (`test_what_an_ended_child_left_unfinished_is_revoked_when_its_root_comes_back`).
 
     Sabotage: read the root's own log for `subagent/*` again, and every child
     reads as absent — each root is released under a working child.
@@ -1444,17 +1443,51 @@ async def test_a_root_with_a_live_child_is_not_released(
         log_event(spawned(root, "c"), STATUS, {"status": "who-knows"})
         assert await supervisor.sweep(after=0) == [], "an unknown status released the parent"
 
-        # A grandchild this mount is running holds the root, under a child that
-        # has already ended.
+        # A grandchild that is working holds the root, even under a child that has
+        # already ended.
         root = await supervisor.start("deep")
         child = spawned(root, "c")
         log_event(child, STATUS, {"status": "done"})
         grandchild = spawned(root, "g", under=child)
         assert await supervisor.sweep(after=0) == [], "released under a running grandchild"
 
-        # Let go unsettled, it is on disk and nothing runs it: not a reason to stay.
-        root.ctx.require(SESSIONS).dispose(grandchild.id)
-        assert await supervisor.sweep(after=0) == ["deep"], "held for good by an orphan"
+        log_event(grandchild, STATUS, {"status": "done"})
+        assert await supervisor.sweep(after=0) == ["deep"], "the grandchild never settled"
+
+
+async def test_what_an_ended_child_left_unfinished_is_revoked_when_its_root_comes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The whole tree is read when its root comes back, and an ended child's
+    unfinished children are ended in their own logs.**
+
+    A child's own children are artifacts of its scope, revoked as it unwinds — but a
+    crash between a child's ending and theirs leaves a grandchild `running` on disk
+    beneath a child that ended. Read one level at a time, the next process never saw
+    it: its spend reached no goal, the panel never listed it, and nothing ended it.
+    Now the root's whole tree is read as its log opens, and the sweep revokes what
+    the ended child left — so it holds nothing, and reads as what it is.
+
+    Sabotage: skip `_revoke_beneath` for a child that had ended, and the grandchild
+    is still working after the restart.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("deep")
+        child = spawned(root, "c")
+        grandchild = spawned(root, "g", under=child)
+        log_event(grandchild, STATUS, {"status": "running"})
+        log_event(child, STATUS, {"status": "done"})
+        for log in (root.session, child, grandchild):
+            assert await session_written(root.ctx, log)
+
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("deep")
+        family = {state.run_id: state for state in family_of(root)}
+        assert set(family) == {"c", "g"}, "the grandchild was not read with its root"
+        revoked = family["g"]
+        assert (revoked.deleted, revoked.deleted_reason) == (True, PARENT_TEARDOWN)
+        assert revoked.status == "canceled"
+        assert await supervisor.sweep(after=0) == ["deep"], "held by what the child left"
 
 
 # --- P11-07: the family, from the children's own logs ------------------------

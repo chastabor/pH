@@ -160,7 +160,7 @@ async def main(project: Path, children_on: str) -> None:
             while not settled_into_place():
                 await anyio.sleep(0.02)
         # Every log, the children's among them: a restart finds a root's children by
-        # their own logs on disk (`children_of`), and the root's names none of them.
+        # their own logs on disk (`descendants_of`), and the root's names none of them.
         for session in sessions.list():
             await sessions.flush(session)
         print(

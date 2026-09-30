@@ -739,7 +739,7 @@ its parent's. The full account is `plans/Each_Session_Owns_Its_Log_Plan.md`;
 
 | ID | Work item | Delivers | Gate |
 |---|---|---|---|
-| P11-01 | **Landed.** The store lists a session's children (`children_of`), past the survey limit | I-5 | `test_persistence_backends` |
+| P11-01 | **Landed.** The store lists a session's children (`children_of`, since renamed `descendants_of`), past the survey limit | I-5 | `test_persistence_backends` |
 | P11-02 | **Landed.** A child's records in its own log, through doors; the seam writes the admission; format 3 | rule 2 | `test_subagent_status`, `test_log_writers` |
 | P11-03 | **Landed.** `ChildState`, a pure fold per child; `children` / `load_children` | I6 | `test_fold_laws`, `test_child_logs` |
 | P11-04 | **Landed.** The seam's admission, sweep, readmission, holds and delete read and write the child's log; readmission finds its provider by `owner` | A5 | `test_child_logs`, `test_subagent_grant` |

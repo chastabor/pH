@@ -84,6 +84,7 @@ from ph.seams.credentials import waiting_for
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
+    PARENT_TEARDOWN,
     STATUS,
     SUSPENDED_DETAIL,
     UNRECOVERABLE_DETAIL,
@@ -127,7 +128,6 @@ from ph.tools.definition import NotDone
 from ph_rlm.bindings import RUN_TOOL
 from ph_rlm.keys import RLM_CHILDREN
 from ph_rlm.subagents import (
-    PARENT_TEARDOWN,
     PROVIDER_NAME,
     TASK_PREFIX,
     RlmChildProvider,
@@ -304,7 +304,7 @@ async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
     It is in the child's own log, and the seam flushes that log before it opens the
     child's gate: a crash any time after the child's first step leaves a log on disk
     that says what the child was asked, by whom and under which ceiling — which is
-    what the store lists a parent's children by (`children_of`) and the sweep
+    what the store lists a parent's children by (`descendants_of`) and the sweep
     readmits them from. It used to ride the parent's log in memory, while the child's
     own flushes never wrote its parent, so a crash mid-run left a child with a log and
     a tree that nothing on disk named.
@@ -901,12 +901,12 @@ def test_the_family_reach_rule_is_the_nuclear_family() -> None:
 
 
 def test_a_default_name_describes_the_task_and_stays_unique() -> None:
-    name = default_child_name("Review the authentication middleware for races", "abcdef123456")
+    name = default_child_name("Review the authentication middleware for races", "abcdef12")
     assert name.startswith("subagent-review-the-authentication-")
     assert name.endswith("-abcdef12")
-    assert default_child_name("x", "abcdef123456", taken=[name]) != name
+    assert default_child_name("x", "abcdef12", taken=[name]) != name
     # An unslugifiable prompt still yields an addressable name.
-    assert default_child_name("!!!", "abcdef123456") == "subagent-task-abcdef12"
+    assert default_child_name("!!!", "abcdef12") == "subagent-task-abcdef12"
 
 
 # ------------------------------------------------------------------- the grant --

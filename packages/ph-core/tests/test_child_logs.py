@@ -21,18 +21,22 @@ from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
+    PARENT_TEARDOWN,
     STATUS,
     SubagentRequest,
     SubagentRun,
     SubagentSpawnError,
     exhausted_detail,
+    record_deleted,
+    record_ended,
 )
-from ph.session import Session, SessionEvent, SessionHeader, session_written
+from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, session_written
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
     StubSubagentProvider,
     admitted_child,
+    assistant_payload,
     log_event,
     stored_events,
     stored_types,
@@ -75,10 +79,17 @@ async def _from_an_earlier_process(
     )
     for kind, data in records:
         log_event(child, kind, data)
-    assert await session_written(ctx, child)
-    ctx.require(SESSIONS).dispose(child.id)
-    ctx.require(SUBAGENTS).forget_session(parent.id)
+    await _as_an_earlier_process_left_them(ctx, parent, child)
     return child.id
+
+
+async def _as_an_earlier_process_left_them(ctx: Context, parent: Session, *logs: Session) -> None:
+    """Each of `logs` on disk and nothing about them in memory — what the next process
+    finds."""
+    for log in logs:
+        assert await session_written(ctx, log)
+        ctx.require(SESSIONS).dispose(log.id)
+    ctx.require(SUBAGENTS).forget_session(parent.id)
 
 
 async def test_a_child_is_on_its_own_disk_before_its_gate_opens(mount: MountProfile) -> None:
@@ -243,3 +254,143 @@ async def test_a_stored_child_is_read_once_per_mount(
 
     assert reads == [child_id]
     assert first == second and list(first) == ["r1"]
+
+
+async def test_a_childs_own_children_are_read_with_its_root(mount: MountProfile) -> None:
+    """**The whole tree, in one read.** A restart used to read a parent's children one
+    level at a time, and only beneath children it readmitted — so a grandchild beneath
+    a child that had ended was never read: its spend reached no goal, and nothing
+    listed it. Every descendant is filed in its root's family under its root's id, so
+    the one read that finds the children finds all of theirs.
+
+    Sabotage: file only the parent's direct children in `_stored_tree`, and the
+    grandchild — and what it spent — is missing.
+    """
+    ctx = await mount()
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1")
+    log_event(child, STATUS, {"status": "done"})
+    grandchild = admitted_child(ctx, child, "r2")
+    log_event(
+        grandchild,
+        "assistant/message",
+        {**assistant_payload("found it", "m1"), "usage": {"inputTokens": 5, "outputTokens": 2}},
+        SurfaceIntent("append", ()),
+    )
+    log_event(grandchild, STATUS, {"status": "done"})
+    await _as_an_earlier_process_left_them(ctx, parent.session, child, grandchild)
+    subagents = ctx.require(SUBAGENTS)
+
+    await subagents.load_children(parent.session.id, parent.session.header.family)
+
+    assert list(subagents.children(child.id)) == ["r2"], "the grandchild was not read"
+    assert subagents.delegated_tokens(parent.session.id) == 7
+
+
+@pytest.mark.parametrize("ending", ["ended-before-the-crash", "given-up-by-the-sweep"])
+async def test_what_an_ended_child_left_unfinished_is_revoked(
+    mount: MountProfile, ending: str
+) -> None:
+    """**An ended child's own children end with it** — in their own logs, on a restart.
+
+    A child's children are artifacts of its scope, revoked (`PARENT_TEARDOWN`) as it
+    unwinds. A crash between a child's ending and theirs left a grandchild `running`
+    on disk beneath a child that had ended, and nothing would ever readmit it: its
+    root read as working for good. The sweep finishes that teardown — for a child that
+    ended before the crash, and for one it gives up on itself.
+
+    Sabotage: skip `_revoke_beneath`, and the grandchild is still `running`.
+    """
+    ctx = await mount()
+    ctx.require(SUBAGENTS).register_provider("stub", _Readmitting(StubSubagentProvider(root=ctx)))
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1", {"prompt": "look"})
+    if ending == "ended-before-the-crash":
+        log_event(child, STATUS, {"status": "done"})
+    else:
+        for _ in range(3):
+            log_event(child, STATUS, {"status": "running", "cause": "resumed"})
+    grandchild = admitted_child(ctx, child, "r2", {"prompt": "dig"})
+    log_event(grandchild, STATUS, {"status": "running"})
+    await _as_an_earlier_process_left_them(ctx, parent.session, child, grandchild)
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    revoked = ctx.require(SUBAGENTS).state(grandchild.id)
+    assert revoked is not None
+    assert (revoked.status, revoked.deleted, revoked.deleted_reason) == (
+        "canceled",
+        True,
+        PARENT_TEARDOWN,
+    )
+    assert stored_types(ctx, grandchild.id)[-2:] == [STATUS, DELETED]
+
+
+@pytest.mark.parametrize("door", ["ended", "deleted"])
+async def test_a_child_that_ends_takes_what_it_left_unfinished_with_it(
+    mount: MountProfile, door: str
+) -> None:
+    """**In this process too, not only on a restart**, and whichever door ended it.
+
+    Its running children are its provider's, revoked as its scope unwinds. What
+    nothing else ended was a child this process is not running — here one waiting
+    beneath it, and that one's own child — which read as working for good: it held
+    its root out of passivation, and a credential it waited for would have readmitted
+    it under a parent that had ended. A child that finished stays finished.
+
+    Sabotage: drop `_end_beneath` from the door, and the waiting grandchild is still
+    `queued`.
+    """
+    ctx = await mount()
+    subagents = ctx.require(SUBAGENTS)
+    subagents.register_provider("stub", StubSubagentProvider(root=ctx))
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1")
+    waiting = admitted_child(ctx, child, "r2")
+    beneath = admitted_child(ctx, waiting, "r3")
+    log_event(beneath, STATUS, {"status": "running"})
+    finished = admitted_child(ctx, child, "r4")
+    log_event(finished, STATUS, {"status": "done"})
+    child_agent = ctx.require(AGENTS).create(child, FAKE_OPTIONS)
+    running = await subagents.start("stub", SubagentRequest(prompt="go", parent=child_agent))
+
+    if door == "ended":
+        await record_ended(ctx, child, "done")
+    else:
+        await record_deleted(ctx, child, "not needed")
+
+    for revoked in (waiting, beneath):
+        state = subagents.state(revoked.id)
+        assert state is not None
+        assert (state.status, state.deleted_reason) == ("canceled", PARENT_TEARDOWN)
+    left = [subagents.state(one) for one in (finished.id, running.session_id)]
+    assert [(one.status, one.deleted) for one in left if one is not None] == [
+        ("done", False),
+        ("queued", False),
+    ], "a finished child and a running one are not the cascade's"
+
+
+async def test_a_stored_child_that_is_deleted_takes_its_children_with_it(
+    mount: MountProfile,
+) -> None:
+    """A delete that reaches a child on disk writes its tombstone there, and what it
+    left unfinished beneath it goes too. It used to tombstone the child alone.
+
+    Sabotage: as above, and the grandchild is still `running`.
+    """
+    ctx = await mount()
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1", {"prompt": "look"})
+    grandchild = admitted_child(ctx, child, "r2", {"prompt": "dig"})
+    log_event(grandchild, STATUS, {"status": "running"})
+    await _as_an_earlier_process_left_them(ctx, parent.session, child, grandchild)
+
+    assert await ctx.require(SUBAGENTS).delete(parent.session, "r1", reason="not needed")
+
+    assert stored_types(ctx, grandchild.id)[-2:] == [STATUS, DELETED]
+    revoked = ctx.require(SUBAGENTS).state(grandchild.id)
+    assert revoked is not None and revoked.deleted_reason == PARENT_TEARDOWN

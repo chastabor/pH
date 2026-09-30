@@ -694,9 +694,7 @@ class SessionChildrenNotice(SessionNotice):
     is correct in whatever order it arrives and a client keeps no deltas.
 
     **A parent before its own children, siblings in admission order**, so a reader
-    draws the tree in one pass. Only what this daemon has read: every child of the
-    root, and the children of every child it has run or readmitted — a grandchild
-    beneath a child that ended in an earlier process is on disk and not listed.
+    draws the tree in one pass — every level of it, read as the root's log opens.
     """
 
     METHOD: ClassVar[str] = "session.children"

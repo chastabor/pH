@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
+
 from ..keys import SESSIONS
 from ..seams.subagents import (
     Access,
@@ -26,11 +28,12 @@ from ..seams.subagents import (
     SubagentRequest,
     SubagentResult,
     SubagentRun,
+    SubagentSpawnError,
     SubagentStatus,
     open_child_log,
 )
 
-__all__ = ["StubSubagentProvider"]
+__all__ = ["HoldingProvider", "RefusingProvider", "StubSubagentProvider"]
 
 
 @dataclass(slots=True)
@@ -104,3 +107,37 @@ class StubSubagentProvider:
     def last(self) -> SubagentRequest:
         """The most recent request, for a test asserting what was delegated."""
         return self.requests[-1]
+
+
+@dataclass(slots=True)
+class HoldingProvider:
+    """Holds its first spawn mid-build until `go` is set, and passes the rest
+    straight to `inner`.
+
+    So the spawns after the first are judged while that one is past its guards and
+    not yet admitted, which is where one step's tool calls, run side by side, leave
+    each other. A test sets `go` once it has spawned what it came to."""
+
+    inner: StubSubagentProvider
+    first: SubagentRequest | None = None
+    """The first spawn, as the seam handed it over."""
+    building: anyio.Event = field(default_factory=anyio.Event)
+    """Set once the first spawn is being held."""
+    go: anyio.Event = field(default_factory=anyio.Event)
+
+    async def start(self, request: SubagentRequest) -> SubagentRun:
+        if self.first is None:
+            self.first = request
+            self.building.set()
+            await self.go.wait()
+        return await self.inner.start(request)
+
+
+@dataclass(frozen=True, slots=True)
+class RefusingProvider:
+    """Refuses every child it is asked to build, once the seam's guards have passed."""
+
+    reason: str = "no room for this child"
+
+    async def start(self, request: SubagentRequest) -> SubagentRun:
+        raise SubagentSpawnError(self.reason)

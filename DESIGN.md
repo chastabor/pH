@@ -1121,7 +1121,7 @@ In the log, the same relationship is `SessionHeader.parent_session`,
 id, so the link needs no side index. It is also how a parent finds its children
 after a restart: a child is filed in its parent's family with an id that starts
 `<parent>-`, and the store lists those logs and lets each header decide
-(`SessionArchive.children_of`).
+(`SessionArchive.descendants_of`).
 
 ### 6.2 Orchestration
 
@@ -1146,9 +1146,9 @@ child appends to its parent's log or flushes it.
 
 The spawn path, in order. The seam (`SubagentService.start`): profile, preset and
 model resolution → the parent's stored children read (`load_children`) → the spawn
-guards → the ceiling → the provider (`ph_rlm/subagents.py`): depth gate → name
-(unique among the parent's `children`) and model resolution (**no model
-fallback**) → child session with the header meta → `agents.create(...,
+guards → the child's name (unique among its siblings, admitted or on their way,
+and held from here) → the ceiling → the provider (`ph_rlm/subagents.py`): depth
+gate → model resolution (**no model fallback**) → child session with the header meta → `agents.create(...,
 parent=parent)` → workspace → `SubagentRun` → `followup` the task → register the
 parent-scope effect → start the drive, which waits at the run's gate. Then the
 seam again (`_admit`): refuse a child whose log does not name its parent → append
@@ -1218,7 +1218,7 @@ the stored children already read, keyed by run id in admission order.
 `load_children` reads the stored ones first: once per parent per mount, on a worker
 thread, and only the records a child's state is folded from (a child's log is mostly
 streamed chunks, and every root of a daemon shares the loop), through
-`SessionArchive.children_of` — as a resumed session opens (`open_session`), on every
+`SessionArchive.descendants_of` — as a resumed session opens (`open_session`), on every
 host. The store's general survey can't stand in for
 that listing, because it stops at a limit, and a ladder, a budget or a cap that
 missed a child would miscount. A child that is let go keeps its last state as its
@@ -1234,8 +1234,13 @@ still reads only the parent's log. When `children` is among its `token_sources`,
 `GoalService.spent` adds `delegated_tokens(parent, goal_id)`: what the children
 admitted under that goal (`goalId`) spent, and every level beneath them, because a
 goal is a budget for a whole delegation tree. The spawn caps' fold still counts the
-parent's turns. Their session count is the parent's children, and their turn count
-is the children whose `parentTurn` is the parent's current `turn/start`. A fold that
+parent's turns, and their child counts come from the seam
+(`SubagentService.child_counts`). The session count is the parent's children, the
+turn count is the children whose `parentTurn` is the parent's current `turn/start`,
+and both include the parent's spawns in flight: past their guards, children not yet
+admitted. Without those, two spawns from one step could both pass a cap that only
+one of them fit under. A spawn in flight holds its child's name the same way, so two
+siblings spawned side by side cannot take one name. A fold that
 read a second log would be a projection its cache could not key, which is why the
 join sits outside it.
 
@@ -1336,10 +1341,11 @@ Nothing is copied into the parent's log; `ChildState.tokens` totals them.
 > sweep had to count them back in from the child's log before the ladder read them
 > (L5). The mirror also charged one level only: a grandchild's spend, and every
 > child's compactions, reached no goal. Read from the child's own log, the answers
-> are where the ladder and the budget look, and the catch-up step is gone. One limit
-> is stated where it lives (`delegated_tokens`): a child's own children count once
-> this process has read them, so after a restart the children of a child that was
-> not readmitted are not loaded.
+> are where the ladder and the budget look, and the catch-up step is gone. The whole
+> tree is read as its root's log opens (`load_children`, one `descendants_of`), so
+> after a restart a grandchild counts beneath a child that was not readmitted too.
+> And a child that ends takes what it left unfinished beneath it: the doors that end
+> one (`record_ended`, `record_deleted`) tombstone each such descendant in its own log.
 
 **`descendants()` is deliberately not `reachable_family`.** Descent is transitive
 and covers grandchildren; the messaging family is one hop and includes siblings.

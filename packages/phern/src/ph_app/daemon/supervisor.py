@@ -892,31 +892,14 @@ def _waiting_on(roots: Iterable[Root]) -> list[tuple[str, str]]:
 def _working_beneath(root: Root) -> bool:
     """Whether a sub-agent beneath `root` is still working — what holds it mounted.
 
-    Read from each child's own log (Phase 11): `child_is_live` over `family_of`,
-    the family as this process has read it. **Every child of the root counts**,
-    stored ones too, because the resume sweep has decided each of them by the time
-    a sweeper can ask: readmitted, ended in its own log, or held for a credential,
-    which is waiting and must not be released under.
-
-    **A grandchild counts only while this mount is running it.** One whose own
-    parent is still working is already covered by that parent, and one this
-    process runs beneath a parent that has settled is real work, rare and brief — a
-    settled child's own children are revoked with it. What is left is the case
-    that must not count: a grandchild left `queued` or `running` on disk beneath a
-    child that ended in an earlier process. Nothing readmits it — the sweep reaches
-    a child's children only through a child it readmits — so holding the root for
-    it would hold it for good, which is E3's failure over a log instead of a
-    status.
+    Read from each child's own log (Phase 11): `child_is_live` over the whole
+    family, stored members too, because the resume sweep has decided each of them
+    by the time a sweeper can ask — readmitted, ended in its own log, or held for a
+    credential, which is waiting and must not be released under — and has revoked
+    what an ended child left unfinished beneath it. So nothing left live is an
+    orphan, and every level counts the same.
     """
-    sessions = root.ctx.get(SESSIONS)
-    return any(
-        child_is_live(state)
-        and (
-            state.parent_id == root.id
-            or (sessions is not None and sessions.get(state.session_id) is not None)
-        )
-        for state in family_of(root)
-    )
+    return any(child_is_live(state) for state in family_of(root))
 
 
 def model_for(ctx: Context, choice: ModelChoice) -> ModelEntry:

@@ -139,6 +139,25 @@ never widen it. The limits row's child caps are the first registrant. How many
 children a turn or a session may spawn is a count the seam can *ask* and a policy
 row must *decide*, which is why it is a registration here rather than a field.
 
+**A cap asks the seam for the count** (`child_counts(parent)`, a `ChildCounts` of
+this turn's children and all of them). It counts a spawn from the moment its guards
+pass. The guards run before the provider builds the child, and a child is in
+`children` only once its admission is written, so a spawn is on its parent's list
+from its last guard until that admission lands or the spawn is refused. Each
+hand-off happens with no await, so the count holds the spawn exactly once. Without
+it, two spawns from one step (the driver runs a step's tool calls side by side) each
+saw the other missing, and both passed a cap that only one of them fit under.
+
+**The seam names the child, at the same moment.** Right after the guards, `start`
+gives the child the name the spawn asked for, or one made from its task
+(`default_child_name`), and holds it on the same list. The name must be unique among
+the parent's children and its spawns on their way: names address children
+(`agent_message`, the roster), and a provider that chose them from the admitted
+children alone let two spawns from one step take one. A name that is taken, empty or
+longer than `MAX_NAME_CHARS` is refused before the provider is asked. The provider
+receives the request with its name filled in, and the seam stamps the name on the
+run as it stamps the owner.
+
 ## Providing one
 
 ```python
@@ -167,7 +186,7 @@ Obligations a provider carries, in order:
 1. **Open the child's own log, naming its parent.** The header carries
    `parentSession` and `origin: "subagent"`, the id starts `<parent id>-`, and the
    log is filed in the parent's family. That log is the child's only record, and it
-   is how the parent finds the child after a restart (`SessionArchive.children_of`),
+   is how the parent finds the child after a restart (`SessionArchive.descendants_of`),
    so the seam refuses a child whose log does not name its parent.
 2. **Validate the kwargs, gate the depth** (`RLM_MAX_DEPTH`), and preflight the
    model **with no fallback**: a child silently downgraded to another model is a
@@ -254,8 +273,9 @@ ctx.subagents.name_of(agent_id)                        # its admission's name, o
 - **`children`** reads each live child through its own cached fold
   (`subagent-fold-cache`, checked per child against a fresh fold, I6), beside the
   stored children already read.
-- **`load_children`** reads the parent's stored children off the store
-  (`SessionArchive.children_of`, in the parent's family) once per mount, on a worker
+- **`load_children`** reads everything beneath the parent off the store — the whole
+  tree, in one read (`SessionArchive.descendants_of`, in the parent's family), each
+  state filed under the parent its header names — once per mount, on a worker
   thread, parsing only the records a child's state is folded from
   (`CHILD_EVENT_TYPES`). `open_session` calls it as a resumed session opens, on every
   host; the resume sweep, a spawn, a `task` call's crash check, messaging and a
@@ -368,6 +388,19 @@ child is bounded and its children swept. `readmit_waiting` descends the same way
 arrives. There are no delays, unlike the root's ladder, because this one only ever
 runs while a harness is starting — which is already the wait.
 
+**A child that ends takes what it left unfinished beneath it.** Its running children
+are artifacts of its scope, revoked (`PARENT_TEARDOWN`) as it unwinds. That never
+reaches a descendant this process is not running: one held for a credential, one
+beneath a child a restart readmitted, one a delete reached on disk. So the two doors
+that end a child, `record_ended` and `record_deleted`, tombstone every such
+descendant in its own log, every level in one walk (`_revoke_beneath`), whichever
+provider or seam path called them. Left alone, such a descendant read as working for
+good: it held its root out of passivation, and a credential it waited for would have
+readmitted it under a parent that had ended. A crash between a child's ending and its
+children's leaves the rest to the resume sweep, which does the same for a child that
+had ended. Nothing left live beneath a root is then an orphan, and passivation counts
+every level alike.
+
 **The bound is the host's, and `resume_children` takes it with no default.** This
 seam owns the sweep, the fold and the records; how many attempts work is worth is
 policy, and a seam that answered it for a caller who said nothing would be
@@ -439,9 +472,10 @@ means there is no such child, or it was deleted already.
 them left a child canceled and not deleted. Whether the child had already ended is
 read from its own log, not from a caller's flag, and a child that ended is not
 ended again: a `canceled` over its `done` turned a finished child into a revoked
-one. The transcript stays on disk, because a parent looking for what a revoked
-child did should find the revocation, not a gap. A deleted child is never
-rehydrated.
+one. A child tombstoned already is left as it is, so a teardown and a cascade that
+both reach one child write one tombstone. The transcript stays on disk, because a
+parent looking for what a revoked child did should find the revocation, not a gap.
+A deleted child is never rehydrated.
 
 A mount going away is not a revocation. The provider suspends each unfinished
 child instead: `queued` with `SUSPENDED_DETAIL` in its own log, no tombstone, and

@@ -31,6 +31,7 @@ from weakref import WeakKeyDictionary
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
+from .families import descendants
 from .lineage import lineage_faults
 
 if TYPE_CHECKING:
@@ -134,30 +135,30 @@ def stored_row(session_id: str, header: SessionHeader | None, modified: float) -
     )
 
 
-def children_among(parent_id: str, rows: Iterable[StoredSession]) -> tuple[StoredSession, ...]:
-    """The rows `parent_id` spawned, ordered by id. **The header decides.**
+def descendants_among(parent_id: str, rows: Iterable[StoredSession]) -> tuple[StoredSession, ...]:
+    """The rows beneath `parent_id` — its children, theirs, and so on — ordered by id.
+    **The header decides.**
 
-    Each backend narrows its candidates by the family directory and the id
-    prefix (`families.children_under`), and neither is proof. A grandchild's id
-    starts with its grandparent's too, and a fork can be named after its source
-    and filed in its family. So only `delegating_parent` counts. That is the
-    header's `origin: "subagent"` link, and a fork does not have one: its
-    `parent` names the log it was cut from.
+    Each backend narrows its candidates by the family directory and the id prefix
+    (`families.children_under`), and neither is proof: a fork can be named after its
+    source and filed in its family. So a row is beneath `parent_id` only when its
+    `delegating_parent`, followed up through the other candidates, reaches it. That
+    is the header's `origin: "subagent"` link, and a fork does not have one: its
+    `parent` names the log it was cut from. Each row's own `delegating_parent` says
+    which level it is.
 
-    Stated here and not once per backend for `stored_row`'s reason: two
-    backends that each wrote their own filter would drift, and nothing would
-    fail. Ordered by id so both backends give the same answer. Their scans
-    return names in whatever order the directory holds them.
+    Stated here and not once per backend for `stored_row`'s reason: two backends
+    that each wrote their own filter would drift, and nothing would fail. Ordered by
+    id so both backends give the same answer.
 
     A row whose header would not parse has no `delegating_parent`, so it is not
-    listed. A log that cannot say whose child it is cannot be resumed as one.
+    listed, and neither is anything beneath it: a log that cannot say whose child it
+    is cannot be resumed as one. A chain that loops never reaches `parent_id`.
     """
-    return tuple(
-        sorted(
-            (row for row in rows if row.delegating_parent == parent_id),
-            key=lambda row: row.session_id,
-        )
-    )
+    candidates = {row.session_id: row for row in rows}
+    lineage = [(one.session_id, one.delegating_parent) for one in candidates.values()]
+    beneath = descendants([(parent_id, None), *lineage], parent_id)[1:]
+    return tuple(sorted((candidates[one] for one in beneath), key=lambda row: row.session_id))
 
 
 @runtime_checkable
@@ -213,8 +214,14 @@ class SessionArchive(Protocol):
         """What is on record, most recently touched first."""
         ...
 
-    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
-        """Every stored session `parent_id` spawned, ordered by id. Direct children only.
+    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored session beneath `parent_id` — its children, theirs, and so on —
+        ordered by id. Each row's `delegating_parent` says which level it is.
+
+        **The whole tree, in one read.** Every descendant is filed in the root's
+        family and named under its id, so the scan that finds a parent's children
+        finds all of theirs with them; listing one level at a time would read the
+        same directory once per level and leave a restart blind below the first.
 
         **Every one, not a page.** `stored` checks every log in the store and
         then cuts at `limit`, so a parent's children fall below the cut once the
@@ -232,8 +239,8 @@ class SessionArchive(Protocol):
 
         Only logs that reached disk are listed. A child's header is written at
         its first flush, so one that is live and has never flushed is known
-        only to the process running it. The header decides who is a child
-        (`children_among`), so a grandchild and a fork are left out.
+        only to the process running it. The header decides who is beneath the
+        parent (`descendants_among`), so a fork is left out.
         """
         ...
 

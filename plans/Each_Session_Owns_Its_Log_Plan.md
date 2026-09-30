@@ -315,8 +315,9 @@ same way.
 
 ## P11-01 — the store lists a session's children
 
-*(Landed. `SessionArchive.children_of(parent_id, family)`, with the rule shared by both
-backends and both test stores in `protocol.children_among`, and the scan in
+*(Landed. `SessionArchive.children_of(parent_id, family)` — since renamed `descendants_of`,
+which lists every level beneath the parent — with the rule shared by both
+backends and both test stores in `protocol.children_among` (now `descendants_among`), and the scan in
 `families.children_under`. Turso answers per candidate, not by one query: each session
 is its own database, so no table holds two headers. `read_own(id, family=)` already
 existed and is what a child is read with. An empty family is refused rather than
@@ -549,8 +550,10 @@ and suspend tests, pointed at the child's log (`test_subagents.py` 176–427, 53
 *(Landed. `GoalService` holds `ctx` and `spent(session, state)` joins
 `SubagentService.delegated_tokens`; `/autonomous` reads the joined spend. ph-stabilize's
 caps join `children` at read time in `refuse_child` (`child_counts`), and a deleted child
-still counts, as before. Known limit: the children of a child that was not readmitted
-after a restart are not loaded, so their spend reaches a goal only once they are.)*
+still counts, as before. The known limit this row shipped with — the children of a
+child that was not readmitted after a restart went unread — was closed after the
+phase: `descendants_of` reads a whole tree, and the sweep revokes what an ended child
+left unfinished.)*
 
 **Why.** Three readers outside the seam fold the parent's log for facts about children.
 
@@ -588,10 +591,9 @@ after a restart are not loaded, so their spend reaches a goal only once they are
 *(Landed. `session/children` and `session.children` carry `ChildRow`s for the whole
 family, a parent before its own children. The supervisor listens on the store-wide
 `session/event` for ids under its root and pushes when a child's cached state changes,
-coalesced to one frame per checkpoint. Passivation: every direct child counts, stored
-ones included; a deeper one only while this mount runs it, since nothing readmits a
-grandchild under a child that ended in an earlier process. Credential rows walk the
-family. `PROTOCOL_VERSION` 6 also carries P11-08's `not_a_root` and
+coalesced to one frame per checkpoint. Passivation counts every live member of the
+family — once the sweep revokes what an ended child left unfinished (closed after the
+phase), none of them is an orphan. Credential rows walk the family. `PROTOCOL_VERSION` 6 also carries P11-08's `not_a_root` and
 `SessionSummary.origin`.)*
 
 **What.**
@@ -733,7 +735,10 @@ superseded in `plans/Two_Log_Facts_Todo.md`; dated notes in
 - **Merging run id and session id** (decision 1).
 - **The spawn-cap race** (defect 8). It predates this phase and this phase doesn't change
   it: a guard still runs before admission. The fix, counting a spawn as in flight from
-  the moment its guard passes, is its own row.
+  the moment its guard passes, is its own row. *(Landed after the phase:
+  `SubagentService.child_counts`, which counts the spawns on their way. The same race let two siblings
+  take one name, so the seam now names every child right after the guards, and a spawn
+  in flight holds its name on the same list.)*
 - **Migrating logs** from format 2.
 
 ## Verification

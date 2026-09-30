@@ -105,7 +105,7 @@ def child_session_id(parent_id: str, run_id: str) -> str:
 
     **The prefix is how a parent finds its children on disk** (Phase 11): the store
     narrows a family directory to the names beginning with the parent's id before it
-    reads a header (`SessionArchive.children_of`), so a child named any other way is
+    reads a header (`SessionArchive.descendants_of`), so a child named any other way is
     one no restart finds. One spelling, here, for every provider that names a child
     and every reader that narrows by it."""
     return f"{parent_id}-{run_id}"

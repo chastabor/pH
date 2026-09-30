@@ -139,9 +139,9 @@ def family_of(root: Root) -> list[ChildState]:
     one walk of a delegation tree (`SubagentService.family`): a parent before its own
     children, siblings in admission order, which is the order a tree is drawn in.
 
-    **What this process has read, and nothing more.** Every child of the root — read
-    as the root's log opens — and the children of every child it has opened since.
-    A fold, like everything in this module: asking loads nothing.
+    **The whole tree**, read in one pass as the root's log opens
+    (`SubagentService.load_children`). A fold, like everything in this module:
+    asking loads nothing.
     """
     subagents = root.ctx.get(SUBAGENTS)
     return subagents.family(root.id) if subagents is not None else []

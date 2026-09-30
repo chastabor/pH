@@ -34,8 +34,9 @@ from typing import Any
 
 import pytest
 
-from ph.persistence.protocol import StoredSession, children_among, stored_row
-from ph.seams.subagents import descendants, reachable_family
+from ph.persistence.families import descendants
+from ph.persistence.protocol import StoredSession, descendants_among, stored_row
+from ph.seams.subagents import reachable_family
 from ph.seams.workspace import (
     WorkspaceRecord,
     family_survivors,
@@ -521,10 +522,10 @@ class _Store:
             for index, (one, session) in enumerate(self.sessions.items())
         ][:limit]
 
-    def children_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
         """Declared because `SessionArchive` carries it; the fold walks the listing.
         Answered through the backends' own filter, over the same rows `stored` builds."""
-        return children_among(
+        return descendants_among(
             parent_id,
             (
                 stored_row(one, session.header, float(index))

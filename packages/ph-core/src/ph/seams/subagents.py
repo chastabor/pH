@@ -29,7 +29,8 @@ failures as bugs.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+import secrets
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, TypeAlias, get_args, runtime_checkable
@@ -106,12 +107,15 @@ __all__ = [
     "CHILD_EVENT_TYPES",
     "DELETED",
     "INTERRUPTED_DETAIL",
+    "MAX_NAME_CHARS",
+    "PARENT_TEARDOWN",
     "SETTLED_STATUSES",
     "STATUS",
     "SUSPENDED_DETAIL",
     "UNRECOVERABLE_DETAIL",
     "Access",
     "Admission",
+    "ChildCounts",
     "ChildState",
     "FamilyRole",
     "ReadmittingProvider",
@@ -139,7 +143,6 @@ __all__ = [
     "child_state",
     "child_state_of",
     "default_child_name",
-    "descendants",
     "downgrade_text",
     "exhausted_detail",
     "extend_child_state",
@@ -229,6 +232,13 @@ INTERRUPTED_DETAIL = "the harness stopped while this child was running; it did n
 
 A sentence rather than a code, because its reader is a person or a model looking
 at a child's state and asking what happened to a child that never answered."""
+
+
+PARENT_TEARDOWN = "parent-teardown"
+"""Why a child was revoked when its parent ended or went away (I2): its parent's scope
+unwound under it, or — found on a restart — its parent had ended and left it
+unfinished. One reason for both, because they are one event: the second is the first,
+completed by the next process where the crash cut it short."""
 
 
 SUSPENDED_DETAIL = (
@@ -454,7 +464,9 @@ class SubagentRequest:
     this seam; `_delegating_boundary` resolves it.
     """
     name: str | None = None
-    """A stable label among its siblings. Defaulted by the provider when omitted."""
+    """A stable label among its siblings, which is how they are addressed. Made from
+    the task when omitted, and unique either way: the seam names every child before
+    its provider is asked (`SubagentService.start`)."""
     provider: str | None = None
     model: str | None = None
     """Exact selector. A provider must not silently fall back to another model —
@@ -749,17 +761,23 @@ def record_admitted(
     refused.
     """
     parent = request.parent.session
-    turn = parent.latest("turn/start") if parent is not None else None
     goals = ctx.get(GOALS)
     goal = goals.open(parent) if goals is not None and parent is not None else None
     payload = admission_payload(
         run,
         request,
         owner=owner,
-        parent_turn=turn.seq if turn is not None else None,
+        parent_turn=_current_turn(parent) if parent is not None else None,
         goal_id=goal.goal.id if goal is not None else None,
     )
     return _LOG.append(child, ADMITTED, payload)
+
+
+def _current_turn(parent: Session) -> int | None:
+    """The seq of `parent`'s latest `turn/start`: the turn a child admitted now is
+    stamped with (`parentTurn`), and the one the spawn caps count."""
+    opened = parent.latest("turn/start")
+    return opened.seq if opened is not None else None
 
 
 def record_waiting(child: Session, /, **extra: JsonValue) -> None:
@@ -819,9 +837,12 @@ async def record_ended(
     open, and readmit to do the work again. The caller delivers the result after
     this returns. Best effort, for `record_started`'s reason: an ending that cannot
     be written is still the ending.
+
+    **What it left unfinished beneath it ends with it** (`_end_beneath`).
     """
     event = _append_status(child, status, **extra)
     await session_written(ctx, child)
+    await _end_beneath(ctx, child)
     return event
 
 
@@ -835,16 +856,36 @@ async def record_deleted(ctx: Context, child: Session, /, reason: str) -> None:
     finished child into a revoked one. Whether it ended is read from its own log,
     not from a caller's flag, so the rule has one reader — through the seam's cached
     fold when there is one, since a long log refolded per revocation is a parent's
-    teardown paying for every child it had.
+    teardown paying for every child it had. A child tombstoned already is left as it
+    is, and **what it left unfinished beneath it ends with it** (`_end_beneath`).
     """
+    await _tombstone(ctx, child, reason)
+    await _end_beneath(ctx, child)
+
+
+async def _tombstone(ctx: Context, child: Session, reason: str) -> None:
+    """`record_deleted`'s own write, without taking anything beneath the child with
+    it: what `_revoke_beneath` writes on each descendant, since its walk already
+    reaches every level."""
     service = ctx.get(SUBAGENTS)
-    state = service.state(child.id) if service is not None else None
-    ended = (state if state is not None else child_state(child)).status in SETTLED_STATUSES
+    known = service.state(child.id) if service is not None else None
+    state = known if known is not None else child_state(child)
+    if state.deleted:
+        return
     with child.batch() as batch:
-        if not ended:
+        if state.status not in SETTLED_STATUSES:
             _append_status(batch, "canceled", reason=reason)
         _LOG.append(batch, DELETED, {"reason": reason})
     await session_written(ctx, child)
+
+
+async def _end_beneath(ctx: Context, child: Session) -> None:
+    """**A child that ends takes what it left unfinished beneath it** — in the doors
+    that end one, so it holds whichever provider or seam path ended it
+    (`SubagentService._revoke_beneath`)."""
+    service = ctx.get(SUBAGENTS)
+    if service is not None:
+        await service._revoke_beneath(child.id)
 
 
 async def open_child_log(
@@ -993,6 +1034,16 @@ class _SpawnGuard:
 
 
 @dataclass(frozen=True, slots=True)
+class ChildCounts:
+    """A parent's children, as the spawn caps count them (`SubagentService.child_counts`)."""
+
+    turn: int = 0
+    """Those admitted in the parent's current turn, and those on their way."""
+    session: int = 0
+    """All of them, a deleted one included, and those on their way."""
+
+
+@dataclass(frozen=True, slots=True)
 class _Readmitter:
     """The provider a child's admission names, able to readmit it: its name, its row,
     and itself as a `ReadmittingProvider` — asked once per child, and carried."""
@@ -1033,6 +1084,9 @@ class SubagentService:
     """Children this process is not running, by parent id and then session id. A
     parent is here once its stored children were read (`load_children`), and a child
     of it that is let go leaves its last state here (`_let_go`)."""
+    _spawning: dict[str, set[str]] = field(default_factory=dict)
+    """The names of each parent's spawns past the guards and not yet admitted, by
+    parent id (`child_counts`)."""
 
     def register_provider(
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
@@ -1054,6 +1108,66 @@ class SubagentService:
         """
         by = self.ctx.running_for(scope)
         return claim_entry(by.owner, self._guards, _SpawnGuard(check, by), label="subagent-guard")
+
+    def child_counts(self, parent: Session) -> ChildCounts:
+        """How many children `parent` has made, this turn and in all: what a spawn cap
+        counts, read from the children's own logs when a spawn is judged.
+
+        **A spawn on its way counts as a child.** Its guards run before its provider
+        builds the child, and the child is in `children` only once its admission is
+        written. With nothing else counted, two spawns from one step (the driver runs a
+        step's tool calls side by side) each saw the other missing, and both passed a
+        cap one of them crossed. A spawn is on its parent's list from its last guard
+        until its admission is written or it is refused, with no await at either
+        hand-off, so it is counted once, in this turn: the one its admission stamps.
+
+        **The turn is the parent's latest `turn/start`, by seq** (`_current_turn`). A
+        child admitted before the parent had a turn counts in the turn only while the
+        parent still has none. Deleted children count, and a fork starts with none,
+        since no child names it.
+        """
+        children = self.children(parent.id).values()
+        spawning = len(self._spawning.get(parent.id, ()))
+        turn = _current_turn(parent)
+        return ChildCounts(
+            turn=spawning + sum(1 for child in children if child.parent_turn == turn),
+            session=spawning + len(children),
+        )
+
+    def _named(self, request: SubagentRequest, parent: Session | None) -> str:
+        """The name a spawn's child is addressed by, unique among its siblings.
+
+        **Named by the seam, before its provider is asked**, for `child_counts`'
+        reason: a provider that named a child from the admitted ones let two spawns
+        from one step take one name. `start` holds the name on the parent's list of
+        spawns on their way. A name asked for that a sibling has is refused, since
+        names address children (`agent_message`, the roster); one left out is made
+        from the task (`default_child_name`).
+        """
+        taken: set[str] = set()
+        if parent is not None:
+            taken.update(state.name for state in self.children(parent.id).values())
+            taken.update(self._spawning.get(parent.id, ()))
+        if request.name is None:
+            return default_child_name(request.prompt, secrets.token_hex(4), taken=taken)
+        name = request.name.strip()
+        if not name or len(name) > MAX_NAME_CHARS:
+            raise SubagentSpawnError(f"a subagent name must be 1..{MAX_NAME_CHARS} characters")
+        if name in taken:
+            raise SubagentSpawnError(
+                f'a sibling is already named "{name}"; names address children, so they '
+                "must be unique among siblings"
+            )
+        return name
+
+    def _landed(self, parent: Session | None, name: str) -> None:
+        """Take a spawn off its parent's list: admitted, and a child from here, or
+        refused. A second call does nothing."""
+        if parent is None or (names := self._spawning.get(parent.id)) is None:
+            return
+        names.discard(name)
+        if not names:
+            del self._spawning[parent.id]
 
     def provider_names(self) -> list[str]:
         return sorted(self._providers)
@@ -1437,6 +1551,9 @@ class SubagentService:
         refused too, since that log is the child's only record. A readmit writes no
         admission — the one it was rebuilt from is already there — and passes none.
 
+        `start`'s spawn comes off its parent's list in the step that writes its
+        admission, which is the step it starts counting as a child in (`child_counts`).
+
         The caller opens the child's gate (`SubagentRun.ready`) once this returns:
         `start` at once, a readmission after its own children are swept.
         """
@@ -1452,7 +1569,7 @@ class SubagentService:
             if request is not None and parent is not None:
                 if child is None or not _names_parent(child, parent.id):
                     # Its log is how its parent finds it after a restart
-                    # (`SessionArchive.children_of`), so a child with no log, or one
+                    # (`SessionArchive.descendants_of`), so a child with no log, or one
                     # that does not name its parent, is one nothing could bring back.
                     raise SubagentSpawnError(
                         f'subagent {run.name}: the "{owner}" provider opened no log for it '
@@ -1462,6 +1579,7 @@ class SubagentService:
                 # Before the ceiling: a child refused below reads as admitted and then
                 # ended, rather than as a log with no account of what it was.
                 record_admitted(self.ctx, child, run, request, owner=owner)
+                self._landed(parent, run.name)
             try:
                 self._enforce(grant, run, held, boundary)
             except InactiveScopeError as gone:
@@ -1535,7 +1653,7 @@ class SubagentService:
         parent = request.parent.session
         if parent is not None:
             # Every child the parent has, on disk as well as in memory, before anything
-            # counts them — a spawn cap, a provider keeping sibling names unique. Once
+            # counts them — a spawn cap, the names its children have taken. Once
             # per mount (`load_children`); a parent resumed through the sweep has it.
             await self.load_children(parent.id, parent.header.family)
         # Guards first: a refusal here has nothing to unwind, which is the
@@ -1546,36 +1664,46 @@ class SubagentService:
                 reason = guard.check(request)
             if reason is not None:
                 raise _refused(reason)
-        # Once, then threaded — the ceiling, the brief and the containment
-        # check must be answers to the *same* boundary, and one resolution
-        # makes that true by construction (the `held` argument one line down
-        # exists for the identical reason).
-        boundary = self._delegating_boundary(request)
-        held = self.held_by(request, boundary)
-        self.check_grant(request, held)
-        grant = self.grant_for(request, held, boundary=boundary)
-        entry = self.require(name)
-        # As the row that registered the provider (P6-29). A provider's `start`
-        # is row code this registry invokes — the same category as a tool's
-        # `execute` — and it ran unbound, so anything it registered landed on the
-        # seam and outlived its row. The layer is the registration's own, for the
-        # reason `CompactionSeam.engine_by` states: the target is in hand here
-        # (`request.parent`) but reading it means another copy of P6-24's
-        # `getattr(agent, "ctx", None)`, and the child's own containment is
-        # `Grant`'s subject rather than this binding's.
+        child_name = self._named(request, parent)
+        request = replace(request, name=child_name)
+        if parent is not None:
+            # On its way from here, with no await since its guards (`child_counts`).
+            self._spawning.setdefault(parent.id, set()).add(child_name)
         try:
-            with running(entry.by):
-                run = await entry.provider.start(request)
-        except InactiveScopeError as gone:
-            # **A spawn whose parent's scope died under it is a refusal**, whichever
-            # provider was building it: every registration a child needs — its
-            # workspace, its release, its job — is on a scope inside the parent's.
-            # The provider releases what it built and lets this through; the caller
-            # is owed the spawn's own answer, with a code, not a raw scope error.
-            raise parent_went_away(request.name or "a child") from gone
-        admitted = await self._admit(
-            run, owner=name, grant=grant, held=held, boundary=boundary, request=request
-        )
+            # Once, then threaded — the ceiling, the brief and the containment
+            # check must be answers to the *same* boundary, and one resolution
+            # makes that true by construction (the `held` argument one line down
+            # exists for the identical reason).
+            boundary = self._delegating_boundary(request)
+            held = self.held_by(request, boundary)
+            self.check_grant(request, held)
+            grant = self.grant_for(request, held, boundary=boundary)
+            entry = self.require(name)
+            # As the row that registered the provider (P6-29). A provider's `start`
+            # is row code this registry invokes — the same category as a tool's
+            # `execute` — and it ran unbound, so anything it registered landed on the
+            # seam and outlived its row. The layer is the registration's own, for the
+            # reason `CompactionSeam.engine_by` states: the target is in hand here
+            # (`request.parent`) but reading it means another copy of P6-24's
+            # `getattr(agent, "ctx", None)`, and the child's own containment is
+            # `Grant`'s subject rather than this binding's.
+            try:
+                with running(entry.by):
+                    run = await entry.provider.start(request)
+            except InactiveScopeError as gone:
+                # **A spawn whose parent's scope died under it is a refusal**, whichever
+                # provider was building it: every registration a child needs — its
+                # workspace, its release, its job — is on a scope inside the parent's.
+                # The provider releases what it built and lets this through; the caller
+                # is owed the spawn's own answer, with a code, not a raw scope error.
+                raise parent_went_away(child_name) from gone
+            # The seam's to give, and stamped as `_admit` stamps the owner.
+            run.name = child_name
+            admitted = await self._admit(
+                run, owner=name, grant=grant, held=held, boundary=boundary, request=request
+            )
+        finally:
+            self._landed(parent, child_name)
         admitted.ready.set()
         return admitted
 
@@ -1607,7 +1735,8 @@ class SubagentService:
         The one walk of a delegation tree: a goal's spend, the daemon's panel, what
         holds a root, what waits for a credential. Cycle-safe for `descendants`'
         reason — a log claiming an ancestor as its child costs a wasted lookup, not a
-        hang. As deep as this process has read (`load_children`).
+        hang. Every level, once the tree's root was read (`load_children`), which a
+        resumed session's is as it opens.
         """
         found: list[ChildState] = []
         seen = {parent_id}
@@ -1622,29 +1751,42 @@ class SubagentService:
         return found
 
     async def load_children(self, parent_id: str, family: str) -> dict[str, ChildState]:
-        """`children`, with the ones on disk this process is not running read in.
+        """`children`, with everything beneath `parent_id` on disk that this process is
+        not running read in — **the whole tree, not one level**.
 
-        Once per parent per mount: a stored child changes only when this process
-        opens it, and then it is live — or when its session is let go, which hands
-        its state back (`_let_go`). A resumed session's are read as it opens
+        One read of the store (`SessionArchive.descendants_of`) finds every level,
+        since a tree is filed in one family under its root's id; each state is filed
+        under the parent its own header names, and every parent in the tree counts as
+        read. So a restart sees a grandchild beneath a child it did not readmit —
+        which one level at a time left unread, and so uncounted, unlisted and never
+        ended.
+
+        Once per tree per mount: a stored child changes only when this process opens
+        it, and then it is live — or when its session is let go, which hands its state
+        back (`_let_go`). A resumed session's tree is read as it opens
         (`open_session`); the sweep, a spawn, a revocation and the crash checks ask
         again, which then costs a lookup. On a worker thread, and only the records a
         child's state is folded from (`CHILD_EVENT_TYPES`): a child's log is mostly
         streamed chunks, and a mount runs on the loop every root of a daemon shares.
 
-        `family` is the parent's (`SessionHeader.family`) — a child's too, since a
-        child is filed with its parent — and is where the store looks.
+        `family` is the parent's (`SessionHeader.family`) — every descendant's too,
+        since a tree is filed with its root — and is where the store looks.
         """
         if parent_id not in self._stored:
             store = self.ctx.get(SESSION_PERSISTENCE)
-            live = set(self._live.get(parent_id, ()))
-            self._stored[parent_id] = (
+            sessions = self.ctx.get(SESSIONS)
+            live = {one.id for one in sessions.list()} if sessions is not None else set()
+            tree = (
                 {}
                 if store is None
                 else await anyio.to_thread.run_sync(
-                    lambda: _stored_children(store, parent_id, family, live)
+                    lambda: _stored_tree(store, parent_id, family, live)
                 )
             )
+            self._stored.setdefault(parent_id, {})
+            for owner, states in tree.items():
+                # What is already known of a child wins over this read of it.
+                self._stored[owner] = states | self._stored.get(owner, {})
         return self.children(parent_id)
 
     def delegated_tokens(self, parent_id: str, goal_id: str | None = None) -> int:
@@ -1655,7 +1797,6 @@ class SubagentService:
         answers are part of what the goal asked for. The roster this replaces charged
         one level only — a child's own answers, mirrored into its parent's log — so a
         grandchild's spend, and every child's compactions, reached no goal at all.
-        As deep as `family` reaches.
         """
         return sum(
             state.tokens + sum(below.tokens for below in self.family(state.session_id))
@@ -1697,8 +1838,10 @@ class SubagentService:
 
     def forget_session(self, session_id: str) -> None:
         """Drop what this service cached about one session: its own fold, and the
-        stored children it read for it."""
+        stored tree it read for it, every level of which `load_children` filed."""
         self._folds.forget(session_id)
+        for state in self.family(session_id):
+            self._stored.pop(state.session_id, None)
         self._stored.pop(session_id, None)
 
     def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
@@ -1838,15 +1981,21 @@ class SubagentService:
         sweep (K4): a root coming back must not be held hostage by the least
         recoverable thing it holds, and **a provider that declines is an ending too**
         (L6).
+
+        **An ended child's unfinished descendants are revoked** (`_revoke_beneath`):
+        one given up on here takes them with it as its ending is written
+        (`record_ended`), and one that ended in an earlier process left them to a
+        crash that came before they were.
         """
         session = parent.session
         if session is None:
             return []
         revived: list[str] = []
         for state in self.children(session.id).values():
-            if state.deleted or state.status not in ("queued", "running"):
-                continue
             if state.run_id in self._runs:
+                continue
+            if not child_is_live(state):
+                await self._revoke_beneath(state.session_id)
                 continue
             readmitter = self._readmitter(state)
             interrupted = state.status == "running"
@@ -1878,6 +2027,33 @@ class SubagentService:
             await self._sweep_readmitted(run, retry_limit=retry_limit)
             revived.append(state.run_id)
         return revived
+
+    async def _revoke_beneath(self, session_id: str) -> None:
+        """Tombstone (`PARENT_TEARDOWN`), each in its own log, every unfinished
+        descendant of a child that ended, that this process is not running.
+
+        **A running one is its provider's**: a child's own children are effects of its
+        scope, revoked as it unwinds (I2). What that teardown never reaches is a child
+        this process is not running — held for a credential, left beneath a child a
+        restart readmitted, or reached on disk by a delete — and what a crash between a
+        child's ending and its children's left behind. Left alone, such a descendant
+        reads as working for good: nothing readmits a child beneath one that ended, so
+        it held its root out of passivation and asked for a credential it would never
+        use. Every level in one walk (`family`), one log at a time, best effort.
+        """
+        for state in self.family(session_id):
+            if not child_is_live(state) or state.run_id in self._runs:
+                continue
+            try:
+                await self._write_child(
+                    state.session_id,
+                    lambda child: _tombstone(self.ctx, child, PARENT_TEARDOWN),
+                )
+            except Exception:
+                log.exception(
+                    "ph.seams.subagents: %s could not be revoked beneath its ended parent",
+                    state.session_id,
+                )
 
     async def _sweep_readmitted(self, run: SubagentRun, *, retry_limit: int) -> None:
         """A readmitted child's own children, swept as its parent's were (L5b), and
@@ -1988,6 +2164,7 @@ class SubagentService:
         runs is its provider's to stop (`RevokingProvider`), which writes the
         tombstone as it lets go; one settled by an earlier process is tombstoned
         here. A revocation used to reach only children this process held in memory.
+        Either way what it left unfinished beneath it goes with it (`record_deleted`).
         """
         state = (await self.load_children(parent.id, parent.header.family)).get(run_id)
         if state is None or state.deleted:
@@ -2398,13 +2575,16 @@ def extend_child_state(previous: ChildState, log: Session, start: int) -> ChildS
     return state
 
 
-def _stored_children(
+def _stored_tree(
     store: SessionPersistence, parent_id: str, family: str, live: set[str]
-) -> dict[str, ChildState]:
-    """The children of `parent_id` on disk that this process is not running, by session
-    id, each folded from its stored log. On a worker thread (`load_children`)."""
-    found: dict[str, ChildState] = {}
-    for row in store.children_of(parent_id, family):
+) -> dict[str, dict[str, ChildState]]:
+    """Everything beneath `parent_id` on disk that this process is not running, each
+    folded from its stored log and filed under the parent its header names — with an
+    entry, empty or not, for every session in the tree, since each one's children
+    were in this read. On a worker thread (`load_children`)."""
+    tree: dict[str, dict[str, ChildState]] = {}
+    for row in store.descendants_of(parent_id, family):
+        tree.setdefault(row.session_id, {})
         if row.session_id in live:
             continue
         # A child's log starts at seq 0, so its own file is the whole of it — read by
@@ -2413,15 +2593,15 @@ def _stored_children(
         header, events = store.read_own(row.session_id, family=row.family, types=CHILD_EVENT_TYPES)
         state = child_state_of(row.session_id, header, events)
         if state.admitted:
-            found[row.session_id] = state
-    return found
+            tree.setdefault(state.parent_id, {})[row.session_id] = state
+    return tree
 
 
 def _names_parent(child: Session, parent_id: str) -> bool:
     """Whether a child's log names `parent_id` the way the store finds it by.
 
     The header's parent link decides (`delegating_parent`); the id's `<parent>-`
-    prefix is how `SessionArchive.children_of` narrows the family directory before it
+    prefix is how `SessionArchive.descendants_of` narrows the family directory before it
     reads a header, so a child without it is one the listing never reaches.
     """
     return child.header.delegating_parent == parent_id and is_child_id(parent_id, child.id)
@@ -2503,50 +2683,6 @@ def reachable_family(sessions: Iterable[_Parented], agent_id: str) -> dict[str, 
     return reach
 
 
-def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> list[str]:
-    """`agent_id` and everything spawned beneath it, transitively (P6-28).
-
-    **Not `reachable_family`, and the difference is the point.** That answers "who
-    may this agent *address*" — the C7 nuclear family, including siblings and the
-    parent — which is the right rule for a message. This answers "whose leftovers are
-    mine to account for": a sibling's worktree is not this agent's to enumerate,
-    still less to collect, and borrowing the messaging rule would widen a filesystem
-    question with an answer computed for a different one (I7).
-
-    Transitive where `reachable_family` is one hop: a grandchild that failed is
-    evidence its grandparent is the only live party left to look at, because the
-    child that spawned it settled too.
-
-    An agent's id is its session's id, so the links are `delegating_parent` — the
-    agent that spawned each one — and nothing needs a side index. Not
-    `parent_session`: a fork names the log it was cut from there, and a fork's
-    trees are its own, not its source's leftovers. **`(id, parent)` pairs rather than
-    `Session` objects**, which is what lets the collector answer this from a
-    *listing* — a family is narrowed before a single log is read rather than after
-    all of them are.
-
-    Breadth-first, and cycle-safe by construction: `seen` is tested before descent,
-    so a log claiming its own ancestor as a child costs a wasted lookup rather than a
-    hang.
-    """
-    children: dict[str, list[str]] = {}
-    known = set()
-    for session_id, parent in lineage:
-        known.add(session_id)
-        if parent:
-            children.setdefault(parent, []).append(session_id)
-    if agent_id not in known:
-        return []
-    found = [agent_id]
-    seen = {agent_id}
-    for current in found:
-        for child in children.get(current, ()):
-            if child not in seen:
-                seen.add(child)
-                found.append(child)
-    return found
-
-
 def family_reach(
     *, sender_parent: str | None, sender_id: str, target_parent: str | None, target_id: str
 ) -> bool:
@@ -2567,8 +2703,13 @@ def family_reach(
     return sender_parent == target_parent  # a sibling, roots included
 
 
-def default_child_name(prompt: str, run_id: str, *, taken: Sequence[str] = ()) -> str:
-    """`subagent-<prompt-slug>-<id8>`, unique among `taken`.
+MAX_NAME_CHARS = 64
+"""The longest name a spawn may give its child."""
+
+
+def default_child_name(prompt: str, tag: str, *, taken: Collection[str] = ()) -> str:
+    """`subagent-<prompt-slug>-<tag>`, unique among `taken`. `tag` tells apart two
+    children given the same task; the seam passes eight random hex digits.
 
     A name the parent can read back matters more than it looks: the roster, the
     terminal notice and every `agent_message` address use it, and a child called
@@ -2578,7 +2719,7 @@ def default_child_name(prompt: str, run_id: str, *, taken: Sequence[str] = ()) -
         word for word in "".join(c if c.isalnum() else " " for c in prompt).split()[:4] if word
     ]
     slug = "-".join(words).lower()[:32] or "task"
-    candidate = f"subagent-{slug}-{run_id[:8]}"
+    candidate = f"subagent-{slug}-{tag}"
     if candidate not in taken:
         return candidate
     for suffix in range(2, 100):

@@ -28,11 +28,12 @@ from ph.cordis import Context
 from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, LLM, SESSIONS, SUBAGENTS, TOOLS, TUI_STATUS
 from ph.llm.types import Finish, FinishReason, GenerateOptions, LlmFailure, ToolCallBlock
-from ph.seams.subagents import ADMITTED, SubagentRequest, SubagentSpawnError
+from ph.seams.subagents import ADMITTED, ChildCounts, SubagentRequest, SubagentSpawnError
 from ph.session import Session, SurfaceIntent
 from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.testing import (
     FAKE_OPTIONS,
+    HoldingProvider,
     MountProfile,
     StubSubagentProvider,
     assert_fold_laws,
@@ -852,6 +853,30 @@ async def test_the_turn_cap_counts_children_admitted_this_turn(mount: MountProfi
     assert (breach["turn"], breach["session"]) == (0, 2)
 
 
+async def test_two_spawns_at_once_cannot_both_pass_the_cap(mount: MountProfile) -> None:
+    """The cap counts a spawn on its way (`SubagentService.child_counts`): while the
+    first of two spawns from one step is being built, the second is refused.
+
+    Sabotage: count only the admitted children in `refuse_child` and the second spawn
+    is made.
+    """
+    ctx = await mount(row("limits", children={"turnLimit": 1}), profile=PROFILE)
+    session, parent, provider = await _parent(ctx)
+    subagents = ctx.require(SUBAGENTS)
+    held = HoldingProvider(provider)
+    subagents.register_provider("held", held)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(subagents.start, "held", SubagentRequest(prompt="one", parent=parent))
+        await held.building.wait()
+        with pytest.raises(SubagentSpawnError, match=r"turn limit exceeded \(2/1 children\)"):
+            await subagents.start("stub", SubagentRequest(prompt="two", parent=parent))
+        held.go.set()
+
+    assert [one.prompt for one in provider.requests] == ["one"]
+    assert subagents.child_counts(session) == ChildCounts(turn=1, session=1)
+
+
 async def test_a_deleted_child_still_counts(mount: MountProfile) -> None:
     """Deleting a child frees none of the budget: the spawn was asked for and made.
 
@@ -859,7 +884,7 @@ async def test_a_deleted_child_still_counts(mount: MountProfile) -> None:
     count is of admissions — as it was when the parent's log held them and a
     delete never took one off.
 
-    Sabotage: leave deleted children out of `child_counts` and the second spawn
+    Sabotage: leave deleted children out of `SubagentService.child_counts` and the second spawn
     is made.
     """
     ctx = await mount(row("limits", children={"sessionLimit": 1}), profile=PROFILE)
