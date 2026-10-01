@@ -227,6 +227,23 @@ the request edge, so the value never enters a row, an event, or a child process
 (I-3). `${env:…}` interpolation is available for everything that is not a
 secret, with `${env:VAR:-default}` for a fallback.
 
+## Upgrading from 0.5
+
+- **Restart the daemon** (`phern agents shutdown`): it speaks protocol 6, and a
+  client and a daemon from different releases refuse each other's new fields.
+- **Sessions from 0.5 do not carry over.** The session log is format 3, and a 0.5
+  log is refused when it is opened rather than migrated. Finish what is running on
+  0.5 first; the old logs stay on disk as plain JSONL.
+- **A sub-agent's records are in its own log.** A front end gets a root's family
+  from the daemon — `session/children`, and the `session.children` notice whenever a
+  row moves — rather than from the root's stream, and a restarted daemon brings each
+  child back where it stopped.
+- **The scheduler sleeps until something is due** instead of checking every five
+  seconds, so a schedule runs at its moment; `phern agents doctor` shows its next
+  wake where it showed the tick.
+- **The code graph and the text index are rebuilt once**, one index per workspace
+  now; a `path:` on the `text-index` row is the directory they go under.
+
 ## Upgrading from 0.4
 
 - **Restart the daemon** (`phern agents shutdown`): it speaks protocol 5, and a

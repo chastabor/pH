@@ -73,7 +73,7 @@ uv prints where it put `phern` — `~/.local/bin` by default — and `uv tool
 update-shell` fixes a PATH that misses it. Afterwards the deployment answers to
 its own name: `uv tool upgrade phern`, `uv tool uninstall phern`. `--editable`
 reaches every member through the workspace, so a `git pull` is the whole
-upgrade. Coming from 0.4, read [*Upgrading from 0.4*](#upgrading-from-04) first.
+upgrade. Coming from 0.5, read [*Upgrading from 0.5*](#upgrading-from-05) first.
 
 `phern doctor` reports what you actually got — which rows mounted, which
 profiles this install can compose, and why any of them refused.
@@ -357,6 +357,38 @@ attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` �
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Upgrading from 0.5
+
+0.6 gives every session its own log — a sub-agent's records are in the sub-agent's,
+so a restarted daemon brings each child back where it stopped — and lets the
+daemon's scheduler sleep until something is due. What that changes for an 0.5 setup:
+
+- **Restart the daemon.** It speaks protocol 6, and a client and a daemon from
+  different releases refuse each other's new fields. `phern agents shutdown`, and
+  the next command that needs one starts the new one.
+- **Sessions from 0.5 do not carry over.** The session log is format 3, and a
+  format-2 log is refused when it is opened (`session header version must be 3, got
+  2`) rather than migrated: a child's records moved out of its parent's log, and an
+  old log read as a new one would put them in the wrong place. Finish what is
+  running on 0.5 first. The old logs stay where they are, as plain JSONL.
+- **The code graph and the text index are rebuilt once.** Each keeps one index per
+  workspace now (`$PH_CACHE/code-graph/<workspace>/graph.db`,
+  `$PH_CACHE/text-index/<workspace>/<embedder>`), so the first `code_index` or
+  `text_index` after the upgrade starts from scratch. The 0.5 indexes are not read,
+  and go with the rest of `$PH_CACHE` when you clear it. A `path:` on the
+  `text-index` row is now the directory the indexes go under, not the index itself.
+  A worktree's index is removed once the worktree has been gone a week.
+- **Schedules fire on time, and nothing polls.** The daemon sleeps until the next
+  appointment instead of checking every five seconds, so a schedule runs at its
+  moment, and a daemon with nothing scheduled wakes for none. `phern agents doctor`
+  shows when the scheduler next wakes where it used to show the tick.
+- **The `settings` row is gone.** Nothing read `ctx.settings`. A profile that still
+  patches `settings` or names `settings-local` is refused at load; delete the row.
+- **Telemetry ships a record once the log holds its event** — at the next flush, not
+  on the append — so an exported `(session, seq)` always names an event the log
+  keeps. What only the last write at shutdown puts on disk is not exported
+  ([`docs/seams/session_telemetry.md`](docs/seams/session_telemetry.md)).
+
 ## Upgrading from 0.4
 
 0.5 gives each kind of setting one owner and makes a session's profile its own, so
@@ -478,6 +510,40 @@ phern attachments gc         # media no stored session references
 short enough for a unix socket, reports which optional backends are installed
 and what each missing one costs, and fails on any failure that is not on its
 enumerated list of platform gaps — which is empty on both platforms today.
+
+## Building a release
+
+Every member is released together, at one version: each pins the others exactly
+(`ph-core==0.6.0`), so a change in any of them is a release of all seven.
+
+```bash
+# 1. The version, everywhere it is written: `version` and the `==` pins between
+#    members in packages/*/pyproject.toml, and `__version__` in
+#    packages/ph-core/src/ph/__init__.py. Then:
+uv lock                                          # moves the seven workspace entries
+./test.sh                                        # the four gates, on the new version
+
+# 2. A wheel and a source distribution per member. dist/ keeps only its
+#    .gitignore between releases.
+rm -f dist/*.whl dist/*.tar.gz
+uv build --all-packages --out-dir dist
+
+# 3. The set installs together from the files alone, as PyPI will serve it.
+uv venv /tmp/phern-release
+uv pip install --python /tmp/phern-release/bin/python dist/*.whl
+/tmp/phern-release/bin/phern --help
+
+# 4. PyPI: the wheels and the sdists.
+uv publish dist/*
+```
+
+Both carry the package's README as the PyPI description, so README changes —
+the upgrade notes above among them — go in before step 2. A release that changes
+what a daemon and a client say to each other bumps `PROTOCOL_VERSION`
+(`packages/phern/src/ph_app/protocol.py`), and one that an older build could no
+longer read a log of bumps `SESSION_FORMAT_VERSION`
+(`packages/ph-core/src/ph/session/events.py`). Each records its reason beside the
+number, and each belongs in the upgrade notes.
 
 ## Where to read more
 

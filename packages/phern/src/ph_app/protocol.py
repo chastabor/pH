@@ -163,6 +163,13 @@ does not know and never asks for the family; restarting the daemon on the same
 release fixes that. Released with the session log's format 3, so each number moves
 once.
 
+The same number covers the scheduler that sleeps until something is due rather
+than ticking (S18): `daemon/status` drops `tickEvery` for `nextWake`, when it next
+wakes, absent while nothing is planned; and `session/new` answers with a
+`NewSessionReply`, the root's description plus its `header`, which a front end
+builds its mirror of the root's log on. A 0.5.x client refuses the `nextWake` and
+`header` it does not know; restarting the daemon on the same release fixes that.
+
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by
 `phern agents doctor`; no client compares it and hangs up. So it documents a
