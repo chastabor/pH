@@ -39,6 +39,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+import anyio
 import numpy as np
 import pytest
 
@@ -47,10 +48,10 @@ from ph.indexable import triage
 from ph.json import as_str
 from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
-from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
+from ph.testing import FAKE_OPTIONS, MountProfile, raising, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
-from ph_text_index import TEXT_INDEX
+from ph_text_index import TEXT_INDEX, Config, TextIndexSeam
 from ph_text_index._chunk import chunk_paragraphs, chunk_text
 from ph_text_index._embed import Vectors
 from ph_text_index._store import IndexMismatch, TextIndex
@@ -111,6 +112,12 @@ def _agent(ctx: Context) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(
         ctx.require(SESSIONS).create(f"ti-{next(_SEQ)}"), FAKE_OPTIONS
     )
+
+
+def _opened(ctx: Context) -> TextIndex:
+    """The one index a test's agents opened: they share a workspace."""
+    [store] = ctx.require(TEXT_INDEX)._indexes.values()
+    return store
 
 
 async def _mounted(
@@ -385,6 +392,136 @@ def test_a_sidecar_chunk_with_no_vector_is_dropped_on_open(tmp_path: Path) -> No
     assert "docs/ghost.md" not in reopened.documents()
 
 
+def test_a_vector_the_sidecar_never_named_is_removed_on_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the crash between two writes: the vectors synced and the
+    sidecar naming them was never written.
+
+    Their ids start at the sidecar's `next_id`, which is where the next add
+    allocates, and turbovec refuses an id it holds, so every add after the crash
+    raised until somebody deleted the directory.
+
+    Sabotage: skip `_remove_strays` in `open`, and the add raises.
+    """
+    embedder = HashingEmbedder()
+    store = _store(tmp_path / "ix")
+    _indexed(store, embedder, "docs/w.md", DOCUMENT)
+    store.save()
+    _indexed(store, embedder, "docs/lost.md", "A passage whose sidecar never landed.")
+
+    monkeypatch.setattr(
+        "ph_text_index._store.write_atomic", raising(OSError("the process died here"))
+    )
+    with pytest.raises(OSError, match="died"):
+        store.save()
+    monkeypatch.undo()
+
+    reopened = _store(tmp_path / "ix")
+    assert reopened.documents() == ["docs/w.md"]
+    assert _indexed(reopened, embedder, "docs/next.md", "Billing, invoiced monthly.") > 0
+    reopened.save()
+    assert _store(tmp_path / "ix").documents() == ["docs/next.md", "docs/w.md"]
+
+
+def _seam(root: Path, embedder: HashingEmbedder) -> TextIndexSeam:
+    """The service on its own, as a second root or process would hold it."""
+    seam = TextIndexSeam(ctx=Context(), config=Config(path=str(root)))
+    seam.provider = embedder
+    return seam
+
+
+async def _index_one(seam: TextIndexSeam, workspace: Path, path: str, text: str) -> None:
+    async with seam.writing(workspace) as store:
+        _indexed(store, HashingEmbedder(), path, text)
+        store.save()
+
+
+async def test_two_writers_sharing_a_directory_both_keep_their_documents(
+    tmp_path: Path,
+) -> None:
+    """Every root and process on a workspace shares its directory, and each held
+    its own copy and saved it whole. So the second save described only its own
+    documents, and the first writer's vectors were left with no text.
+
+    Sabotage: take the copy in `writing` without asking whether it is stale, and
+    the first writer's document is gone.
+    """
+    embedder, tree = HashingEmbedder(), tmp_path / "tree"
+    first, second = _seam(tmp_path / "ix", embedder), _seam(tmp_path / "ix", embedder)
+    await second.index(tree)  # a copy loaded before the other writer's change
+
+    await _index_one(first, tree, "docs/w.md", DOCUMENT)
+    await _index_one(second, tree, "docs/billing.md", "Invoices are issued monthly.")
+
+    assert _store(first.root(tree)).documents() == ["docs/billing.md", "docs/w.md"]
+    assert (await first.index(tree)).documents() == ["docs/billing.md", "docs/w.md"]
+
+
+async def test_a_second_writer_waits_for_the_first(tmp_path: Path) -> None:
+    """One change at a time across seams, not only within one: a reload before
+    the change is no use to a writer whose copy moves under it during the change.
+
+    Sabotage: take no file lock in `writing`, and the second writer enters while
+    the first holds it.
+    """
+    embedder, tree = HashingEmbedder(), tmp_path / "tree"
+    first, second = _seam(tmp_path / "ix", embedder), _seam(tmp_path / "ix", embedder)
+    entered = anyio.Event()
+
+    async def wait_to_write() -> None:
+        async with second.writing(tree):
+            entered.set()
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            async with first.writing(tree):
+                group.start_soon(wait_to_write)
+                await anyio.sleep(0.3)
+                assert not entered.is_set(), "two writers held one directory"
+            await entered.wait()
+
+
+async def test_a_search_does_not_load_what_a_writer_is_part_way_through(
+    tmp_path: Path,
+) -> None:
+    """A writer's files are only whole once it lets go: between its two writes the
+    vectors are ahead of the sidecar. So a search that finds its copy stale while
+    the lock is held answers from that copy, and loads once the writer is done.
+
+    Sabotage: reload in `index` without asking for the lock, and the search sees
+    the writer's change before the writer has let go.
+    """
+    embedder, tree = HashingEmbedder(), tmp_path / "tree"
+    reader, writer = _seam(tmp_path / "ix", embedder), _seam(tmp_path / "ix", embedder)
+    await reader.index(tree)
+
+    async with writer.writing(tree) as store:
+        _indexed(store, embedder, "docs/w.md", DOCUMENT)
+        store.save()
+        assert (await reader.index(tree)).documents() == []
+
+    assert (await reader.index(tree)).documents() == ["docs/w.md"]
+
+
+async def test_each_workspace_has_its_own_index(tmp_path: Path) -> None:
+    """What an index holds belongs to one tree: documents named relative to it, one
+    version-control token, and a sweep that drops what that tree no longer has.
+    Two workspaces in one directory took turns deleting each other's documents.
+
+    Sabotage: key `root` by the embedder alone, and one workspace's document is in
+    the other's index.
+    """
+    seam = _seam(tmp_path / "ix", HashingEmbedder())
+    here, there = tmp_path / "here", tmp_path / "there"
+
+    await _index_one(seam, here, "docs/w.md", DOCUMENT)
+
+    assert (await seam.index(there)).documents() == []
+    assert (await seam.index(here)).documents() == ["docs/w.md"]
+    assert seam.root(here).parent.parent == seam.root(there).parent.parent == tmp_path / "ix"
+
+
 def test_a_filter_that_matches_nothing_returns_nothing_rather_than_raising(
     tmp_path: Path,
 ) -> None:
@@ -512,7 +649,7 @@ async def test_a_paths_filter_narrows_the_search(mount: MountProfile, tmp_path: 
     )
 
     assert {hit["path"] for hit in found.value["hits"]} == {"notes/w.md"}
-    assert found.value["searched"] < ctx.require(TEXT_INDEX)._index.stats()["chunks"]
+    assert found.value["searched"] < _opened(ctx).stats()["chunks"]
 
 
 async def test_the_spellings_a_model_writes_for_a_path_all_work(
@@ -536,7 +673,7 @@ async def test_the_spellings_a_model_writes_for_a_path_all_work(
     ctx, _ = await _mounted(mount, tmp_path, max_chars=200, overlap_chars=0)
     agent = _agent(ctx)
     await run_tool(ctx, "text_index", {"paths": ["docs", "notes"]}, agent=agent)
-    everything = int(ctx.require(TEXT_INDEX)._index.stats()["chunks"])
+    everything = int(_opened(ctx).stats()["chunks"])
 
     async def search(paths: list[str]) -> Any:  # noqa: ANN401
         found = await run_tool(
@@ -809,9 +946,9 @@ async def test_switching_the_model_gets_its_own_index_directory(
     seam = ctx.require(TEXT_INDEX)
 
     seam.provider = HashingEmbedder(dim=96)
-    small = seam.root()
+    small = seam.root(tmp_path)
     seam.provider = HashingEmbedder(dim=384)
-    large = seam.root()
+    large = seam.root(tmp_path)
 
     assert small != large, "two embedders shared one index directory"
     assert small.parent == large.parent, "both still under the row's cache root"

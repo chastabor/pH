@@ -29,9 +29,10 @@ from typing import Any
 import anyio
 import pytest
 
-from ph.keys import SESSION_TELEMETRY
+from ph.keys import SESSION_TELEMETRY, SESSIONS
 from ph.seams.telemetry import SessionTelemetryRecord
-from ph.testing import MountProfile
+from ph.session import Session, SessionHeader
+from ph.testing import MountProfile, log_event, raising, stored_events
 
 pytestmark = pytest.mark.anyio
 
@@ -169,3 +170,100 @@ async def test_a_sink_that_records_is_still_refused(mount: MountProfile) -> None
         await telemetry.record(_record("the record"))
 
     assert seen == ["the record"]
+
+
+# ------------------------------------------------------- behind the log --
+
+
+def _ledger(seen: list[SessionTelemetryRecord], session_id: str) -> list[tuple[str, int]]:
+    """What the ledger said about one session, as the `(type, seq)` it names."""
+    return [
+        (record.body, record.attributes["event.seq"])
+        for record in seen
+        if record.channel == "ledger" and record.attributes["session.id"] == session_id
+    ]
+
+
+async def test_a_ledger_record_ships_once_the_log_holds_its_event(mount: MountProfile) -> None:
+    """A record names its event by `(session, seq)`, so it must not name one the
+    log can lose.
+
+    `session/event` fires on the in-memory append. A crash takes whatever no flush
+    wrote, and the resumed log appends at its own length, so a record shipped off
+    the firehose named one event while the log put another at that seq. Here the
+    unwritten tail is let go the way a crash lets it go, and the ledger has to
+    agree with what a resume would be handed.
+
+    Sabotage: ship on the append again, and the first assertion fails.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s")
+
+    log_event(session, "turn/start", {"turn": 1})
+    await anyio.wait_all_tasks_blocked()
+    assert _ledger(seen, "s") == [], "exported before the log held it"
+
+    await sessions.flush(session)
+    lost = log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    sessions.dispose("s")
+    await anyio.wait_all_tasks_blocked()
+
+    stored = stored_events(ctx, "s")
+    assert "turn/start" in [event.type for event in stored]
+    assert _ledger(seen, "s") == [(event.type, event.seq) for event in stored]
+    assert lost.seq == len(stored), "the tail the store does not hold was not shipped"
+
+
+async def test_a_flush_that_failed_ships_nothing(mount: MountProfile) -> None:
+    """Only a flush every backend finished says the log holds anything, so one that
+    raised releases nothing, and the next that succeeds releases it all.
+
+    Sabotage: emit `session/durable` whether or not the dispatch raised, and the
+    first assertion fails.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s")
+
+    refusing = ctx.on("session/flush", raising(OSError("no space left on device")))
+    started = log_event(session, "turn/start", {"turn": 1})
+    with pytest.raises(ExceptionGroup):
+        await sessions.flush(session)
+    await anyio.wait_all_tasks_blocked()
+    assert _ledger(seen, "s") == []
+
+    refusing()
+    await sessions.flush(session)
+    await anyio.wait_all_tasks_blocked()
+    assert (started.type, started.seq) in _ledger(seen, "s")
+
+
+async def test_one_copy_of_a_log_cannot_release_another(mount: MountProfile) -> None:
+    """A resume in the same process makes a second copy of a log under the same id,
+    and a flush of the first can still be finishing. What it wrote says nothing
+    about the new copy's events, which begin wherever that copy's stored log ended.
+
+    Sabotage: key the ledger's cursors by session id, and the new copy's event
+    ships on the old copy's word.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
+    sessions = ctx.require(SESSIONS)
+    old = sessions.create("s")
+    sessions.dispose("s")
+    new = sessions.adopt(Session("s", header=SessionHeader(id="s", created_at=1)))
+    started = log_event(new, "turn/start", {"turn": 1})
+
+    ctx.emit("session/durable", old, new.seq, contained=True)
+    await anyio.wait_all_tasks_blocked()
+    assert _ledger(seen, "s") == []
+
+    await sessions.flush(new)
+    await anyio.wait_all_tasks_blocked()
+    assert _ledger(seen, "s") == [(started.type, started.seq)]

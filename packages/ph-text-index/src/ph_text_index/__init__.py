@@ -30,12 +30,12 @@ reason `tool-attach` insists on it (I-9). It matters more here than there,
 because indexing is a *bulk* read: a tool that walked the tree with `Path.open`
 would be an exfiltration primitive with a glob argument.
 
-The corollary is that the index is per-deployment and not per-agent. Two agents
-with different workspaces share `$PH_CACHE/text-index/<embedder>` unless a
-profile says otherwise, so a passage one agent indexed is retrievable by
-another. That is the right default for a documentation corpus and the wrong one
-for anything private; `path:` in the row's config is how a deployment separates
-them.
+The corollary is that the index is per workspace and not per agent. Agents in
+one workspace share `$PH_CACHE/text-index/<workspace>/<embedder>`, so a passage
+one of them indexed the others retrieve; a worktree is a workspace of its own
+(`TextIndexSeam.root`). Two roots or two processes on one workspace share the
+directory too, which is why a change is made under a file lock in it
+(`TextIndexSeam.writing`).
 
 @module ph_text_index
 """
@@ -45,7 +45,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -58,6 +59,7 @@ from ph.indexable import triage
 from ph.json import JsonObject
 from ph.keys import COMMANDS, FS, SKILLS, TOOLS
 from ph.llm.types import ContentBlock
+from ph.locks import LockBusy, acquire_file_lock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
@@ -142,7 +144,8 @@ class Config(WireModel):
     """Row config for `text-index`."""
 
     path: str = ""
-    """Where the index lives. Defaults to `$PH_CACHE/text-index/<embedder>`.
+    """Where the indexes live, one per workspace and embedder beneath it
+    (`<path>/<workspace>/<embedder>`). Defaults to `$PH_CACHE/text-index`.
 
     Under the cache root because the index is **rebuildable** — the documents are
     the truth and this is a derived artifact, which is exactly the lifecycle
@@ -284,14 +287,37 @@ TEXT_INDEX: ServiceKey[TextIndexSeam] = ServiceKey("text_index")
 """The text index, for `/text-index` and the tools it backs."""
 
 
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _try_writer_lock(root: Path) -> Callable[[], None] | None:
+    """The writer lock of the index at `root` if it is free this instant, else `None`."""
+    try:
+        return acquire_file_lock(root / "writer.lock", timeout=0, what="the text index")
+    except LockBusy:
+        return None
+
+
+async def _writer_lock(root: Path) -> Callable[[], None]:
+    """The writer lock, waited for as long as another writer holds it.
+
+    Polled rather than blocked in a worker thread, so a canceled call stops
+    waiting and no abandoned thread takes the lock after its caller has gone."""
+    while (release := _try_writer_lock(root)) is None:
+        await anyio.sleep(0.1)
+    return release
+
+
 @dataclass(slots=True)
 class TextIndexSeam:
     """The service published as `ctx.text_index`.
 
-    Holds the one index and the one embedder, and serializes every mutation
-    behind a lock. The lock is not defensive tidiness: `text_index` is not
-    concurrency-safe precisely *because* of it — two calls that both loaded, both
-    mutated and both saved would leave the sidecar describing one of them.
+    Holds the one embedder, and a copy of each workspace's index it has opened.
+    Every change goes through `writing`. Its lock is not defensive tidiness: two
+    calls that both loaded, both mutated and both saved would leave the sidecar
+    describing one of them, whether the two are in this seam or in another
+    sharing the directory.
     """
 
     ctx: Context
@@ -306,8 +332,8 @@ class TextIndexSeam:
     for a waiter to wait on. Held here so the two facts stay one decision — the
     tools exist exactly while a provider does, and both leave on the same scope.
     """
-    _index: TextIndex | None = None
-    _lock: anyio.Lock = field(default_factory=anyio.Lock)
+    _indexes: dict[Path, TextIndex] = field(default_factory=dict)
+    """Per index directory, the copy this seam last loaded or wrote."""
 
     def register(self, provider: Embedder, *, scope: Context | None = None) -> Disposer:
         """Claim the embedder slot, and offer the tools it makes possible.
@@ -334,28 +360,87 @@ class TextIndexSeam:
             )
         return self.provider
 
-    def root(self) -> Path:
-        """Where this embedder's index lives.
+    def root(self, workspace: Path) -> Path:
+        """Where this embedder's index of one workspace lives.
 
         **Keyed by the embedder**, so switching models does not walk into the
         `IndexMismatch` it would otherwise cause — the two indexes simply do not
-        collide, and switching back finds the old one intact. A digest rather
-        than the name because a model id has slashes in it."""
-        digest = hashlib.sha256(self.embedder.name.encode("utf-8")).hexdigest()[:16]
-        return default_cache_path(self.config.path, "text-index", digest)
+        collide, and switching back finds the old one intact.
 
-    async def index(self) -> TextIndex:
-        """The open index, loaded once."""
-        if self._index is None:
+        **And by the workspace**, as `CodeGraphSeam.store_for` keys its own,
+        because what an index holds belongs to one tree: its documents are named
+        relative to it, one version-control token says how far it was indexed,
+        and a run's sweep drops what that tree no longer has. Two workspaces in
+        one directory took turns deleting each other's documents and re-embedding
+        their own. The cost is the code graph's too: a directory per workspace, a
+        worktree included, and nothing prunes them.
+
+        Beneath the row's `path` when one is set, so a configured path keys both
+        as well. Digests rather than names, because a model id and a path have
+        slashes in them."""
+        return default_cache_path(self.config.path, "text-index").joinpath(
+            _digest(str(workspace)), _digest(self.embedder.name)
+        )
+
+    async def index(self, workspace: Path) -> TextIndex:
+        """One workspace's index, for a search.
+
+        Loaded again when its files changed since this copy read or wrote them,
+        but only if the writer lock is free this instant. A writer holding it is
+        part-way through a change, and its files may be part-way through a save,
+        so the search answers from the copy there is. Only a seam with no copy
+        at all waits for the lock."""
+        root = self.root(workspace)
+        store = self._indexes.get(root)
+        if store is not None and not store.stale():
+            return store
+        release = _try_writer_lock(root)
+        if release is None:
+            if store is not None:
+                return store
+            release = await _writer_lock(root)
+        try:
+            return await self._fresh(root)
+        finally:
+            release()
+
+    @asynccontextmanager
+    async def writing(self, workspace: Path) -> AsyncIterator[TextIndex]:
+        """One workspace's index, held for one change against every other writer.
+
+        The lock is a file in the index directory, so it orders every writer of
+        it: another root in the same daemon, a `phern -p`, a second daemon, and
+        this seam's own calls too, since `flock` refuses a second holder even in
+        one process. Each writer used to hold its own copy and save it whole, so
+        the sidecar described whichever saved last, the other's vectors lost
+        their meaning, and both allocated the same ids. Under the lock, a copy
+        another writer has changed is loaded again, so every change starts from
+        what is on disk.
+
+        Waited for, because indexing is slow and a second writer is expected to
+        queue behind the first.
+        """
+        root = self.root(workspace)
+        release = await _writer_lock(root)
+        try:
+            yield await self._fresh(root)
+        finally:
+            release()
+
+    async def _fresh(self, root: Path) -> TextIndex:
+        """The copy of the index at `root`, loaded again if its files changed.
+        Called holding the writer lock, so no writer is part-way through them."""
+        store = self._indexes.get(root)
+        if store is None or store.stale():
             store = TextIndex(
-                root=self.root(),
+                root=root,
                 model=self.embedder.name,
                 bit_width=self.config.bit_width,
                 calibrate=self.config.calibrate,
             )
             await anyio.to_thread.run_sync(store.open)
-            self._index = store
-        return self._index
+            self._indexes[root] = store
+        return store
 
     async def embed(self, texts: list[str], *, query: bool) -> Vectors:
         embedder = self.embedder
@@ -363,13 +448,11 @@ class TextIndexSeam:
             lambda: embedder.encode(texts, query=query), abandon_on_cancel=True
         )
 
-    def locked(self) -> anyio.Lock:
-        return self._lock
-
     def report(self) -> list[tuple[str, str]]:
         """`phern doctor`'s section: what is indexed, and by what."""
         if self.provider is None:
             return [("embedder", "none registered — text_index is not offered")]
+        root = self.root(self.ctx.require(FS).root_for(None))
         rows = [
             ("embedder", self.provider.name),
             ("model", "loaded" if _ready(self.provider) else "not loaded — /text-index install"),
@@ -379,12 +462,13 @@ class TextIndexSeam:
                 if isinstance(self.provider, LocalWeights)
                 else "the library default",
             ),
-            ("path", str(self.root())),
+            ("path", str(root)),
         ]
-        if self._index is None:
+        store = self._indexes.get(root)
+        if store is None:
             rows.append(("state", "not opened yet"))
             return rows
-        stats = self._index.stats()
+        stats = store.stats()
         rows.extend(
             [
                 ("documents", str(stats["documents"])),
@@ -562,7 +646,6 @@ async def apply(ctx: Context, config: Config) -> None:
         return dropped
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
-        store = await seam.index()
         documents = await ctx.require(FS).collect(
             args.paths,
             args.glob or config.glob,
@@ -582,11 +665,14 @@ async def apply(ctx: Context, config: Config) -> None:
         # Which backend answers is the workspace provider's to say
         # (`ph.seams.changes`), and a tree with none answers an empty state, so
         # the loop below is correct either way — it just does the work again.
-        state = TreeState()
-        if not args.forget:
-            state = await tree_state(ctx, ctx.require(FS).root_for(run.agent), since=store.token)
-
-        async with seam.locked():
+        #
+        # Asked under the lock: the token it diffs from is the one the last
+        # writer stored, whichever root or process that was.
+        workspace = ctx.require(FS).root_for(run.agent)
+        async with seam.writing(workspace) as store:
+            state = TreeState()
+            if not args.forget:
+                state = await tree_state(ctx, workspace, since=store.token)
             for path in documents:
                 run.raise_if_canceled()
                 if store.holds(path) and state.vouches_for(path, store.vcs_id(path)):
@@ -645,7 +731,7 @@ async def apply(ctx: Context, config: Config) -> None:
         }
 
     async def search_tool(args: SearchArgs, run: ToolRunContext) -> dict[str, Any]:
-        store = await seam.index()
+        store = await seam.index(ctx.require(FS).root_for(run.agent))
         vector = await seam.embed([args.query], query=True)
         run.raise_if_canceled()
         # The id set is built **once** and handed to `search`, which used to

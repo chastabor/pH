@@ -16,13 +16,25 @@ Ledger records mirror session events one-to-one with one exception: only the
 thousands of records saying the same thing, and the first is the one that
 carries the latency signal.
 
+**A ledger record ships once the log holds its event, and not before.** The
+record names its event by `(session, seq)`, and `session/event` fires on the
+in-memory append. A crash loses whatever no flush had written, and the resumed
+log appends at its own length, so a record exported off the firehose could name
+one event while the log, after a resume, put another at that seq. So the row
+keeps a cursor per session and, when `session/durable` says how much the log
+holds (`SessionStore.flush`), reads the events up to there off the log, the way a
+store reads what it owes. Nothing else changes: the record still carries the
+event's own `time`, so the latency the first chunk reports is the one it had, and
+the export lags only by the distance to the next flush, which every step, tool
+call and turn end makes.
+
 @module ph.seams.telemetry
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
@@ -102,13 +114,13 @@ export path, made while that path is the thing failing.
 
 **Per task, and that is the whole correction.** It was an instance field, so the
 flag was raised for the *deployment* while any one record was in flight — and
-every record is shipped from its own task (`observe` is fired from the session
-firehose, `ops_record` from wherever the operation is). Two events a millisecond
-apart therefore raced, and the loser was dropped silently: exactly the bursts
-worth exporting — a turn's `step/start`, its first chunk, its `turn/end` —
-arrived as one record in three. Re-entrancy is a property of the call stack, so
-it is tracked where the call stack is. A task a sink spawns inherits the flag,
-which is right: it is still the export path.
+records are shipped from many tasks (a batch from each flush, `ops_record` from
+wherever the operation is). Two records a millisecond apart therefore raced, and
+the loser was dropped silently: exactly the bursts worth exporting — a turn's
+`step/start`, its first chunk, its `turn/end` — arrived as one record in three.
+Re-entrancy is a property of the call stack, so it is tracked where the call
+stack is. A task a sink spawns inherits the flag, which is right: it is still the
+export path.
 """
 
 
@@ -118,9 +130,16 @@ class SessionTelemetry:
 
     ctx: Context
     _sinks: list[_Sink] = field(default_factory=list)
-    _last_chunked_step: dict[str, tuple[int, int]] = field(default_factory=dict)
+    _last_chunked_step: dict[Session, tuple[int, int]] = field(default_factory=dict)
     """Per session, the step whose first chunk already shipped. One entry per
     session rather than one per step, so it does not grow with the conversation."""
+    _shipped: dict[Session, int] = field(default_factory=dict)
+    """Per live session, how far the ledger has read its log: every event below
+    this seq, and none past it.
+
+    Keyed by the session and not its id, because a resume in the same process
+    makes a second copy of a log under the same id, and a flush of the first
+    copy finishing late says nothing about the second's events."""
 
     def add_sink(
         self,
@@ -155,32 +174,56 @@ class SessionTelemetry:
         finally:
             _EXPORTING.reset(token)
 
-    def wants(self, session: Session, event: SessionEvent) -> bool:
-        """Whether this event ships — decided synchronously, so a dropped chunk
-        costs no task. Only the first `assistant/chunk` per step does."""
+    def _wants(self, session: Session, event: SessionEvent) -> bool:
+        """Whether this event ships. Only the first `assistant/chunk` per step does."""
         if event.type != "assistant/chunk":
             return True
         step = (as_int(event.data.get("turn")), as_int(event.data.get("step")))
-        if self._last_chunked_step.get(session.id) == step:
+        if self._last_chunked_step.get(session) == step:
             return False
-        self._last_chunked_step[session.id] = step
+        self._last_chunked_step[session] = step
         return True
 
-    async def observe(self, session: Session, event: SessionEvent) -> None:
-        """Mirror one session event onto the ledger channel."""
-        await self.record(
-            SessionTelemetryRecord(
-                channel="ledger",
-                time=event.time,
-                severity="info",
-                attributes={
-                    "session.id": session.id,
-                    "event.type": event.type,
-                    "event.seq": event.seq,
-                },
-                body=event.type,
+    def _track(self, session: Session) -> None:
+        """Start a session's cursor at its end: its seed was never an event here."""
+        self._shipped.setdefault(session, session.seq)
+
+    def _durable(self, session: Session, through: int) -> list[SessionEvent]:
+        """What the ledger ships now that the log holds every event below `through`.
+
+        Nothing is read when no sink would receive it: a record is fanned out to
+        the sinks there are when it is made, so there is nobody to read it for."""
+        start = self._shipped.get(session)
+        if start is None or through <= start:
+            return []
+        self._shipped[session] = through
+        if not self._sinks:
+            return []
+        owed = session.events_from(start, through - start)
+        return [event for event in owed if self._wants(session, event)]
+
+    def _forget(self, session: Session) -> None:
+        """Drop one session's cursor. What no flush confirmed is not exported:
+        nothing says the log holds it."""
+        self._shipped.pop(session, None)
+        self._last_chunked_step.pop(session, None)
+
+    async def observe(self, session: Session, events: Sequence[SessionEvent]) -> None:
+        """Mirror session events onto the ledger channel, in the order given."""
+        for event in events:
+            await self.record(
+                SessionTelemetryRecord(
+                    channel="ledger",
+                    time=event.time,
+                    severity="info",
+                    attributes={
+                        "session.id": session.id,
+                        "event.type": event.type,
+                        "event.seq": event.seq,
+                    },
+                    body=event.type,
+                )
             )
-        )
 
     async def ops(
         self,
@@ -254,10 +297,16 @@ async def apply(ctx: Context, config: Config) -> None:
 
         telemetry.add_sink(write)
 
-    def on_event(session: Session, event: SessionEvent) -> MaybeAwaitable[None]:
+    def on_durable(session: Session, through: int) -> MaybeAwaitable[None]:
         # The returned coroutine is scheduled by `emit`, never awaited on the
-        # append path; a chunk that will not ship returns nothing and costs no
-        # task at all.
-        return telemetry.observe(session, event) if telemetry.wants(session, event) else None
+        # flush path; a flush that released nothing costs no task at all.
+        ready = telemetry._durable(session, through)
+        return telemetry.observe(session, ready) if ready else None
 
-    ctx.on("session/event", on_event)
+    # Sessions already live when the row (re)activates are read from here on,
+    # as the firehose listener it replaced would have heard them.
+    for session in ctx.require(SESSIONS).list():
+        telemetry._track(session)
+    ctx.on("session/created", telemetry._track)
+    ctx.on("session/durable", on_durable)
+    ctx.on("session/disposed", telemetry._forget)

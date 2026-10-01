@@ -1,9 +1,10 @@
 """`ctx.sessions` — the live session store, and forking.
 
-Publishes four events: `session/created`, `session/disposed`, `session/event`
-(the post-commit append feed) and `session/flush` (the awaited durability
+Publishes five events: `session/created`, `session/disposed`, `session/event`
+(the post-commit append feed), `session/flush` (the awaited durability
 checkpoint, a `parallel` dispatch so every backend runs and the caller waits
-for all of them).
+for all of them) and `session/durable` (what that checkpoint made durable, for
+a reader that must not run ahead of the log).
 
 Forking is the branching mechanism (D2): pH does not model branching as a
 message tree, it models it as `fork(source, boundary)` plus `seed_length`. The
@@ -64,6 +65,12 @@ events.declare(
     "parallel",
     owner="ph.session",
     doc="Awaited durability checkpoint: every backend drains and the caller waits.",
+)
+events.declare(
+    "session/durable",
+    "emit",
+    owner="ph.session",
+    doc="A flush every backend finished: the log holds the session's events below the count.",
 )
 
 ForkRejection = Literal[
@@ -289,9 +296,17 @@ class SessionStore:
         The honest trade: one `flush(child)` is now N dispatches rather than one.
         Both backends return early when nothing is owed, so the ancestors cost a
         dict lookup each.
+
+        **Then `session/durable`, with how much of the log is now held**, for a
+        reader that must not run ahead of it (the telemetry ledger). The count is
+        taken before the dispatch: each backend writes, under its own lock,
+        everything the log held when that write began, so it is a floor. With no
+        backend attached every flush answers at once, as `written` does.
         """
         for ancestor in self.lineage(session):
+            through = ancestor.seq
             await self.ctx.parallel("session/flush", ancestor)
+            self.ctx.emit("session/durable", ancestor, through, contained=True)
 
     async def written(self, session: Session) -> bool:
         """`flush`, answering whether it worked rather than raising.

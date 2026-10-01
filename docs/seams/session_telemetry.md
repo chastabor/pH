@@ -28,8 +28,7 @@ That is the whole reason `add_sink` exists rather than telling people to use
 ```text
 ctx.session_telemetry.record(record)       # -> passes redaction, then sinks
 ctx.session_telemetry.add_sink(sink)       # after the waterfall, by construction
-ctx.session_telemetry.observe(...)         # mirror session events
-ctx.session_telemetry.wants(channel)       # is anyone listening?
+ctx.session_telemetry.observe(session, events)  # mirror session events
 ctx.session_telemetry.ops
 ```
 
@@ -37,8 +36,23 @@ A `SessionTelemetryRecord` is `time`, `channel`, `severity`, `body`,
 `attributes` — a log-record shape rather than a span shape, which is what lets it
 map onto OTel logs without inventing a hierarchy.
 
-`wants(channel)` exists so a producer can skip building a record nobody will
-receive; with telemetry off, that is every record.
+## A ledger record ships once the log holds its event
+
+A ledger record names its event by `(session.id, event.seq)`. `session/event`
+fires on the in-memory append, and a crash loses whatever no flush wrote. The
+resumed log appends at its own length, so a record shipped straight off the
+firehose could name one event while the log, after the resume, put another at
+that seq.
+
+So the row keeps a cursor per session and never listens to the append at all.
+`SessionStore.flush` emits `session/durable` once every backend's flush has
+returned, with the log's length as it was before the dispatch, and the row reads
+the events up to there off the log. A flush that raised releases nothing. A
+session disposed before a flush reached its tail never ships that tail, because
+nothing says the log holds it. With no sink registered, nothing is read.
+
+The cost is lag, not loss: a record ships at the next flush, which every step,
+tool call and turn end makes. It still carries its event's own `time`.
 
 ## One exception to mirroring
 
@@ -53,7 +67,7 @@ first is the one that carries the latency signal.
 * It does not trace. See above.
 * It does not decide what is sensitive — a redaction row does, on the waterfall.
 * **Ledger records are the seam's own mirroring of the session log**, so what an
-  operator sees there is what the log already says. The `ops` channel has three
+  operator sees there is what the log already holds. The `ops` channel has three
   producers, all through the module's `ops_record` helper, which is a no-op
   without the seam: a session open refused because another process holds it, a
   store that cannot take the I-5 lease, and a workspace provider that failed and

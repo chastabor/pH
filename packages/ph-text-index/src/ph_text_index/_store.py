@@ -19,10 +19,16 @@ fine for a corpus of documents and wrong for a corpus of millions; the ceiling
 is the sidecar, not turbovec. It is stated here rather than discovered later.
 
 The pair can also diverge — a crash between the two writes leaves vectors with
-no meaning, or meanings with no vectors. `load` reconciles by trusting the
-sidecar and dropping any id the index does not hold, because a chunk nobody can
-retrieve is invisible while a vector with no text would surface as a hit this
-row could not describe.
+no meaning, or meanings with no vectors. `open` reconciles toward the sidecar
+both ways. It drops any chunk the index does not hold, because a chunk nobody can
+retrieve is invisible. It removes any vector the sidecar does not name, because
+its id is one the next `add` would allocate again.
+
+**One writer at a time, across processes.** Every root and process on a
+workspace shares its directory. Each holds its own copy in memory, and a save
+writes that copy whole, so two writers left the sidecar describing whichever
+saved last. The service opens and writes under a file lock, and loads again a
+copy another writer has changed since (`stale`); see `TextIndexSeam.writing`.
 
 ## Calibration
 
@@ -51,7 +57,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from ph.json import as_int, as_str
 from ph.paths import write_atomic
@@ -76,6 +82,9 @@ the future, not for one of ours missing a key."""
 
 CALIBRATION_SAMPLE = 1_024
 """Rows turbovec's own guidance calls enough for a calibration fit."""
+
+_Signature: TypeAlias = tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]
+"""The sidecar's and the vectors' `_stamp`."""
 
 
 class IndexMismatch(RuntimeError):
@@ -136,6 +145,8 @@ class TextIndex:
     Beside the digests rather than inside a `Record`, because it is one fact per
     *document* while a record is one per passage: storing it per chunk would be
     the same string repeated once for every paragraph of every file."""
+    _seen: _Signature = (None, None)
+    """The files as this copy last read or wrote them. See `stale`."""
 
     # ------------------------------------------------------------- paths ----
 
@@ -165,6 +176,7 @@ class TextIndex:
 
         :raises IndexMismatch: when the sidecar names a different embedder.
         """
+        self._seen = self._signature()
         if not self.sidecar_path.exists():
             return
         raw = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
@@ -210,7 +222,57 @@ class TextIndex:
                 dropped,
                 self.root,
             )
+        self._remove_strays()
         self._reindex_paths()
+
+    def _remove_strays(self) -> None:
+        """Remove every vector the sidecar does not name, and write that down.
+
+        What a crash between `save`'s two writes leaves: the vectors synced, the
+        sidecar naming them never written. Their ids start at the sidecar's
+        `next_id`, which is where the next `add` allocates, and turbovec refuses
+        an id it already holds, so every later add raised until the directory
+        was deleted.
+
+        turbovec lists no ids, so they are found with a search whose `k` is the
+        whole index. That is one full scan, and only when the count says there is
+        something to find: every id the sidecar kept is in the index, so the
+        difference in size is exactly the number of strays. Synced at once, so
+        the scan is made once and not on every open until somebody saves; the
+        service opens under the writer lock, so nobody else is writing.
+        """
+        if self._index is None:
+            return
+        strays = len(self._index) - len(self._records)
+        if strays <= 0:
+            return
+        # Heavy, and needed only where an index is built or searched.
+        import numpy as np  # noqa: PLC0415
+
+        query = np.zeros((1, int(self._index.dim)), dtype=np.float32)
+        _scores, ids = self._index.search(query, len(self._index))
+        for id_ in ids[0].tolist():
+            if id_ not in self._records:
+                self._index.remove(id_)
+        self._index.sync(str(self.index_path))
+        self._seen = self._signature()
+        log.warning(
+            "ph_text_index: %d vector(s) in %s had no sidecar chunk and were removed",
+            strays,
+            self.root,
+        )
+
+    def _signature(self) -> _Signature:
+        return (_stamp(self.sidecar_path), _stamp(self.index_path))
+
+    def stale(self) -> bool:
+        """Whether another writer changed the files since this copy read or wrote them.
+
+        A stat of each, so it is cheap enough to ask before every use. Both files,
+        because a writer that died between its two writes changed only the
+        vectors, and a copy checked against the sidecar alone would sync its own
+        changes onto a file that had moved under it."""
+        return self._signature() != self._seen
 
     def _reindex_paths(self) -> None:
         self._by_path = {}
@@ -243,6 +305,7 @@ class TextIndex:
         # Replace, never truncate-in-place: the sidecar is the only copy of what
         # the vectors mean, and a partial write of it loses the corpus.
         write_atomic(self.sidecar_path, json.dumps(payload))
+        self._seen = self._signature()
 
     # ------------------------------------------------------------ mutate ----
 
@@ -426,6 +489,18 @@ class TextIndex:
                 else "empty"
             ),
         }
+
+
+def _stamp(path: Path) -> tuple[int, int, int] | None:
+    """One file's `(inode, mtime, size)`, or `None` when it is absent.
+
+    The inode is what catches the sidecar, which `write_atomic` replaces; the
+    mtime and size catch the vectors, which `sync` appends to in place."""
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
 def _turbovec() -> Any:  # noqa: ANN401

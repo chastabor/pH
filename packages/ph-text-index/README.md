@@ -78,11 +78,9 @@ reason `tool-attach` insists on it (I-9). It matters more here, because
 indexing is a *bulk* read: a tool that walked the tree with `Path.open` would be
 an exfiltration primitive with a glob argument.
 
-The corollary: the index is **per-deployment, not per-agent**. Two agents share
-`$PH_CACHE/text-index/<embedder digest>` unless a profile says otherwise, so a
-passage one indexed is retrievable by another. Right for a documentation corpus,
-wrong for anything private — `path:` in the row's config is how you separate
-them.
+The corollary: the index is **per workspace, not per agent**. Agents in one
+workspace share its index, so a passage one indexed the others retrieve. See
+"On disk" for where it lives and why it is keyed that way.
 
 ## Chunking
 
@@ -107,9 +105,23 @@ indexed. It is also the ceiling: the sidecar is rewritten whole on every save,
 which is fine for a corpus of documents and wrong for millions.
 
 A crash between the two writes can leave them diverged, so vectors are committed
-first and `open` reconciles by trusting the sidecar and dropping any id the index
-cannot answer for — a chunk nobody can retrieve is invisible, where a vector
-with no text would surface as a hit this row could not describe.
+first and `open` reconciles toward the sidecar both ways. It drops any chunk the
+index cannot answer for, since a chunk nobody can retrieve is invisible. It
+removes any vector the sidecar does not name, since a vector with no text would
+surface as a hit this row could not describe, and its id is one the next add
+would allocate again.
+
+**One index per workspace and embedder**, at
+`$PH_CACHE/text-index/<workspace>/<embedder>`, because what an index holds
+belongs to one tree: documents named relative to it, one version-control token,
+and a sweep that drops what that tree no longer has. A worktree is a workspace
+of its own, and nothing prunes the directories it leaves.
+
+**One writer at a time.** Roots and processes on one workspace share its
+directory. A change is made under `writer.lock` in it, starting from what is on
+disk: a copy another writer has changed since it was loaded is loaded again. A
+second writer waits for the first. A search loads a changed copy again only when
+the lock is free, and otherwise answers from the copy it has.
 
 ### Calibration
 
