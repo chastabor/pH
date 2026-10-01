@@ -41,7 +41,6 @@ answers most of what an agent actually asks and reports where it cannot.
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import logging
 from collections.abc import Mapping
@@ -68,6 +67,7 @@ from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_to
 from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
 from ph.wire import WireModel
+from ph.workspace_caches import digest, use
 
 from ._extract import (
     cache_release,
@@ -127,7 +127,8 @@ class Config(WireModel):
     """Row config for `code-graph`."""
 
     path: str = ""
-    """Where the index lives. Defaults to `$PH_CACHE/code-graph/<root digest>.db`.
+    """Where the index lives. Defaults to `$PH_CACHE/code-graph/<root digest>/graph.db`;
+    a path set here is one database, used as given.
 
     Under the cache root because the index is **rebuildable** — the source is the
     truth and this is derived, which is the lifecycle `$PH_CACHE` names (Q1).
@@ -178,21 +179,22 @@ class CodeGraphSeam:
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
 
     def store_for(self, root: Path) -> CodeGraphStore:
-        """This workspace's index. One file per root, and **nothing prunes them.**
+        """This workspace's index: a directory per root, or the row's `path` as given.
 
         Keyed per root on purpose — a worktree at another revision holds
         different line numbers, so sharing one index would hand out pointers
         that are quietly stale. The cost is that under a profile whose children
-        run in worktrees, every throwaway tree leaves a database behind, and
-        `phern doctor` names only the current one. Stated here rather than left to
-        be discovered, which is this codebase's rule for a cache nothing
-        collects (`ph.seams.uploads` says the same about attachments): deleting
-        `$PH_CACHE/code-graph` reclaims all of them and costs a re-index.
+        run in worktrees, every throwaway tree leaves a database behind, so the
+        directory records its workspace and one whose workspace is gone is swept
+        on a later index (`ph.workspace_caches`).
         """
-        digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-        return CodeGraphStore(
-            path=default_cache_path(self.config.path, "code-graph", f"{digest}.db")
-        )
+        if self.config.path:
+            return CodeGraphStore(path=default_cache_path(self.config.path, "code-graph"))
+        return CodeGraphStore(path=self.base() / digest(str(root)) / "graph.db")
+
+    def base(self) -> Path:
+        """Where the per-workspace indexes live, when no `path` names one database."""
+        return default_cache_path(None, "code-graph")
 
     def locked(self) -> anyio.Lock:
         return self._lock
@@ -560,6 +562,10 @@ async def apply(ctx: Context, config: Config) -> None:
         skipped: list[dict[str, str]] = []
         indexed = unchanged = symbols = removed = 0
 
+        if not config.path:
+            # Before the lock: the record and the sweep touch nothing an index
+            # holds. Not for a configured `path`, one database the row was given.
+            await anyio.to_thread.run_sync(use, seam.base(), fs.root_for(run.agent))
         async with seam.locked():
             await anyio.to_thread.run_sync(book.prepare)
             if args.forget:

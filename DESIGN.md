@@ -929,7 +929,7 @@ pre-execute gate stay `session-checkpoint-policy`'s — before every model
 request, before a top-level tool body and a nested dispatch that can reach past
 the workspace, after a rejected `agent/pre-step`
 (`persistence/checkpoint_policy.py`) — and a kind that needs one declares
-`tools-execute` rather than placing a second. What still flushes by hand: a
+`tools-body` rather than placing a second. What still flushes by hand: a
 daemon verb before it replies (F7), an upload before its handle is cached, a
 sub-agent's admission before its gate opens, and its ending before its parent is
 handed the result (`record_ended`, F1). A backend writes what the log
@@ -987,9 +987,8 @@ the tombstone is the record.
 > ### A session resumes repeatedly
 >
 > **What a resume owes the store is not what the store already has.** A resume
-> seeds the stored events, then adds two things nobody wrote: the repair closers,
-> and the `session/end-seed` the constructor appends. Both are in the log before
-> the store is asked to track it.
+> seeds the stored events, then adds what nobody wrote: the repair closers. They
+> are in the log before the store is asked to track it.
 >
 > `JsonlSessionStore.track` used to infer durability from `path.exists()` and
 > queue nothing when the file was already there — which is right for a fresh

@@ -227,7 +227,17 @@ class SessionStore:
         if parent is not None:
             fields.setdefault("family", parent.header.family)
         header = SessionHeader.model_validate(fields)
-        return self._publish(Session(resolved, seed=seed, header=header, durable=inherited))
+        session = Session(resolved, seed=seed, header=header, durable=inherited)
+        if seed is not None:
+            # **Where a branch's own work begins**, at `seed_length`: a fork's or a
+            # segment's first event of its own. Laid here, by the one door that
+            # makes a branch, and not by the constructor, which every resume, view
+            # and replay goes through too — there it marked nothing, and a viewer
+            # showed an event the log on disk did not have. Before `_publish`, so
+            # it is in the log when a backend first tracks it and no listener
+            # takes it for news.
+            _LOG.append(session, "session/end-seed", {})
+        return self._publish(session)
 
     def adopt(self, session: Session) -> Session:
         """Publish an already-constructed session (the resume path).

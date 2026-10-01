@@ -62,6 +62,7 @@ from .payloads import (
     DaemonConfigReply,
     DaemonLifetime,
     DaemonStatusReply,
+    NewSessionReply,
     PresetApplied,
     RootDescription,
     RootListing,
@@ -159,7 +160,7 @@ id. As a `Verb` that was a convention rather than a rule:
 
 SESSIONS_LIST = Verb("sessions/list", NoParams, RootListing)
 SESSIONS_BROWSE = Verb("sessions/browse", BrowseParams, SessionBrowse)
-SESSION_NEW = Verb("session/new", NewSessionParams, RootDescription)
+SESSION_NEW = Verb("session/new", NewSessionParams, NewSessionReply)
 SESSION_ATTACH = Verb("session/attach", SessionParams, AttachReply)
 SESSION_DETACH = Verb("session/detach", SessionParams, SessionDetached)
 SESSION_STATUS = Verb("session/status", SessionParams, RootStatusReply)

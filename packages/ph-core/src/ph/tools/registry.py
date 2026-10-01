@@ -6,7 +6,7 @@ Three separable things live here because they share one traversal:
 * **visibility** — restrictions intersect over *global* names only, so a
   restriction can never silence a tool an agent registered for itself;
 * **the pipeline** — `tools/pre-execute` → approval on `ask` → monotonic guards
-  → `tools/execute` (around) → body → `tools/post-execute` → normalize →
+  → `tools/execute` (around) → `tools/body` → body → `tools/post-execute` → normalize →
   `finalize_content` → `tools/result` (B1-B5).
 
 **Guards run after approval**, following dsh. A guard is deny-only and runs last,
@@ -156,6 +156,13 @@ events.declare(
     "waterfall",
     owner="ph.tools",
     doc="Around the tool body: timeouts, retries, metrics. May replace the signal.",
+)
+events.declare(
+    "tools/body",
+    "serial",
+    owner="ph.tools",
+    doc="A call about to run its body, once every `tools/execute` listener has had its say. "
+    "A barrier that must cover what they appended waits here.",
 )
 events.declare(
     "tools/post-execute",
@@ -1306,6 +1313,11 @@ class ToolRuntime:
                 # A wrapper may have replaced the signal for its delegated
                 # lifetime; the body sees whatever reached it.
                 run.execution = dispatch_exec
+                await self.ctx.serial("tools/body", dispatch_exec, scope=dispatch_exec.scope)
+                # Never start a canceled body. Checked last, after every wrapper
+                # and the barrier: a slow one is where a cancellation lands.
+                if is_canceled(dispatch_exec.signal):
+                    return aborted_result(started=False)
                 # **The definition's code runs as the agent it was invoked
                 # for** (P6-26), all three callbacks and not only `execute` —
                 # `render` and `project_meta` are the same row's code reached

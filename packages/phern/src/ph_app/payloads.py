@@ -59,6 +59,7 @@ from ph.seams.subagents import (
 from ph.seams.tui_screens import ScreenSchema
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
+from ph.session import SessionHeader
 from ph.wire import WireModel, wire_alias
 
 from .protocol import CapabilityBlock, Cursor
@@ -86,6 +87,7 @@ __all__ = [
     "DiagnosticSection",
     "Hold",
     "MutationRepeated",
+    "NewSessionReply",
     "PresetApplied",
     "ProfileAsk",
     "ProfileAskReply",
@@ -307,6 +309,17 @@ class _CarriesSchedules(_CarriesJson):
 
 class RootStatusReply(RootDetail, _CarriesSchedules):
     """`session/status` — one root in detail, with what is still going to fire."""
+
+
+class NewSessionReply(RootDescription):
+    """`session/new` — the description, with the root's own header.
+
+    What a front end builds its mirror of the root's log on (`DaemonSession.header`).
+    Here and not on every description: the other replies that carry one are about
+    status, and a client builds its mirror once, from this reply.
+    """
+
+    header: SessionHeader
 
 
 class AttachReply(RootDescription):

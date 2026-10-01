@@ -227,9 +227,7 @@ async def apply(ctx: Context, config: Config) -> None:
             )
             if not proposal.edits:
                 return _considered(request, proposal.summary or "no edits proposed")
-            record = await service.apply(
-                proposal, scope=request.scope, session=session, agent=agent
-            )
+            record = await service.apply(proposal, scope=request.scope, agent=agent)
         except (PlannerError, RefinementRefused) as error:
             log.debug("ph_rlm.harness: refinement did not apply", exc_info=True)
             return _considered(request, str(error))

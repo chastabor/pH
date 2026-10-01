@@ -88,8 +88,7 @@ async def test_it_opens_a_stored_log_with_nothing_mounted(mount: MountProfile) -
         "message",
         "tool",
         "event",
-        "event",  # the seed boundary a stored log records
-    ]
+    ], "the log as stored, with no seed boundary laid on the view"
     app = TrajectoryApp(records, session_id=session_id)
     assert app.trajectory.sessions is None, "a file-backed view has no store, and says so"
 

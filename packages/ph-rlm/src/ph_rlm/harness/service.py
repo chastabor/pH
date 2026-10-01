@@ -194,15 +194,14 @@ class HarnessService:
         self,
         proposal: RefinementProposal,
         *,
-        session: Session | None,
-        agent: AgentHandle | None,
+        agent: AgentHandle,
         refine_id: str,
     ) -> tuple[list[HarnessEdit], list[str]]:
         """`(accepted, rejected)` — the checks, before the refinement is written, bar
         H1's probes (`_probe`), which record themselves under `refine_id`."""
         accepted: list[HarnessEdit] = []
         rejected: list[str] = []
-        current = self.state(session)
+        current = self.state(agent.session)
         for edit in proposal.edits:
             entry_id = edit.id or slugify(edit.title or edit.content)
             if entry_id in RESERVED_IDS:
@@ -234,7 +233,7 @@ class HarnessService:
         self,
         reference: HarnessReference,
         *,
-        agent: AgentHandle | None,
+        agent: AgentHandle,
         entry_id: str,
         refine_id: str,
     ) -> str | None:
@@ -259,8 +258,9 @@ class HarnessService:
             # A mounted seam with no provider is the seam's own error to word:
             # `runtime.run` raises it, and the except below reports it.
             return "no code runtime is mounted to resolve it against"
-        if agent is None or (session := agent.session) is None:
-            return "no agent to resolve it as, and record it in"
+        session = agent.session
+        if session is None:
+            return "the agent has no log to record the probe in"
 
         intents = intents_of(self.ctx)
         try:
@@ -310,11 +310,14 @@ class HarnessService:
         self,
         proposal: RefinementProposal,
         *,
+        agent: AgentHandle,
         scope: HarnessScope = "local",
-        session: Session | None = None,
-        agent: AgentHandle | None = None,
     ) -> RefinementRecord:
         """Validate, then record. The record is the state; nothing else is.
+
+        Made by an agent, into its session's harness: a skill entry is probed as
+        that agent, in its boundary and recorded in its log (S21), and a global
+        edit asks that agent's person (H3).
 
         :raises RefinementRefused: a global edit the human declined, or nothing
             valid left to apply.
@@ -325,18 +328,17 @@ class HarnessService:
             "a global refinement edits every future session, including other projects, and "
             "was not approved",
         )
-        accepted, rejected = await self._validate(
-            proposal, session=session, agent=agent, refine_id=refine_id
-        )
+        session = agent.session
+        accepted, rejected = await self._validate(proposal, agent=agent, refine_id=refine_id)
         if not accepted:
             raise RefinementRefused(
                 "; ".join(rejected) or "the proposal contained no edits to apply"
             )
 
         current = self.state(session)
-        # The *agent's* scope when there is one, because whether a binding of
-        # that name is visible is a per-agent question (B7).
-        target_scope = agent.ctx if agent is not None else self.ctx
+        # The agent's scope, because whether a binding of that name is visible
+        # is a per-agent question (B7).
+        target_scope = agent.ctx
         applied: list[AppliedEdit] = []
         for edit in accepted:
             # `validate` stamped an id on every accepted edit — it is the one

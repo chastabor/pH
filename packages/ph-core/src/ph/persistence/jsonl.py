@@ -81,6 +81,7 @@ __all__ = [
     "resumptions",
     "session_logs",
     "session_path",
+    "skim_session",
 ]
 
 
@@ -115,7 +116,7 @@ def resumption_of(session: Session) -> Resumption | None:
     that did. Only the log's own resumes count (`resumptions`).
     """
     event = session.latest("session/resumed")
-    if event is None or event.seq < (session.header.seed_length or 0):
+    if event is None or event.seq < session.header.first_own_seq:
         return None
     return Resumption.of(event)
 
@@ -127,9 +128,7 @@ def resumptions(session: Session) -> list[Resumption]:
     taken as the fork's they would date the fork by its source's restarts.
     """
     return [
-        Resumption.of(event)
-        for event in session.events_from(session.header.seed_length or 0)
-        if event.type == "session/resumed"
+        Resumption.of(event) for event in session.own_events() if event.type == "session/resumed"
     ]
 
 
@@ -195,7 +194,9 @@ def logs_holding(
             if needle not in path.read_bytes():
                 yield path.stem, []
                 continue
-            _header, events = read_session(path, types=types)
+            # Skimmed: a log that holds a schedule is read for its records of
+            # these types, and one damaged elsewhere is the resume's to refuse.
+            _header, events = skim_session(path, types)
         except (OSError, ValueError):
             log.warning("ph.persistence.jsonl: could not read %s", path, exc_info=True)
             continue
@@ -457,9 +458,9 @@ class JsonlSessionStore:
         premise that is true of two cases and false of the third. A fresh
         session has an empty log, so it queues nothing either way. A fork writes
         a new file, so its whole seed is owed. But a **resume** re-opens an
-        existing file with a log that already contains the repair closers and
-        `session/end-seed` — present at `track` time, never written — so the
-        gate discarded exactly the events that were owed. The result was a gap in
+        existing file with a log that already contains the repair closers —
+        present at `track` time, never written — so the gate discarded exactly
+        the events that were owed. The result was a gap in
         the seq space, `_readmit` refusing the next seed, and a session that
         could be resumed once. `TursoSessionStore` was unaffected because it
         upserts by `seq` and so queues its whole log unconditionally; the two
@@ -815,6 +816,11 @@ def _peek_header(path: Path) -> SessionHeader | None:
         return None
 
 
+_TYPED = '{"type":"'
+"""How every line this backend writes begins: `to_wire` puts `type` first and
+`dumps` is compact, so a line's type can be read off its text (`skim_session`)."""
+
+
 def read_session(
     path: Path, *, upto: int | None = None, types: frozenset[str] | None = None
 ) -> tuple[SessionHeader, list[SessionEvent]]:
@@ -843,27 +849,52 @@ def read_session(
     record of any type is kept aside, so the torn-batch rule below still judges the
     tail by what was written rather than by what was kept.
     """
+    return _read(path, upto, types, None)
+
+
+def skim_session(path: Path, types: frozenset[str]) -> tuple[SessionHeader, list[SessionEvent]]:
+    """`read_session(path, types=types)`, without parsing the lines it throws away.
+
+    A line whose own text names another type (`_TYPED`) is passed unparsed:
+    `json.loads` of the discarded lines was most of a typed read — 17 ms against 5
+    on a 9 800-event log. It trades away one refusal, so it is for a reader that may
+    lose it: a damaged line among those passed goes unseen, where `read_session`
+    refuses the log. Not for one that must fail closed, since a damaged type name
+    reads as another type. The last line is parsed whatever it names, so the
+    torn-tail and torn-batch rules judge the tail as a strict read does.
+    """
+    return _read(path, None, types, tuple(f'{_TYPED}{one}"' for one in types))
+
+
+def _read(
+    path: Path,
+    upto: int | None,
+    types: frozenset[str] | None,
+    wanted: tuple[str, ...] | None,
+) -> tuple[SessionHeader, list[SessionEvent]]:
+    """`read_session`'s loop, and `skim_session`'s when `wanted` holds the line
+    prefixes of the types to keep."""
     header: SessionHeader | None = None
     events: list[SessionEvent] = []
     tail: dict[str, Any] | None = None
+    passed: tuple[int, str] | None = None
     with path.open("r", encoding="utf-8") as handle:
         for number, line in enumerate(handle, start=1):
-            text = line.strip()
-            if not text:
+            if (
+                wanted is not None
+                and header is not None
+                and line.startswith(_TYPED)
+                and not line.startswith(wanted)
+                and line.endswith("\n")
+            ):
+                # The last line passed while none parsed after it is the tail.
+                passed = (number, line)
                 continue
-            try:
-                record = json.loads(text)
-            except json.JSONDecodeError as error:
-                if not line.endswith("\n"):
-                    # Only the last line can lack its newline.
-                    log.warning(
-                        "ph.persistence.jsonl: %s:%d is a write that did not finish; "
-                        "reading the log without it",
-                        path,
-                        number,
-                    )
-                    break
-                raise ValueError(f"{path}:{number}: {error}") from error
+            if not line.strip():
+                continue
+            record = _parse(path, number, line)
+            if record is None:
+                break
             if record.get("type") == HEADER_LINE_TYPE:
                 header = SessionHeader.model_validate(record["header"])
                 continue
@@ -874,12 +905,14 @@ def read_session(
                 # on the header so a file that puts it after an event still
                 # yields one rather than raising "no session header line".
                 break
-            tail = record
+            tail, passed = record, None
             if types is not None and record.get("type") not in types:
                 continue
             events.append(SessionEvent.from_wire(record))
     if header is None:
         raise ValueError(f"{path}: no session header line")
+    if passed is not None:
+        tail = _parse(path, *passed)
     if upto is None and tail is not None:
         last = SessionEvent.from_wire(tail)
         dropped = _unfinished_batch([last])
@@ -892,6 +925,27 @@ def read_session(
             )
             events = [event for event in events if event.seq <= last.seq - dropped]
     return header, events
+
+
+def _parse(path: Path, number: int, line: str) -> dict[str, Any] | None:
+    """One line's record, or `None` for an unterminated last line: a write that did
+    not finish (F6). Anything else that is not a record refuses the log."""
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError as error:
+        if not line.endswith("\n"):
+            # Only the last line can lack its newline.
+            log.warning(
+                "ph.persistence.jsonl: %s:%d is a write that did not finish; "
+                "reading the log without it",
+                path,
+                number,
+            )
+            return None
+        raise ValueError(f"{path}:{number}: {error}") from error
+    if not isinstance(record, dict):
+        raise ValueError(f"{path}:{number}: not a record")
+    return record
 
 
 def _unfinished_batch(events: Sequence[SessionEvent]) -> int:
@@ -935,12 +989,11 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     closers = interrupted_turn_closers(events, calls, intents=intents)
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))
     # `durable=len(events)`: **what the store already holds is `events`, and
-    # nothing else.** The closers
-    # are synthesized here and the constructor appends `session/end-seed` on top;
-    # both are in the log and neither has been written. A backend that inferred
-    # durability from "the file exists" dropped them and left a gap in the seq
-    # space, which `_readmit` refuses — so the session resumed once and never
-    # again. Said here because this is the only place that knows the difference.
+    # nothing else.** The closers are synthesized here; they are in the log and
+    # have not been written. A backend that inferred durability from "the file
+    # exists" dropped them and left a gap in the seq space, which `_readmit`
+    # refuses — so the session resumed once and never again. Said here because
+    # this is the only place that knows the difference.
     session = ctx.require(SESSIONS).adopt(revived)
     # Recorded, not just returned. A resume is a fact about *provenance* — this
     # process picked up work somebody else started — and it is not derivable

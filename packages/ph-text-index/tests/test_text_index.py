@@ -51,6 +51,7 @@ from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, raising, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
+from ph.workspace_caches import WORKSPACE_FILE
 from ph_text_index import TEXT_INDEX, Config, TextIndexSeam
 from ph_text_index._chunk import chunk_paragraphs, chunk_text
 from ph_text_index._embed import Vectors
@@ -520,6 +521,21 @@ async def test_each_workspace_has_its_own_index(tmp_path: Path) -> None:
     assert (await seam.index(there)).documents() == []
     assert (await seam.index(here)).documents() == ["docs/w.md"]
     assert seam.root(here).parent.parent == seam.root(there).parent.parent == tmp_path / "ix"
+
+
+async def test_a_change_records_the_workspace_its_index_serves(tmp_path: Path) -> None:
+    """What lets a sweep remove the index of a worktree that is gone: its directory
+    names the workspace, and a digest cannot (`ph.workspace_caches`).
+
+    Sabotage: drop the `use` call from `writing`, and nothing is recorded.
+    """
+    seam = _seam(tmp_path / "ix", HashingEmbedder())
+    here = tmp_path / "here"
+
+    await _index_one(seam, here, "docs/billing.md", "Invoices are issued monthly.")
+
+    recorded = seam.root(here).parent / WORKSPACE_FILE
+    assert recorded.read_text(encoding="utf-8") == str(here)
 
 
 def test_a_filter_that_matches_nothing_returns_nothing_rather_than_raising(

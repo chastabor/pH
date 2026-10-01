@@ -47,6 +47,7 @@ from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
+from ph.workspace_caches import WORKSPACE_FILE
 from ph_code_graph import CODE_GRAPH
 from ph_code_graph._extract import (
     INHERITS,
@@ -307,6 +308,25 @@ async def test_indexing_then_asking_answers_with_a_readable_pointer(
     lines = (tmp_path / hit["path"]).read_text().splitlines()
     assert "def shared" in lines[hit["start_line"] - 1]
     assert f"{hit['path']}:{hit['start_line']}" in text_of(found.content)
+
+
+async def test_an_index_records_the_workspace_its_graph_serves(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """What lets a sweep remove the graph of a worktree that is gone: its directory
+    names the workspace, and a digest cannot (`ph.workspace_caches`).
+
+    Sabotage: drop the `use` call from `code_index`, and nothing is recorded.
+    """
+    _tree(tmp_path)
+    ctx = await mount(ROW)
+    root = ctx.require(FS).root_for(None)
+
+    built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+
+    assert not built.is_error, text_of(built.content)
+    recorded = ctx.require(CODE_GRAPH).store_for(root).path.parent / WORKSPACE_FILE
+    assert recorded.read_text(encoding="utf-8") == str(root)
 
 
 async def test_callers_names_the_calling_symbol_and_the_calling_line(

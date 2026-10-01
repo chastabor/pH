@@ -594,7 +594,6 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "workspace/retained",
             }
         ),
-        "ph.session.session": frozenset({"session/end-seed"}),
         "ph.session_profile": frozenset(
             {
                 "profile/adopted",
@@ -607,7 +606,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "profile/withdrawn",
             }
         ),
-        "ph.session.store": frozenset({"session/segmented"}),
+        "ph.session.store": frozenset({"session/end-seed", "session/segmented"}),
         "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
         "ph_app.daemon.supervisor": frozenset(
             {

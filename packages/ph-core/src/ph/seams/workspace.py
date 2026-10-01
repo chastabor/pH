@@ -2011,7 +2011,7 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
     """
     open_records: dict[str, WorkspaceRecord] = {}
     closed: list[WorkspaceRecord] = []
-    for event in session.events[session.header.seed_length or 0 :]:
+    for event in session.own_events():
         # The type test first: a long log is mostly `assistant/chunk`, and
         # reading `agentId` off every one of them to discover it is absent costs
         # a mapping get and a string per event.
@@ -2554,11 +2554,8 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
             log.warning("ph.seams.workspace: no restore point for this run", exc_info=True)
         return await next_()
 
-    # **Outermost** (F5): the restore point is recorded, then the checkpoint
-    # policy's barrier makes it durable, then the cell runs. Registered in mount
-    # order this ran *inside* that barrier — flush, then pin the ref and append
-    # `workspace/checkpoint`, then the cell — so a crash mid-cell left the ref in
-    # the repository and no record of it, and `/revert` had no restore point for
-    # exactly the run that went wrong. It also keeps the snapshot out of the
-    # cell's own `tools-timeout` budget, which is the model's, not the harness's.
+    # **Outermost** (F5), so the snapshot stays out of the cell's own
+    # `tools-timeout` budget, which is the model's, not the harness's. The
+    # checkpoint barrier makes the restore point durable before the cell runs
+    # whatever the order: it is on `tools/body`, after every wrapper.
     ctx.on("tools/execute", around, prepend=True)

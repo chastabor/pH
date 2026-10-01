@@ -114,7 +114,7 @@ from ..payloads import (
     StatusFacts,
     notice_of,
 )
-from ..protocol import DaemonGone, NoParams, SessionParams, Verb, is_number
+from ..protocol import DaemonGone, NoParams, SessionParams, Verb
 from ..sessions import SessionSummary
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
@@ -165,10 +165,12 @@ class DaemonSession:
     _unreadable: int = 0
     """Frames this client could not rebuild **or admit**. Counted so the warning is
     one — and read as a fact, not only as a log-quietener: see `diverged`."""
-    generation: int | None = None
-    """The daemon session's generation, from the `session/new` reply: when its
-    running incarnation began (`generation_of`), kept as the mirror's `created_at`
-    so the mirror's `cursor_of` names the same one.
+    header: SessionHeader | None = None
+    """The daemon session's own header, from the `session/new` reply, which the
+    mirror is built on. So the mirror reads its log as the daemon does — a fork's
+    `seed_length` marks its inherited history off from its own work — and, once it
+    holds the same `session/resumed` records, its `cursor_of` names the daemon's
+    generation.
 
     **A constructor argument rather than a setter**, for the reason
     `Session.durable_length`'s own docstring gives about itself: an ordering
@@ -176,10 +178,10 @@ class DaemonSession:
     type cannot be built without is one nobody can get wrong. This was a `begin()`
     that replaced `session` after construction and raised if anything had been
     admitted first — a guard against a window that need not exist, since
-    `session/new` answers with the cursor before this object is built.
+    `session/new` answers with the header before this object is built.
 
     `None` only where no daemon said otherwise: a headless test driving this
-    directly gets a session with a generation of its own."""
+    directly gets a session with a header of its own."""
     arrival: str = ""
     """`FrontSession.arrival`: the attach reply's `profile_note`, the daemon's own
     sentence about a session kept on a version its named profile moved past."""
@@ -191,12 +193,9 @@ class DaemonSession:
     which re-validated the whole log each time and grew a `session/end-seed` marker
     the daemon's log does not have. Now each event is `admit`ted as it arrives, so
     the mirror is the same type as what it mirrors, with the same surface fold, the
-    same `stale()` check available to this client, and — once `begin` has keyed the
-    header to the attach reply's generation — the same `cursor_of` as the daemon's
-    own. A screen built from it reads a live log rather than a copy.
-
-    A placeholder until `begin`: valid and empty, with a generation of its own, so a
-    front end driven without an attach reply still has a session to build on."""
+    same `stale()` check available to this client, and — on the daemon's `header` —
+    the same `cursor_of` as the daemon's own. A screen built from it reads a live log
+    rather than a copy."""
     _readings: list[StatusReading] = field(default_factory=list)
     _moved: anyio.Event = field(default_factory=anyio.Event)
     """Set and replaced whenever the root's status changes — a wake-up for
@@ -212,12 +211,7 @@ class DaemonSession:
     (`refresh_children`)."""
 
     def __post_init__(self) -> None:
-        header = (
-            None
-            if self.generation is None
-            else SessionHeader(id=self.session_id, created_at=self.generation)
-        )
-        self.session = Session(self.session_id, header=header)
+        self.session = Session(self.session_id, header=self.header)
         self.feed = Followed(
             session_id=self.session_id, on_events=self._apply, on_status=self._status
         )
@@ -734,11 +728,9 @@ async def attach_session(
     await client.initialize("asks")
     # `trust` is the person's answer, which this client asked for and the daemon
     # enforces — it refuses a `cwd` nobody has vouched for (P5-14).
-    # The reply carries this root's cursor, and so its generation — which is what
-    # keys the mirror below. Read rather than discarded: nothing resumes the root
-    # between this reply and the attach, so the number here is the one the attach
-    # reply will name, and taking it now is what lets the mirror be built whole
-    # instead of re-keyed afterwards.
+    # The reply carries this root's header, which the mirror below is built on.
+    # Read rather than discarded: taking it now is what lets the mirror be built
+    # whole instead of re-keyed afterwards.
     created = await client.call(
         verbs.SESSION_NEW,
         NewSessionParams(
@@ -749,7 +741,6 @@ async def attach_session(
             profile=profile,
         ),
     )
-    generation = created.cursor.generation
 
     # Three startup reads at once, each through the one typed door and each
     # landing in a slot of its own reply's type. The first draft kept a
@@ -805,7 +796,7 @@ async def attach_session(
         screens=_screens_of(listed_screens[0].screens, hidden),
         listed_models=list(listed_models[0].models),
         hidden_screens=hidden,
-        generation=int(generation) if is_number(generation) else None,
+        header=created.header,
     )
     client.peer.on_notify = front.dispatch
     # The attach reply carries the status, the route and the footer, so this is

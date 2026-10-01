@@ -288,7 +288,7 @@ def goals(session: Session) -> dict[str, GoalState]:
     if session.latest(SET) is None:
         return {}
     found: dict[str, GoalState] = {}
-    for event in session.events_from(session.header.seed_length or 0):
+    for event in session.own_events():
         fold_goal_event(found, event)
     return found
 

@@ -87,6 +87,7 @@ from ..payloads import (
     DiagnosticSection,
     Hold,
     MutationRepeated,
+    NewSessionReply,
     PresetApplied,
     RepeatOutcome,
     RootDescription,
@@ -600,7 +601,7 @@ class _Connection:
     async def _sessions_list(self, _params: NoParams) -> RootListing:
         return RootListing(sessions=self.server.supervisor.describe())
 
-    async def _new_session(self, params: NewSessionParams) -> RootDescription:
+    async def _new_session(self, params: NewSessionParams) -> NewSessionReply:
         # `cwd` is the client's, and the daemon is the one that mounts — so
         # it is said here rather than assumed from the daemon's own process,
         # which is somewhere neither the person nor their files are. `or None`
@@ -635,7 +636,7 @@ class _Connection:
             # After the mount, not before: a directory is only worth
             # recording once its profile has actually composed.
             TrustStore(path=trust_path()).trust(Path(cwd))
-        return root.describe()
+        return NewSessionReply(**root.describe().model_dump(), header=root.session.header)
 
     async def _cancel(self, params: SessionParams) -> RootDescription:
         # Not a `MUTATIONS` row: cancel is idempotent by construction, and a

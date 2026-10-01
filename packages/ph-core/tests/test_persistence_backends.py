@@ -10,9 +10,8 @@ Protocol; none reaches for a path, a directory or a table.
 A defect that shipped, and the reason the two names are not interchangeable.
 
 A resume seeds the stored events *plus* the repair closers
-`interrupted_turn_closers` synthesized, and the constructor then appends
-`session/end-seed` on top. Those last events are in the log and have **never been
-written**. A backend that treated everything present at `track` time as durable
+`interrupted_turn_closers` synthesized. Those closers are in the log and have
+**never been written**. A backend that treated everything present at `track` time as durable
 dropped them and wrote only what arrived afterwards through `record`, leaving a
 **gap in the seq space** — and `_readmit` refuses a gap, so the session resumed
 exactly once and then could not be opened again. Measured: a daemon root survived
@@ -246,26 +245,25 @@ async def test_a_resume_writes_what_it_synthesized_on_top_of_what_it_read(
     """A session resumes **repeatedly**, and each reopen leaves the log contiguous.
 
     The test the suite was missing, and the shape of the bug it missed. A resume
-    seeds the stored events, then adds two things nobody wrote: the repair
-    closers, and the `session/end-seed` the constructor appends. Both are in the
+    seeds the stored events, then the repair closers nobody wrote. They are in the
     log before the store is ever asked to track it — so a backend that inferred
     "the file exists, therefore its contents are what I have" dropped them and
     wrote only what came afterwards. That leaves a hole in the seq space, and
     `_readmit` refuses a hole, so the *second* resume raised.
 
-    **Twice, because once passes either way.** The gap is created by the first
-    resume and only detected by the second, which is precisely why every test
-    that touched this stopped one step short — including the one below named for
-    resuming, which reads a stored log back but never reopens it.
+    **Three lifetimes, each cut short mid-turn, because once passes either way.**
+    The gap is created by the first resume and only detected by the second, which
+    is precisely why every test that touched this stopped one step short.
 
     Both backends, because they disagreed here and the Protocol is the only
     thing that makes them answer alike: `TursoSessionStore` upserts by `seq` and
     queues its whole log, so it was always correct; `JsonlSessionStore` appends
     and has to be told what it already holds.
     """
+    from ph.persistence.repair import interrupted_turn_closers
+
     session = _session(store)
     _append(store, session, "turn/start", {"turn": 1})
-    _append(store, session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     await store.flush(session)
 
     for reopen in (1, 2, 3):
@@ -279,26 +277,21 @@ async def test_a_resume_writes_what_it_synthesized_on_top_of_what_it_read(
             f"reopen {reopen}: the stored seq space has a hole, so nothing can seed from it"
         )
         # What `resume_session` does, without a mounted profile: seed from the
-        # store, let the constructor mark the boundary, then record the reopen.
-        revived = Session("s1", seed=list(events), header=header)
-        revived.durable_length = len(events)
+        # store and the closers for the turn the last lifetime left open, record
+        # the reopen, then start a turn this lifetime will not finish either.
+        closers = interrupted_turn_closers(events)
+        assert closers, f"reopen {reopen}: the fixture is not a crashed log"
+        revived = Session("s1", seed=[*events, *closers], header=header, durable=len(events))
         store.track(revived)
         log_event(revived, "session/resumed", {"events": len(events)})
+        log_event(revived, "turn/start", {"turn": reopen + 1})
         await store.flush(revived)
 
     _, events = store.read("s1")
     assert [event.seq for event in events] == list(range(len(events)))
-    assert [event.type for event in events] == [
-        "turn/start",
-        "turn/end",
-        # One boundary marker, then one record per reopen. The marker is not
-        # laid again: the guard reads past the `session/resumed` a reopen writes
-        # after it. Sabotage: read the last event alone, and each reopen adds two.
-        "session/end-seed",
-        "session/resumed",
-        "session/resumed",
-        "session/resumed",
-    ]
+    kinds = [event.type for event in events]
+    assert kinds.count("turn/end") == 3, "a reopen's closers were not written"
+    assert kinds.count("session/resumed") == 3
 
 
 async def test_a_repaired_tail_is_written_not_only_repaired(
@@ -474,10 +467,10 @@ def _reference_fork(
     settles for anything it builds — a header assembled here has to say it, and a
     synthetic chain with no real root has to pick one.
 
-    `own=False` keeps the header and drops the child's one event, which is the
-    shape a fork taken *at* an end-seed has: `Session.__init__` suppresses the
-    marker when the seed already ends in one, so such a child stores nothing at
-    all and the file has no first seq to read a boundary off.
+    `own=False` keeps the header and drops the child's one event: the shape a
+    fork taken *at* an end-seed was stored in while the constructor laid the
+    marker and skipped it for a seed that already ended in one. Such a child
+    stored nothing at all, and the file has no first seq to read a boundary off.
 
     **Built the way `SessionStore.create` builds one**: a session holding its
     inherited prefix, told that `boundary` events of it are durable elsewhere.
@@ -498,8 +491,7 @@ def _inheriting(session_id: str, header: SessionHeader, boundary: int) -> Sessio
     """A session whose first `boundary` events are someone else's to store.
 
     Their content is not read by anything here — the store writes from the
-    boundary up — so they are markers, and ending on one keeps the constructor
-    from appending another.
+    boundary up — so they are markers.
     """
     prefix = [
         SessionEvent(type="session/end-seed", seq=seq, time=1, data={}) for seq in range(boundary)
@@ -554,11 +546,12 @@ async def test_a_fork_at_an_end_seed_still_reads_its_history(
 ) -> None:
     """A child that owns *nothing* inherits everything, and used to read as empty.
 
-    `Session.__init__` suppresses the `session/end-seed` marker when the seed
-    already ends in one, so a fork taken at an end-seed — a fork of a fresh fork,
-    or any trajectory fork aimed at that boundary — writes a header and no events
-    at all. With no first event to read a boundary off, the walk took an empty
-    file for a complete log and handed back nothing.
+    While the constructor laid the `session/end-seed` marker it skipped one for a
+    seed that already ended in one, so a fork taken at an end-seed — a fork of a
+    fresh fork, or any trajectory fork aimed at that boundary — wrote a header and
+    no events at all. `SessionStore.create` now lays every branch its own marker,
+    but logs stored that way remain. With no first event to read a boundary off,
+    the walk took an empty file for a complete log and handed back nothing.
 
     The damage compounds rather than stopping there: `resume_session` seeds from
     that empty answer, appends its own marker at seq 0, and the next read refuses
@@ -815,6 +808,7 @@ async def test_a_seeded_child_writes_only_what_this_store_lacks(
         ),
         durable=inherited,
     )
+    log_event(child, "session/end-seed", {})  # laid as `SessionStore.create` lays it
     store.track(child)
     await store.flush(child)
 

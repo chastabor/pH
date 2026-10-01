@@ -80,17 +80,24 @@ def _closed_turn(session: Session, turn: int, text: str) -> None:
     log_event(session, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
 
 
-def test_seeding_marks_the_end_of_the_seed() -> None:
-    parent = Session("p")
+def test_a_branch_marks_the_end_of_its_seed_and_a_reopen_adds_nothing() -> None:
+    """The marker says where a branch's own work begins, so the door that makes a
+    branch lays it. A seed alone is a resume, a view or a replay, and there it
+    marked nothing: every reopen grew the log, and a viewer showed an event the
+    log on disk did not have.
+
+    Sabotage: lay the marker in the `Session` constructor again, and the reopen
+    gains an event.
+    """
+    store = _store()
+    parent = store.create("p")
     _closed_turn(parent, 1, "hello")
-    child = Session("c", seed=list(parent.events))
+    child = store.fork(parent)
     assert child.first_live_seq == len(parent.events)
     assert child.events[-1].type == "session/end-seed"
 
-    # Reopening an untouched session must not grow its log per open.
     reopened = Session("c2", seed=list(child.events))
-    assert reopened.events[-1].type == "session/end-seed"
-    assert len(reopened.events) == len(child.events)
+    assert reopened.events == child.events
 
 
 def test_a_seed_is_validated_to_the_same_rules_as_an_append() -> None:
@@ -120,7 +127,7 @@ def test_an_unrecognized_required_event_refuses_the_seed() -> None:
 def test_an_unrecognized_ignorable_event_is_accepted() -> None:
     note = SessionEvent(type="telemetry/note", seq=0, time=1, data={}, ignorable=True)
     session = Session("f", seed=[note])
-    assert [event.type for event in session.events] == ["telemetry/note", "session/end-seed"]
+    assert [event.type for event in session.events] == ["telemetry/note"]
 
 
 def test_fork_at_a_closed_turn_replays_identically() -> None:

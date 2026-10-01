@@ -153,7 +153,7 @@ def schedules(session: Session) -> dict[str, ScheduleState]:
     # safe direction: no `schedule/created` anywhere means none after the seed.
     if session.latest(CREATED) is None:
         return {}
-    return _fold(session.events_from(session.header.seed_length or 0))
+    return _fold(session.own_events())
 
 
 def _fold(events: Iterable[SessionEvent]) -> dict[str, ScheduleState]:

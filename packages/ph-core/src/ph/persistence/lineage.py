@@ -130,7 +130,7 @@ def materialize(
     # into the moment `fork` stops copying — the child's counter has to start at
     # `seed_length` — and a wrong log read as a right one is the exact failure
     # this module exists to make loud.
-    inherited = header.seed_length or 0
+    inherited = header.first_own_seq
     if events and events[0].seq == 0 and inherited > len(events):
         raise LineageError(
             f"session {session_id!r} starts at seq 0, so it claims to hold its own "
@@ -152,11 +152,11 @@ def materialize(
     # both the count to take and the boundary the fork was made at.
     #
     # **A child that owns nothing still inherits everything**, and reading that
-    # as a complete empty log is how a fork lost its history. It happens for a
-    # forked-at-an-end-seed child: `Session.__init__` suppresses the
-    # `session/end-seed` marker when the seed already ends in one, so the child
-    # writes a header and no events at all. With no first event to read a
-    # boundary off, `seed_length` is the boundary — which is what it means.
+    # as a complete empty log is how a fork lost its history. Such files exist: a
+    # fork taken at an end-seed was stored with a header and no events while the
+    # constructor laid the marker and skipped it for a seed already ending in
+    # one. With no first event to read a boundary off, `seed_length` is the
+    # boundary — which is what it means.
     chain = [session_id]
     pieces = [events]
     owed = events[0].seq if events else inherited

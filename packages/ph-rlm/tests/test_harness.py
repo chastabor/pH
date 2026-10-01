@@ -77,7 +77,7 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
     """
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="one", edits=[note_edit("first")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("first")]), agent=agent
     )
     await ctx.require(HARNESS).apply(
         RefinementProposal(
@@ -89,7 +89,6 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
                 note_edit("second"),
             ],
         ),
-        session=session,
         agent=agent,
     )
     return ctx, session, agent
@@ -102,7 +101,6 @@ async def test_an_applied_refinement_is_the_state(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="learned something", edits=[note_edit("prefer-uv")]),
-        session=session,
         agent=agent,
     )
 
@@ -151,12 +149,11 @@ async def test_a_fork_inherits_the_harness_as_of_its_boundary(harnessed: Harness
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="before", edits=[note_edit("early")]),
-        session=session,
         agent=agent,
     )
     boundary = session.events[-1].seq
     await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="after", edits=[note_edit("late")]), session=session, agent=agent
+        RefinementProposal(summary="after", edits=[note_edit("late")]), agent=agent
     )
 
     assert set(fold_session(session).entries["note"]) == {"early", "late"}
@@ -201,7 +198,6 @@ async def test_h5_the_doctrine_is_not_editable(harnessed: Harnessed) -> None:
                 summary="rewrite everything",
                 edits=[note_edit("base_system_prompt", "a new doctrine")],
             ),
-            session=session,
             agent=agent,
         )
     assert [event for event in session.events if event.type == REFINED] == []
@@ -223,7 +219,6 @@ async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: 
                 skill_edit("imaginary", "ph_nonexistent_module", "nope"),
             ],
         ),
-        session=session,
         agent=agent,
     )
 
@@ -273,7 +268,7 @@ async def test_h1_probes_within_the_agents_boundary_beside_its_kernel(
     (workspace.root / "ph_only_here.py").write_text("def here():\n    return 1\n", encoding="utf-8")
 
     record = await ctx.require(HARNESS).apply(
-        _skill("local-helper", "ph_only_here", "here"), session=session, agent=agent
+        _skill("local-helper", "ph_only_here", "here"), agent=agent
     )
 
     assert [edit.id for edit in record.applied_edits] == ["local-helper"], record.rejected
@@ -293,9 +288,7 @@ async def test_h1_a_probe_is_on_disk_before_it_runs(
     stored_at_run: list[list[str]] = []
     _on_each_run(monkeypatch, lambda _request: stored_at_run.append(stored_types(ctx, session.id)))
 
-    record = await ctx.require(HARNESS).apply(
-        _skill("finding-files", "glob", "glob"), session=session, agent=agent
-    )
+    record = await ctx.require(HARNESS).apply(_skill("finding-files", "glob", "glob"), agent=agent)
 
     assert stored_at_run and "harness/probe" in stored_at_run[0], "the kernel ran first"
     probe = next(event for event in session.events if event.type == "harness/probe")
@@ -313,20 +306,18 @@ async def test_h1_a_probe_the_log_cannot_record_does_not_run(
 
     Sabotage: make `HARNESS_PROBE`'s barrier `buffered`, and the kernel runs.
     """
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     ran: list[str] = []
     _on_each_run(monkeypatch, lambda request: ran.append(request.program))
     monkeypatch.setattr(SessionStore, "flush", raising(OSError("read-only file system")))
 
     with pytest.raises(RefinementRefused, match="could not be recorded, so it did not run"):
-        await ctx.require(HARNESS).apply(
-            _skill("finding-files", "glob", "glob"), session=session, agent=agent
-        )
+        await ctx.require(HARNESS).apply(_skill("finding-files", "glob", "glob"), agent=agent)
     assert ran == [], "the probe ran with no record of it on disk"
 
 
 async def test_h1_a_skill_without_a_reference_teaches_nothing(harnessed: Harnessed) -> None:
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="no reference"):
         await ctx.require(HARNESS).apply(
             RefinementProposal(
@@ -337,7 +328,6 @@ async def test_h1_a_skill_without_a_reference_teaches_nothing(harnessed: Harness
                     )
                 ],
             ),
-            session=session,
             agent=agent,
         )
 
@@ -353,7 +343,6 @@ async def test_h2_a_skill_for_a_bound_tool_renders_the_binding_form(harnessed: H
         RefinementProposal(
             summary="how to search", edits=[skill_edit("finding-files", "glob", "glob")]
         ),
-        session=session,
         agent=agent,
     )
     entry = ctx.require(HARNESS).state(session).entry("skill", "finding-files")
@@ -365,7 +354,6 @@ async def test_h2_an_unbound_reference_does_not_claim_to_be_a_binding(harnessed:
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="plain python", edits=[skill_edit("dumping", "json", "dumps")]),
-        session=session,
         agent=agent,
     )
     entry = ctx.require(HARNESS).state(session).entry("skill", "dumping")
@@ -375,13 +363,12 @@ async def test_h2_an_unbound_reference_does_not_claim_to_be_a_binding(harnessed:
 
 
 async def test_deleting_an_entry_that_is_not_there_is_refused(harnessed: Harnessed) -> None:
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="no such note"):
         await ctx.require(HARNESS).apply(
             RefinementProposal(
                 summary="tidying", edits=[HarnessEdit(action="delete", kind="note", id="ghost")]
             ),
-            session=session,
             agent=agent,
         )
 
@@ -397,7 +384,7 @@ async def test_h3_a_canceled_turn_is_not_prompted_for_a_global_edit(
     `ApprovalService.request` defaults its cancellation to the agent's own token,
     so every prompt inherits the rule rather than each caller restating it.
     """
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     asked = _allow(ctx)
     agent.signal.cancel("the user stopped the turn")
 
@@ -405,7 +392,6 @@ async def test_h3_a_canceled_turn_is_not_prompted_for_a_global_edit(
         await ctx.require(HARNESS).apply(
             RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
-            session=session,
             agent=agent,
         )
     assert asked == [], "a canceled turn must not reach the answerer"
@@ -418,14 +404,13 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
     asked = _allow(ctx)
 
     await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="local", edits=[note_edit("mine")]), session=session, agent=agent
+        RefinementProposal(summary="local", edits=[note_edit("mine")]), agent=agent
     )
     assert asked == [], "a local refinement asked for approval"
 
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
         scope="global",
-        session=session,
         agent=agent,
     )
     assert asked == ["refine"]
@@ -437,7 +422,7 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
 
 
 async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) -> None:
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
 
     async def refuse(_request: object, _next: object) -> str:
         return "rejected"
@@ -448,7 +433,6 @@ async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) ->
         await ctx.require(HARNESS).apply(
             RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
-            session=session,
             agent=agent,
         )
     assert read_global_events(ctx.require(HARNESS).directory) == []
@@ -456,12 +440,11 @@ async def test_h3_a_declined_global_edit_writes_nothing(harnessed: Harnessed) ->
 
 async def test_h3_fails_closed_with_nowhere_to_ask(harnessed: Harnessed) -> None:
     """B3: no answerer is not consent."""
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     with pytest.raises(RefinementRefused, match="not approved"):
         await ctx.require(HARNESS).apply(
             RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
             scope="global",
-            session=session,
             agent=agent,
         )
     assert read_global_events(ctx.require(HARNESS).directory) == []
@@ -477,7 +460,6 @@ async def test_a_global_refinement_folds_from_its_own_log(harnessed: Harnessed) 
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
         scope="global",
-        session=session,
         agent=agent,
     )
 
@@ -509,7 +491,7 @@ async def test_a_global_edit_is_written_only_after_the_approval_that_allowed_it(
     decision when the edit is written; drop `call_id` from the ask and the decision
     no longer names the record.
     """
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     _allow(ctx)
     approving = not_none(agent.session)
     decided_then: list[Any] = []
@@ -526,7 +508,6 @@ async def test_a_global_edit_is_written_only_after_the_approval_that_allowed_it(
     record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
         scope="global",
-        session=session,
         agent=agent,
     )
 
@@ -544,7 +525,7 @@ async def test_a_global_edit_whose_approval_cannot_be_written_is_refused(
     Written anyway, it would be the same edit in force with no record of who
     allowed it, which is the gap the ordering closes.
     """
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     _allow(ctx)
 
     async def unwritten(_ctx: Context, _session: Any) -> bool:  # noqa: ANN401
@@ -555,7 +536,6 @@ async def test_a_global_edit_whose_approval_cannot_be_written_is_refused(
         await ctx.require(HARNESS).apply(
             RefinementProposal(summary="deployment-wide", edits=[note_edit("house-style")]),
             scope="global",
-            session=session,
             agent=agent,
         )
     assert read_global_events(ctx.require(HARNESS).directory) == []
@@ -580,7 +560,6 @@ async def test_a_local_refinement_is_on_disk_before_its_projection(
     monkeypatch.setattr("ph_rlm.harness.service.write_atomic", probe)
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="learned", edits=[note_edit("local")]),
-        session=session,
         agent=agent,
     )
 
@@ -595,12 +574,10 @@ async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="everywhere", edits=[note_edit("style", "the house rule")]),
         scope="global",
-        session=session,
         agent=agent,
     )
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="here", edits=[note_edit("style", "what this repo does")]),
-        session=session,
         agent=agent,
     )
     entry = ctx.require(HARNESS).state(session).entry("note", "style")
@@ -611,14 +588,13 @@ async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
 async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) -> None:
     """The plan's gate. Concurrent sessions share this log, so the lock is what
     makes eight refinements eight records rather than one torn line."""
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     _allow(ctx)
 
     async def write(index: int) -> None:
         await ctx.require(HARNESS).apply(
             RefinementProposal(summary=f"n{index}", edits=[note_edit(f"entry-{index}")]),
             scope="global",
-            session=session,
             agent=agent,
         )
 
@@ -642,7 +618,6 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="original", edits=[note_edit("kept", "the first title")]),
-        session=session,
         agent=agent,
     )
     before = ctx.require(HARNESS).state(session).to_wire()
@@ -655,7 +630,6 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
                 note_edit("also-added"),
             ],
         ),
-        session=session,
         agent=agent,
     )
     changed = ctx.require(HARNESS).state(session).entry("note", "kept")
@@ -678,7 +652,7 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
 async def test_h6_a_refinement_is_not_rolled_back_twice(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), agent=agent
     )
     await ctx.require(HARNESS).rollback(record.refine_id, session=session, agent=agent)
     with pytest.raises(RefinementRefused, match="already been rolled back"):
@@ -693,7 +667,6 @@ async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed
     record = await ctx.require(HARNESS).apply(
         RefinementProposal(summary="everyone", edits=[note_edit("shared")]),
         scope="global",
-        session=session,
         agent=agent,
     )
 
@@ -709,7 +682,7 @@ async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed
 async def test_the_command_reports_and_rolls_back(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), agent=agent
     )
 
     shown = await ctx.require(COMMANDS).dispatch("/refine --show", session=session, agent=agent)
@@ -745,7 +718,7 @@ async def test_the_command_refuses_an_unknown_id(harnessed: Harnessed) -> None:
 async def test_the_harness_reaches_the_model_as_a_snapshot(harnessed: Harnessed) -> None:
     """A12: a refinement changes this text mid-session, so it must not sit in the
     cached prefix — every apply would re-bill the whole prompt."""
-    ctx, session, agent = await harnessed()
+    ctx, _session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(
             summary="learned how to run them",
@@ -760,7 +733,6 @@ async def test_the_harness_reaches_the_model_as_a_snapshot(harnessed: Harnessed)
                 )
             ],
         ),
-        session=session,
         agent=agent,
     )
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
@@ -800,7 +772,7 @@ async def test_the_projection_is_written_and_equals_the_fold(harnessed: Harnesse
     """
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), agent=agent
     )
 
     path = ctx.require(HARNESS).projection_path(session)

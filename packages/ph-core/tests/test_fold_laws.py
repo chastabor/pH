@@ -68,7 +68,7 @@ def test_a_lawful_fold_has_no_findings() -> None:
 
 
 def test_a_prefix_is_the_same_events_under_the_same_header_and_nothing_more() -> None:
-    """Seeding would add a `session/end-seed`; a prefix must not."""
+    """A prefix is those events as they were, under the same header, and no more."""
     session = _turn_log()
     prefix = prefix_of(session, 4)
 
@@ -164,8 +164,7 @@ def test_prefixes_begin_where_the_cache_could_first_have_read() -> None:
     log_event(child, "turn/start", {"turn": 3})
 
     def own_turns(log: Session) -> int:
-        since = log.header.seed_length or 0
-        return sum(1 for event in log.events_from(since) if event.type == "turn/start")
+        return sum(1 for event in log.own_events() if event.type == "turn/start")
 
     assert check_fold_laws(child, own_turns, _more_turns) == []
     assert check_fold_laws(child, own_turns, _more_turns, start=0) != []

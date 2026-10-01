@@ -50,6 +50,7 @@ tool/call appended                      # log first, act second
   approval on `ask`                     # ctx.approval; only allowed-once proceeds
   guards              deny-only, last, final
   tools/execute       around, signal-only replacement
+  tools/body          serial: barriers, after every wrapper
   the body
   tools/post-execute  waterfall  -> accept | block
   normalize -> finalize_content
@@ -107,6 +108,7 @@ unwind) and a `Boundary` for reads (it is only a question about reach).
 |---|---|---|
 | `tools/pre-execute` | waterfall | allow, deny or ask — hooks, permissions, sandbox |
 | `tools/execute` | waterfall (around) | timeouts, retries, metrics; may replace the signal |
+| `tools/body` | serial | the body is next and every wrapper has run: the checkpoint barrier |
 | `tools/post-execute` | waterfall | accept, replace a projection, or block with feedback |
 | `tools/result` | emit | the frozen authoritative outcome of one call |
 | `tools/change` | emit | the visible set changed; re-read `schemas()` |

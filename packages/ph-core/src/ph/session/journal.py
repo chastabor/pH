@@ -121,7 +121,7 @@ class IntentJournal:
         as the checkpoint policy's barriers are. The intent is then settled
         `not-started` in memory (when the kind has a closer), so the next flush that
         works writes an honest pair rather than an orphan for repair. A `buffered` or
-        `tools-execute` kind is not flushed here; see `Barrier`.
+        `tools-body` kind is not flushed here; see `Barrier`.
 
         :raises IntentNotDurable: when a durable kind's record could not be written.
         :raises IntentError: when the kind is undeclared or `data` carries no key.
@@ -180,7 +180,7 @@ class IntentJournal:
     def record(self, session: Session, kind: IntentKind, data: JsonObject) -> Claim:
         """`open` with no barrier — so synchronous.
 
-        For the `tools-execute` kinds, whose records are written by the tool batch
+        For the `tools-body` kinds, whose records are written by the tool batch
         and whose flush the checkpoint policy places after every pre-execute gate —
         so a flush here would be the wrong one, in the wrong place. Refused for a
         `durable` kind, which `open` exists to make durable.

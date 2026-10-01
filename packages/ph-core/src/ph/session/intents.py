@@ -90,7 +90,7 @@ IntentOrphan: TypeAlias = Literal[Unsettled, "owner-settles"]
   than the owner's look.
 """
 
-Barrier: TypeAlias = Literal["durable", "buffered", "tools-execute"]
+Barrier: TypeAlias = Literal["durable", "buffered", "tools-body"]
 """When the opening record must be on disk (decision 3).
 
 * `durable` — before the act: the journal flushes before handing out the claim,
@@ -98,9 +98,10 @@ Barrier: TypeAlias = Literal["durable", "buffered", "tools-execute"]
   act's own durable intent flushes it, for an opener whose act carries one.
 * `buffered` — whenever the next flush happens: accounting, where losing the
   record in a crash loses a line of history and never an act.
-* `tools-execute` — the checkpoint policy's barrier before tools execute, which
-  must run *after* every pre-execute gate. The two tool kinds declare it so the
-  journal does not place a second one; it is placed where it already is.
+* `tools-body` — the checkpoint policy's barrier before a tool's body
+  (`tools/body`), which runs *after* every pre-execute gate and every
+  `tools/execute` wrapper. The two tool kinds declare it so the journal does not
+  place a second one; it is placed where it already is.
 """
 
 

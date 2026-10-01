@@ -162,7 +162,7 @@ def recovery_of(session: Session) -> Recovery:
     """
     attempts = 0
     failed = False
-    for event in session.events_from(session.header.seed_length or 0):
+    for event in session.own_events():
         if event.type == RECOVERED:
             attempts, failed = 0, False
         elif event.type == RETRY:

@@ -10,7 +10,7 @@ So the bridge re-enters the **complete** pipeline per binding call:
 
 * each `await tools.<name>(...)` is a sub-call with the outer execution's opaque
   token as `parent`, dispatched through `tools/pre-execute` → approval → guards
-  → `tools/execute` → body → `tools/post-execute` (C1);
+  → `tools/execute` → `tools/body` → body → `tools/post-execute` (C1);
 * each one logs `tool/code-dispatch-start` at entry and `tool/code-dispatch` at
   settle, so forty writes are forty durable records rather than one stdout blob
   (C2). Both are log-only: `derive_messages()` ignores them, so sub-calls never

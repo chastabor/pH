@@ -344,7 +344,7 @@ class SpillStore:
         `.staging` behind — including a stage whose blob is already there.
         """
         claims = self.claims
-        seed = session.header.seed_length or 0
+        seed = session.header.first_own_seq
 
         def run() -> list[str]:
             owners: set[str] = set()

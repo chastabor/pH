@@ -42,7 +42,6 @@ directory too, which is why a change is made under a file lock in it
 
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -72,6 +71,7 @@ from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_to
 from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
 from ph.wire import WireModel
+from ph.workspace_caches import digest, use
 
 from ._chunk import Chunk, chunk_paragraphs
 from ._embed import Embedder, LocalWeights, SentenceTransformerEmbedder, Vectors
@@ -287,10 +287,6 @@ TEXT_INDEX: ServiceKey[TextIndexSeam] = ServiceKey("text_index")
 """The text index, for `/text-index` and the tools it backs."""
 
 
-def _digest(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
 def _try_writer_lock(root: Path) -> Callable[[], None] | None:
     """The writer lock of the index at `root` if it is free this instant, else `None`."""
     try:
@@ -373,14 +369,15 @@ class TextIndexSeam:
         and a run's sweep drops what that tree no longer has. Two workspaces in
         one directory took turns deleting each other's documents and re-embedding
         their own. The cost is the code graph's too: a directory per workspace, a
-        worktree included, and nothing prunes them.
+        worktree included, which `writing` sweeps once its workspace is gone.
 
         Beneath the row's `path` when one is set, so a configured path keys both
         as well. Digests rather than names, because a model id and a path have
         slashes in them."""
-        return default_cache_path(self.config.path, "text-index").joinpath(
-            _digest(str(workspace)), _digest(self.embedder.name)
-        )
+        return self._base() / digest(str(workspace)) / digest(self.embedder.name)
+
+    def _base(self) -> Path:
+        return default_cache_path(self.config.path, "text-index")
 
     async def index(self, workspace: Path) -> TextIndex:
         """One workspace's index, for a search.
@@ -420,6 +417,8 @@ class TextIndexSeam:
         Waited for, because indexing is slow and a second writer is expected to
         queue behind the first.
         """
+        # Before the lock: the record and the sweep touch nothing a writer holds.
+        await anyio.to_thread.run_sync(use, self._base(), workspace)
         root = self.root(workspace)
         release = await _writer_lock(root)
         try:

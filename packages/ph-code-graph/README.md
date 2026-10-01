@@ -178,10 +178,12 @@ would make `callers` return every place that merely *mentions* a type.
 
 ## Where things live
 
-- **the index**: `$PH_CACHE/code-graph/<digest of the workspace root>.db` — the
-  cache root because it is rebuildable from the source, and keyed by root so two
-  checkouts do not answer each other's questions. `path:` in the row's config
-  overrides it.
+- **the index**: `$PH_CACHE/code-graph/<digest of the workspace root>/graph.db` —
+  the cache root because it is rebuildable from the source, and keyed by root so
+  two checkouts do not answer each other's questions. The directory records its
+  workspace, and one whose workspace has been gone a week is removed on the next
+  index, so a profile that runs children in worktrees does not leave a database
+  per tree forever. `path:` in the row's config names one database instead.
 - **the grammars**: `$PH_CACHE/tree-sitter`, set by the row at mount.
 
 That second one is not housekeeping. The pack materializes even its *bundled*

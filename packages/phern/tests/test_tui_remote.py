@@ -37,6 +37,7 @@ from ph.seams.commands import CommandContext, CommandSchema
 from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
+from ph.session import SessionHeader
 from ph.testing import StubAgent
 from ph_app import verbs
 from ph_app.daemon.client import DaemonClient
@@ -164,26 +165,33 @@ async def test_the_front_ends_log_is_a_live_mirror_not_a_rebuild(tmp_path: Path)
         assert cursor_of(front.session) == cursor_of(root.session)
 
 
-def test_the_generation_is_a_constructor_argument_not_a_later_setter() -> None:
-    """The mirror is keyed at birth, so there is no window in which it is not.
+def test_the_mirror_is_built_on_the_daemons_header() -> None:
+    """The mirror is keyed at birth, on the root's own header.
 
-    `session/new` answers with this root's cursor *before* the front end is built,
-    so the generation is in hand at construction. It arrived as a `begin()` that
-    swapped the `Session` afterwards and raised if anything had been admitted
-    first — a runtime guard against an ordering that need not exist, which is the
-    shape `Session.durable_length`'s own docstring rejects for itself. A value the
-    type cannot be built without is one nobody can get wrong.
+    `session/new` answers with it *before* the front end is built, so it is in hand
+    at construction. It arrived as a `begin()` that swapped the `Session` afterwards
+    and raised if anything had been admitted first — a runtime guard against an
+    ordering that need not exist. And it was a header of the client's own, keyed by
+    the reply's generation, so a forked root's mirror had no `seed_length`: every
+    fold of the log's own events counted the fork's inherited history as its own.
+
+    Sabotage: build the mirror's header from the id and a generation again, and the
+    fork's boundary is gone.
     """
+    header = SessionHeader(
+        id="k", created_at=1_700_000_000_000, parent_session="p", seed_length=3, family="p"
+    )
     front = DaemonSession(
         client=None,  # type: ignore[arg-type]
         session_id="k",
         state=TuiState(),
         adapter=TuiEventAdapter(state=TuiState()),
         host=StubHost(),
-        generation=1_700_000_000_000,
+        header=header,
     )
 
-    assert front.session.header.created_at == 1_700_000_000_000
+    assert front.session.header == header
+    assert front.session.header.first_own_seq == 3
     assert not hasattr(front, "begin"), "no second phase to forget"
     # Driven without a daemon, it still has a valid session of its own.
     assert _detached("k").session.seq == 0

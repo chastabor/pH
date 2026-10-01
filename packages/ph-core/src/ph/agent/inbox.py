@@ -117,7 +117,7 @@ class Inbox:
         self._state: dict[str, list[Message]] = {"next-turn": [], "next-step": []}
         # Replay only this lifecycle's splices: a fork inherits its parent's
         # transcript, not its parent's unanswered queue.
-        for event in session.events[session.header.seed_length or 0 :]:
+        for event in session.own_events():
             if event.type != "agent/inbox/spliced":
                 continue
             try:

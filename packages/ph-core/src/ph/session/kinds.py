@@ -414,9 +414,9 @@ TOOL_DISPATCH = declare_intent(
         # Recorded once the pipeline decided and before the binding ran: the call
         # may have happened.
         orphan="outcome-unknown",
-        # The checkpoint policy's barrier before tools execute, which it places
-        # after every pre-execute gate and skips where a restore covers the tool.
-        barrier="tools-execute",
+        # The checkpoint policy's barrier before the tool's body, which it skips
+        # where a restore covers the tool.
+        barrier="tools-body",
         closer=_dispatch_interrupted,
         # A dispatched tool that can check its own effect is asked on resume, as a
         # top-level call's is, and the cell it ran in says what it found (L6b).
@@ -460,9 +460,9 @@ TOOL_EFFECT = declare_intent(
         settled_key=_key_field,
         orphan="outcome-unknown",
         # Opened ahead of the `tools/execute` waterfall, so the checkpoint
-        # policy's barrier — after every pre-execute gate — carries it to disk
-        # before the body runs.
-        barrier="tools-execute",
+        # policy's barrier on `tools/body` carries it to disk before the body
+        # runs.
+        barrier="tools-body",
         closer=_effect_unknown,
         writer=_LOG,
         failed=_effect_failed,

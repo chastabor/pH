@@ -29,15 +29,16 @@ from ph_rlm.keys import HARNESS
 pytestmark = pytest.mark.anyio
 
 
-async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
-    """A session whose harness has one entry and a written projection, and where it is."""
+async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any, Any]:
+    """A session whose harness has one entry and a written projection, its agent, and
+    where the projection is."""
     ctx, session, agent = await harnessed(INVARIANT_ROW)
     await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="one", edits=[note_edit("thing")]), session=session, agent=agent
+        RefinementProposal(summary="one", edits=[note_edit("thing")]), agent=agent
     )
     path = ctx.require(HARNESS).projection_path(session)
     assert path.exists(), "nothing was projected to check"
-    return ctx, session, path
+    return ctx, session, agent, path
 
 
 async def test_a_hand_edited_projection_trips_the_invariant(harnessed: Harnessed) -> None:
@@ -48,7 +49,7 @@ async def test_a_hand_edited_projection_trips_the_invariant(harnessed: Harnessed
     the log. What an edit means is that something now believes the file is state
     — and the next fold will silently overwrite whatever it believed.
     """
-    ctx, _session, path = await _refined(harnessed)
+    ctx, _session, _agent, path = await _refined(harnessed)
 
     assert violations(ctx) == [], "a freshly written projection disagreed with its own fold"
     assert report_section(ctx, "Invariants")["harness-projection"].startswith("holds ·"), (
@@ -78,10 +79,10 @@ async def test_a_second_refinement_leaves_the_projection_equal_to_the_fold(
     there was none — a path could pass that by creating the file and still never
     update one.
     """
-    ctx, session, _path = await _refined(harnessed)
+    ctx, session, agent, _path = await _refined(harnessed)
 
     await ctx.require(HARNESS).apply(
-        RefinementProposal(summary="two", edits=[note_edit("second")]), session=session, agent=None
+        RefinementProposal(summary="two", edits=[note_edit("second")]), agent=agent
     )
 
     assert ctx.require(HARNESS).state(session).entry("note", "second") is not None, (
@@ -99,7 +100,7 @@ async def test_a_missing_projection_is_not_a_violation(harnessed: Harnessed) -> 
     alarm that fires loudest where the feature is used least is one people learn
     to ignore, which costs the alarm that matters.
     """
-    ctx, session, path = await _refined(harnessed)
+    ctx, session, _agent, path = await _refined(harnessed)
     path.unlink()
 
     assert violations(ctx) == []

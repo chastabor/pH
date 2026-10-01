@@ -115,7 +115,8 @@ would allocate again.
 `$PH_CACHE/text-index/<workspace>/<embedder>`, because what an index holds
 belongs to one tree: documents named relative to it, one version-control token,
 and a sweep that drops what that tree no longer has. A worktree is a workspace
-of its own, and nothing prunes the directories it leaves.
+of its own. The workspace's directory records which workspace it is, and one whose
+workspace has been gone a week is removed on the next change (`ph.workspace_caches`).
 
 **One writer at a time.** Roots and processes on one workspace share its
 directory. A change is made under `writer.lock` in it, starting from what is on

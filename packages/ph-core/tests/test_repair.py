@@ -501,7 +501,6 @@ def test_a_repaired_log_seeds_a_resumable_session() -> None:
     tool_result = messages[-1].content[0]
     assert tool_result.type == "tool-result"
     assert tool_result.is_error is True
-    assert resumed.events[-1].type == "session/end-seed"
 
 
 def test_an_earlier_completed_turn_is_untouched() -> None:
@@ -540,13 +539,7 @@ async def test_resume_repairs_a_crashed_log_on_load(mount: MountProfile, tmp_pat
     # The closers, then the record that this was a resume: the repair is what
     # makes the log readable, and `session/resumed` is what makes the *seam*
     # visible to anything reading it afterwards.
-    assert types[-5:] == [
-        "tool/result",
-        "step/end",
-        "turn/end",
-        "session/end-seed",
-        "session/resumed",
-    ]
+    assert types[-4:] == ["tool/result", "step/end", "turn/end", "session/resumed"]
     assert revived.events[-1].data["interrupted"] is True, "a crashed tail was not reported"
 
 
@@ -598,9 +591,8 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
 async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_path: Path) -> None:
     """The seam's wiring: `resume_session` tells the store what it already holds.
 
-    A resume adds two events nobody wrote — the repair closers and the
-    `session/end-seed` the constructor appends — and a backend that appends has
-    no way to know they are owed. `resume_session` is the only place that knows,
+    A resume adds events nobody wrote — the repair closers — and a backend that
+    appends has no way to know they are owed. `resume_session` is the only place that knows,
     because it is the only place holding both the events it read and the log it
     built from them, so it states the boundary with `durable_length`.
 
@@ -696,11 +688,7 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
     ctx.require(SESSIONS).dispose("between")
 
     revived = await resume_session(ctx, "between")
-    assert [event.type for event in revived.events][-3:] == [
-        "shell/result",
-        "session/end-seed",
-        "session/resumed",
-    ]
+    assert [event.type for event in revived.events][-2:] == ["shell/result", "session/resumed"]
     assert revived.events[-1].data["closed"] == 1
     await ctx.require(SESSIONS).flush(revived)
     ctx.require(SESSIONS).dispose("between")

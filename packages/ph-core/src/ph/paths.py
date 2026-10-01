@@ -344,8 +344,8 @@ def default_home_path(configured: str | None, name: str) -> Path:
     return resolve_roots().home / name
 
 
-def default_cache_path(configured: str | None, *fallback: str) -> Path:
-    """A row's `path` setting, else `$PH_CACHE/<fallback…>` — `default_home_path`'s twin.
+def default_cache_path(configured: str | None, fallback: str) -> Path:
+    """A row's `path` setting, else `$PH_CACHE/<fallback>` — `default_home_path`'s twin.
 
     Canonical either way, and that is the whole reason this exists rather than
     being written per row: the two indexing rows arrived a week apart, one
@@ -353,14 +353,10 @@ def default_cache_path(configured: str | None, *fallback: str) -> Path:
     configured path reached through a symlink gave one of them two spellings for
     one index — every other reader resolving to a different one, and `phern doctor`
     printing the unresolved one. `canonical`'s own docstring is the argument.
-
-    Takes the fallback in segments because a cache root is rarely just a name:
-    these rows key theirs by a digest under it, and joining that at each call
-    site was the other half of the copy.
     """
     if configured:
         return canonical(Path(configured).expanduser())
-    return resolve_roots().cache.joinpath(*fallback)
+    return resolve_roots().cache / fallback
 
 
 def is_under(candidate: Path, root: Path) -> bool:

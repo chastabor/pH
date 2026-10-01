@@ -103,9 +103,9 @@ def prefix_of(session: Session, length: int) -> Session:
     """This log's first `length` events as a `Session` of their own.
 
     Through `admit`, which keeps every event as it was — seq, time, payload — and
-    adds nothing: seeding would append a `session/end-seed` marker, which is right
-    for a fork and wrong for a prefix. The header rides along, because
-    `seed_length` is part of what some folds read.
+    takes a prefix that ends inside a batch, which the seed path refuses as a torn
+    write. The header rides along, because `seed_length` is part of what some
+    folds read.
 
     :raises ValueError: when the log holds a type this build does not know and
         cannot ignore — the seed path's rule, which `admit` shares.

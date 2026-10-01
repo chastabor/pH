@@ -542,17 +542,5 @@ async def test_a_stored_log_and_a_live_one_project_identically(
     header, events = read_session(stored_log(store_root(ctx), live.id))
     stored = Session(live.id, seed=events, header=header)
 
-    replayed = build_trajectory(stored)
-    # A seeded session appends `session/end-seed` to mark where its history
-    # ended and this run began — a real event the live session never had, and
-    # one this view renders precisely because an auditor wants to see the
-    # boundary. So the claim is that the *shared* events project identically,
-    # not that the two logs are the same log.
-    boundary = [record for record in replayed if record.title == "session/end-seed"]
-    assert len(boundary) == 1, "a resumed session should record its own seed boundary"
-    shared = [record for record in replayed if record.title != "session/end-seed"]
-
-    live_records = build_trajectory(live)
-    assert [record.index for record in shared] == [record.index for record in live_records]
-    for replayed_record, live_record in zip(shared, live_records, strict=True):
-        assert replayed_record == live_record
+    # The same records, and no more: a log opened to be viewed is the log on disk.
+    assert build_trajectory(stored) == build_trajectory(live)

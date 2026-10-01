@@ -47,9 +47,6 @@ from .request_header import (
     parse_request_header,
 )
 from .surface import SurfaceManager, fold_surface
-from .writers import log_writer
-
-_LOG = log_writer(__name__)
 
 __all__ = ["Session", "SessionBatch", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
 
@@ -208,6 +205,14 @@ class SessionHeader(WireModel):
             raise ValueError(f'session header cwd must be an absolute path, got "{value}"')
         return value
 
+    @property
+    def first_own_seq(self) -> int:
+        """Where this log's own work begins: past what it inherited, or 0.
+
+        The question a fold asks when a fork's seed is its source's history and not
+        its own: a splice, a goal or a resume in that seed belongs to the source."""
+        return self.seed_length or 0
+
     def validated(self, session_id: str) -> SessionHeader:
         if self.id != session_id:
             raise ValueError(
@@ -257,17 +262,6 @@ class _LatestFold[T]:
         self.value = fold_latest(log, self._event_type, self._parse, self.value, since=self._seen)
         self._seen = len(log)
         return self.value
-
-
-def _marked(log: Sequence[SessionEvent]) -> bool:
-    """Whether a seed already ends in its `session/end-seed` — past only the
-    `session/resumed` each reopen records after it. Read as the last event alone,
-    every reopen found `resumed` there and marked the boundary again, so a cold
-    session gained two events per open instead of the one that records it."""
-    for event in reversed(log):
-        if event.type != "session/resumed":
-            return event.type == "session/end-seed"
-    return False
 
 
 class Session:
@@ -366,9 +360,9 @@ class Session:
         `header.seed_length` is its *original* fork boundary.
 
         **Not `first_live_seq`.** A resume seeds the stored events *plus* the repair
-        closers and `session/end-seed`, which are in the log and have never been
-        written — so what a store holds is a number only the caller knows, never one
-        inferred from what happens to be present at `track` time.
+        closers, which are in the log and have never been written — so what a store
+        holds is a number only the caller knows, never one inferred from what happens
+        to be present at `track` time.
 
         A plain attribute rather than a header field because it describes *this
         process's* relationship to *one* store, not the session. `seed_length` next door
@@ -389,12 +383,6 @@ class Session:
         base = header or SessionHeader(id=session_id, created_at=now_ms())
         self.header = base.validated(session_id)
 
-        # Appended here so the marker is already in `events` when a backend
-        # captures the creation seed: no load-time write. Not again for a seed
-        # that has one (`_marked`).
-        if seed is not None and not _marked(self._log):
-            _LOG.append(self, "session/end-seed", {})
-
     # -------------------------------------------------------------- identity --
 
     @property
@@ -412,6 +400,10 @@ class Session:
         if self._events_snapshot is None:
             self._events_snapshot = tuple(self._log)
         return self._events_snapshot
+
+    def own_events(self) -> tuple[SessionEvent, ...]:
+        """The events past the inherited seed (`SessionHeader.first_own_seq`)."""
+        return self.events_from(self.header.first_own_seq)
 
     def events_from(self, index: int, limit: int | None = None) -> tuple[SessionEvent, ...]:
         """The events appended at or after `index`, at most `limit` of them.

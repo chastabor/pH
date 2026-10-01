@@ -36,7 +36,14 @@ import pytest
 
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, TOOLS
 from ph.locks import LockBusy, acquire_file_lock
-from ph.persistence.jsonl import JsonlSessionStore, append_records, read_records, read_session
+from ph.persistence.jsonl import (
+    _TYPED,
+    JsonlSessionStore,
+    append_records,
+    read_records,
+    read_session,
+    skim_session,
+)
 from ph.persistence.lease import lease_path
 from ph.session import (
     SESSION_FORMAT_VERSION,
@@ -99,6 +106,9 @@ async def test_flush_writes_a_header_line_and_one_line_per_event(
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
     assert lines[0].startswith('{"type":"session/header"')
+    # `skim_session` reads a type off a line's text, and turns into a strict read
+    # without a word if this ever stops holding.
+    assert all(line.startswith(_TYPED) for line in lines)
 
 
 async def test_a_stored_session_reads_back_identically(mount: MountProfile, tmp_path: Path) -> None:
@@ -355,10 +365,20 @@ async def test_what_a_stream_listener_appends_goes_out_flushed(
     assert "attachment/degraded" in [event.type for event in session.events[: written[0]]]
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
 async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
-    mount: MountProfile, tmp_path: Path
+    mount: MountProfile, tmp_path: Path, wrapped: bool
 ) -> None:
-    """Barrier 2: the `tool/call` is durable before the side effect happens."""
+    """Barrier 2: the `tool/call` is durable before the side effect happens.
+
+    And so is whatever a `tools/execute` wrapper appended, however late it was
+    registered: around `tools/execute` the barrier was only as deep as mount order
+    put it, and a wrapper registered after it ran inside it. On `tools/body` it is
+    after every one of them.
+
+    Sabotage: flush around `tools/execute` again, and the wrapped case finds the
+    wrapper's record unwritten when the body runs.
+    """
     from ph.testing import simple_tool
 
     ctx = await mount(_root(tmp_path))
@@ -370,6 +390,17 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
 
     ctx.require(TOOLS).register(simple_tool("touch", body))
     session = ctx.require(SESSIONS).create("s")
+    if wrapped:
+
+        async def notice(execution: Any, next_: Any) -> Any:  # noqa: ANN401
+            log_event(
+                session,
+                "attachment/degraded",
+                {"provider": "fake", "attachmentIds": ["x"], "attachments": []},
+            )
+            return await next_()
+
+        ctx.on("tools/execute", notice)
     run = ctx.require(TOOLS).create_execution(
         __import__("ph.tools", fromlist=["ToolExecutionInput"]).ToolExecutionInput(
             call_id="c", name="touch", arguments={}, scope=ctx, session=session
@@ -379,6 +410,44 @@ async def test_a_top_level_tool_body_is_preceded_by_a_barrier(
     await ctx.require(TOOLS).dispatch(run)
     # Nothing owed when the body ran: the barrier wrote it first.
     assert flushed_before_body == [True]
+
+
+async def test_a_call_canceled_at_the_barrier_never_starts(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The last check before a body, made by the registry for every call: a
+    cancellation that lands while the barrier flushes, or in any slow wrapper,
+    ends the call unstarted — not only a call the barrier flushed for.
+
+    Sabotage: drop the registry's check after `tools/body`, and the body runs.
+    """
+    from ph.cancel import CancelToken
+    from ph.testing import simple_tool
+    from ph.tools import ToolExecutionInput
+
+    ctx = await mount(_root(tmp_path))
+    ran: list[str] = []
+
+    def body(_args: object, _run: ToolRunContext) -> str:
+        ran.append("ran")
+        return "ok"
+
+    ctx.require(TOOLS).register(simple_tool("touch", body))
+    session = ctx.require(SESSIONS).create("s")
+    cancel = CancelToken()
+    ctx.on("tools/body", lambda _execution: cancel.cancel())
+    run = ctx.require(TOOLS).create_execution(
+        ToolExecutionInput(
+            call_id="c", name="touch", arguments={}, scope=ctx, session=session, cancel=cancel
+        )
+    )
+    log_event(session, "turn/start", {"turn": 1})
+
+    prepared = await ctx.require(TOOLS).dispatch(run)
+
+    assert ran == []
+    assert prepared.result is not None and prepared.result.error is not None
+    assert prepared.result.error.kind == "aborted"
 
 
 @pytest.mark.parametrize("restore_point", [True, False])
@@ -880,6 +949,53 @@ def test_a_batch_cut_by_a_torn_write_is_dropped_whole(tmp_path: Path, members: l
     assert [event.seq for event in events] == [0]
 
 
+def _line(event: SessionEvent) -> str:
+    from ph.json import dumps
+
+    return dumps(event.to_wire()) + "\n"
+
+
+def test_a_skimmed_read_judges_the_tail_by_the_last_line_written(tmp_path: Path) -> None:
+    """`skim_session` passes a line unparsed, and the last line is still the tail: a
+    batch whose final member was passed is whole, and its first member stays.
+
+    Sabotage: leave the skimmed tail unparsed, so the tail is the first member, and
+    the batch reads as cut short and loses it.
+    """
+    ref = BatchRef(first=1, count=2)
+    kept = SessionEvent(type="turn/end", seq=1, time=1, data={"turn": 1}, batch=ref)
+    passed = SessionEvent(type="step/start", seq=2, time=1, data={"turn": 1}, batch=ref)
+    turn = SessionEvent(type="turn/start", seq=0, time=1, data={"turn": 1})
+    path = _raw_log(tmp_path, "skim", [turn, kept, passed], "")
+
+    _header, events = skim_session(path, frozenset({"turn/end"}))
+
+    assert [event.seq for event in events] == [1]
+
+
+def test_a_skimmed_read_passes_damage_it_has_no_use_for(tmp_path: Path) -> None:
+    """The trade `skim_session` makes, and its limit: a damaged line whose own text names a
+    type the reader does not want goes unseen, where a strict read refuses the log;
+    a damaged line it would have kept still refuses.
+
+    Sabotage: pass every line that begins as a written one does, and the wanted
+    damage is passed too.
+    """
+    turn = SessionEvent(type="turn/start", seq=0, time=1, data={"turn": 1})
+    end = SessionEvent(type="turn/end", seq=2, time=1, data={"turn": 1})
+    unwanted = '{"type":"assistant/chunk","seq":1,"tim\n'
+    path = _raw_log(tmp_path, "unwanted", [turn], unwanted + _line(end))
+    wanted = frozenset({"turn/end"})
+
+    with pytest.raises(ValueError, match="unwanted"):
+        read_session(path, types=wanted)
+    assert [event.seq for event in skim_session(path, wanted)[1]] == [2]
+
+    damaged = _raw_log(tmp_path, "wanted", [turn], '{"type":"turn/end","seq":1,"tim\n')
+    with pytest.raises(ValueError, match="wanted"):
+        skim_session(damaged, wanted)
+
+
 def test_a_complete_batch_reads_back_intact(tmp_path: Path) -> None:
     header, events = read_session(_batched(tmp_path, [_member(1), _member(2)]))
     assert [event.seq for event in events] == [0, 1, 2]
@@ -904,7 +1020,7 @@ async def test_a_resumed_log_appends_behind_a_dropped_batch_cleanly(tmp_path: Pa
     await store.flush(session)
 
     _header, reread = read_session(path)
-    assert [event.type for event in reread] == ["turn/start", "session/end-seed", "turn/end"]
+    assert [event.type for event in reread] == ["turn/start", "turn/end"]
     assert [event.seq for event in reread] == list(range(len(session.events)))
 
 

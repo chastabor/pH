@@ -145,7 +145,6 @@ async def test_the_planner_prompt_carries_the_state_the_history_and_the_tail(
                 )
             ],
         ),
-        session=session,
         agent=agent,
     )
     say(session, "run the tests")
@@ -248,7 +247,6 @@ async def test_show_prints_what_the_bound_hides(refining: Refining) -> None:
                 HarnessEdit(action="create", kind="note", id="zzz", title="second", content="y"),
             ],
         ),
-        session=session,
         agent=agent,
     )
 
