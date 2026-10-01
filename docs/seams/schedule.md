@@ -48,7 +48,7 @@ ctx.schedule.cancel(schedule_id, session=...)
 ctx.schedule.claim(..., now=...)               # the tick, written ahead
 ctx.schedule.live(session)                     # what is still scheduled
 ctx.schedule.states(session)                   # the fold
-ctx.schedule.heartbeat(...)   ctx.schedule.index()   ctx.schedule.reindex()
+ctx.schedule.index()   ctx.schedule.reindex()
 ```
 
 A `Schedule` is `id`, `kind`, `spec`, `prompt`.
@@ -71,6 +71,13 @@ It sleeps until then, and no pass comes sooner than a second after the last
 watches, and a root mounting moves the plan too: either wakes it to plan again.
 **With nothing scheduled it has no deadline at all**, so making a schedule is the
 opt-in. The first pass is at boot.
+
+**The sleep is on the wall clock** (`ph.wall_clock`). The loop's own deadlines run
+on the monotonic clock, which stops while the machine is suspended, so a laptop
+closed overnight used to wake the scheduler late by however long it slept. A
+wall-clock timer fires on resume for anything that came due during the suspend.
+`docs/dev-notes/linux-macos-differences.md` §9 has the per-platform detail and how
+to check it by hand.
 
 **A daemon rebuilds it from the logs when it can't vouch for itself** (S18), in the
 background. Each pass surveys the index, and a rebuild starts only on one of these:
@@ -116,7 +123,12 @@ the store that can.
 | `schedule/created` | with its kind and spec |
 | `schedule/canceled` | the matching end |
 | `schedule/tick` | **before** the work is delivered |
-| `schedule/heartbeat` | the cadence is alive |
+
+There is no liveness record. Nothing here appends because time passed, and
+whether a daemon is still watching is a question asked of the daemon:
+`phern agents doctor` prints when the scheduler next wakes (`nextWake`). A log
+written before 0.7.0 may still hold `schedule/heartbeat` records. They were
+written `ignorable`, so the log still opens and nothing renders them.
 
 ## See also
 

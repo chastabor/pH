@@ -220,6 +220,42 @@ the shape of the source it cites.
 **Rule:** a formatting complaint is never a platform gap. It is deterministic and
 one command from being gone, so it must never go on a tolerated-failure list.
 
+### 9. Waiting for a moment: the monotonic clock stops while the machine sleeps
+
+Every `anyio` deadline runs on `time.monotonic()`. On Linux that is
+`CLOCK_MONOTONIC`, and on macOS under Python 3.12 it is `mach_absolute_time`.
+**Neither counts time spent suspended.** When the scheduler started sleeping until
+its next appointment instead of ticking every five seconds (`8cbb94a`), a laptop
+closed overnight woke it late by however long the lid had been shut.
+
+`ph.wall_clock.sleep_until` arms the wait on the wall clock instead, and the
+mechanism differs per kernel:
+
+| | Linux | macOS |
+|---|---|---|
+| timer | `timerfd` on `CLOCK_REALTIME`, `TFD_TIMER_ABSTIME` (ctypes; `os.timerfd_create` is 3.13+) | kqueue `EVFILT_TIMER`, `NOTE_ABSOLUTE \| NOTE_USECONDS \| NOTE_MACH_CONTINUOUS_TIME` |
+| across a suspend | fires on resume if its moment has passed | "continue to tick across sleep" (`<sys/event.h>`) |
+| a stepped clock | an absolute realtime timer follows it | not followed: the moment is fixed when the timer is armed |
+| what the suite checks | `test_wall_clock` reads `/proc/self/fdinfo` and asserts `clockid: 0`, `settime flags: 01` | the timer fires at its moment; nothing reads the flags back |
+
+Anywhere else, or when the timer cannot be made, it falls back to a monotonic
+sleep and logs that a suspend will delay the wake.
+
+**No test closes the lid.** To check by hand:
+
+- **Linux:** make a `once` schedule two minutes out, then
+  `sudo rtcwake -m mem -s 300` (suspend for five minutes). On resume, the
+  schedule's `schedule/tick` should appear within a second or two, with a `dueAt`
+  before the resume.
+- **macOS:** the same schedule, then `pmset sleepnow` and wake the machine after
+  the schedule's moment. Same expectation. Until this has been run on the mac rig,
+  the macOS row of the table is the header file's word, not a measurement.
+
+**Rule:** a deadline that names a moment (an appointment, a keep-alive expiry)
+waits on the wall clock. A deadline that names an interval inside a running piece
+of work (a cancel grace, a boot timeout) stays monotonic, because the work slept
+too.
+
 ---
 
 ## What to do when a test fails on one platform only

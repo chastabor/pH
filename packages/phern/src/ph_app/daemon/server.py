@@ -150,17 +150,6 @@ __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
 
-HEARTBEAT_EVERY = 5 * 60.0
-"""Seconds between liveness records for a root that has work scheduled.
-
-Not a keep-alive and not a health check: a record, so an operator reading a
-cron-driven trace can tell "waiting for Wednesday" from "died on Tuesday". A
-schedule that fires monthly otherwise leaves a log whose last line is a month
-old, which is indistinguishable from a log nobody is writing.
-
-Beside the other two cadences rather than in the seam, where it was: ph-core
-held a constant only this loop read."""
-
 SWEEP_EVERY = 60.0
 """How often the passivation sweep runs. A coarse tick, not a second timeout."""
 
@@ -1355,7 +1344,6 @@ class DaemonServer:
     whole frame, and a flag would have to be set by every writer of every field
     that goes into one."""
     sweep_every: float = SWEEP_EVERY
-    heartbeat_every: float = HEARTBEAT_EVERY
     watch_every: float = WATCH_EVERY
     invariants_every: float = INVARIANTS_EVERY
     """The cadences, named rather than a tuple: `serve` already threads them past
@@ -1399,7 +1387,6 @@ class DaemonServer:
             passivate_after=supervisor.passivate_after,
             next_wake=supervisor.planned,
             sweep_every=self.sweep_every,
-            heartbeat_every=self.heartbeat_every,
             watch_every=self.watch_every,
             invariants_every=self.invariants_every,
             unreachable_since=self.unreachable_since,
@@ -1775,7 +1762,6 @@ async def serve(
     keep_alive: float = 0.0,
     sweep_every: float = SWEEP_EVERY,
     scheduling: bool = True,
-    heartbeat_every: float = HEARTBEAT_EVERY,
     watch_every: float = WATCH_EVERY,
     invariants_every: float = INVARIANTS_EVERY,
     path: Path | None = None,
@@ -1828,7 +1814,6 @@ async def serve(
                 stop=anyio.Event(),
                 path=socket_path,
                 sweep_every=sweep_every,
-                heartbeat_every=heartbeat_every,
                 watch_every=watch_every,
                 invariants_every=invariants_every,
                 ephemeral=ephemeral,
@@ -1842,7 +1827,7 @@ async def serve(
             supervisor.recheck_lifetime = server.check_lifetime
             # Each cadence its own task, one primitive: a cadence riding another's
             # counter advances only when that one *succeeds*, so a run of failing
-            # passes would starve an unrelated record.
+            # passes would starve an unrelated task.
             if passivate_after is not None or ephemeral:
                 # `server.sweep`, not `supervisor.sweep`: the pass now ends with
                 # "and is there anything left to be up for", and the answer can
@@ -1855,9 +1840,6 @@ async def serve(
                 # Asleep until something is due rather than polling; see
                 # `Supervisor.keep_schedules` and docs/seams/schedule.md.
                 tasks.start_soon(supervisor.keep_schedules, server.stop)
-                tasks.start_soon(
-                    _every, heartbeat_every, server.stop, supervisor.heartbeat, "the heartbeat"
-                )
             if watch_every > 0:
                 # Its own cadence and its own `if`, not a rider on the scheduler: a test
                 # that turns the scheduler off to keep it out of its assertions

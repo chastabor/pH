@@ -119,9 +119,9 @@ the daemon: **16 minutes of event loop a day at 50 such roots**.
 
 ## Why each cadence is its own task
 
-The heartbeat rode the ticker on a counter that only advanced when a tick
-*succeeded*, so **a run of failing ticks starved the liveness record** as a side
-effect of an unrelated failure. The socket watch has its own `if` for the mirror
+A cadence that rides another's counter advances only when that one *succeeds*, so
+**a run of failing passes starves an unrelated task** as a side effect of a
+failure that has nothing to do with it. The socket watch has its own `if` for the mirror
 reason: a test that turns the scheduler off to keep a timer out of its assertions
 must not thereby turn off the thing that notices the daemon has no door.
 
@@ -153,6 +153,7 @@ from daemon_helpers import (
     until,
 )
 
+from ph import wall_clock
 from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
@@ -1714,28 +1715,6 @@ async def test_a_root_with_work_scheduled_is_not_released(tmp_path: Path) -> Non
         assert await supervisor.sweep(after=0) == ["appointed"]
 
 
-async def test_a_heartbeat_records_that_something_is_still_watching(tmp_path: Path) -> None:
-    """Liveness for a schedule that fires monthly.
-
-    Without it such a root's log ends with a line a month old, which reads
-    exactly like a log nobody is writing any more. A record, not a keep-alive:
-    what keeps the root mounted is the schedule itself.
-    """
-    async with running(tmp_path) as daemon:
-        supervisor = daemon.running.supervisor
-        root = await supervisor.start("monthly")
-
-        await supervisor.heartbeat(now=1_000)
-        assert not [e for e in root.session.events_from(0) if e.type == "schedule/heartbeat"]
-
-        root.ctx.require(SCHEDULE).create(
-            root.session, Schedule(id="m", kind="cron", spec="0 0 1 * *", prompt="monthly")
-        )
-        await supervisor.heartbeat(now=2_000)
-        beats = [e for e in root.session.events_from(0) if e.type == "schedule/heartbeat"]
-        assert len(beats) == 1 and beats[0].data["live"] == 1
-
-
 async def test_one_root_with_a_broken_schedule_does_not_stop_the_others(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2290,9 +2269,24 @@ async def test_the_scheduler_sleeps_until_something_is_due(
     made on a root wakes it, by its log, to sleep until that one is due — which it
     then fires.
 
+    **The wait is for that moment on the wall clock** (P12-00), not a delay on the
+    monotonic one, which does not count a suspend: a scheduler that slept through a
+    closed lid woke late by however long the machine had slept. The recorder pins
+    the hand-off to `ph.wall_clock`, which `test_wall_clock` holds to
+    `CLOCK_REALTIME`.
+
     Sabotage: drop the schedule watch from `_start`, and the sleeper never learns of
-    the appointment.
+    the appointment. Put back `move_on_after((planned - now_ms()) / 1000)`, and
+    nothing is armed on the wall clock.
     """
+    armed: list[int] = []
+    wall_sleep = wall_clock.sleep_until
+
+    async def record(at: int) -> None:
+        armed.append(at)
+        await wall_sleep(at)
+
+    monkeypatch.setattr(wall_clock, "sleep_until", record)
     async with supervised(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("timed")
         assert supervisor.next_wake(now=now_ms()) is None, "nothing scheduled, nothing to wake for"
@@ -2306,6 +2300,10 @@ async def test_the_scheduler_sleeps_until_something_is_due(
         )
         await until(lambda: supervisor.planned is not None, what="the plan to move")
         assert not_none(supervisor.planned) >= at
+        await until(
+            lambda: armed[-1:] == [supervisor.planned],
+            what="the wake to be armed at the planned instant",
+        )
 
         await until(
             lambda: any(e.type == "schedule/tick" for e in root.session.events_from(0)),

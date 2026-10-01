@@ -676,7 +676,6 @@ def doctor() -> None:
                 ("passivate after", "off" if passivate is None else duration(passivate * 1000)),
                 ("scheduler", _scheduler(facts)),
                 ("sweep", _cadence(facts.sweep_every)),
-                ("heartbeat", _cadence(facts.heartbeat_every)),
                 ("socket watch", _cadence(facts.watch_every)),
                 ("invariant poll", _cadence(facts.invariants_every)),
                 *_reachability(facts),

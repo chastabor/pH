@@ -51,7 +51,6 @@ __all__ = [
     "CANCELED",
     "CREATED",
     "FOLDED",
-    "HEARTBEAT",
     "TICK",
     "Schedule",
     "ScheduleKind",
@@ -70,7 +69,6 @@ log = logging.getLogger("ph.seams.schedule")
 CREATED = "schedule/created"
 CANCELED = "schedule/canceled"
 TICK = "schedule/tick"
-HEARTBEAT = "schedule/heartbeat"
 
 FOLDED = frozenset({CREATED, CANCELED, TICK})
 """The records `schedules` folds: all a reader needs of a log to know its schedules."""
@@ -487,14 +485,6 @@ class ScheduleService:
             return
         stamp = now if now is not None else now_ms()
         self.index.record(session.id, next_at=self.next_due(session, now=stamp), now=stamp, new=new)
-
-    def heartbeat(self, session: Session, *, now: int, live: int) -> None:
-        """Record that the scheduler is still watching this root.
-
-        `live` is passed rather than re-derived: the caller has just asked
-        whether this root has any, and folding again to count them was the
-        second of two folds per beat."""
-        _LOG.append(session, HEARTBEAT, {"at": now, "live": live})
 
 
 def _soonest(states: Iterable[ScheduleState], *, now: int) -> int | None:

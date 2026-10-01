@@ -115,7 +115,6 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "schedule/created",
         "schedule/canceled",
         "schedule/tick",
-        "schedule/heartbeat",
         # An autonomous run's objective, its spend, its quality gates and how it
         # ended (P5-07). `goal/settled` names *which* budget stopped it, because
         # "it stopped" and "it ran out of turns" are different things to whoever
@@ -433,7 +432,6 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "schedule/created",
         "schedule/canceled",
         "schedule/tick",
-        "schedule/heartbeat",
         # What a person poked at from the composer. Ignorable: a reader skipping
         # these loses the account of what someone ran beside the conversation,
         # and never the conversation — the model was not shown it either way,
@@ -574,9 +572,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.seams.permission_presets": frozenset({"permission/preset"}),
         "ph.seams.sandbox": frozenset({"sandbox/denied", "sandbox/mode"}),
         "ph.seams.skills": frozenset({"skill/read"}),
-        "ph.seams.schedule": frozenset(
-            {"schedule/canceled", "schedule/created", "schedule/heartbeat", "schedule/tick"}
-        ),
+        "ph.seams.schedule": frozenset({"schedule/canceled", "schedule/created", "schedule/tick"}),
         # Every record of a child, in the child's own log, and from nowhere else: the
         # seam writes the admission, and a provider reports its child through this
         # module's doors (`record_waiting`, `record_started`, `record_ended`,

@@ -31,6 +31,7 @@ __all__ = [
     "CancelToken",
     "Canceled",
     "Cancellation",
+    "Waitable",
     "first_of",
     "is_canceled",
     "raced",
@@ -178,17 +179,25 @@ async def until_canceled(signal: Cancellation | None, scope: anyio.CancelScope) 
     scope.cancel()
 
 
-async def first_of(*events: anyio.Event) -> None:
+class Waitable(Protocol):
+    """Anything that can be waited on to happen: an `anyio.Event`, a
+    `Cancellation`, a `ph.wall_clock.Alarm`."""
+
+    async def wait(self) -> None: ...
+
+
+async def first_of(*events: Waitable) -> None:
     """Wait for whichever of these happens first.
 
     A wait on one of several endings — a follow's root going idle or its daemon
     going away, a scheduler's plan moving or its daemon stopping — is a hang
-    whenever it is another that happens. Bound it with `anyio.move_on_after` for
-    a deadline as well.
+    whenever it is another that happens. A deadline is one more ending: pass a
+    `ph.wall_clock.Alarm` for an epoch instant, or bound the call with
+    `anyio.move_on_after` for a short relative one.
     """
     async with anyio.create_task_group() as tasks:
 
-        async def stop_on(event: anyio.Event) -> None:
+        async def stop_on(event: Waitable) -> None:
             await event.wait()
             tasks.cancel_scope.cancel()
 

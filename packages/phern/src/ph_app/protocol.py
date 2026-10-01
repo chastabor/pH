@@ -80,7 +80,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -169,6 +169,17 @@ wakes, absent while nothing is planned; and `session/new` answers with a
 `NewSessionReply`, the root's description plus its `header`, which a front end
 builds its mirror of the root's log on. A 0.5.x client refuses the `nextWake` and
 `header` it does not know; restarting the daemon on the same release fixes that.
+
+**7 (0.7.0): the daemon writes nothing because time passed** (Phase 12,
+`plans/Event_Driven_Daemon_Plan.md`). `daemon/status` drops `heartbeatEvery`, and a
+root with a live schedule no longer appends `schedule/heartbeat` every five
+minutes. Whether a daemon is alive is a question a monitor asks it, through this
+socket or the OpenTelemetry sink, not a record left in the log. Logs that already
+hold heartbeats still open, because each was written `ignorable`. A 0.6.x client
+refuses this reply for the `heartbeatEvery` it requires, and a 0.7 client reading
+a 0.6 daemon refuses the `heartbeatEvery` it no longer knows; restarting the
+daemon on the same release fixes both. The rest of Phase 12 changes this reply
+again before 0.7.0 ships.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

@@ -70,7 +70,7 @@ from filelock import FileLock
 
 from ph.cordis import Context
 from ph.json import as_int
-from ph.persistence.jsonl import logs_holding
+from ph.persistence.jsonl import logs_holding, read_stored
 from ph.seams.schedule import (
     CANCELED,
     CREATED,
@@ -392,6 +392,31 @@ def test_a_log_with_no_schedules_is_not_walked() -> None:
     for index in range(50):
         log_event(session, "assistant/chunk", {"i": index})
     assert schedules(session) == {}
+
+
+def test_a_log_written_with_heartbeats_still_opens_with_its_schedule(tmp_path: Path) -> None:
+    """`schedule/heartbeat` left the vocabulary in 0.7.0 (Phase 12), and a log from
+    before then holds one for every five minutes a schedule was live.
+
+    Each was written `ignorable`, and that flag is all that lets a build that no
+    longer knows the type open the log: without it `_readmit` refuses the log at
+    the first beat. The fold reads only `FOLDED`, so the schedule comes back whole.
+    """
+    session, _, _ = _sched("interval", str(HOUR))
+    beat = SessionEvent(
+        type="schedule/heartbeat",
+        seq=session.seq,
+        time=now_ms(),
+        data={"at": 0, "live": 1},
+        ignorable=True,
+    )
+    write_stored_log(tmp_path, session.header, [*session.events, beat])
+
+    header, events = read_stored(tmp_path, session.id)
+    resumed = Session(header.id, header=header, seed=events)
+
+    assert resumed.events[-1].type == "schedule/heartbeat"
+    assert schedules(resumed).keys() == {"s1"}
 
 
 def _last_due(session: Session) -> int:

@@ -144,13 +144,11 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # failure left behind, and the reason is the only thing that separates
         # evidence somebody kept from a directory nobody meant to leave.
         "workspace/retained",
-        # P5-06: creating, canceling and heartbeating a schedule are not
-        # conversation — the *tick* is, and it has a transcript row. An auditor
-        # asking "why did this wake at 3am, and was anything watching between
-        # runs" wants all four.
+        # P5-06: creating and canceling a schedule are not conversation — the
+        # *tick* is, and it has a transcript row. An auditor asking "why did this
+        # wake at 3am" wants all three.
         "schedule/created",
         "schedule/canceled",
-        "schedule/heartbeat",
         "goal/continued",
         "goal/gate",
         "workspace/provisioned",

@@ -1187,11 +1187,10 @@ rule to answer it."""
 
 RECORDLESS: frozenset[str] = frozenset(
     {
-        # Creating, canceling and heartbeating a schedule are not events in the
-        # conversation — the *tick* is what a reader needs, and it has a row.
+        # Creating and canceling a schedule are not events in the conversation —
+        # the *tick* is what a reader needs, and it has a row.
         "schedule/created",
         "schedule/canceled",
-        "schedule/heartbeat",
         # The loop's own bookkeeping. `goal/set` and `goal/settled` are rows —
         # they bracket the run — while a continuation and a gate result are
         # accounting the transcript already shows as turns and tool output.

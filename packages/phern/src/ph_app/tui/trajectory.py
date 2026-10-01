@@ -478,7 +478,6 @@ HANDLERS: Mapping[str, Handler] = {
     "schedule/created": _on_harness_event,
     "schedule/canceled": _on_harness_event,
     "schedule/tick": _on_harness_event,
-    "schedule/heartbeat": _on_harness_event,
     "goal/set": _on_harness_event,
     "goal/continued": _on_harness_event,
     "goal/gate": _on_harness_event,

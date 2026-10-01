@@ -104,6 +104,7 @@ from ph.session_profile import (
 )
 from ph.text import count_of
 from ph.tools.errors import error_message
+from ph.wall_clock import Alarm
 
 from ..attach import Tray, prompt_message
 from ..payloads import (
@@ -1765,9 +1766,9 @@ class Supervisor:
     def _live_schedules(self, root: Root) -> list[ScheduleState]:
         """This root's schedules that could still fire, or an empty list.
 
-        The seam lookup and its `None` guard written once: three callers wanted
-        it — the tick, the heartbeat and the passivation predicate — and each
-        had its own copy of the name, the guard and the read.
+        The seam lookup and its `None` guard written once: the listing, the
+        daemon's `schedule` hold and the passivation predicate all want it, and
+        each had its own copy of the name, the guard and the read.
         """
         schedule = root.ctx.get(SCHEDULE)
         return [] if schedule is None else list(schedule.live(root.session))
@@ -2036,6 +2037,10 @@ class Supervisor:
         making a schedule is the opt-in (docs/seams/schedule.md). The first pass is
         at once, so a boot wakes what came due while the daemon was down. A wake by
         the clock is a due wake, which may retry a rebuild that failed (`_rebuild`).
+
+        **The sleep is on the wall clock** (`ph.wall_clock`, P12-00). A deadline on
+        the loop's monotonic clock does not count a suspend, so a laptop closed
+        overnight woke the scheduler late by however long it had slept.
         """
         while True:
             # Before the pass, so a change it makes or meets still wakes the next.
@@ -2045,12 +2050,11 @@ class Supervisor:
             except Exception:
                 log.exception("ph_app.daemon: the scheduler pass failed")
             self.planned = self.next_wake(now=now_ms())
-            delay = math.inf if self.planned is None else (self.planned - now_ms()) / 1000
-            with anyio.move_on_after(max(0.0, delay)) as sleep:
-                await first_of(stop, moved)
+            alarm = Alarm(self.planned)
+            await first_of(stop, moved, alarm)
             if stop.is_set():
                 return
-            if sleep.cancelled_caught:
+            if alarm.rang:
                 self._occasions += 1
 
     async def tick(self, *, now: int | None = None) -> list[str]:
@@ -2094,20 +2098,6 @@ class Supervisor:
             except Exception:
                 log.exception("ph_app.daemon: root %s failed its schedule tick", root.id)
         return fired
-
-    async def heartbeat(self, *, now: int | None = None) -> None:
-        """Leave a liveness record on every root that has work scheduled.
-
-        A record, not a keep-alive: a schedule that fires monthly otherwise
-        leaves a log whose last line is a month old, which reads exactly like a
-        log nobody is writing any more.
-        """
-        stamp = now if now is not None else now_ms()
-        for root in list(self.roots.values()):
-            live = self._live_schedules(root)
-            if live:
-                root.ctx.require(SCHEDULE).heartbeat(root.session, now=stamp, live=len(live))
-                await self._flush(root)
 
     async def verify_invariants(self) -> dict[str, list[Violation]]:
         """Poll every live root's pollable invariants; record what does not hold.
@@ -2411,11 +2401,6 @@ class Supervisor:
         * **it has work scheduled** (P5-06) — a root with a live schedule has already
           said when it comes back;
         * **it has been quiet long enough**, from the log.
-
-        A heartbeat is deliberately *not* a condition: it is a record the scheduler
-        leaves so an operator can tell "waiting for Wednesday" from "died on Tuesday",
-        not a claim on the root's life. What keeps a scheduled root mounted is the
-        schedule.
         """
         if root.status not in QUIET:
             return False
