@@ -350,7 +350,7 @@ def _on_supervisor_violated(builder: _Builder, event: SessionEvent) -> None:
     """Invariants stopped holding, or started again (I6).
 
     **One type, two opposite facts**, which is what the generic reading cannot
-    carry. `verify_invariants` records the clearing as the same type with an
+    carry. `verify_root` records the clearing as the same type with an
     empty list, so `_describe` rendered the good news as `violations=[], pid=9` —
     a reader has no way to tell that is reassurance, and the bad news arrived as
     a Python dict repr in a document a person reads.

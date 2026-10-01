@@ -27,7 +27,6 @@ from typing import Protocol
 import anyio
 
 __all__ = [
-    "POLL_SECONDS",
     "CancelToken",
     "Canceled",
     "Cancellation",
@@ -155,17 +154,6 @@ def is_canceled(token: Cancellation | None) -> bool:
     return token is not None and token.canceled
 
 
-POLL_SECONDS = 0.05
-"""The stop ladder's cadence — how often a *deadline* is re-checked.
-
-**Not how a cancellation is noticed any more.** `Cancellation.wait` is an event,
-so a waiter is told; what is left polling is the kernel's `_watch`, which asks a
-second question on the same tick — has the abort grace expired — and a deadline
-needs a clock whatever the flag does. Well under the time a person takes to
-notice that nothing has happened, which is the bound that matters for a ladder.
-"""
-
-
 async def until_canceled(signal: Cancellation | None, scope: anyio.CancelScope) -> None:
     """Cancel `scope` once `signal` trips; park forever when there is none.
 
@@ -226,7 +214,7 @@ async def raced[T](signal: Cancellation | None, work: Callable[[], Awaitable[T]]
         async def run() -> None:
             nonlocal outcome
             outcome = await work()
-            # The watcher is all that is left; it would otherwise poll until the
+            # The watcher is all that is left; it would otherwise wait until the
             # token's owner went away.
             tasks.cancel_scope.cancel()
 

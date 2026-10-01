@@ -79,6 +79,22 @@ person can act on. Each declaration also sits inside the row that owns the cache
 so a profile that drops the seam drops the claim with it rather than reporting
 `holds` about a cache nobody mounted.
 
+## When a running daemon checks
+
+`phern doctor` mounts a fresh profile, so it can only say that the checks run. The
+daemon checks its live roots, **after something was written and the writing
+stopped** (`Supervisor.verifier`). ph-core emits `session/durable` after every
+flush of every session in a mount, the root's and its children's alike, and
+whichever path wrote. That marks the root unverified. Once the root is settled
+(quiet, nothing working beneath it) and nothing more has been written for
+`VERIFY_AFTER` (30 s), it is checked. A root nothing was written to is never
+checked again, and a burst of writes costs one check. A release takes one last
+look first. It used to poll every live root every five minutes.
+
+What is recorded is a *change*: `supervisor/violated` when the set of broken
+invariants differs from what the root's log already says, including the clearing.
+`check_invariants=False` (on `serve`) turns the daemon's checks off.
+
 An entry the log has outgrown is **not** drift — that is the ordinary state of a
 cache between reads — and a cached session that is no longer live is skipped,
 because there is no log left to fold.

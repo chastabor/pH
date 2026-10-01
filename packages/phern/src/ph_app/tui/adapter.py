@@ -790,7 +790,7 @@ class TuiEventAdapter:
         transcript may no longer be what the model saw.
 
         **The event carries both transitions**, which is the half a first draft
-        missed: `verify_invariants` writes the same type with an empty list when
+        missed: `verify_root` writes the same type with an empty list when
         a root starts holding again, so an empty `violations` is the *good* news
         and rendering it through the same sentence said "stopped holding 1
         invariant (an unnamed invariant)" — backwards, and the more alarming

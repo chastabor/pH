@@ -11,10 +11,10 @@ the same read chunk — which is what a host cancelling the moment it issues doe
 because both frames are written back to back and the guest reads both before
 yielding — cancels a task whose body never entered its own `try`.
 
-Driven against `Runner` directly rather than through the kernel: the kernel's
-stop ladder sleeps `POLL_SECONDS` before it looks at the token, so by the time
-its `cancel` goes out the guest has long since started the task. The window is a
-guest-level one and this is where it can be opened deliberately.
+Driven against `Runner` directly rather than through the kernel: whether the
+kernel's `cancel` lands in the same read chunk as its `run` is up to scheduling a
+test through the kernel does not control. The window is a guest-level one and
+this is where it can be opened deliberately.
 """
 
 from __future__ import annotations

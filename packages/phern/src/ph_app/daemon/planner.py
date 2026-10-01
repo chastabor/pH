@@ -45,10 +45,6 @@ __all__ = ["Planner"]
 log = logging.getLogger("ph_app.daemon")
 
 
-def _nothing() -> None:
-    """`Planner.due`'s default: a job with nothing to count when the clock wakes it."""
-
-
 @dataclass(slots=True)
 class Planner:
     """A pass, then sleep until the next moment it has work, or until told."""
@@ -59,8 +55,9 @@ class Planner:
     """The pass. Idempotent, so a wake with nothing to do costs one pass."""
     plan: Callable[[int], int | None]
     """When the next pass has work, epoch ms, given now; `None` sleeps until told."""
-    due: Callable[[], None] = _nothing
-    """Called when the clock, rather than a notice, ended the sleep."""
+    rang: int = 0
+    """How many times the clock, rather than a notice, ended the sleep. The scheduler
+    counts these as reasons a failed index rebuild may now succeed."""
     planned: int | None = None
     """When this means to wake next, or `None` while it sleeps until told. Read by
     `phern agents doctor` rather than worked out again."""
@@ -84,4 +81,4 @@ class Planner:
             if stop.is_set():
                 return
             if alarm.rang:
-                self.due()
+                self.rang += 1

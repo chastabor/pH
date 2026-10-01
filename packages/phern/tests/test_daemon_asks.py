@@ -27,12 +27,10 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import Daemon, running, until
+from daemon_helpers import Daemon, ask_a_person, running, until
 
-from ph.keys import APPROVAL, USER_QUESTIONS
-from ph.seams.approval import ApprovalAnswer
+from ph.keys import USER_QUESTIONS
 from ph.seams.user_questions import UserQuestion
-from ph.testing import StubAgent
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Handler
 from ph_app.daemon.supervisor import Root
@@ -44,15 +42,6 @@ pytestmark = pytest.mark.anyio
 async def _root(daemon: Daemon, session_id: str = "asked") -> Root:
     """One live root, started the way `session/attach` starts one."""
     return await daemon.running.supervisor.start(session_id)
-
-
-async def _ask(
-    root: Root, *, tool_name: str = "write", call_id: str | None = "c1"
-) -> ApprovalAnswer:
-    """Fire one approval through the seam, exactly as a gated tool does."""
-    return await root.ctx.require(APPROVAL).request(
-        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name=tool_name, call_id=call_id
-    )
 
 
 async def _front_end(
@@ -92,7 +81,7 @@ async def test_a_gated_call_under_the_daemon_reaches_a_person(tmp_path: Path) ->
         root = await _root(daemon)
         await _front_end(daemon, root, _answering("allowed-once", seen))
 
-        outcome = await _ask(root)
+        outcome = await ask_a_person(root)
 
         assert outcome == "allowed-once"
         assert [one["request"]["toolName"] for one in seen] == ["write"]
@@ -127,7 +116,7 @@ async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
         for client in (first, second):
             await client.call("session/attach", sessionId=root.id)
 
-        outcome = await _ask(root)
+        outcome = await ask_a_person(root)
 
         assert outcome == "allowed-once"
         assert len(fast) == 1 and len(slow) == 1, "both were asked"
@@ -162,7 +151,7 @@ async def test_a_detached_client_is_no_longer_asked(tmp_path: Path) -> None:
             await client.call("session/attach", sessionId=root.id)
 
         await leaving.call("session/detach", sessionId=root.id)
-        assert await _ask(root) == "allowed-once"
+        assert await ask_a_person(root) == "allowed-once"
 
         assert asked == [], "a detached client was still put in front of a person"
         assert len(staying) == 1, "and the one still attached was asked"
@@ -183,7 +172,7 @@ async def test_a_watcher_that_is_not_a_front_end_is_never_asked(tmp_path: Path) 
         await watcher.call("session/attach", sessionId=root.id)
         await _front_end(daemon, root, _answering("rejected", []))
 
-        outcome = await _ask(root)
+        outcome = await ask_a_person(root)
 
         assert outcome == "rejected", "the follower's answer must not have been taken"
         assert asked == [], "and it was never asked"
@@ -205,7 +194,7 @@ async def test_an_ask_with_nobody_attached_waits_for_whoever_arrives(
         async with anyio.create_task_group() as tasks:
 
             async def approve() -> None:
-                outcome.append(await _ask(root))
+                outcome.append(await ask_a_person(root))
 
             tasks.start_soon(approve)
             # Long enough that a design which resolved on "nobody there" would
@@ -237,7 +226,7 @@ async def test_a_root_parked_on_a_person_may_be_released(tmp_path: Path) -> None
         supervisor = daemon.running.supervisor
 
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(_ask, root)
+            tasks.start_soon(ask_a_person, root)
             await anyio.sleep(0.05)
 
             assert root.status == "waiting"
@@ -269,7 +258,7 @@ async def test_a_front_end_that_vanishes_mid_ask_is_dropped_not_answered_for(
             leaver = await _front_end(daemon, root, never)
 
             async def approve() -> None:
-                outcome.append(await _ask(root))
+                outcome.append(await ask_a_person(root))
 
             tasks.start_soon(approve)
             await anyio.sleep(0.05)
@@ -311,8 +300,8 @@ async def test_answering_is_declared_once_for_a_connection_not_per_attach(
         # with no front end waits by design (P5-13), so a test that only
         # asserted the answer would hang instead of failing.
         with anyio.fail_after(5):
-            assert await _ask(one) == "allowed-once"
-            assert await _ask(two) == "allowed-once"
+            assert await ask_a_person(one) == "allowed-once"
+            assert await ask_a_person(two) == "allowed-once"
         assert len(seen) == 2, "both roots reached the same declared front end"
 
 
@@ -369,7 +358,7 @@ class _Twice:
 ASKED_TWICE = {
     # With no call id, as the Continual Harness asks for `refine`.
     "approval/ask": _Twice(
-        partial(_ask, tool_name="refine", call_id=None),
+        partial(ask_a_person, tool_name="refine", call_id=None),
         ApprovalAskReply(answer="allowed-once"),
         "request",
         "toolName",
@@ -493,7 +482,7 @@ async def test_re_attaching_while_a_question_is_open_does_not_ask_twice(
         client = await _front_end(daemon, root, wait)
 
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(_ask, root)
+            tasks.start_soon(ask_a_person, root)
             with anyio.fail_after(5):
                 while not posed:
                     await anyio.sleep(0.01)

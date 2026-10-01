@@ -28,12 +28,13 @@ from anyio.abc import TaskGroup
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
-from ph.keys import COMMANDS, MOUNT, SANDBOX
+from ph.keys import APPROVAL, COMMANDS, MOUNT, SANDBOX
 from ph.llm.types import StreamChunk
 from ph.paths import resolve_roots
+from ph.seams.approval import ApprovalAnswer
 from ph.session import Session
 from ph.session_profile import BASE as PROFILE_BASE
-from ph.testing import admitted_child, logged_events, not_none
+from ph.testing import StubAgent, admitted_child, logged_events, not_none
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
@@ -133,10 +134,6 @@ class _Daemon:
         """One live root, started the way `session/attach` starts one."""
         return await self.running.supervisor.start(session_id)
 
-    def aged(self) -> None:
-        """`age(self.running)`: past the spawn window, and nobody told."""
-        age(self.running)
-
     async def busy_root(self, session_id: str = "busy") -> Root:
         """One root the supervisor reads as mid-turn, without running a turn.
 
@@ -220,28 +217,23 @@ async def unplugged(
     monkeypatch: pytest.MonkeyPatch,
     **options: Any,  # noqa: ANN401
 ) -> AsyncIterator[DaemonServer]:
-    """A `DaemonServer` with no socket: a supervisor, `check_lifetime` wired to it the
-    way `serve` wires it, and the lifetime clock running.
+    """A `DaemonServer` with no socket, on `supervised`, with its lifetime clock running.
 
     For the lifetime tests that never connect a client (a root parking on a person,
     a ladder giving up, a spawn window closing), so they run where unix sockets do
-    not. `supervised` is the same one layer down. Root release is not started:
-    `passivate_after` is off unless a test asks.
+    not. Root release is not started, and `passivate_after` is off unless a test
+    asks.
     """
-    private_runtime(tmp_path, monkeypatch)
-    async with anyio.create_task_group() as tasks:
-        supervisor = Supervisor(profile=PROFILE, tasks=tasks, passivate_after=None)
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        supervisor.passivate_after = None
         server = DaemonServer(
             supervisor=supervisor, stop=anyio.Event(), path=tmp_path / "unbound.sock", **options
         )
-        supervisor.recheck_lifetime = server.check_lifetime
-        tasks.start_soon(server.lifetime_clock.keep, server.stop)
+        supervisor.tasks.start_soon(server.lifetime_clock.keep, server.stop)
         try:
             yield server
         finally:
             server.stop.set()
-            await supervisor.aclose()
-            tasks.cancel_scope.cancel()
 
 
 @asynccontextmanager
@@ -301,11 +293,14 @@ async def running(
         # test that did not ask about passivation should not have it racing its
         # assertions. P5-05's own tests opt in.
         options.setdefault("passivate_after", None)
-        # Off for the same reason, and one sharper: a poll that found drift would
-        # append `supervisor/violated` into a root, so a test asserting on event
-        # types would fail for a reason that has nothing to do with its subject.
-        # The suite whose subject *is* the poll turns it on.
-        options.setdefault("invariants_every", 0)
+        # Off for the same reason — `serve` starts the invariant check as a
+        # background job — and one sharper: a check that found drift would append
+        # `supervisor/violated` into a root, so a test asserting on event types
+        # would fail for a reason that has nothing to do with its subject. The
+        # suite whose subject *is* the check turns it on. (`supervised` starts no
+        # planners, so its supervisor leaves the check on: only a release's last
+        # look runs it there.)
+        options.setdefault("check_invariants", False)
         tasks.start_soon(
             lambda: serve(
                 profile or PROFILE, path=socket, ready=ready, started=started.append, **options
@@ -453,6 +448,16 @@ def spawned(root: Root, run_id: str, *, under: Session | None = None, name: str 
         spawner,
         run_id,
         {"name": name or run_id, "prompt": "look", "modelProvider": "fake", "model": "fake-1"},
+    )
+
+
+async def ask_a_person(
+    root: Root, *, tool_name: str = "write", call_id: str | None = "c1"
+) -> ApprovalAnswer:
+    """Fire one approval through `root`'s seam, exactly as a gated tool does: the
+    root's desk then holds it, and `Root.status` reads `waiting`."""
+    return await root.ctx.require(APPROVAL).request(
+        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name=tool_name, call_id=call_id
     )
 
 

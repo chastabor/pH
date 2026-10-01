@@ -414,7 +414,7 @@ def test_the_generic_reading_keeps_the_facts_that_fit() -> None:
 def test_both_invariant_transitions_read_as_themselves() -> None:
     """One event type, two opposite facts, and the generic reading carries neither.
 
-    `verify_invariants` records a clearing as `supervisor/violated` with an empty
+    `verify_root` records a clearing as `supervisor/violated` with an empty
     list, so the fallback renderer printed the good news as `violations=[],
     pid=9` — nothing a reader could recognize as reassurance — and the bad news
     as a Python dict repr in a document a person reads.

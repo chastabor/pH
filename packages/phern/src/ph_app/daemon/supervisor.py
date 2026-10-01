@@ -83,7 +83,7 @@ from ph.seams.schedule import (
 )
 from ph.seams.schedule_index import Appointment, ScheduleIndex
 from ph.seams.shell import ShellService
-from ph.seams.subagents import CHILD_EVENT_TYPES, child_is_live
+from ph.seams.subagents import CHILD_EVENT_TYPES, DELETED, STATUS, child_is_live
 from ph.seams.workspace import Workspace, latest_checkpoint, workspace_of
 from ph.session import (
     IntentNotDurable,
@@ -137,15 +137,16 @@ from .projections import commands_of, family_of, family_rows, readings_of, scree
 from .recovery import (
     CHILD_RETRY_LIMIT,
     FAILED,
-    PASS_FLOOR,
     PASSIVATE_AFTER,
     PASSIVATED,
     RECOVERED,
     RETRY,
     UNREACHABLE,
+    VERIFY_AFTER,
     VIOLATED,
     WAKE_WITHIN,
     Recovery,
+    floored,
     recovery_of,
 )
 
@@ -476,15 +477,29 @@ class Root:
     waits in the inbox — and `status` says `needs-profile-decision`."""
     family: _FamilyFeed = field(default_factory=_FamilyFeed)
     """What `session.children` last told this root's watchers (P11-07)."""
-    recheck: Callable[[], None] = _nothing
-    """Say that something this root's release, or the daemon's life, depends on may
-    have moved. `Supervisor.start` points it at `Supervisor._recheck`.
+    unverified_at: int | None = None
+    """When something in this root's mount was last made durable since its
+    invariants were checked, epoch ms, or `None` when nothing has been (P12-04).
 
-    Called for the changes the agent's own status does not announce: the last
-    watcher leaving, the desk opening or closing an ask (a root parked on a person
-    reads `waiting`), and the ladder ending either way (`failed`, or `recovered`
-    back to `idle`). Without it each of those waited for some unrelated event to be
-    noticed, which is what a sixty-second sweep used to cover for."""
+    Set from `session/durable`, which ph-core emits after every flush of every
+    session in the mount — the root's and its children's alike, and whichever path
+    wrote: a turn, a command, a credential, a schedule. A cache drifts only when
+    something writes, and every writer that has finished has flushed, so this is
+    the one place every write is seen. Cleared by `verify_root`."""
+    recheck: Callable[[], None] = _nothing
+    """Say that this root's status may have moved, which both its release and the
+    daemon's life depend on. `Supervisor.start` points it at `Supervisor._recheck`.
+
+    Called on every agent status transition, and for the changes the agent's own
+    status does not announce: the desk opening or closing an ask (a root parked on
+    a person reads `waiting`), and the ladder ending either way (`failed`, or
+    `recovered` back to `idle`). Without it each of those waited for some unrelated
+    event to be noticed, which is what a sixty-second sweep used to cover for."""
+    unwatched: Callable[[], None] = _nothing
+    """Say that this root's last watcher left, which lets it be released. Not a
+    `recheck`: watchers are no term of what holds the daemon, so asking that again
+    (and possibly reading the schedule index to answer) would change nothing.
+    `Supervisor.start` points it at the releaser's notice."""
 
     @property
     def needs_credential(self) -> str | None:
@@ -514,7 +529,8 @@ class Root:
 
     def unsubscribe(self, subscriber: Subscriber) -> None:
         self.subscribers.discard(subscriber)
-        self.recheck()
+        if not self.subscribers:
+            self.unwatched()
 
     def publish(self, notice: SessionNotice) -> None:
         """Tell every watcher. A failing subscriber is dropped, not raised.
@@ -795,7 +811,7 @@ class Root:
 def _recorded_violations(session: Session) -> set[str]:
     """Which invariants this root's log already says are not holding, by id.
 
-    The comparison `verify_invariants` records a *change* against. Read off the
+    The comparison `verify_root` records a *change* against. Read off the
     log rather than remembered, so a root passivated overnight and woken this
     morning compares against what its own transcript says rather than against an
     empty memory — which would re-announce a condition already on the record.
@@ -805,9 +821,9 @@ def _recorded_violations(session: Session) -> set[str]:
     holds 3 message(s) where a fresh derivation gives 4". Those numbers move
     every time the session grows, so comparing them would make a root that is
     both drifting and still busy — the only interesting case — differ from its
-    own last record on every poll, and re-append every five minutes. That is
-    exactly the flood this comparison exists to prevent, and keying on the
-    detail would have reintroduced it in the one case that matters.
+    own last record on every check, and re-append each time. That is exactly the
+    flood this comparison exists to prevent, and keying on the detail would have
+    reintroduced it in the one case that matters.
 
     What broke is the invariant; the detail is how it looked at one moment. The
     record carries the detail, and the identity gates the record.
@@ -949,8 +965,17 @@ class Supervisor:
 
     A field beside `choice` because it is the same kind of thing —
     per-daemon configuration — and because threading it through `serve`, the
-    sweeper task and two method signatures spelled one constant in eight places,
+    old sweeper task and two method signatures spelled one constant in eight places,
     two of them positionally unchecked through `start_soon`."""
+    check_invariants: bool = True
+    """Whether a root's pollable invariants are checked when it settles (I6, P12-04).
+
+    Off for a soak or a benchmark that must not pay an O(events) refold per turn,
+    and in tests whose subject is something else. `verify_root` still answers a
+    caller who asks, either way."""
+    verify_after: float = VERIFY_AFTER
+    """Seconds a root must be settled, with nothing written in its mount, before its
+    check runs (`recovery.VERIFY_AFTER` says why there is a wait at all)."""
     wake_within: float | None = WAKE_WITHIN
     """How stale an indexed appointment may be and still wake its root (P6-23).
 
@@ -971,10 +996,10 @@ class Supervisor:
     **Named for the question, not the cause**, because more than one thing
     raises it. A turn starting or ending is the one the socket cannot see, and
     it is registered in `_start` beside the other `ctx.on` listeners rather than
-    buried inside one of them. `schedule/create` and `schedule/cancel` call it
-    from their handlers, since a client's own request is the other way `holds()`
-    moves. What is *not* wired is written down in `DaemonServer.holds` (§5 rule
-    6), where a reader would otherwise assume every term has an event."""
+    buried inside one of them. A schedule made, withdrawn or fired is heard from
+    the log by `_watch_schedules`, whichever path wrote it, and the status changes
+    the agent does not announce by `Root.recheck`. `DaemonServer.holds` lists the
+    terms and their events (§5 rule 6)."""
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
     _mounting: dict[str, _Mounting] = field(default_factory=dict)
     """Mounts in flight, by root id. See `_Mounting` and `start`."""
@@ -994,6 +1019,14 @@ class Supervisor:
 
     Told by `notice_schedules` (a schedule made or canceled, by the log) and by a root
     mounting, which brings its store and its own appointments."""
+    verifier: Planner = field(init=False)
+    """The invariant check (I6, P12-04): a pass that checks every root that is settled
+    and has had nothing written for `verify_after` (`_verify_quiet`), then a sleep
+    until the next one will be (`next_verify`).
+
+    Told by `session/durable` from any session in a mount (which marks its root
+    unverified) and by `_recheck`, since a root that was written to while working is
+    due only once it settles. Replaced a five-minute poll over every live root."""
     releaser: Planner = field(init=False)
     """Root release (P5-05, P12-01): a pass that releases every root quiet long enough
     (`sweep`), then a sleep until the next root's quiet window ends (`next_release`).
@@ -1004,14 +1037,18 @@ class Supervisor:
     ending either way. Each has a test in `test_daemon.py` that changes only that one
     thing."""
     _occasions: int = 0
-    """How many times a schedule changed or one came due: each is a reason an index
-    rebuild that failed may now succeed (`_rebuild`)."""
-    _tried: tuple[bool, int] | None = None
+    """How many times a schedule changed: with the scheduler's clock wakes
+    (`scheduler.rang`), each is a reason an index rebuild that failed may now
+    succeed (`_rebuild`)."""
+    _tried: tuple[bool, int, int] | None = None
     """What the last rebuild that left the index in doubt was tried with: whether a
-    store was at hand, and `_occasions`. The same again is not tried again."""
+    store was at hand, `_occasions` and `scheduler.rang`. The same again is not
+    tried again."""
     _last_pass: int = 0
     """When the last scheduler pass began. Anything due by then was attempted, so it
     does not hold the next sleep at zero (`next_wake`)."""
+    _last_verify: int = 0
+    """When the last invariant pass began, which floors the next (`next_verify`)."""
     _last_release: int = 0
     """When the last release pass began, which only floors the next (`next_release`).
 
@@ -1020,14 +1057,12 @@ class Supervisor:
     window has usually long ended. Leaving it out would leave it mounted."""
 
     def __post_init__(self) -> None:
-        self.scheduler = Planner(
-            "the scheduler pass",
-            run=self.wake_and_tick,
-            plan=lambda now: self.next_wake(now=now),
-            due=self._due_wake,
-        )
+        self.scheduler = Planner("the scheduler pass", run=self.wake_and_tick, plan=self.next_wake)
         self.releaser = Planner(
             "the release pass", run=self.sweep, plan=lambda _now: self.next_release()
+        )
+        self.verifier = Planner(
+            "the invariant check", run=self._verify_quiet, plan=lambda _now: self.next_verify()
         )
 
     async def start(
@@ -1219,6 +1254,7 @@ class Supervisor:
             for dispose in root.desk.attach():
                 exits.callback(dispose)
             root.recheck = self._recheck
+            root.unwatched = self.releaser.notice
             # `/profile` (S7) the same way, and for the same reason: saving and
             # switching a session's profile are this host's, not a row's.
             commands = ctx.get(COMMANDS)
@@ -1349,11 +1385,14 @@ class Supervisor:
 
                 **The release notice comes before that guard**: a child settling is
                 what lets an unwatched root go, and an unwatched root is exactly the
-                one the guard skips.
+                one the guard skips. Only for a status or a tombstone, the two records
+                `child_is_live` can turn false on; a child's spending records arrive
+                with every reply and can hold nothing.
                 """
                 if event.type not in CHILD_EVENT_TYPES or source.header.delegating_parent is None:
                     return
-                self.releaser.notice()
+                if event.type in (STATUS, DELETED):
+                    self.releaser.notice()
                 if not root.subscribers:
                     return
                 if not root.family.due:
@@ -1375,7 +1414,7 @@ class Supervisor:
                 starts, so the releaser plans again on the same transition.
                 """
                 if agent_ is agent:
-                    self._recheck()
+                    root.recheck()
 
             def announce(agent_: object, status: str) -> None:
                 # Guarded like `relay` above, and for the same reason: reading
@@ -1411,6 +1450,13 @@ class Supervisor:
             # The children's are heard on the bus, and only as a row: what a watcher
             # is sent about them is `session.children`, never their chunks.
             ctx.on("session/event", beneath)
+
+            def written(_session: Session, _through: int) -> None:
+                """Something in this mount is durable now that has not been checked."""
+                root.unverified_at = now_ms()
+                self.verifier.notice()
+
+            ctx.on("session/durable", written)
             ctx.on("agent/status", lifetime)
             ctx.on("agent/status", announce)
             ctx.on("commands/change", verbs)
@@ -1930,7 +1976,7 @@ class Supervisor:
         mount is the reason to try again.
         """
         store = self._store()
-        attempt = (store is not None, self._occasions)
+        attempt = (store is not None, self._occasions, self.scheduler.rang)
         if attempt == self._tried:
             return
         self._tried = attempt
@@ -2068,17 +2114,17 @@ class Supervisor:
         self._occasions += 1
         self.scheduler.notice()
 
-    def _due_wake(self) -> None:
-        """The scheduler woke by the clock: a due wake, which is an occasion too."""
-        self._occasions += 1
-
     def _watch_schedules(self, _session: Session, event: SessionEvent) -> None:
+        """A schedule made, withdrawn or fired, by whichever path: the log is where
+        it happens, so this is where the scheduler, root release and the daemon's
+        `schedule` hold all hear it."""
         if event.type in (CREATED, CANCELED):
             self.notice_schedules()
-        if event.type in (CANCELED, TICK):
-            # A schedule withdrawn, or a `once` that has fired: either can be the
-            # last thing holding this root mounted.
-            self.releaser.notice()
+        if event.type in (CREATED, CANCELED, TICK):
+            # Made: the sidebar learns the daemon is held. Withdrawn, or a `once`
+            # that has fired: either can be the last thing holding this root
+            # mounted, and the daemon with it.
+            self._recheck()
 
     def _recheck(self) -> None:
         """Something a root's release, or the daemon's life, depends on may have
@@ -2086,11 +2132,15 @@ class Supervisor:
 
         `Root.recheck` points here, for the changes the agent's own status does not
         announce: a watcher leaving, a root parking on a person or done waiting on
-        one, and the ladder ending either way."""
+        one, and the ladder ending either way.
+
+        The verifier is told too: a root written to while it worked becomes due
+        only when it settles, and settling is a status change."""
         self.releaser.notice()
+        self.verifier.notice()
         self.recheck_lifetime()
 
-    def next_wake(self, *, now: int) -> int | None:
+    def next_wake(self, now: int) -> int | None:
         """When the scheduler next has work, or `None` when it has none at all.
 
         The earlier of a schedule due on a mounted root, by its log, and an
@@ -2109,7 +2159,7 @@ class Supervisor:
         ahead = [moment for moment in moments if moment > self._last_pass]
         if not ahead:
             return None
-        return max(min(ahead), self._last_pass + int(PASS_FLOOR * 1000))
+        return floored(min(ahead), self._last_pass)
 
     async def tick(self, *, now: int | None = None) -> list[str]:
         """Fire whatever is due on every mounted root (P5-06). Returns their ids.
@@ -2153,83 +2203,101 @@ class Supervisor:
                 log.exception("ph_app.daemon: root %s failed its schedule tick", root.id)
         return fired
 
-    async def verify_invariants(self) -> dict[str, list[Violation]]:
-        """Poll every live root's pollable invariants; record what does not hold.
+    def _verify_at(self, root: Root) -> int | None:
+        """When `root` is due its check, epoch ms, or `None`: the check off, nothing
+        written since the last, or the root not settled.
 
-        **The gap this closes.** `ph.seams.invariants` splits invariants into
-        inline ones — I3 refuses on the path it governs — and *pollable* ones,
-        which carry a `check` because a projection either equals its fold right
-        now or it does not. Every pollable check in the tree existed and nothing
-        called it: `phern doctor` mounts a fresh profile, so it reports that the
-        checks run, never that this deployment's live state passed them. The
-        caches those checks exist to catch drifting — the surface, the
-        derivation, `ToolRuntime`'s views, six `SessionFoldCache`s — only drift
-        in a process that has been up a while, which is precisely the process
-        `phern doctor` cannot look at.
+        Settled is quiet with nothing working beneath it. A mid-turn flush is not a
+        settle, and a child flushing every step under an idle parent would otherwise
+        refold the parent's whole mount at each one."""
+        if not self.check_invariants or root.unverified_at is None:
+            return None
+        if root.status not in QUIET or _working_beneath(root):
+            return None
+        return root.unverified_at + int(self.verify_after * 1000)
 
-        **Per root, because the mount is per root.** `start` is explicit that two
-        roots are two deployments as far as every seam is concerned, so there is
-        no one registry to ask; each root's own answer is about its own caches.
-        A root whose profile mounts no `invariants` row is skipped rather than
-        reported as holding — an unmounted invariant is absent from the report,
-        which is the seam's own rule.
+    def next_verify(self) -> int | None:
+        """When the next root is due its check, epoch ms, or `None` while none is."""
+        moments = [at for root in self.roots.values() if (at := self._verify_at(root)) is not None]
+        if not moments:
+            return None
+        return floored(min(moments), self._last_verify)
+
+    async def _verify_quiet(self) -> None:
+        """The verifier's pass: check every root whose moment has come."""
+        stamp = now_ms()
+        self._last_verify = stamp
+        for root in list(self.roots.values()):
+            at = self._verify_at(root)
+            if at is None or at > stamp:
+                continue
+            # **A checkpoint per root.** One `verify()` is 12 ms on a 25k-event log
+            # and 161 ms on a 500k one, and nothing else here awaits, so several
+            # roots due at once would run back to back with the loop blocked.
+            # Yielding between them caps the stall at one root. It does not weaken
+            # the reason this is not threaded: that argument is about tearing
+            # *inside* one `verify`, which is still atomic with respect to the loop.
+            await anyio.lowlevel.checkpoint()
+            await self.verify_root(root)
+
+    async def verify_settled(self, root: Root) -> None:
+        """Check `root` now if anything in its mount was written since its last check.
+
+        The last look before a release (`_passivate`): the verifier would get to it
+        after `verify_after`, and by then its caches are gone. Free when nothing new
+        was written.
+        """
+        if self.check_invariants and root.unverified_at is not None:
+            await self.verify_root(root)
+
+    async def verify_root(self, root: Root) -> list[Violation]:
+        """Check one root's pollable invariants; record the set of broken ones when
+        it differs from what the root's log already says. Returns what is broken.
+
+        **The gap this closes.** `ph.seams.invariants` splits invariants into inline
+        ones — I3 refuses on the path it governs — and *pollable* ones, which carry a
+        `check` because a projection either equals its fold right now or it does
+        not. `phern doctor` mounts a fresh profile, so it reports that the checks
+        run, never that a deployment's live state passed them. The caches those
+        checks exist to catch drifting only drift in a process that has been up a
+        while, which is this one. **Per root, because the mount is per root.**
 
         **On the event loop, deliberately not threaded.** The checks refold live
         session state, and that state is mutated only from this loop. Off-thread
         they would race an append and report a torn read as a violation — the
         worst possible failure for a check whose entire job is to be believed.
-        The cost is why the cadence is slow rather than why the work moves.
 
         Flushed, for `announce_unreachable`'s reason applied one turn harder:
         this is a finding about bookkeeping owned by the same process, so leaving
         it in that process's buffer is the one place it must not sit.
 
-        **What it returns and what it records are different questions**, and the
-        difference is deliberate. The return is a *sample*: everything violating
-        right now, whether or not it is news. The record is a *change*: written
-        only when the set of broken invariants differs from what this root's log
-        already says. A caller wanting "is this deployment healthy" reads the
-        return; the log answers "what happened, and when".
+        A root whose profile mounts no `invariants` row is skipped rather than
+        reported as holding — an unmounted invariant is absent from the report,
+        which is the seam's own rule.
         """
-        found: dict[str, list[Violation]] = {}
-        for root in list(self.roots.values()):
-            # **A checkpoint per root, not per pass.** One `verify()` is 12 ms on
-            # a 25k-event log and 161 ms on a 500k one — it refolds the whole
-            # surface and re-derives every message — and nothing else here
-            # awaits, so ten roots ran back to back for up to 1.6 s with the loop
-            # blocked: no relay frames, no socket reads, the 5 s tick slipping.
-            # Yielding *between* roots caps the stall at one root and costs
-            # nothing that matters. It does not weaken the reason this is not
-            # threaded: that argument is about tearing *inside* one `verify`,
-            # which is still atomic with respect to the loop.
-            await anyio.lowlevel.checkpoint()
-            registry = root.ctx.get(INVARIANTS)
-            if registry is None:
-                continue
-            # `verify` contains a raising check itself, turning it into a finding
-            # rather than dropping it — so there is nothing to guard here, and a
-            # guard would swallow the one outcome this is for.
-            current = registry.verify()
-            if current:
-                found[root.id] = current
-            # **A change, not a sample**, which is the difference between a
-            # record and a leak. A drifted cache does not repair itself, so a
-            # poll that appended what it saw would write the same finding every
-            # five minutes for the life of the daemon — 288 identical records a
-            # day, in the log a person opens *because* something is wrong.
-            #
-            # Not a latch either, the way `unreachable_since` is: that transition
-            # is one-way by construction and this one is not. A generation bump
-            # rebuilds the derivation, so a cache can start holding again — and a
-            # latch would then miss the next drift, which is the one failure this
-            # cadence exists to catch.
-            #
-            # Read back off the log rather than held on `Root`, so the comparison
-            # survives passivation and resume: a root released overnight and
-            # restarted must not re-announce what its own transcript already
-            # says. `latest` is an incremental fold, so this costs nothing.
-            if {one.invariant for one in current} == _recorded_violations(root.session):
-                continue
+        registry = root.ctx.get(INVARIANTS)
+        if registry is None:
+            return []
+        # `verify` contains a raising check itself, turning it into a finding
+        # rather than dropping it — so there is nothing to guard here, and a
+        # guard would swallow the one outcome this is for.
+        current = registry.verify()
+        # **A change, not a sample**, which is the difference between a record and
+        # a leak. A drifted cache does not repair itself, so a check that appended
+        # what it saw would write the same finding at every settle for the life of
+        # the root, in the log a person opens *because* something is wrong.
+        #
+        # Not a latch either, the way `unreachable_since` is: that transition is
+        # one-way by construction and this one is not. A generation bump rebuilds
+        # the derivation, so a cache can start holding again — and a latch would
+        # then miss the next drift, which is the one failure this check exists to
+        # catch.
+        #
+        # Read back off the log rather than held on `Root`, so the comparison
+        # survives passivation and resume: a root released overnight and restarted
+        # must not re-announce what its own transcript already says. `latest` is an
+        # incremental fold, so this costs nothing.
+        if {one.invariant for one in current} != _recorded_violations(root.session):
             if current:
                 log.error(
                     "ph_app.daemon: root %s violates %d invariant(s): %s",
@@ -2254,7 +2322,10 @@ class Supervisor:
                 }
             )
             await self._flush(root)
-        return found
+        # After the record's own flush, which marked the root unverified again: the
+        # record is not news to the next check.
+        root.unverified_at = None
+        return current
 
     async def announce_unreachable(self, note: dict[str, Any]) -> None:
         """Write the "nobody can reach me" record into every root, and flush it.
@@ -2459,7 +2530,7 @@ class Supervisor:
         The first four are `_held`, which `next_release` reads too, so the moment a
         root is planned for and the predicate that releases it cannot disagree.
         """
-        return not self._held(root) and root.idle_for(now) >= after * 1000
+        return root.idle_for(now) >= after * 1000 and not self._held(root)
 
     def _held(self, root: Root) -> bool:
         """Whether something other than recent activity keeps `root` mounted.
@@ -2495,7 +2566,7 @@ class Supervisor:
         ]
         if not moments:
             return None
-        return max(min(moments), self._last_release + int(PASS_FLOOR * 1000))
+        return floored(min(moments), self._last_release)
 
     async def sweep(self, *, after: float | None = None, now: int | None = None) -> list[str]:
         """Release every root that has been quiet long enough. Returns their ids.
@@ -2543,7 +2614,12 @@ class Supervisor:
             await self._passivate(root, now=now)
 
     async def _passivate(self, root: Root, *, now: int) -> None:
+        # Measured first: a violation the check below records is a new last event,
+        # and the release would then claim a root idle for no time at all.
         idle_ms = root.idle_for(now)
+        # The last look at its caches before they are gone (P12-04): a drift found
+        # now is recorded in the log a resume will read, rather than lost with them.
+        await self.verify_settled(root)
         root.passivated(idle_ms)
         log.info(
             "ph_app.daemon: passivating root %s after %d minutes idle", root.id, idle_ms // 60_000

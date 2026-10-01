@@ -893,16 +893,17 @@ async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
     """The third term of `holds`, and the only one a client changes by asking.
 
     `schedule` moves when somebody creates or cancels one, and nothing about
-    that arrives as an agent status or a connection — so the two handlers say so
-    themselves. Left to anything else, a person who had just set an appointment
-    would watch the row go on claiming their daemon leaves when they close the
-    window, having been told otherwise by the command they just ran.
+    that arrives as an agent status or a connection — so the schedule watch says
+    so itself, from the log, whichever path wrote the record. Left to anything
+    else, a person who had just set an appointment would watch the row go on
+    claiming their daemon leaves when they close the window, having been told
+    otherwise by the command they just ran.
 
     The cancel is the half with teeth: it is a claim being *withdrawn*, and on a
     daemon whose only hold it was, the withdrawal is what lets the process go.
 
-    Sabotage: drop either `check_lifetime()` from the schedule handlers, and the
-    corresponding `until` here waits out its ten seconds.
+    Sabotage: drop `_recheck()` from `Supervisor._watch_schedules`, and each
+    `until` here waits out its ten seconds.
     """
 
     def held() -> list[str]:

@@ -27,19 +27,19 @@ a clock rather than on an event. Since P12-02 nothing sweeps for it:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import age, logged, running, unplugged, until
+from daemon_helpers import age, ask_a_person, logged, running, unplugged, until
 
-from ph.keys import APPROVAL
 from ph.paths import resolve_roots
 from ph.seams.schedule_index import ScheduleIndex
 from ph.session import SurfaceIntent, now_ms
-from ph.testing import StubAgent, log_event, user_payload
+from ph.testing import log_event, user_payload
 from ph_app.daemon import server
 from ph_app.daemon.launch import SPAWN_TIMEOUT
+from ph_app.daemon.server import DaemonServer
+from ph_app.daemon.supervisor import Root
 
 pytestmark = pytest.mark.anyio
 
@@ -53,6 +53,19 @@ def _appointment(session_id: str = "later", *, at: int = 4_000_000_000_000) -> N
     condition of the same predicate.
     """
     ScheduleIndex(resolve_roots().home).record(session_id, next_at=at, now=at)
+
+
+def _held_by_the_ladder(daemon: DaemonServer, root: Root) -> None:
+    """Hold an aged daemon with `root` mid-ladder (`retrying` is work in hand), so
+    the event a test is about is the only thing that can let it go.
+
+    Aged after the hold, never before: mounting a root already rechecks the
+    lifetime, so a daemon aged first and holding nothing stops at the mount, and a
+    test of what comes next passes for the wrong reason."""
+    root.retry(reason="the provider is down")
+    age(daemon)
+    daemon.check_lifetime()
+    assert not daemon.stop.is_set(), "the ladder holds it"
 
 
 # -------------------------------------------- what the exit does not wait for --
@@ -76,7 +89,7 @@ async def test_the_exit_no_longer_waits_on_the_root_quiet_window(tmp_path: Path)
     after=60.0)` — and this fails on a log written a moment ago.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
-        daemon.aged()
+        age(daemon.running)
         root = await daemon.running.supervisor.start("just-finished")
         log_event(
             root.session, "user/message", user_payload("the last thing"), SurfaceIntent("append")
@@ -138,7 +151,7 @@ async def test_a_connected_client_keeps_an_ephemeral_daemon_up(tmp_path: Path) -
     Sabotage: count attached roots instead of open connections.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        daemon.aged()
+        age(daemon.running)
         assert daemon.running.spent(), "nothing has connected yet"
 
         await daemon.client("asks")
@@ -190,7 +203,7 @@ async def test_an_appointment_keeps_an_ephemeral_daemon_up(tmp_path: Path) -> No
     Sabotage: drop condition 4, and this passes as spent.
     """
     async with running(tmp_path, ephemeral=True) as daemon:
-        daemon.aged()
+        age(daemon.running)
         assert daemon.running.spent(), "nothing on the books yet"
 
         _appointment()
@@ -336,27 +349,11 @@ async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive
     """
     async with unplugged(tmp_path, monkeypatch, ephemeral=True) as daemon:
         root = await daemon.supervisor.start("parked")
-        # Held first, by the ladder: `retrying` is work in hand, and the desk
-        # outranks it in `Root.status`, so the ask is the only thing that can let
-        # the daemon go. Aged after the hold, or mounting alone would end it.
-        root.retry(reason="the provider is down")
-        age(daemon)
-        daemon.check_lifetime()
-        assert not daemon.stop.is_set(), "the ladder holds it"
-        outcome: list[Any] = []
-
+        # The desk outranks the ladder in `Root.status`, so the ask is then the
+        # only thing that can let the daemon go.
+        _held_by_the_ladder(daemon, root)
         async with anyio.create_task_group() as tasks:
-
-            async def ask() -> None:
-                outcome.append(
-                    await root.ctx.require(APPROVAL).request(
-                        agent=StubAgent(ctx=root.ctx, session=root.session),
-                        tool_name="write",
-                        call_id="c1",
-                    )
-                )
-
-            tasks.start_soon(ask)
+            tasks.start_soon(ask_a_person, root)
             await anyio.sleep(0.05)
             assert root.status == "waiting", "parked on a human, by the desk's own reckoning"
 
@@ -385,12 +382,7 @@ async def test_a_root_that_gave_up_does_not_keep_an_ephemeral_daemon_alive(
     """
     async with unplugged(tmp_path, monkeypatch, ephemeral=True) as daemon:
         root = await daemon.supervisor.start("spent")
-        # Held first, mid-ladder, and aged after the hold: `give_up` is then the only
-        # thing that can let the daemon go.
-        root.retry(reason="the provider is down")
-        age(daemon)
-        daemon.check_lifetime()
-        assert not daemon.stop.is_set(), "the ladder holds it"
+        _held_by_the_ladder(daemon, root)
         root.give_up("the provider is down", attempts=3)
         assert root.status == "failed", "the ladder is over, and the log says so"
 
@@ -408,7 +400,7 @@ async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Pa
     that left its socket behind would make every ordinary exit look like a crash.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
-        daemon.aged()
+        age(daemon.running)
         path = daemon.path
 
         daemon.running.check_lifetime()
@@ -657,7 +649,7 @@ async def test_a_turn_finishing_with_nobody_watching_ends_the_daemon(tmp_path: P
     behind every time.
     """
     async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
-        daemon.aged()
+        age(daemon.running)
         root = await daemon.running.supervisor.start("detached")
         assert not root.subscribers, "the case under test: nobody is listening"
 

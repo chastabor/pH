@@ -179,7 +179,7 @@ class AskDesk:
     def waiting(self) -> bool:
         """Whether this root is parked on a person.
 
-        Read by `Root.status`, which is what lets the sweep release it: a root
+        Read by `Root.status`, which is what lets release take it: a root
         waiting on a human is idle in every sense that matters, and holding a
         process for somebody who closed their laptop is the failure P5-05 exists
         to prevent.

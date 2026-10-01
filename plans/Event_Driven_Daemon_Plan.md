@@ -90,10 +90,10 @@ No backward-compatibility shims. Each of the following breaks outright:
   unknown type that carries that flag. The old records stay in the log unread,
   and the TUI adapter drops types it does not know (`tui/adapter.py:146`). No
   log-format bump.
-* **Invariant timing.** A cache drift is found at the next settle (a turn or
-  command ending) instead of within five minutes. Only a writer can drift a cache,
-  and writers run inside turns and commands. A drift injected by hand with no
-  writer after it, as the current tests do, waits for the next settle.
+* **Invariant timing.** A cache drift is found `VERIFY_AFTER` (30 s) after the
+  writing that caused it stops and the root settles, instead of within five
+  minutes. A root nothing is written to is never checked again. Only a writer can
+  drift a cache, and every writer flushes, which is what `session/durable` hears.
 * **Kernel probe timing and type.** The first ping moves from about 50 ms into a
   run to `probe_seconds` into it. A cell that finishes in under a second sends no
   ping at all, and a lost `done` is repaired after about 1 s instead of about
@@ -281,6 +281,23 @@ nothing to plan for, each sleeps until told. `DaemonServer.sweep()`,
 ("release: next in …"). The `holds()` paragraph listing terms with no event behind
 them now says every term has one.
 
+**After a `/simplify` pass (2026-10-01):**
+
+* A watcher leaving notifies only the releaser (`Root.unwatched`), and only when it
+  was the last one. Watchers are no term of what holds the daemon, so the lifetime
+  recheck there changed nothing and could read the schedule index.
+* The `schedule` hold is heard on the log: `_watch_schedules` calls `_recheck` on
+  `CREATED`, `CANCELED` and `TICK`, and the two `check_lifetime` calls in the wire
+  handlers are gone.
+* `beneath` notifies the releaser only on `subagent/status` and
+  `subagent/deleted`, the two records `child_is_live` turns false on.
+* `Planner` counts its clock wakes (`rang`) instead of taking a `due` callback.
+* `recovery.floored` holds the floor rule both planners use.
+* `DaemonServer.spawn_window_ends` is read by both `lifetime_deadline` and `spent`.
+* `DaemonServer` wires `recheck_lifetime` itself, so no server is built half-wired.
+* In tests: `unplugged` builds on `supervised`, `daemon_helpers.ask_a_person`
+  replaces three copies, and the turn test uses the shared `gate` fixture.
+
 **Found while testing:** the old exit tests for a parked root and a root that gave
 up passed for the wrong reason. Mounting a root already rechecks the lifetime, so
 with the spawn window aged first, the daemon stopped at mount. They now hold the
@@ -310,6 +327,35 @@ keep_alive > 0`.
   `SPAWN_TIMEOUT`; a client arriving disarms both.
 
 ### P12-03: the kernel clock sleeps until its next deadline
+
+**Landed (2026-10-01).** As designed below, with these differences:
+
+* **`_ActiveRun` still builds with no loop running**, because a test of `settle`
+  constructs one synchronously. So `started_at` is stamped by `run` rather than read
+  by a field factory, and `moved` is `None` until `_watch` first plans (`_move()`
+  sets it when it exists).
+* **The grace and stall comparisons are `>=`**, where they were `>`. A clock that
+  wakes exactly at its deadline would otherwise find nothing due yet, plan the same
+  instant again, and spin until the float moved.
+* **`_probe` takes the interval as a parameter**, since `probe_seconds` may now be
+  `None`. `_watch` calls it only when the probe is on, and it checks timing by the
+  same rule `_next_deadline` plans by, including the first probe after `started_at`.
+* **After a `/simplify` pass:** `probed_at` is stamped when the run opens, so there
+  is no separate start time. `_probe` acts only once `_next_deadline` says it is
+  due, so the probe rule is written once. The setting is `PositiveFloat | None`.
+* **`POLL_SECONDS` is gone from `ph.cancel`.** The three tests that used it as a
+  reference number now say 50 ms in words or use a literal.
+* **Tests** (`test_kernel.py`), each sabotage-checked:
+  * the clock wakes about once per probe (counted at `_probe`; a 50 ms tick put
+    back fails it);
+  * a probe answered after a stall starts the next (without `answered`'s wake,
+    one probe goes out where a dozen should);
+  * with the probe off, no probe is sent and a cancel still stops the run;
+  * an abort a refusal began reaches the kill with the probe off, for a cell that
+    ignores `SIGINT` and spins;
+  * `probe_seconds` of 0 or less is refused, and `None` is accepted.
+
+  The existing lost-`done` repair test still fails with the `_probe` call removed.
 
 `Kernel._watch` (`manager.py:804`) stops ticking.
 
@@ -355,6 +401,49 @@ keep_alive > 0`.
   stall tests stay green unchanged.
 
 ### P12-04: invariants are checked when a root settles
+
+**Landed (2026-10-01).** As designed below, with these differences:
+
+* **The setting is `check_invariants: bool`**, on `serve`, `Supervisor` and
+  `DaemonStatusReply` alike, rather than `verify_invariants`, which is the method's
+  name. `phern agents doctor` prints "invariants: checked when a root settles" or
+  "off".
+* **`verify_root` holds the record-a-change rule**, `verify_settled` the gate
+  (setting on, root quiet, log moved), and `verify_invariants` is the
+  every-root sample a caller asks for. `verified_seq` is stamped after any
+  record, so the record is not news to the next settle.
+* **`_passivate` measures the idle time before it checks**: a violation recorded
+  there is a new last event, and the release record would otherwise claim a root
+  idle for no time at all.
+* **Tests:** the invariant suite moved onto `supervised`, so all but the wire test
+  run where unix sockets do not (before, every one used `running`). New tests,
+  each sabotage-checked:
+  * a drift is recorded when the next turn settles;
+  * with the check off, nothing is recorded;
+  * a root is not checked again until its log moves;
+  * a root is checked before it is released.
+
+  `test_a_command_on_an_idle_root_is_checked` covers `_acted` over the wire.
+
+**Reworked after a `/simplify` pass (2026-10-01): one write trigger, debounced.** The
+three hand-placed checks missed writers (the give-up exit, `credentials/store`,
+`session/adopt`, schedule edits, declined ticks) and watched only the root's own
+`seq`, so a child writing under an idle root was never seen. They also refolded
+inline: `_acted` never skipped, since every keyed mutation writes its own command
+records, which put about 160 ms on a 500k-event log in front of the reply. Now:
+
+* `session/durable`, which ph-core emits after every flush in a mount, marks the
+  root unverified (`Root.unverified_at`) and wakes `Supervisor.verifier`, a fourth
+  `Planner`. `_recheck` wakes it too, since a root written to while working is due
+  only once it settles.
+* The verifier checks a root once it is settled (quiet, nothing working beneath)
+  and nothing more has been written for `recovery.VERIFY_AFTER` (30 s), so a burst
+  costs one refold. Only `_passivate` still checks inline, as a last look.
+* `verify_invariants` is gone: nothing outside tests called it, and they call
+  `verify_root`. `Root.verified_seq` became `unverified_at`.
+* New tests: a child's write makes its parent due a check; a root is not checked
+  again until something is written. The command test now runs end to end through
+  the verifier `serve` starts.
 
 * `Supervisor.verify_root(root)` is extracted from the per-root body of
   `verify_invariants` (`supervisor.py:2112`). `verify_invariants()` stays for
@@ -522,8 +611,8 @@ This is row 6, the answer to "why is it needed".
 | P12-00 | **Landed (2026-10-01).** `ph.wall_clock` (`sleep_until`, `Alarm`); `first_of` takes any `Waitable`; `keep_schedules` sleeps on the wall clock. macOS timer unverified on hardware | — | `test_wall_clock`, `test_the_scheduler_sleeps_until_something_is_due` |
 | P12-01 | **Landed (2026-10-01).** Root release sleeps until a deadline; `Planner` shared by all three jobs | P12-00 | one test per notice, each sabotage-checked; the no-polling pass count |
 | P12-02 | **Landed (2026-10-01)** with P12-01. Lifetime deadlines; `DaemonServer.sweep` gone | P12-00 | `test_daemon_lifetime` without `sweep_every`; `unplugged` |
-| P12-03 | kernel clock; `probe_seconds: float \| None` | — | kernel wake count, cross-task abort, stall re-arm, probe off |
-| P12-04 | invariants on settle | — | `test_daemon_invariants`, seq gate |
+| P12-03 | **Landed (2026-10-01).** Kernel clock sleeps until its next deadline; `probe_seconds: float \| None`; `POLL_SECONDS` gone | — | kernel wake count, cross-task abort, stall re-arm, probe off |
+| P12-04 | **Landed (2026-10-01).** Invariants checked after writes settle (`verifier`, fed by `session/durable`); `check_invariants` flag; the five-minute poll gone | — | `test_daemon_invariants` (socket-free), seq gate |
 | P12-05 | socket watch on inotify and kqueue | — | the reaped-dir test with no cadence; replaced; ancestor |
 | P12-07 | guest `NOTE_EXIT` | — | macOS kernel test: host SIGKILL during a blocking cell |
 | P12-08 | docs, doctor rows, delete `_every` | all | `test_non_guarantees`, doc links |

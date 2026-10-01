@@ -439,13 +439,9 @@ class DaemonStatusReply(CapabilityBlock):
     """When the next quiet root may be released, epoch ms, or `None` while none can
     be: release sleeps until then rather than sweeping (P12-01)."""
     watch_every: float
-    invariants_every: float = 0.0
-    """How often the pollable invariants are checked, or `0` for off (I6).
-
-    Defaulted rather than required, unlike the one above it: a daemon built
-    before this cadence existed reports no field, and `0` is what that daemon was
-    actually doing. `watch_every` has never been optional and gains nothing by
-    becoming so."""
+    check_invariants: bool
+    """Whether a root's pollable invariants are checked when it settles (I6, P12-04),
+    rather than on the five-minute cadence that `invariantsEvery` used to name."""
     unreachable_since: int | None = None
     """Set only once the socket stopped being this daemon's (P5-11). Absent is
     the normal answer, which is why the row it feeds is absent too."""

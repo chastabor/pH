@@ -181,7 +181,9 @@ a 0.6 daemon refuses the `heartbeatEvery` it no longer knows; restarting the
 daemon on the same release fixes both. Root release and the daemon's own
 keep-alive went the same way (P12-01, P12-02): `daemon/status` drops `sweepEvery`
 for `nextRelease`, when the next quiet root may be released, absent while none
-can be. The rest of Phase 12 changes this reply again before 0.7.0 ships.
+can be. Invariants are checked when a root settles (P12-04): `invariantsEvery`
+becomes `checkInvariants`, a flag. The rest of Phase 12 changes this reply again
+before 0.7.0 ships.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

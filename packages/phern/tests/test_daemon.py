@@ -145,6 +145,7 @@ import anyio
 import pytest
 from daemon_helpers import (
     PROFILE,
+    ask_a_person,
     break_the_provider,
     private_runtime,
     running,
@@ -152,6 +153,7 @@ from daemon_helpers import (
     supervised,
     until,
 )
+from rlm_fixtures import ModelGate
 
 from ph import wall_clock
 from ph.agent.inbox import InboxTarget
@@ -159,9 +161,7 @@ from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.json import JsonObject, JsonValue, as_str
-from ph.keys import APPROVAL, SCHEDULE, SESSIONS, WORKSPACE
-from ph.llm.fake import FakeAdapter
-from ph.llm.types import GenerateOptions, StreamChunk
+from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.paths import resolve_roots
 from ph.persistence import session_path
 from ph.seams.models import ModelChoice
@@ -172,7 +172,6 @@ from ph.session import Session, SessionEvent, SessionHeader, now_ms, session_wri
 from ph.session.kinds import SESSION_HOLDER, WORKSPACE_RESTORE, credential_hold
 from ph.testing import (
     ReapedHost,
-    StubAgent,
     log_event,
     not_none,
     noting,
@@ -1492,33 +1491,25 @@ async def test_a_root_mounting_is_planned_for(
 
 
 async def test_a_turn_ending_lets_the_root_go(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gate: ModelGate
 ) -> None:
     """The commonest way a quiet window starts: a turn ends.
 
-    The turn is held open past the window, so the pass the mount planned finds the
-    root `running` and plans nothing. A turn shorter than that needs no notice: the
-    pass would find it over and plan from its last record.
+    The turn is held open at the model past the window, so the pass the mount
+    planned finds the root `running` and plans nothing. A turn shorter than that
+    needs no notice: the pass would find it over and plan from its last record.
 
-    Sabotage: drop `_recheck` from the `agent/status` listener, and nothing wakes
+    Sabotage: drop `recheck()` from the `agent/status` listener, and nothing wakes
     the releaser when the turn ends.
     """
-    turn = anyio.Event()
-    stream = FakeAdapter.stream
-
-    async def held(self: FakeAdapter, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
-        await turn.wait()
-        async for chunk in stream(self, options):
-            yield chunk
-
-    monkeypatch.setattr(FakeAdapter, "stream", held)
     async with _releasing(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("worked")
         await supervisor.prompt("worked", "hello")
-        await until(lambda: root.status == "running", what="the turn to start")
+        await until(lambda: gate.arrived == 1, what="the turn to reach the model")
+        assert root.status == "running"
         await _still_mounted(supervisor, "worked")
 
-        turn.set()
+        gate.release_all()
         await _released(supervisor, "worked")
 
 
@@ -1557,16 +1548,10 @@ async def test_a_root_parking_on_a_person_lets_it_go(
         await _still_mounted(supervisor, "parked")
 
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(_ask_a_person, root)
+            tasks.start_soon(ask_a_person, root)
             await until(lambda: root.status == "waiting", what="the root to park")
             await _released(supervisor, "parked")
             tasks.cancel_scope.cancel()
-
-
-async def _ask_a_person(root: Root) -> None:
-    await root.ctx.require(APPROVAL).request(
-        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
-    )
 
 
 async def test_a_child_settling_lets_the_root_go(

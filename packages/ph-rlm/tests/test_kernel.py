@@ -50,6 +50,7 @@ from typing import Any, NoReturn
 
 import anyio
 import pytest
+from pydantic import ValidationError
 from runtime_helpers import namespace
 
 from ph.orphans import process_alive
@@ -60,6 +61,7 @@ from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph_rlm.kernel.manager import (
     MAX_FRAME_BYTES,
     RESET_NOTICE,
+    Config,
     Kernel,
     KernelLimits,
     frame_cap,
@@ -746,7 +748,7 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
 ) -> None:
     """The reason the stop ladder's clock is a sibling task.
 
-    `_pump` used to sit in `move_on_after(POLL_SECONDS)` so it could ask
+    `_pump` used to sit in a 50 ms `move_on_after` so it could ask
     between reads whether the caller had canceled. The cost was not one scope
     per socket read but **one per frame**: `_recv_line` returns straight out of
     its buffer whenever a frame is already there, and a 64 KiB read of a chatty
@@ -767,12 +769,9 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     `InvalidStateError` and removes the reader synchronously inside the
     callback. Canceling it was always safe.
 
-    Sabotage: put the `move_on_after` back around the read, and `canceled`
-    counts roughly `duration / POLL_SECONDS`.
+    Sabotage: put a 50 ms `move_on_after` back around the read, and `canceled`
+    counts roughly `duration / 0.05`.
     """
-
-    from ph.cancel import POLL_SECONDS
-
     original = anyio.wait_readable
     canceled = 0
     waits = 0
@@ -789,8 +788,8 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     monkeypatch.setattr(anyio, "wait_readable", counting)
 
     kernel = await make_kernel()
-    # Long enough that the old poll would have fired many times over.
-    slept = 12 * POLL_SECONDS
+    # Long enough that the old 50 ms poll would have fired many times over.
+    slept = 0.6
     result = await kernel.run(f"import asyncio\nawait asyncio.sleep({slept})\n'done'", (), None)
 
     assert result.value == "done", result.error
@@ -1044,6 +1043,19 @@ async def test_a_cell_that_starves_the_loop_is_measured_and_not_killed(
     assert kernel.loop_stalls > 0, "a cell that never yielded answered every probe on time"
 
 
+def _count_pings(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Every probe a kernel sends from here on, by its id, still sent for real."""
+    sent: list[int] = []
+    real = Kernel._ping
+
+    async def counting(self: Kernel, run_id: int, probe: int) -> None:
+        sent.append(probe)
+        await real(self, run_id, probe)
+
+    monkeypatch.setattr(Kernel, "_ping", counting)
+    return sent
+
+
 async def test_the_probe_reports_how_far_behind_a_guest_loop_is(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1063,14 +1075,7 @@ async def test_the_probe_reports_how_far_behind_a_guest_loop_is(
     rate rather than the probe rate.
     """
     kernel = await make_kernel(probe_seconds=0.2)
-    sent: list[int] = []
-    real = Kernel._ping
-
-    async def counting(self: Kernel, run_id: int, probe: int) -> None:
-        sent.append(probe)
-        await real(self, run_id, probe)
-
-    monkeypatch.setattr(Kernel, "_ping", counting)
+    sent = _count_pings(monkeypatch)
     await kernel.run("import asyncio\nawait asyncio.sleep(1.0)", (), None)
 
     assert kernel.loop_worst is not None, "no probe was answered"
@@ -1080,6 +1085,147 @@ async def test_the_probe_reports_how_far_behind_a_guest_loop_is(
     # on both sides: the exact count is the scheduler's, the *order* is the
     # claim, and the poll rate it must not be is 20/s.
     assert 2 <= len(sent) <= 10, f"{len(sent)} probes in a second at probe_seconds=0.2"
+
+
+async def test_an_open_run_wakes_its_clock_once_per_probe(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop ladder's clock sleeps until its next question, not on a tick (P12-03).
+
+    `_watch` used to wake twenty times a second for the life of every open run and
+    ask `_probe` whether one was due. Now it plans the moment one is, so a second of
+    cell at a fifth of a second of cadence wakes it about five times.
+
+    Counted at `_probe`, which the clock calls on every wake while the probe is on,
+    so the count is the wake count whatever the clock's own shape.
+
+    Sabotage: put a 50 ms `anyio.sleep` back at the top of `_watch`'s loop, and the
+    count is the tick rate.
+    """
+    kernel = await make_kernel(probe_seconds=0.2)
+    asked: list[float] = []
+    real = Kernel._probe
+
+    def counting(self: Kernel, active: Any, tasks: Any) -> None:  # noqa: ANN401
+        asked.append(anyio.current_time())
+        real(self, active, tasks)
+
+    monkeypatch.setattr(Kernel, "_probe", counting)
+    await kernel.run("import asyncio\nawait asyncio.sleep(1.0)", (), None)
+
+    assert 2 <= len(asked) <= 10, f"the clock woke {len(asked)} times in a second"
+
+
+async def test_a_probe_answered_after_a_stall_starts_the_next(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled probe has no deadline, so its answer is what wakes the clock.
+
+    The cell starves its loop for a while, so the probe outstanding when it began
+    goes unanswered past its interval and is counted as a stall. Then it yields,
+    the answer arrives, and probing has to resume for the rest of the run.
+
+    Sabotage: drop `_move()` from `_ActiveRun.answered`, and the clock sleeps out
+    the run once the stall ends; one or two probes go out, not a dozen.
+    """
+    kernel = await make_kernel(probe_seconds=0.05)
+    sent = _count_pings(monkeypatch)
+    with anyio.fail_after(30):
+        await kernel.run(
+            "import asyncio, time\n"
+            "end = time.monotonic() + 0.4\n"
+            "while time.monotonic() < end:\n"
+            "    pass\n"
+            "await asyncio.sleep(0.6)\n",
+            (),
+            None,
+        )
+
+    assert kernel.loop_stalls >= 1, "the spin never starved a probe; this asserted nothing"
+    assert len(sent) >= 5, f"probing did not resume after the stall: {len(sent)} sent"
+
+
+async def test_with_the_probe_off_a_run_sends_no_probe_and_cancel_still_stops_it(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`probeSeconds: null` turns the probe off, and nothing else with it.
+
+    No probe goes out and the clock has nothing to wake for, but the caller's
+    cancel is an event (`token.wait()`), so it still reaches the cell at once.
+
+    Sabotage: race only `moved` in `_watch`, not the token, and this cancel waits
+    for nothing.
+    """
+    from ph.cancel import CancelToken
+
+    kernel = await make_kernel(probe_seconds=None)
+    sent = _count_pings(monkeypatch)
+    token = CancelToken()
+
+    async with anyio.create_task_group() as tasks:
+
+        async def cancel_shortly() -> None:
+            await anyio.sleep(0.3)
+            token.cancel("user")
+
+        tasks.start_soon(cancel_shortly)
+        with anyio.fail_after(10):
+            result = await kernel.run("import asyncio\nawait asyncio.sleep(30)", (), token)
+
+    assert result.error is not None
+    assert sent == [], "a probe went out with the probe off"
+    assert kernel.loop_worst is None
+
+
+async def test_an_abort_a_refusal_began_still_reaches_the_kill_with_the_probe_off(
+    make_kernel: MakeKernel,
+) -> None:
+    """The grace deadline is planned when the abort begins, from any task.
+
+    A refused call starts the abort from `_serve_call`, not from the clock. This
+    cell then ignores `SIGINT` and spins, so the cancel frame is never read and the
+    signal does nothing: only the kill at the end of the grace stops it. With the
+    probe off the clock had no deadline at all, so what wakes it to plan the grace
+    is `begin_abort` setting `moved`.
+
+    Sabotage: drop `_move()` from `begin_abort`, and the clock sleeps on while the
+    cell spins.
+    """
+
+    async def refused(**_arguments: object) -> NoReturn:
+        raise CodeRunFailure("denied", "tools.edit was refused")
+
+    namespace = tools(edit=refused)
+    kernel = await make_kernel(
+        namespaces=(namespace,), cancel_grace=0.3, probe_seconds=None, cpu_seconds=600
+    )
+
+    with pytest.raises(CodeRunFailure), anyio.fail_after(10):
+        await kernel.run(
+            "import signal\n"
+            "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+            "try:\n"
+            "    await tools.edit(path='x')\n"
+            "except BaseException:\n"
+            "    pass\n"
+            "while True:\n"
+            "    pass\n",
+            (namespace,),
+            None,
+        )
+    revived = await kernel.run("'back'", (namespace,), None)
+    assert revived.value == "back"
+    assert RESET_NOTICE in revived.logs, "the spinning cell was not killed"
+
+
+def test_a_probe_interval_of_zero_is_refused_and_null_turns_it_off() -> None:
+    """Zero is not "as often as possible": the clock would plan a deadline that is
+    always now. `null` is the way to say never."""
+    assert Config(probe_seconds=None).probe_seconds is None
+    with pytest.raises(ValidationError):
+        Config(probe_seconds=0)
+    with pytest.raises(ValidationError):
+        Config(probe_seconds=-1.0)
 
 
 def test_the_readers_ceiling_follows_the_limit_the_kernel_booted_with() -> None:

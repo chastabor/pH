@@ -151,23 +151,6 @@ __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
 
-INVARIANTS_EVERY = 5 * 60.0
-"""How often each live root is asked whether its pollable invariants hold (I6).
-
-**A cadence of its own rather than a ride on another**: one cadence per *question*.
-This asks whether the deployment is still telling the truth about itself, and
-folding it into a cadence that asks something else would mean the answer to one
-question decided how often the other was asked.
-
-Five minutes, and slow on purpose. A check is O(events) in every live root's log
-and will almost always pass — it exists to catch a writer that bypassed
-`Session._append`, which is a bug nobody has on a schedule. Fast enough to name
-the drift inside a working session, slow enough that the refold is not a tax
-anybody would later be tempted to remove.
-
-`0` turns it off, matching the others.
-"""
-
 WATCH_EVERY = 30.0
 """How often the daemon checks that the socket at its path is still its own (P5-11).
 
@@ -660,21 +643,12 @@ class _Connection:
     # a buffer is one a restart forgets.
 
     async def _schedule_create(self, params: CreateScheduleParams) -> Schedule:
-        made = await self.server.supervisor.schedule(params.session_id, params.to_schedule())
-        # `schedule` is one of `holds()`' terms, and this is the moment it can
-        # start being true — the other two ways it moves are a cancel below and
-        # a `once` firing, whose turn rechecks when it ends. Announced rather than
-        # waited for, so the sidebar of a terminal that just set an appointment
-        # says so.
-        self.server.check_lifetime()
-        return made
+        # The `schedule` hold moves on the log, not here: `_watch_schedules` hears
+        # the record and rechecks, whichever path wrote it.
+        return await self.server.supervisor.schedule(params.session_id, params.to_schedule())
 
     async def _schedule_cancel(self, params: CancelScheduleParams) -> ScheduleCanceled:
         canceled = await self.server.supervisor.unschedule(params.session_id, params.schedule_id)
-        # The other direction, and the one with teeth: a cancel can be what lets
-        # an ephemeral daemon go, and nothing else would notice that a claim had
-        # just been withdrawn.
-        self.server.check_lifetime()
         return ScheduleCanceled(
             session_id=params.session_id,
             schedule_id=params.schedule_id,
@@ -1344,10 +1318,7 @@ class DaemonServer:
     whole frame, and a flag would have to be set by every writer of every field
     that goes into one."""
     watch_every: float = WATCH_EVERY
-    invariants_every: float = INVARIANTS_EVERY
-    """The cadences, named rather than a tuple: `serve` already threads them past
-    each other positionally into `start_soon`, and this is the one place they are
-    read back by a person."""
+    """The socket watch's cadence, read back by a person through `status`."""
     lifetime_clock: Planner = field(init=False)
     """The daemon's own two deadlines (P7-08, P12-02): an armed keep-alive expiring,
     and an auto-started daemon nobody has spoken to reaching `SPAWN_TIMEOUT`
@@ -1377,6 +1348,11 @@ class DaemonServer:
     thereafter by `status` for whoever eventually gets to ask."""
 
     def __post_init__(self) -> None:
+        # Wired here rather than passed in, because the two hold each other: the
+        # server needs the supervisor to ask what is running, and the supervisor
+        # needs the server to say that the answer moved. Here rather than in
+        # `serve`, so no server is ever built half-wired.
+        self.supervisor.recheck_lifetime = self.check_lifetime
         self.lifetime_clock = Planner(
             "the lifetime check", run=self._lifetime_pass, plan=self.lifetime_deadline
         )
@@ -1393,8 +1369,16 @@ class DaemonServer:
         if self.keep_alive_until is not None:
             moments.append(self.keep_alive_until)
         if self.ephemeral and not self.served:
-            moments.append(self.started + int(SPAWN_TIMEOUT * 1000))
+            moments.append(self.spawn_window_ends)
         return min((moment for moment in moments if moment > now), default=None)
+
+    @property
+    def spawn_window_ends(self) -> int:
+        """When a daemon nobody has spoken to may leave, epoch ms (`served` says why).
+
+        One expression for the clock that wakes at it and the predicate that asks
+        past it (`spent`), so the two cannot disagree."""
+        return self.started + int(SPAWN_TIMEOUT * 1000)
 
     def status(self) -> DaemonStatusReply:
         """What this daemon is, for `phern agents doctor`.
@@ -1418,7 +1402,7 @@ class DaemonServer:
             next_wake=supervisor.scheduler.planned,
             next_release=supervisor.releaser.planned,
             watch_every=self.watch_every,
-            invariants_every=self.invariants_every,
+            check_invariants=supervisor.check_invariants,
             unreachable_since=self.unreachable_since,
             # `report()`'s shape as models — a list of sections, each a title
             # and `(label, value)` rows — carrying one built-in section today
@@ -1615,7 +1599,7 @@ class DaemonServer:
         if self.holds(now=now) if holds is None else holds:
             return False
         stamp = now if now is not None else now_ms()
-        return self.served or stamp >= self.started + int(SPAWN_TIMEOUT * 1000)
+        return self.served or stamp >= self.spawn_window_ends
 
     @property
     def mode(self) -> DaemonMode:
@@ -1724,8 +1708,8 @@ async def _every(
     and a set event returns, so the loop condition and a trailing guard cannot
     disagree about what "stopped" means. That reasoning was written once and
     then depended on by every cadence, so one change to shutdown semantics is
-    one edit. The socket watch and the invariant poll are what still run on it;
-    Phase 12 retires both, and this with them.
+    one edit. The socket watch is what still runs on it; P12-05 retires it, and
+    this with it.
 
     A failing pass is logged and the cadence continues: work that raised would
     otherwise take the task group with it, and with it every root, over a
@@ -1767,7 +1751,7 @@ async def serve(
     keep_alive: float = 0.0,
     scheduling: bool = True,
     watch_every: float = WATCH_EVERY,
-    invariants_every: float = INVARIANTS_EVERY,
+    check_invariants: bool = True,
     path: Path | None = None,
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
@@ -1811,6 +1795,7 @@ async def serve(
             choice=choice,
             passivate_after=passivate_after,
             wake_within=wake_within,
+            check_invariants=check_invariants,
         )
         try:
             server = DaemonServer(
@@ -1818,25 +1803,17 @@ async def serve(
                 stop=anyio.Event(),
                 path=socket_path,
                 watch_every=watch_every,
-                invariants_every=invariants_every,
                 ephemeral=ephemeral,
                 keep_alive=keep_alive,
                 identity=identity,
             )
-            # Wired after the build rather than passed into it, because the two
-            # hold each other: the server needs the supervisor to ask what is
-            # running, and the supervisor needs the server to say that the
-            # answer moved. See `Supervisor.moved`.
-            supervisor.recheck_lifetime = server.check_lifetime
-            # Each cadence its own task, one primitive: a cadence riding another's
-            # counter advances only when that one *succeeds*, so a run of failing
-            # passes would starve an unrelated task.
-            # The three jobs that end on a clock, each asleep until its next moment
-            # rather than polling (`ph_app.daemon.planner`). The release planner and
-            # the lifetime clock are always started: with nothing to plan for —
-            # passivation off, a service daemon with no keep-alive — each sleeps
-            # until told, which costs nothing.
+            # The jobs that end on a clock, each its own task and asleep until its
+            # next moment rather than polling (`ph_app.daemon.planner`). Release,
+            # the invariant check and the lifetime clock are always started: with
+            # nothing to plan for — passivation off, the check off, a service daemon
+            # with no keep-alive — each sleeps until told, which costs nothing.
             tasks.start_soon(supervisor.releaser.keep, server.stop)
+            tasks.start_soon(supervisor.verifier.keep, server.stop)
             tasks.start_soon(server.lifetime_clock.keep, server.stop)
             if scheduling:
                 # See `Supervisor.scheduler` and docs/seams/schedule.md.
@@ -1848,18 +1825,6 @@ async def serve(
                 # door.
                 tasks.start_soon(
                     _every, watch_every, server.stop, server.check_reachable, "the socket watch"
-                )
-            if invariants_every > 0:
-                # Its own `if` for the socket watch's reason, and one more: this
-                # is the cadence a benchmark or a long soak would want to turn
-                # off, and it must be turnable off without also silencing the
-                # scheduler or root release.
-                tasks.start_soon(
-                    _every,
-                    invariants_every,
-                    server.stop,
-                    supervisor.verify_invariants,
-                    "the invariant poll",
                 )
             if started is not None:
                 # Handed out rather than reachable through the socket: a test

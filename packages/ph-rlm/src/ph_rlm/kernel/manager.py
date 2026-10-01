@@ -37,6 +37,7 @@ kernel prefixed with a reset notice rather than a dead harness.
 from __future__ import annotations
 
 import logging
+import math
 import signal
 import socket
 import subprocess
@@ -49,9 +50,10 @@ from typing import Any, ClassVar, Literal, Protocol
 
 import anyio
 import anyio.abc
+from pydantic import PositiveFloat
 
 from ph.agent.types import AgentHandle
-from ph.cancel import POLL_SECONDS, CancelToken, is_canceled
+from ph.cancel import CancelToken, first_of, is_canceled
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
@@ -206,23 +208,35 @@ class _ActiveRun:
     A pong whose id is not this one is unsolicited — a late duplicate, or a
     forged frame off fd 3, which this module assumes is possible everywhere
     else (C10). It clears nothing and times nothing."""
-    probed_at: float | None = None
-    """When the last probe went out, answered or not, or `None` before the first.
+    probed_at: float = 0.0
+    """When the last probe went out, answered or not; before the first, when the run
+    opened, as `run` stamps it. So the first probe is due `probe_seconds` into the
+    run, and a cell shorter than that is never probed. A plain default rather than
+    a factory reading the clock, so a run can be built with no loop running, as a
+    test of `settle` does.
 
     **Never moved while a probe is outstanding**, which is what makes it a
     measurement rather than a cadence: the round trip finally recorded is the
     whole time the loop took to get back to its reader, stall included. It also
     carries the cadence, because a probe is due `probe_seconds` after the last
-    one *left*, not after the last one was answered — gating on the answer
-    alone would put a frame each way on every 50 ms `_watch` tick."""
+    one *left*, not after the last one was answered: gating on the answer alone
+    would send the next the moment the last came back."""
     probe: Literal["idle", "waiting", "stalled"] = "idle"
     """Where the outstanding probe stands. `stalled` is `waiting` past its due
-    time, latched so one starved stretch is counted once rather than per tick."""
+    time, latched so one starved stretch is counted once."""
     aborting_since: float | None = None
     """When this run was asked to stop, by either route — the caller canceling,
     or a dispatch being refused. Held here rather than in `_pump` because
     `_serve_call` starts the abort from its own task, and the escalation clock
     the pump runs has to be the same clock."""
+    moved: anyio.Event | None = None
+    """Set when a deadline `_watch` sleeps toward may have moved under it: an abort
+    begun from another task (`_serve_call`), or a probe answered after it stalled.
+    `_watch` makes a fresh one each time it plans; `None` before it first does."""
+
+    def _move(self) -> None:
+        if self.moved is not None:
+            self.moved.set()
 
     def begin_abort(self) -> bool:
         """Start the escalation clock. **The first caller wins**; returns whether
@@ -241,6 +255,8 @@ class _ActiveRun:
         if self.aborting_since is not None:
             return False
         self.aborting_since = anyio.current_time()
+        # The grace deadline exists now; `_watch` may be asleep toward a probe.
+        self._move()
         return True
 
     def answered(self, probe: int, at: float) -> float | None:
@@ -256,8 +272,12 @@ class _ActiveRun:
         """
         if self.probe != "waiting" and self.probe != "stalled":
             return None
-        if probe != self.probe_id or self.probed_at is None:
+        if probe != self.probe_id:
             return None
+        if self.probe == "stalled":
+            # A stalled probe has no deadline, so `_watch` sleeps until this:
+            # the next probe was due a while ago.
+            self._move()
         self.probe = "idle"
         return at - self.probed_at
 
@@ -389,12 +409,13 @@ class Kernel:
     raw-`pathlib` non-goal (§11, Q10) and distinct from it: this one is about
     *time*, and a deployment widens it by raising this number."""
 
-    probe_seconds: float = 1.0
-    """How often a run is probed while it is open (M2).
+    probe_seconds: float | None = 1.0
+    """How often a run is probed while it is open (M2), or `None` for never.
 
     A frame each way, answered from the guest's reader task. Cheap enough to run
     continuously — which is the point, because a gauge that is only read when
-    something already looks wrong tells you nothing about what normal was."""
+    something already looks wrong tells you nothing about what normal was.
+    `Config.probe_seconds` says what turning it off costs."""
     _process: anyio.abc.Process | None = None
     _sock: socket.socket | None = None
     loop_worst: float | None = None
@@ -716,6 +737,7 @@ class Kernel:
                     for namespace in namespaces
                     for binding in namespace.bindings
                 },
+                probed_at=anyio.current_time(),
             )
             async with anyio.create_task_group() as tasks:
                 process = self._process
@@ -749,7 +771,7 @@ class Kernel:
         """Read this run's frames until it settles. Nothing interrupts the read.
 
         **The scope it used to sit in was paid per frame, not per read.** The
-        body was wrapped in `move_on_after(POLL_SECONDS)` so the loop
+        body was wrapped in a 50 ms `move_on_after` so the loop
         could ask two questions between reads — has the caller canceled, and
         has the abort grace expired — neither of which is about the socket. But
         `_recv_line` returns straight out of its buffer whenever a frame is
@@ -807,39 +829,48 @@ class Kernel:
         """The stop ladder's clock, off the read path (C3).
 
         The two questions `_pump` used to interrupt itself to ask, asked by
-        something that is only ever sleeping. Same 0.05 s cadence, so
-        cancellation is noticed as promptly as before — what changes is that
-        noticing it no longer costs a canceled socket wait.
+        something that is otherwise asleep. **Asleep until something is due**
+        (P12-03), not on a 50 ms tick: it plans the next moment it has a question
+        for (`_next_deadline`) and sleeps until then, until the caller cancels
+        (`token.wait()`), or until `active.moved` says a deadline moved under it.
+        A run that is never canceled wakes once per `probe_seconds`, for the probe,
+        and not at all with the probe off.
 
         Concurrency with `_pump` is not new: `_serve_call` has always started an
         abort from its own task, which is why `aborting_since` lives on
         `_ActiveRun` rather than in the pump. This is a second caller of the
-        same shape.
+        same shape, and `begin_abort` sets `moved` so the grace deadline is
+        planned at once.
 
         `while True` rather than `while not active.settled`: the loop is started
         before the first frame can arrive, so the entry test could never be
-        false, and the check that matters is the one *after* the sleep — a run
+        false, and the check that matters is the one *after* the wait — a run
         that settled while this task slept must not be sent a spurious
         interrupt or killed. Written as an entry condition it reads as the
         termination test and invites the real one to be deleted as redundant.
         """
         while True:
-            await anyio.sleep(POLL_SECONDS)
+            active.moved = moved = anyio.Event()
+            with anyio.CancelScope(deadline=self._next_deadline(active)):
+                if token is not None and active.aborting_since is None:
+                    await first_of(moved, token)
+                else:
+                    await moved.wait()
             if active.settled:
                 return
             if active.aborting_since is None:
                 # **The clock the host never had** (M2). Both rungs below start
                 # only because somebody pressed stop, so a run that is never
-                # canceled and never settles had nothing watching it at all —
-                # the host waits on `done` with no wall clock of its own.
+                # canceled and never settles had nothing watching it at all — the
+                # host waits on `done` with no wall clock of its own.
                 #
-                # What this asks is narrow, and worth stating exactly because
-                # the prose here once claimed more: it catches a guest that
-                # reached `_send_done`, cleared what it owed, and left the host
-                # with no terminal frame. The guest-side failures that
-                # `_snapshot`'s guard and `relax_cpu_budget` cover all leave the
-                # run still *owed*, so `_answer_if_owed` answers those and this
-                # never sees them — those guards stay load-bearing.
+                # What this asks is narrow, and worth stating exactly because the
+                # prose here once claimed more: it catches a guest that reached
+                # `_send_done`, cleared what it owed, and left the host with no
+                # terminal frame. The guest-side failures that `_snapshot`'s guard
+                # and `relax_cpu_budget` cover all leave the run still *owed*, so
+                # `_answer_if_owed` answers those and this never sees them — those
+                # guards stay load-bearing.
                 #
                 # No rung follows it, because the guest settles the run itself.
                 self._probe(active, tasks)
@@ -853,12 +884,31 @@ class Kernel:
                     # take as long as it likes.
                     active.begin_abort()
                     tasks.start_soon(self._interrupt, active.run_id)
-            elif anyio.current_time() - active.aborting_since > self.cancel_grace:
+            elif anyio.current_time() - active.aborting_since >= self.cancel_grace:
                 # Neither the frame nor the signal reached it, which means the
                 # cell is spinning in Python and the guest's loop is starved.
                 # Killing costs the namespace; leaving it costs the session.
                 await self._kill_unresponsive(active)
                 return
+
+    def _next_deadline(self, active: _ActiveRun) -> float:
+        """When `_watch` next has a question to ask, on the loop's clock, or `inf`.
+
+        **Monotonic on purpose**, unlike the daemon's deadlines (`ph.wall_clock`):
+        these are intervals inside one running cell, and a cell suspended with the
+        machine was suspended too.
+
+        Aborting, only the grace matters. Otherwise the probe: due `probe_seconds`
+        after the last one left (or after the run opened), and while one is
+        outstanding, due to be called stalled at the same distance. A stalled
+        probe, or the probe off, has no deadline: a stalled one's answer arrives
+        through `active.moved`. `_probe` asks this too, so the rule is one rule.
+        """
+        if active.aborting_since is not None:
+            return active.aborting_since + self.cancel_grace
+        if self.probe_seconds is None or active.probe == "stalled":
+            return math.inf
+        return active.probed_at + self.probe_seconds
 
     def _probe(self, active: _ActiveRun, tasks: anyio.abc.TaskGroup) -> None:
         """Keep the loop gauge fed, and give the guest a chance to settle (M2).
@@ -867,7 +917,12 @@ class Kernel:
         `_send` waits on `_send_lock`, which a reply the guest is not reading
         can hold indefinitely, and a clock parked inside the thing it is timing
         is not a clock. One probe outstanding at a time, so a starved loop costs
-        one unanswered frame rather than a frame per tick.
+        one unanswered frame rather than one per interval.
+
+        `_watch` also calls this when it woke for something else (a cancel, a
+        moved deadline), so it acts only once `_next_deadline` says the probe is
+        due: an idle probe is sent, a waiting one is called stalled. With the probe
+        off, or one stalled, that moment never comes.
 
         **No verdict is taken here.** The frame names the run the host is
         waiting on, and a guest that is neither running it nor owing it a `done`
@@ -876,14 +931,14 @@ class Kernel:
         side is the measurement: how late the answer was, and whether it came.
         """
         now = anyio.current_time()
+        if now < self._next_deadline(active):
+            return
         if active.probe == "idle":
-            if active.probed_at is not None and now - active.probed_at < self.probe_seconds:
-                return
             active.probe_id += 1
             active.probed_at = now
             active.probe = "waiting"
             tasks.start_soon(self._ping, active.run_id, active.probe_id)
-        elif active.probe == "waiting" and now - (active.probed_at or now) > self.probe_seconds:
+        elif active.probe == "waiting":
             # Once per starved stretch; the probe keeps its own timestamp,
             # because what is worth measuring is how long the loop took to come
             # back and resetting the clock here would throw that away.
@@ -1360,7 +1415,7 @@ class PythonCodeRuntime:
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
-    probe_seconds: float = 1.0
+    probe_seconds: float | None = 1.0
     snapshots: SnapshotPolicy | None = None
     """Set by the `rlm-kernel-snapshot` row. Absent, the runtime still runs — but
     `persistence: "namespace"` would then be a promise nothing keeps, which is
@@ -1406,6 +1461,8 @@ class PythonCodeRuntime:
         measured = [
             one for one in self._kernels.values() if one.loop_worst is not None or one.loop_stalls
         ]
+        if self.probe_seconds is None:
+            return "probe off (`probeSeconds: null`), so nothing is measured"
         if not measured:
             return "no cell has run yet, so nothing has been measured"
         stalls = sum(one.loop_stalls for one in measured)
@@ -1697,13 +1754,20 @@ class Config(KernelLimits):
     swallowed a refusal can finish synchronous work (see `Kernel.cancel_grace`);
     shorter kills a cell that is legitimately slow to unwind, and killing costs
     the namespace."""
-    probe_seconds: float = 1.0
-    """How often an open run's guest loop is probed (M2).
+    probe_seconds: PositiveFloat | None = 1.0
+    """How often an open run's guest loop is probed (M2), or `null` for never.
 
     A frame each way, answered by the guest's reader task, and the round trip is
     what `phern doctor` reports as how far behind that loop is running. Lower
     samples a bursty cell more finely; higher is cheaper on a host with many
-    namespaces. It is a measurement interval, not a deadline."""
+    namespaces. It is a measurement interval, not a deadline. Zero or less is
+    refused rather than read as "as often as possible".
+
+    **What `null` gives up** (P12-03). The doctor's loop gauge has nothing to
+    report. And the probe is the only thing that repairs a run whose `done` frame
+    was lost (`PingFrame.run`): no event says a frame was never sent. With the
+    probe off, such a run waits until somebody cancels it, and the abort ladder
+    ends it from there. An unattended run has nobody to do that."""
     skills: tuple[str, ...] = ()
     sweep_orphans: bool = True
     """Vestigial: `subprocess-local` owns the one sweep now. Kept so a profile

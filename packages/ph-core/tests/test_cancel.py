@@ -2,7 +2,7 @@
 
 `CancelToken` began as a flag — `canceled`, `cancel_reason`,
 `raise_if_canceled`, all synchronous — and everything that needed to *wait* for
-one polled it at `POLL_SECONDS`. That was never a property of the system; it was
+one polled it every 50 ms. That was never a property of the system; it was
 a property of a type with no notification channel, and this is the module where
 that stopped being true.
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 import anyio
 import pytest
 
-from ph.cancel import POLL_SECONDS, Canceled, CancelToken, is_canceled, raced, until_canceled
+from ph.cancel import Canceled, CancelToken, is_canceled, raced, until_canceled
 
 pytestmark = pytest.mark.anyio
 
@@ -26,9 +26,9 @@ pytestmark = pytest.mark.anyio
 async def test_a_waiter_is_told_rather_than_asking() -> None:
     """The point of the change: no cadence between the cancel and the waiter.
 
-    The bound is deliberately far below `POLL_SECONDS`. A poll could not pass
-    it, and asserting "faster than the old mechanism" is the only way to say
-    "this is an event" in a test that does not reach into the implementation.
+    The bound is deliberately far below the 50 ms poll this replaced. A poll could
+    not pass it, and asserting "faster than the old mechanism" is the only way to
+    say "this is an event" in a test that does not reach into the implementation.
     """
     token = CancelToken()
 
@@ -42,7 +42,7 @@ async def test_a_waiter_is_told_rather_than_asking() -> None:
         tasks.start_soon(waiting)
         await anyio.sleep(0)
         token.cancel("user")
-        with anyio.fail_after(POLL_SECONDS / 5):
+        with anyio.fail_after(0.01):
             await woken.wait()
 
 

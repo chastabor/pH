@@ -32,8 +32,8 @@ sentence a person reads, not a color they learn to skip.
 caller of `ctx.diagnostics.report()` today is `phern doctor`, which mounts a fresh
 profile — no session created, no view cached, no scope disposed — so "holds"
 there says the checks run, not that the deployment's live state passed them. The
-daemon is where the same report has something to look at, and wiring the poll
-into it is a separate row.
+daemon is where the same report has something to look at: it checks each root
+once the root settles after a write (`ph_app.daemon.supervisor.Supervisor.verifier`).
 
 @module ph.seams.invariants
 """

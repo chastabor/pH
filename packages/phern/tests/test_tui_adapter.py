@@ -758,7 +758,7 @@ async def test_a_violated_invariant_is_a_notice_in_the_conversation(mount: Mount
 async def test_a_cleared_invariant_is_good_news_and_reads_like_it(mount: MountProfile) -> None:
     """The same event type carries both transitions, and they are opposite facts.
 
-    `verify_invariants` records the clearing too — a transcript that says
+    `verify_root` records the clearing too — a transcript that says
     "violated" and then goes quiet leaves a reader unable to tell a repaired
     cache from a daemon that stopped looking. But it writes it as the *same*
     type with an empty list, so a renderer that reads only the type says the

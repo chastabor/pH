@@ -220,7 +220,7 @@ async def make_kernel(tmp_path: Path, guest_coverage: None) -> AsyncIterator[Mak
         *,
         namespaces: tuple[Any, ...] = (),
         cancel_grace: float = 2.0,
-        probe_seconds: float = 1.0,
+        probe_seconds: float | None = 1.0,
         **limits: object,
     ) -> Kernel:
         kernel = Kernel(

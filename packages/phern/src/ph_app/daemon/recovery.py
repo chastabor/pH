@@ -48,8 +48,10 @@ __all__ = [
     "RETRY",
     "RETRY_DELAYS",
     "UNREACHABLE",
+    "VERIFY_AFTER",
     "VIOLATED",
     "Recovery",
+    "floored",
     "recovery_of",
 ]
 
@@ -231,12 +233,31 @@ from what the transcript shows.
 
 
 PASS_FLOOR: float = 1.0
-"""The least time, in seconds, between two scheduler passes the clock wakes.
+"""The least time, in seconds, between two passes the clock wakes — the scheduler's
+or root release's.
 
-The scheduler sleeps until the next appointment rather than ticking, so nothing
-else bounds how often it runs: an `interval` of a millisecond would be a busy
-loop. A second is finer than any schedule a person sets, and a pass costs a turn.
+Each sleeps until its next moment rather than ticking, so nothing else bounds how
+often it runs: an `interval` of a millisecond, or a root whose release raised,
+would be a busy loop. A second is finer than any schedule a person sets, and a
+pass costs a turn.
 """
+
+
+VERIFY_AFTER: float = 30.0
+"""Seconds a root must have been settled, with nothing written in its mount, before
+its pollable invariants are checked (I6, P12-04).
+
+A debounce, not a cadence: nothing is checked until something was written, and
+then once the writing stops. A refold is O(events) — 161 ms on a 500 000-event log,
+on the event loop — so an autonomous root waking back to back, or a client staging
+five files, pays for one check rather than one per wake or per call. Short enough
+that a drift is on the record within a minute of the work that caused it.
+"""
+
+
+def floored(moment: int, last_pass: int) -> int:
+    """`moment`, or `PASS_FLOOR` after `last_pass` if that is later (epoch ms)."""
+    return max(moment, last_pass + int(PASS_FLOOR * 1000))
 
 
 WAKE_WITHIN: float | None = None

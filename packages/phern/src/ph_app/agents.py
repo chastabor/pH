@@ -686,7 +686,7 @@ def doctor() -> None:
                 ("scheduler", _scheduler(facts)),
                 ("release", _release(facts)),
                 ("socket watch", _cadence(facts.watch_every)),
-                ("invariant poll", _cadence(facts.invariants_every)),
+                ("invariants", "checked when a root settles" if facts.check_invariants else "off"),
                 *_reachability(facts),
             ),
         )
