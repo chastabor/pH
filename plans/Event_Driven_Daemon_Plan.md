@@ -186,6 +186,46 @@ and on Linux it is also told when the clock is stepped.
 
 ### P12-01: root release sleeps until a root's quiet window ends
 
+**Landed (2026-10-01), together with P12-02.** Both halves ran in one task,
+`DaemonServer.sweep()`, which released roots and then checked the daemon's
+lifetime. Converting one would have left an interim cadence and a second round of
+test changes for the other to undo. What landed, against the design below:
+
+* **The loop is a helper.** `ph_app/daemon/planner.py` holds `Planner` (pass,
+  plan, notice, `planned`, an optional `due` hook) and the three rules: a fresh
+  `moved` before the pass, a failing pass logged, `stop` read before the alarm.
+  `Supervisor.scheduler`, `Supervisor.releaser` and `DaemonServer.lifetime_clock`
+  are its three instances. `keep_schedules` and `Supervisor.planned` are gone, and
+  `serve` starts `supervisor.scheduler.keep`.
+* **Release is floored, not filtered.** The scheduler drops moments already due at
+  the last pass, since they were attempted then. Release cannot: a root held at
+  that pass (a running child, say) had no chance, and when it is let go its window
+  has usually long ended. `next_release` floors at `PASS_FLOOR` after the last pass
+  instead. Releasing pops the root from the table before anything that can fail
+  except its write-ahead record, so the floor is not a retry loop in practice.
+* **One predicate, two readers.** `Supervisor._held` holds the four non-time terms.
+  `passivatable` is `not _held(root) and idle_for(now) >= window`, keeping its
+  `idle_for` semantics exactly, and `next_release` plans from the same `_held`.
+* **`Root.recheck`**, pointed at `Supervisor._recheck` (releaser notice plus
+  `recheck_lifetime`), is called by `unsubscribe` (and a dropped subscriber), the
+  desk when an ask opens or closes, `give_up` and **`recovered`**. The plan's table
+  missed `recovered`: `retrying` to `idle` moves no agent status, so an
+  auto-started daemon would have waited for an unrelated event after P12-02. The
+  desk callback does not publish a status notice as the plan suggested.
+  `recheck_lifetime` already sends the lifetime frame, which is what the sidebar
+  reads.
+* **The `agent/status` listener calls `_recheck`**, and `beneath` notifies the
+  releaser before its watcher guard. `_watch_schedules` notifies it on `CANCELED`
+  and `TICK`.
+* **Tests** (`test_daemon.py`, socket-free through `supervised`): one per notice,
+  each sabotage-checked by removing that notice. The turn-end test holds the turn
+  open past the window by gating `FakeAdapter.stream`; a shorter turn needs no
+  notice, because the planned pass finds it over and plans from its last record.
+  `test_an_idle_daemon_releases_at_the_deadline_without_polling` counts passes (one
+  at boot, one at mount, the release) and fails if a cadence comes back. Per-status
+  tests for `needs-credential` and `needs-profile-decision` were not added: both
+  are entered at mount, and the mount notice has its own test.
+
 `Supervisor.keep_releasing(stop)` replaces the sweep task. `serve` starts it when
 `passivate_after is not None`.
 
@@ -230,6 +270,24 @@ and on Linux it is also told when the clock is stepped.
   drops `sweep_every`.
 
 ### P12-02: the daemon's own lifetime deadlines
+
+**Landed (2026-10-01) with P12-01.** `DaemonServer.lifetime_clock` is a `Planner`
+over `check_lifetime`, planned by `lifetime_deadline` (moments still ahead only).
+It is told on a connection's first frame and when the last client leaving arms
+the keep-alive. Both planners and the lifetime clock are always started: with
+nothing to plan for, each sleeps until told. `DaemonServer.sweep()`,
+`SWEEP_EVERY`, `sweep_every` and `DaemonStatusReply.sweep_every` are gone;
+`next_release` takes its place on the wire and in `phern agents doctor`
+("release: next in …"). The `holds()` paragraph listing terms with no event behind
+them now says every term has one.
+
+**Found while testing:** the old exit tests for a parked root and a root that gave
+up passed for the wrong reason. Mounting a root already rechecks the lifetime, so
+with the spawn window aged first, the daemon stopped at mount. They now hold the
+daemon with `retry()` first, age it after, and assert it is still up before the
+event under test. They, and the spawn-window test, run through a new socket-free
+helper, `daemon_helpers.unplugged`. The keep-alive test stays on a real socket,
+since arming the window takes a real client leaving.
 
 `DaemonServer.keep_lifetime(stop)` is the clock half of the deleted
 `server.sweep()` (`server.py:1606`). `serve` starts it when `ephemeral or
@@ -462,8 +520,8 @@ This is row 6, the answer to "why is it needed".
 |---|---|---|---|
 | P12-06 | **Landed (2026-10-01).** Delete the heartbeat; protocol 7; `test_a_log_written_with_heartbeats_still_opens_with_its_schedule` pins old logs (sabotage-checked by dropping `ignorable`) | — | `test_log_writers`, `test_trajectory`, `test_schedule` |
 | P12-00 | **Landed (2026-10-01).** `ph.wall_clock` (`sleep_until`, `Alarm`); `first_of` takes any `Waitable`; `keep_schedules` sleeps on the wall clock. macOS timer unverified on hardware | — | `test_wall_clock`, `test_the_scheduler_sleeps_until_something_is_due` |
-| P12-01 | root release sleeps until a deadline | P12-00 | one test per notice row and per `QUIET` status |
-| P12-02 | lifetime deadlines | P12-00 | `test_daemon_lifetime` without `sweep_every` |
+| P12-01 | **Landed (2026-10-01).** Root release sleeps until a deadline; `Planner` shared by all three jobs | P12-00 | one test per notice, each sabotage-checked; the no-polling pass count |
+| P12-02 | **Landed (2026-10-01)** with P12-01. Lifetime deadlines; `DaemonServer.sweep` gone | P12-00 | `test_daemon_lifetime` without `sweep_every`; `unplugged` |
 | P12-03 | kernel clock; `probe_seconds: float \| None` | — | kernel wake count, cross-task abort, stall re-arm, probe off |
 | P12-04 | invariants on settle | — | `test_daemon_invariants`, seq gate |
 | P12-05 | socket watch on inotify and kqueue | — | the reaped-dir test with no cadence; replaced; ancestor |

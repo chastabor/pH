@@ -894,10 +894,9 @@ async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
 
     `schedule` moves when somebody creates or cancels one, and nothing about
     that arrives as an agent status or a connection — so the two handlers say so
-    themselves. Left to the sweep, a person who had just set an appointment
+    themselves. Left to anything else, a person who had just set an appointment
     would watch the row go on claiming their daemon leaves when they close the
-    window, for up to a minute, having been told otherwise by the command they
-    just ran.
+    window, having been told otherwise by the command they just ran.
 
     The cancel is the half with teeth: it is a claim being *withdrawn*, and on a
     daemon whose only hold it was, the withdrawal is what lets the process go.
@@ -909,7 +908,7 @@ async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
     def held() -> list[str]:
         return list(front.state.lifetime.holds) if front.state.lifetime else []
 
-    async with running(tmp_path, ephemeral=True, sweep_every=600.0) as daemon:
+    async with running(tmp_path, ephemeral=True) as daemon:
         front, _ = await _front(daemon, "planner")
         assert "schedule" not in held(), "nothing is on the books yet"
 

@@ -214,7 +214,7 @@ the alarm; what to do about it is theirs.
 """
 
 PASSIVATE_AFTER = 90 * 60.0
-"""Seconds of quiet before a root is released. `None` turns the sweeper off.
+"""Seconds of quiet before a root is released. `None` turns release off.
 
 Ninety minutes because passivation is not a resource emergency — it is what
 keeps a daemon that has accumulated a month of sessions from holding a mounted

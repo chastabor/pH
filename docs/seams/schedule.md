@@ -1,7 +1,7 @@
 # `ctx.schedule` — work a root will do later, folded from its own log
 
 **Module:** `ph/seams/schedule.py` · **Row:** `schedule` · **Consumers:** the
-daemon's scheduler (`Supervisor.keep_schedules`), `/autonomous`
+daemon's scheduler (`Supervisor.scheduler`), `/autonomous`
 
 Three kinds, one mechanism: `once` at a moment, `interval` every so often, and
 `cron` on an expression.

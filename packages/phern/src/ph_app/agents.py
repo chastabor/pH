@@ -181,6 +181,15 @@ def _scheduler(facts: DaemonStatusReply) -> str:
     return f"next wake in {duration(max(0, facts.next_wake - now_ms()))}"
 
 
+def _release(facts: DaemonStatusReply) -> str:
+    """When the next quiet root is released: release sleeps until then, too."""
+    if facts.passivate_after is None:
+        return "off"
+    if facts.next_release is None:
+        return "nothing quiet enough to plan for"
+    return f"next in {duration(max(0, facts.next_release - now_ms()))}"
+
+
 def _cadence(seconds: float) -> str:
     """One of `serve`'s cadences, in seconds — or `off` for zero.
 
@@ -675,7 +684,7 @@ def doctor() -> None:
                 ("model", _starts_on(facts)),
                 ("passivate after", "off" if passivate is None else duration(passivate * 1000)),
                 ("scheduler", _scheduler(facts)),
-                ("sweep", _cadence(facts.sweep_every)),
+                ("release", _release(facts)),
                 ("socket watch", _cadence(facts.watch_every)),
                 ("invariant poll", _cadence(facts.invariants_every)),
                 *_reachability(facts),

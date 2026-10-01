@@ -134,20 +134,8 @@ class _Daemon:
         return await self.running.supervisor.start(session_id)
 
     def aged(self) -> None:
-        """Wind this daemon's clock back past the window it protects itself in.
-
-        An auto-started daemon may not exit until a client has spoken to it or
-        `SPAWN_TIMEOUT` has passed — see `DaemonServer.served`, which exists so
-        that a daemon does not leave in the moment between the spawn and the UI
-        finding it. A test whose subject is the exit has to say which side of
-        that window it is on, and this is the side where the launcher has given
-        up: what happens to a daemon nobody came for.
-
-        `started` rather than a sleep, and rather than a `now=` on every call:
-        it is the field the window is measured from, and `sweep()` takes no
-        clock of its own.
-        """
-        self.running.started -= int(SPAWN_TIMEOUT * 1000) + 1
+        """`age(self.running)`: past the spawn window, and nobody told."""
+        age(self.running)
 
     async def busy_root(self, session_id: str = "busy") -> Root:
         """One root the supervisor reads as mid-turn, without running a turn.
@@ -205,6 +193,57 @@ async def until(done: Callable[[], bool], *, what: str, seconds: float = 10.0) -
         pytest.fail(f"timed out waiting for {what}")
 
 
+def age(server: DaemonServer) -> None:
+    """Wind this daemon's clock back past the window it protects itself in.
+
+    An auto-started daemon may not exit until a client has spoken to it or
+    `SPAWN_TIMEOUT` has passed — see `DaemonServer.served`, which exists so
+    that a daemon does not leave in the moment between the spawn and the UI
+    finding it. A test whose subject is the exit has to say which side of
+    that window it is on, and this is the side where the launcher has given
+    up: what happens to a daemon nobody came for.
+
+    `started` rather than a sleep, and rather than a `now=` on every call:
+    it is the field the window is measured from, and `check_lifetime()` takes
+    no clock of its own.
+
+    **It tells nobody.** The next `check_lifetime`, from whatever event a test is
+    about, finds the window closed. Telling `lifetime_clock` would end a daemon
+    with nothing holding it at once, before the event under test.
+    """
+    server.started -= int(SPAWN_TIMEOUT * 1000) + 1
+
+
+@asynccontextmanager
+async def unplugged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **options: Any,  # noqa: ANN401
+) -> AsyncIterator[DaemonServer]:
+    """A `DaemonServer` with no socket: a supervisor, `check_lifetime` wired to it the
+    way `serve` wires it, and the lifetime clock running.
+
+    For the lifetime tests that never connect a client (a root parking on a person,
+    a ladder giving up, a spawn window closing), so they run where unix sockets do
+    not. `supervised` is the same one layer down. Root release is not started:
+    `passivate_after` is off unless a test asks.
+    """
+    private_runtime(tmp_path, monkeypatch)
+    async with anyio.create_task_group() as tasks:
+        supervisor = Supervisor(profile=PROFILE, tasks=tasks, passivate_after=None)
+        server = DaemonServer(
+            supervisor=supervisor, stop=anyio.Event(), path=tmp_path / "unbound.sock", **options
+        )
+        supervisor.recheck_lifetime = server.check_lifetime
+        tasks.start_soon(server.lifetime_clock.keep, server.stop)
+        try:
+            yield server
+        finally:
+            server.stop.set()
+            await supervisor.aclose()
+            tasks.cancel_scope.cancel()
+
+
 @asynccontextmanager
 async def supervised(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, profile: Profile | None = None
@@ -258,9 +297,9 @@ async def running(
         started: list[Any] = []
         socket = path if path is not None else tmp_path / name / "daemon.sock"
         socket.parent.mkdir(parents=True, exist_ok=True)
-        # `passivate_after=None` by default: the sweeper is a background timer,
-        # and a test that did not ask about passivation should not have one
-        # racing its assertions. P5-05's own tests opt in.
+        # `passivate_after=None` by default: release runs in the background, and a
+        # test that did not ask about passivation should not have it racing its
+        # assertions. P5-05's own tests opt in.
         options.setdefault("passivate_after", None)
         # Off for the same reason, and one sharper: a poll that found drift would
         # append `supervisor/violated` into a root, so a test asserting on event

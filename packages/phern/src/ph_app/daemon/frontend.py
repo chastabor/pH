@@ -301,6 +301,10 @@ class AskDesk:
             answered=anyio.Event(),
         )
         self.asks[ask.ask_id] = pending
+        # `Root.status` reads `waiting` from here, and the agent's own status does
+        # not move, so the root says it itself: parked on a person, it may be
+        # released and no longer holds the daemon.
+        self.root.recheck()
         try:
             async with anyio.create_task_group() as tasks:
                 pending.tasks = tasks
@@ -311,6 +315,7 @@ class AskDesk:
         finally:
             pending.tasks = None
             self.asks.pop(ask.ask_id, None)
+            self.root.recheck()
         return pending.answer or {}
 
     async def _deliver(self, who: FrontEnd, pending: PendingAsk) -> None:

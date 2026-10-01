@@ -8,8 +8,8 @@ left resident after the thing that started it closed is the kind of accretion
 nobody attributes to the right cause a week later.
 
 Nothing here is a new mechanism, which is the reason it is a predicate rather
-than a fourth timer. P5-05's sweep already asks "is anything still using this
-root"; `holds()` asks the same question one level up, about the process. What is
+than a timer of its own. P5-05's release already asks "is anything still using
+this root"; `holds()` asks the same question one level up, about the process. What is
 new is only the *claimants* — a connection, a turn in flight, an appointment, a
 keep-alive somebody asked for, and the person who typed the command — and that each
 of them can keep a daemon up alone.
@@ -18,9 +18,10 @@ P9-06 moved the exit off the cadence and onto the transitions. Closing the last
 terminal ends an auto-started daemon *then*, not up to a sweep later, so the
 gates come in two halves: what `holds()` says, and when `check_lifetime()` acts
 on it. The exit no longer has a quiet window of its own either — it asks what is
-happening now, where the sweep asks how long a root has been quiet — and the
+happening now, where root release asks how long a root has been quiet — and the
 fifth claimant, a `--keep-alive` the client asked for, is the only one that ends on
-a clock rather than on an event.
+a clock rather than on an event. Since P12-02 nothing sweeps for it:
+`lifetime_clock` sleeps until it expires, and until the spawn window closes.
 """
 
 from __future__ import annotations
@@ -30,13 +31,14 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import logged, running, until
+from daemon_helpers import age, logged, running, unplugged, until
 
 from ph.keys import APPROVAL
 from ph.paths import resolve_roots
 from ph.seams.schedule_index import ScheduleIndex
 from ph.session import SurfaceIntent, now_ms
 from ph.testing import StubAgent, log_event, user_payload
+from ph_app.daemon import server
 from ph_app.daemon.launch import SPAWN_TIMEOUT
 
 pytestmark = pytest.mark.anyio
@@ -280,59 +282,67 @@ async def test_a_keep_alive_holds_it_for_exactly_as_long_as_it_says(tmp_path: Pa
 # ----------------------------------------------------------------- the exit --
 
 
-async def test_the_sweep_that_finds_nothing_left_ends_the_daemon(tmp_path: Path) -> None:
-    """One pass: release what is quiet, then leave if nobody needs the process.
+async def test_a_daemon_nobody_came_for_leaves_when_its_spawn_window_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawn window ends on a clock, and no event follows it (P12-02).
 
-    Driven by calling `server.sweep()` rather than by waiting out `SWEEP_EVERY`,
-    which is the same reason `spent` is a predicate: a test should assert the
-    rule, not the clock. The sweep still runs first — not because the exit
-    depends on it, but because releasing a root on the ordinary path is what
-    flushes its log and drops its lease outside teardown's shielded window.
+    A daemon a UI spawned holds nothing, so only `served` keeps it until the UI's
+    first frame, bounded by `SPAWN_TIMEOUT`. A UI that crashed between the spawn
+    and the connect sends nothing: no connection, no turn, no appointment.
+    `lifetime_clock` sleeps until the window closes and asks then. A sweep used to
+    find it, up to a minute later.
 
-    Sabotage: never consult `spent()`, and the daemon serves an empty supervisor
-    until somebody kills it.
+    The window is shortened rather than waited out, so the wait under test is the
+    real one: planned at boot, ended by the clock, not by anything the test does.
+
+    Sabotage: leave the spawn window out of `lifetime_deadline`, and this daemon
+    stays.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
-        daemon.aged()
-        root = await daemon.running.supervisor.start("done")
-        # Nobody watching: a subscriber is its own claim on a root's life, and
-        # `start` leaves none.
-        assert not root.subscribers
-
-        released = await daemon.running.sweep()
-
-        assert released == ["done"]
-        assert daemon.running.stop.is_set(), "the pass that released the last root also ended it"
+    monkeypatch.setattr(server, "SPAWN_TIMEOUT", 1.0)
+    async with unplugged(tmp_path, monkeypatch, ephemeral=True) as daemon:
+        assert not daemon.stop.is_set(), "the launcher may still be on its way"
+        await until(lambda: daemon.stop.is_set(), what="the spawn window to close")
 
 
-async def test_a_service_daemon_sweeps_and_stays(tmp_path: Path) -> None:
-    """The same pass, the same empty supervisor, the opposite outcome."""
+async def test_a_service_daemon_releases_and_stays(tmp_path: Path) -> None:
+    """A root released and the supervisor empty, and the daemon stays: a service
+    is not spent by having nothing mounted."""
     async with running(tmp_path, passivate_after=0.0) as daemon:
         await daemon.running.supervisor.start("done")
 
-        released = await daemon.running.sweep()
+        await until(lambda: not daemon.holds("done"), what="the quiet root to be released")
 
-        assert released == ["done"]
         assert not daemon.running.stop.is_set()
 
 
 async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`waiting` is releasable, and this is why that mattered.
 
     A turn suspended on an approval reports `running` from the agent, because it
     genuinely is mid-turn — but the only thing it waits for is a human, and
     calling that busy holds a whole process for somebody who closed their laptop.
-    So `waiting` joins `idle` in `passivatable`, and the sweep that releases such
-    a root is the pass that lets this daemon leave.
+    So `waiting` joins `idle` in `QUIET`, and the desk saying so (`Root.recheck`)
+    is what lets this daemon leave. Until P12-02 nothing did: the agent's status
+    does not move, so the exit waited for a sweep.
 
     What it costs is stated in `NON_GUARANTEES`: the ask was in memory, so
     stopping loses it. The log keeps the question.
+
+    Sabotage: drop the desk's `root.recheck()` when it opens an ask, and this daemon
+    stays.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
-        daemon.aged()
-        root = await daemon.running.supervisor.start("parked")
+    async with unplugged(tmp_path, monkeypatch, ephemeral=True) as daemon:
+        root = await daemon.supervisor.start("parked")
+        # Held first, by the ladder: `retrying` is work in hand, and the desk
+        # outranks it in `Root.status`, so the ask is the only thing that can let
+        # the daemon go. Aged after the hold, or mounting alone would end it.
+        root.retry(reason="the provider is down")
+        age(daemon)
+        daemon.check_lifetime()
+        assert not daemon.stop.is_set(), "the ladder holds it"
         outcome: list[Any] = []
 
         async with anyio.create_task_group() as tasks:
@@ -350,14 +360,12 @@ async def test_a_root_parked_on_a_person_does_not_keep_an_ephemeral_daemon_alive
             await anyio.sleep(0.05)
             assert root.status == "waiting", "parked on a human, by the desk's own reckoning"
 
-            await daemon.running.sweep()
-
-            assert daemon.running.stop.is_set()
+            await until(lambda: daemon.stop.is_set(), what="the parked root to let it go")
             tasks.cancel_scope.cancel()
 
 
 async def test_a_root_that_gave_up_does_not_keep_an_ephemeral_daemon_alive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`failed` is the one status that can never change on its own (E3).
 
@@ -369,19 +377,25 @@ async def test_a_root_that_gave_up_does_not_keep_an_ephemeral_daemon_alive(
     stopped trying. Nobody is waiting on it, which is the question this tuple
     asks.
 
-    Sabotage: take `"failed"` back out of `QUIET` and the sweep below finds work
-    to do forever.
+    `give_up` says so itself (`Root.recheck`): the agent's status does not move, so
+    nothing else would ask.
+
+    Sabotage: take `"failed"` back out of `QUIET`, or drop `give_up`'s `recheck()`,
+    and this daemon stays.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
-        daemon.aged()
-        root = await daemon.running.supervisor.start("spent")
+    async with unplugged(tmp_path, monkeypatch, ephemeral=True) as daemon:
+        root = await daemon.supervisor.start("spent")
+        # Held first, mid-ladder, and aged after the hold: `give_up` is then the only
+        # thing that can let the daemon go.
+        root.retry(reason="the provider is down")
+        age(daemon)
+        daemon.check_lifetime()
+        assert not daemon.stop.is_set(), "the ladder holds it"
         root.give_up("the provider is down", attempts=3)
         assert root.status == "failed", "the ladder is over, and the log says so"
 
-        assert not daemon.running.holds(), "a root that gave up is not work in hand"
-        await daemon.running.sweep()
-
-        assert daemon.running.stop.is_set()
+        assert not daemon.holds(), "a root that gave up is not work in hand"
+        await until(lambda: daemon.stop.is_set(), what="the root that gave up to let it go")
 
 
 async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Path) -> None:
@@ -393,12 +407,11 @@ async def test_the_socket_is_gone_once_an_ephemeral_daemon_has_left(tmp_path: Pa
     aftermath of a crash and says something else entirely. An ephemeral daemon
     that left its socket behind would make every ordinary exit look like a crash.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=0.0) as daemon:
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
         daemon.aged()
         path = daemon.path
-        await daemon.running.supervisor.start("done")
 
-        await daemon.running.sweep()
+        daemon.running.check_lifetime()
         await until(lambda: not path.exists(), what="the socket to be unlinked")
 
     assert not path.exists()
@@ -463,18 +476,17 @@ async def test_an_auto_started_daemon_exits_when_the_last_connection_closes(
     """At once, which is the row's whole point, and not one sweep later.
 
     The exit rode the passivation sweep alone, so closing the last terminal left
-    a daemon resident for the rest of a `SWEEP_EVERY` window with nothing to do —
+    a daemon resident for the rest of a sixty-second sweep with nothing to do —
     the gap a person reads as "it did not work". A connection closing is an
     *event*, and the object that owns the lifetime is the one that sees it.
 
     Two clients, so the assertion is about the **last** one: a daemon that left
-    when any connection closed would take down the terminal beside it. The sweep
-    is pushed out to ten minutes rather than turned off, because a cadence that
-    could still cover for the missing call would make this gate prove nothing.
+    when any connection closed would take down the terminal beside it. There is no
+    cadence left that could cover for the missing call (P12-02).
 
-    Sabotage: leave the check on the sweep alone, and this hangs for ten minutes.
+    Sabotage: drop the check from the connection's teardown, and this daemon stays.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=None, sweep_every=600.0) as daemon:
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
         first = await daemon.client("asks")
         second = await daemon.client("asks")
         await until(lambda: len(daemon.running.connections) == 2, what="both clients to register")
@@ -541,27 +553,28 @@ async def test_an_explicitly_started_daemon_still_never_exits(tmp_path: Path) ->
 
 
 async def test_the_keep_alive_expires_without_a_client_to_notice(tmp_path: Path) -> None:
-    """The backstop, and the reason the sweep still asks after P9-06.
+    """The one hold that ends on a clock, ended by the clock (P12-02).
 
     Every other hold ends on an event — a connection closes, a turn ends, a
     schedule is canceled — and `check_lifetime` runs on each. A keep-alive ends on a
-    *clock*, with nobody left in the process to notice, so without the sweep's
-    call an ephemeral daemon with `--keep-alive` would outlive its own window and sit
-    there until something unrelated happened to it.
+    *clock*, with nobody left in the process to notice. The last client leaving
+    arms it and tells `lifetime_clock`, which sleeps until it expires and asks then.
+    A sweep used to find it, up to a minute later.
 
-    Driven with no connection at all and the deadline already behind us, because
-    the subject is the pass rather than the wait.
-
-    Sabotage: drop `check_lifetime()` from `sweep`, and this hangs.
+    Sabotage: drop `lifetime_clock.notice()` where the last client leaves, and this
+    daemon outlives its window.
     """
-    async with running(tmp_path, ephemeral=True, keep_alive=30.0, passivate_after=None) as daemon:
-        daemon.aged()
-        daemon.running.keep_alive_until = now_ms() - 1
-        assert not daemon.running.holds(), "the window is behind us"
+    async with running(tmp_path, ephemeral=True, keep_alive=1.0, passivate_after=None) as daemon:
+        client = await daemon.client("asks")
+        await until(lambda: daemon.running.served, what="the client's first frame")
 
-        await daemon.running.sweep()
+        await client.aclose()
+        await until(
+            lambda: daemon.running.keep_alive_until is not None, what="the window to be armed"
+        )
+        assert not daemon.running.stop.is_set(), "the keep-alive holds it for now"
 
-        assert daemon.running.stop.is_set(), "the pass that noticed is the one that ends it"
+        await until(lambda: daemon.running.stop.is_set(), what="the keep-alive to expire")
 
 
 async def test_a_daemon_nobody_spoke_to_gives_up_when_its_launcher_would_have(
@@ -601,16 +614,16 @@ async def test_a_knock_outliving_the_last_client_does_not_strand_the_daemon(
     connection, and `holds` counts connections, which is the conservative
     direction. Then it closes without ever having spoken, and while the exit was
     guarded per-connection that close asked nothing: the daemon sat there until
-    something unrelated happened to it, up to a whole `sweep_every` later.
+    something unrelated happened to it.
 
     Now the check on every teardown is unconditional, because `spent()` knows
     about the spawn window itself — and this daemon has been served, so there is
     no window left to protect.
 
     Sabotage: guard the teardown's `check_lifetime()` on `connection.spoke`
-    again, and this waits for a sweep that is ten minutes out.
+    again, and this daemon stays.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=None, sweep_every=600.0) as daemon:
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
         client = await daemon.client("asks")
         await until(lambda: daemon.running.served, what="the client's first frame")
 
@@ -636,14 +649,14 @@ async def test_a_turn_finishing_with_nobody_watching_ends_the_daemon(tmp_path: P
     than living inside `announce`, whose whole body is guarded on there being
     watchers to announce to.
 
-    `sweep_every` is pushed out to ten minutes so the cadence cannot cover for
-    the missing registration: what ends this daemon has to be the turn.
+    No cadence is left to cover for the missing registration (P12-02): what ends
+    this daemon has to be the turn.
 
     Sabotage: drop `ctx.on("agent/status", lifetime)`, or fold it back inside
     `announce`'s `subscribers` guard, and a one-shot run leaves a supervisor
     behind every time.
     """
-    async with running(tmp_path, ephemeral=True, passivate_after=None, sweep_every=600.0) as daemon:
+    async with running(tmp_path, ephemeral=True, passivate_after=None) as daemon:
         daemon.aged()
         root = await daemon.running.supervisor.start("detached")
         assert not root.subscribers, "the case under test: nobody is listening"

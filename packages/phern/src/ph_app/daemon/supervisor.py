@@ -40,7 +40,6 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from ph.agent.types import AgentDriver
-from ph.cancel import first_of
 from ph.cordis import Context, LoaderError, Profile
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
@@ -75,6 +74,7 @@ from ph.seams.schedule import (
     CANCELED,
     CREATED,
     FOLDED,
+    TICK,
     Schedule,
     ScheduleService,
     ScheduleState,
@@ -104,7 +104,6 @@ from ph.session_profile import (
 )
 from ph.text import count_of
 from ph.tools.errors import error_message
-from ph.wall_clock import Alarm
 
 from ..attach import Tray, prompt_message
 from ..payloads import (
@@ -132,6 +131,7 @@ from ..sessions import not_a_root, recorded_start
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
+from .planner import Planner
 from .profile_command import profile_command
 from .projections import commands_of, family_of, family_rows, readings_of, screens_of
 from .recovery import (
@@ -391,6 +391,11 @@ class _FamilyFeed:
     `canceled` and its tombstone, eight children settling in one step — into one."""
 
 
+def _nothing() -> None:
+    """The default for a callback nobody wired: `Supervisor.recheck_lifetime` on a
+    supervisor no server watches, `Root.recheck` on a root no supervisor started."""
+
+
 @dataclass(slots=True)
 class Root:
     """One long-running agent, and the wake channel its task waits on.
@@ -437,7 +442,7 @@ class Root:
     is a composer the other cannot reason about.
 
     Rule 6, said out loud: **this does not survive the daemon.** A root released
-    by the sweep, or a daemon that exits, loses the staging — while the *blob*
+    when it goes quiet, or a daemon that exits, loses the staging — while the *blob*
     remains in the store, because `attachment/put` wrote it. So the cost of the
     loss is re-dropping the file, not re-finding it, and nothing durable is
     hiding here.
@@ -471,6 +476,15 @@ class Root:
     waits in the inbox — and `status` says `needs-profile-decision`."""
     family: _FamilyFeed = field(default_factory=_FamilyFeed)
     """What `session.children` last told this root's watchers (P11-07)."""
+    recheck: Callable[[], None] = _nothing
+    """Say that something this root's release, or the daemon's life, depends on may
+    have moved. `Supervisor.start` points it at `Supervisor._recheck`.
+
+    Called for the changes the agent's own status does not announce: the last
+    watcher leaving, the desk opening or closing an ask (a root parked on a person
+    reads `waiting`), and the ladder ending either way (`failed`, or `recovered`
+    back to `idle`). Without it each of those waited for some unrelated event to be
+    noticed, which is what a sixty-second sweep used to cover for."""
 
     @property
     def needs_credential(self) -> str | None:
@@ -500,6 +514,7 @@ class Root:
 
     def unsubscribe(self, subscriber: Subscriber) -> None:
         self.subscribers.discard(subscriber)
+        self.recheck()
 
     def publish(self, notice: SessionNotice) -> None:
         """Tell every watcher. A failing subscriber is dropped, not raised.
@@ -523,7 +538,7 @@ class Root:
                 subscriber(notice.METHOD, wire)
             except Exception:
                 log.debug("ph_app.daemon: dropping a watcher of root %s", self.id)
-                self.subscribers.discard(subscriber)
+                self.unsubscribe(subscriber)
 
     @property
     def status(self) -> str:
@@ -635,6 +650,9 @@ class Root:
         _LOG.append(self.session, RECOVERED, {"afterAttempts": self.recovery.attempts})
         self.recovery = Recovery(attempts=0, failed=False)
         self.publish(SessionStatusNotice(session_id=self.id, status=self.status))
+        # `retrying` to `idle` with no agent transition: the turn that worked
+        # already reported idle while the ladder still said retrying.
+        self.recheck()
 
     def idle_for(self, now: int) -> int:
         """Milliseconds since anything happened in this session (P5-05).
@@ -649,9 +667,17 @@ class Root:
         left a root nothing could ever release, holding a mounted profile for the
         life of the daemon and, under P7-08, the process with it.
         """
+        return max(0, now - self.quiet_since)
+
+    @property
+    def quiet_since(self) -> int:
+        """When this session last did anything, epoch ms: its last event's time, or
+        its header's `created_at` for a log with none (`idle_for` says why).
+
+        What `Supervisor.next_release` plans a release from: the window ends at
+        this plus `passivate_after`."""
         last = self.session.last_event
-        since = self.session.header.created_at if last is None else int(last.time)
-        return max(0, now - since)
+        return self.session.header.created_at if last is None else int(last.time)
 
     def passivated(self, idle_ms: int) -> None:
         """Say in the log that this root is being released, before releasing it.
@@ -704,6 +730,7 @@ class Root:
         self.recovery = replace(self.recovery, failed=True)
         self.publish(SessionStatusNotice(session_id=self.id, status="failed"))
         log.error("ph_app.daemon: root %s failed after %d attempts — %s", self.id, attempts, reason)
+        self.recheck()
 
     def describe(self) -> RootDescription:
         """What a client is told about this root.
@@ -829,10 +856,6 @@ and not the other.
 """
 
 
-def _nothing() -> None:
-    """`Supervisor.moved`'s default: a supervisor nobody is watching."""
-
-
 def _say_what_waits(root: Root) -> None:
     """One line per missing credential, naming the sessions held on it (T5).
 
@@ -895,7 +918,7 @@ def _working_beneath(root: Root) -> bool:
 
     Read from each child's own log (Phase 11): `child_is_live` over the whole
     family, stored members too, because the resume sweep has decided each of them
-    by the time a sweeper can ask — readmitted, ended in its own log, or held for a
+    by the time release can ask — readmitted, ended in its own log, or held for a
     credential, which is waiting and must not be released under — and has revoked
     what an ended child left unfinished beneath it. So nothing left live is an
     orphan, and every level counts the same.
@@ -960,9 +983,26 @@ class Supervisor:
     cannot grow behind it."""
     _schedules: ScheduleIndex | None = None
     """The appointment index, built on first use. See `_index`."""
-    _moved: anyio.Event = field(default_factory=anyio.Event)
-    """Set when the scheduler's plan may be stale — a schedule created or canceled, a
-    root mounted — to wake it early. See `keep_schedules`."""
+    scheduler: Planner = field(init=False)
+    """The scheduler (P5-06, P6-23): a pass that mounts what is due and fires what is
+    mounted (`wake_and_tick`), then a sleep until the next appointment (`next_wake`).
+
+    Asleep rather than polling, and with nothing scheduled, asleep until told: making a
+    schedule is the opt-in (docs/seams/schedule.md). The first pass is at once, so a
+    boot wakes what came due while the daemon was down. A wake by the clock is a due
+    wake, which may retry a rebuild that failed (`_rebuild`).
+
+    Told by `notice_schedules` (a schedule made or canceled, by the log) and by a root
+    mounting, which brings its store and its own appointments."""
+    releaser: Planner = field(init=False)
+    """Root release (P5-05, P12-01): a pass that releases every root quiet long enough
+    (`sweep`), then a sleep until the next root's quiet window ends (`next_release`).
+
+    Told by everything that can make a root releasable sooner (`_recheck`): a turn
+    starting or ending, a root mounting, its last watcher leaving, a root parking on a
+    person or done waiting on one, a child settling, a schedule ending, and the ladder
+    ending either way. Each has a test in `test_daemon.py` that changes only that one
+    thing."""
     _occasions: int = 0
     """How many times a schedule changed or one came due: each is a reason an index
     rebuild that failed may now succeed (`_rebuild`)."""
@@ -972,9 +1012,23 @@ class Supervisor:
     _last_pass: int = 0
     """When the last scheduler pass began. Anything due by then was attempted, so it
     does not hold the next sleep at zero (`next_wake`)."""
-    planned: int | None = None
-    """When the scheduler means to wake next, epoch ms, or `None` while it sleeps
-    until told. Read by `phern agents doctor` rather than worked out again."""
+    _last_release: int = 0
+    """When the last release pass began, which only floors the next (`next_release`).
+
+    Not the scheduler's "attempted by then" rule: a root held at that pass — a child
+    still working, say — had no chance to be released, and when it is let go its
+    window has usually long ended. Leaving it out would leave it mounted."""
+
+    def __post_init__(self) -> None:
+        self.scheduler = Planner(
+            "the scheduler pass",
+            run=self.wake_and_tick,
+            plan=lambda now: self.next_wake(now=now),
+            due=self._due_wake,
+        )
+        self.releaser = Planner(
+            "the release pass", run=self.sweep, plan=lambda _now: self.next_release()
+        )
 
     async def start(
         self,
@@ -1164,6 +1218,7 @@ class Supervisor:
             root.desk = AskDesk(root=root)
             for dispose in root.desk.attach():
                 exits.callback(dispose)
+            root.recheck = self._recheck
             # `/profile` (S7) the same way, and for the same reason: saving and
             # switching a session's profile are this host's, not a row's.
             commands = ctx.get(COMMANDS)
@@ -1195,8 +1250,10 @@ class Supervisor:
 
             exits.callback(forget)
             self.roots[root_id] = root
-            # A root brings its store, which a rebuild in doubt can read through.
-            self._moved.set()
+            # A root brings its store, which a rebuild in doubt can read through, and
+            # its own quiet window, which may be the soonest to end.
+            self.scheduler.notice()
+            self.releaser.notice()
             # **A named profile that moved since this root began** (S6): kept,
             # unless the person's own file moved and a person is here to ask — then
             # held, and asked, before anything runs on either version.
@@ -1289,12 +1346,15 @@ class Supervisor:
                 only a record a child's state is folded from can move its row — a
                 streamed chunk is one set test. Guarded like `relay`: nothing is read
                 for nobody, and `_tell_family` sends only what the rows show changed.
+
+                **The release notice comes before that guard**: a child settling is
+                what lets an unwatched root go, and an unwatched root is exactly the
+                one the guard skips.
                 """
-                if (
-                    not root.subscribers
-                    or event.type not in CHILD_EVENT_TYPES
-                    or source.header.delegating_parent is None
-                ):
+                if event.type not in CHILD_EVENT_TYPES or source.header.delegating_parent is None:
+                    return
+                self.releaser.notice()
+                if not root.subscribers:
                     return
                 if not root.family.due:
                     root.family.due = True
@@ -1310,9 +1370,12 @@ class Supervisor:
                 matters most has no watchers at all — a detached `phern -p`,
                 whose daemon should leave when the work it was started for is
                 finished — which is why `announce`'s guard must not cover it.
+
+                A turn ending is also the commonest moment a root's quiet window
+                starts, so the releaser plans again on the same transition.
                 """
                 if agent_ is agent:
-                    self.recheck_lifetime()
+                    self._recheck()
 
             def announce(agent_: object, status: str) -> None:
                 # Guarded like `relay` above, and for the same reason: reading
@@ -2003,11 +2066,29 @@ class Supervisor:
         """A schedule moved: wake the scheduler to plan again, and let an index in
         doubt be rebuilt again (`_rebuild`)."""
         self._occasions += 1
-        self._moved.set()
+        self.scheduler.notice()
+
+    def _due_wake(self) -> None:
+        """The scheduler woke by the clock: a due wake, which is an occasion too."""
+        self._occasions += 1
 
     def _watch_schedules(self, _session: Session, event: SessionEvent) -> None:
         if event.type in (CREATED, CANCELED):
             self.notice_schedules()
+        if event.type in (CANCELED, TICK):
+            # A schedule withdrawn, or a `once` that has fired: either can be the
+            # last thing holding this root mounted.
+            self.releaser.notice()
+
+    def _recheck(self) -> None:
+        """Something a root's release, or the daemon's life, depends on may have
+        moved: plan the release again, and ask again what holds the process.
+
+        `Root.recheck` points here, for the changes the agent's own status does not
+        announce: a watcher leaving, a root parking on a person or done waiting on
+        one, and the ladder ending either way."""
+        self.releaser.notice()
+        self.recheck_lifetime()
 
     def next_wake(self, *, now: int) -> int | None:
         """When the scheduler next has work, or `None` when it has none at all.
@@ -2029,33 +2110,6 @@ class Supervisor:
         if not ahead:
             return None
         return max(min(ahead), self._last_pass + int(PASS_FLOOR * 1000))
-
-    async def keep_schedules(self, stop: anyio.Event) -> None:
-        """The scheduler: a pass, then sleep until the next has work (P5-06, P6-23).
-
-        Asleep rather than polling, and with nothing scheduled, asleep until told:
-        making a schedule is the opt-in (docs/seams/schedule.md). The first pass is
-        at once, so a boot wakes what came due while the daemon was down. A wake by
-        the clock is a due wake, which may retry a rebuild that failed (`_rebuild`).
-
-        **The sleep is on the wall clock** (`ph.wall_clock`, P12-00). A deadline on
-        the loop's monotonic clock does not count a suspend, so a laptop closed
-        overnight woke the scheduler late by however long it had slept.
-        """
-        while True:
-            # Before the pass, so a change it makes or meets still wakes the next.
-            self._moved = moved = anyio.Event()
-            try:
-                await self.wake_and_tick()
-            except Exception:
-                log.exception("ph_app.daemon: the scheduler pass failed")
-            self.planned = self.next_wake(now=now_ms())
-            alarm = Alarm(self.planned)
-            await first_of(stop, moved, alarm)
-            if stop.is_set():
-                return
-            if alarm.rang:
-                self._occasions += 1
 
     async def tick(self, *, now: int | None = None) -> list[str]:
         """Fire whatever is due on every mounted root (P5-06). Returns their ids.
@@ -2401,30 +2455,47 @@ class Supervisor:
         * **it has work scheduled** (P5-06) — a root with a live schedule has already
           said when it comes back;
         * **it has been quiet long enough**, from the log.
+
+        The first four are `_held`, which `next_release` reads too, so the moment a
+        root is planned for and the predicate that releases it cannot disagree.
         """
-        if root.status not in QUIET:
-            return False
-        if root.subscribers:
-            return False
-        # **The quiet check before the fold**, which is not merely tidier. The
-        # root reaching this line is idle and unwatched — exactly the steady
-        # state the sweeper exists for — so a fold above it runs on every sweep
-        # of the whole ninety-minute window and is discarded eighty-nine times
-        # out of ninety.
-        if root.idle_for(now) < after * 1000:
-            return False
-        # Through the seam's cached folds rather than the bare function: each
-        # child's `SessionFoldCache` keys on its log's `seq`, and an idle child's
-        # log does not grow, so every sweep after the first is a dict hit per
-        # child instead of a whole-log walk. That is what saves the root this
-        # returns `False` for — idle, unwatched, one unsettled child — which would
-        # otherwise re-fold every sixty seconds for the life of the daemon.
-        if _working_beneath(root):
-            return False
-        # Last, and cached the same way: this one was inserted *above* the
-        # comment describing the cached fold, so the paragraph arguing against
-        # a bare whole-log walk sat directly on top of one.
-        return not self._live_schedules(root)
+        return not self._held(root) and root.idle_for(now) >= after * 1000
+
+    def _held(self, root: Root) -> bool:
+        """Whether something other than recent activity keeps `root` mounted.
+
+        The cheap terms first. The two folds go through the seams' caches rather
+        than the bare functions: each `SessionFoldCache` keys on its log's `seq`,
+        and an idle log does not grow, so asking again is a dict hit rather than a
+        whole-log walk. Since P12-01 this is asked when a release is planned or a
+        pass runs, not on a sixty-second sweep, but a root whose only claim is an
+        unsettled child is still asked on every plan.
+        """
+        return (
+            root.status not in QUIET
+            or bool(root.subscribers)
+            or _working_beneath(root)
+            or bool(self._live_schedules(root))
+        )
+
+    def next_release(self) -> int | None:
+        """When the next root may be released, epoch ms, or `None` while none can be.
+
+        The end of each unheld root's quiet window, from its log. A root held by
+        anything else has no moment: whatever lets it go is a notice
+        (`Supervisor.releaser`), and the plan is made again then. Floored at
+        `PASS_FLOOR` after the last pass, so a root whose release raised is not
+        retried in a busy loop.
+        """
+        if self.passivate_after is None:
+            return None
+        window = int(self.passivate_after * 1000)
+        moments = [
+            root.quiet_since + window for root in self.roots.values() if not self._held(root)
+        ]
+        if not moments:
+            return None
+        return max(min(moments), self._last_release + int(PASS_FLOOR * 1000))
 
     async def sweep(self, *, after: float | None = None, now: int | None = None) -> list[str]:
         """Release every root that has been quiet long enough. Returns their ids.
@@ -2436,6 +2507,7 @@ class Supervisor:
         Iterates a copy: passivation removes from `self.roots`.
         """
         stamp = now if now is not None else now_ms()
+        self._last_release = stamp
         window = self.passivate_after if after is None else after
         if window is None:
             return []

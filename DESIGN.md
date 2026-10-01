@@ -1022,7 +1022,7 @@ the tombstone is the record.
 | Reason | Trigger | Event appended | What survives |
 |---|---|---|---|
 | **Clean dispose** | mode completion, or wire `shutdown` | **none** — there is no `supervisor/shutdown` type | the whole log, including what the unwind itself appended (`workspace/disposed`, tombstones): `write_on_unwind` runs after every scope below the mount has unwound |
-| **Passivation** | idle ≥ `PASSIVATE_AFTER` (90 min) on a 60 s sweep | `supervisor/passivated {idleMs}`, **write-ahead** | the JSONL: journal, schedules, ladder state, all re-folded on next start |
+| **Passivation** | idle ≥ `PASSIVATE_AFTER` (90 min), released at the moment the window ends (`Supervisor.releaser`, no sweep) | `supervisor/passivated {idleMs}`, **write-ahead** | the JSONL: journal, schedules, ladder state, all re-folded on next start |
 | **Retry ladder** | any `Exception` from a root's task | `supervisor/retry` before each attempt; `supervisor/failed` on give-up; `supervisor/recovered` on success | the root stays **mounted** and still accepts wakes |
 | **Daemon unreachable** | socket `(st_dev, st_ino)` changed | `supervisor/unreachable`, to **every** root, each flushed | everything — **roots keep working** |
 | **Session lease (I-5)** | a second daemon opens a held log | **none** — an error frame, `session_already_active` | the first daemon is unaffected |

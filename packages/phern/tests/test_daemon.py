@@ -159,7 +159,9 @@ from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.json import JsonObject, JsonValue, as_str
-from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
+from ph.keys import APPROVAL, SCHEDULE, SESSIONS, WORKSPACE
+from ph.llm.fake import FakeAdapter
+from ph.llm.types import GenerateOptions, StreamChunk
 from ph.paths import resolve_roots
 from ph.persistence import session_path
 from ph.seams.models import ModelChoice
@@ -168,7 +170,16 @@ from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
 from ph.seams.subagents import ADMITTED, DELETED, PARENT_TEARDOWN, STATUS, SubagentService
 from ph.session import Session, SessionEvent, SessionHeader, now_ms, session_written
 from ph.session.kinds import SESSION_HOLDER, WORKSPACE_RESTORE, credential_hold
-from ph.testing import ReapedHost, log_event, not_none, noting, raising, stored_log, stored_types
+from ph.testing import (
+    ReapedHost,
+    StubAgent,
+    log_event,
+    not_none,
+    noting,
+    raising,
+    stored_log,
+    stored_types,
+)
 from ph_app import runtime as runtime_module
 from ph_app import verbs
 from ph_app.daemon import recovery, server
@@ -1381,19 +1392,19 @@ async def test_attaching_wakes_a_passivated_root(tmp_path: Path) -> None:
         assert "awaited" in daemon.running.supervisor.roots
 
 
-async def test_the_sweeper_actually_runs(tmp_path: Path) -> None:
-    """The timer, not just the predicate.
+async def test_release_actually_runs(tmp_path: Path) -> None:
+    """The planner `serve` starts, not just the predicate.
 
     Everything above drives `sweep()` directly, which would pass just as well if
     nothing ever called it — the shape of dead code that looks tested.
     """
-    async with running(tmp_path, passivate_after=0.0, sweep_every=0.02) as daemon:
+    async with running(tmp_path, passivate_after=0.0) as daemon:
         client = await daemon.client()
         # Attached first, and that is the test's own setup rather than an
-        # accident: with `passivate_after=0` the sweeper is eligible to release
-        # this root the instant it is idle and unwatched, which is *during* the
-        # turn we are waiting on. Attaching is the same condition a real client
-        # relies on to keep a session it is using.
+        # accident: with `passivate_after=0` the root is releasable the instant
+        # it is idle and unwatched, which is *during* the turn we are waiting on.
+        # Attaching is the same condition a real client relies on to keep a
+        # session it is using.
         await client.call("session/new", sessionId="swept")
         await client.call("session/attach", sessionId="swept")
         await client.prompt("swept", "hello")
@@ -1401,8 +1412,215 @@ async def test_the_sweeper_actually_runs(tmp_path: Path) -> None:
         await client.call("session/detach", sessionId="swept")
         await _until(
             lambda: "swept" not in daemon.running.supervisor.roots,
-            what="the sweeper to release an idle root on its own",
+            what="an idle root to be released on its own",
         )
+
+
+@asynccontextmanager
+async def _releasing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, window: float = 0.2
+) -> AsyncIterator[Supervisor]:
+    """A supervisor whose releaser is running, with a short quiet window (P12-01).
+
+    A window above zero rather than at it, so a release lands after the turn or
+    pass that made the root quiet has finished, and a test asserting "still
+    mounted" can wait past the window and mean it.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        supervisor.passivate_after = window
+        stop = anyio.Event()
+        supervisor.tasks.start_soon(supervisor.releaser.keep, stop)
+        try:
+            yield supervisor
+        finally:
+            stop.set()
+
+
+async def _still_mounted(supervisor: Supervisor, root_id: str) -> None:
+    """Wait past the quiet window, and the floor after the last pass, and say the
+    root is still there: what holds it is holding it."""
+    await anyio.sleep(not_none(supervisor.passivate_after) + PASS_FLOOR + 0.2)
+    assert root_id in supervisor.roots, f"{root_id} was released while held"
+
+
+async def _released(supervisor: Supervisor, root_id: str) -> None:
+    await until(lambda: root_id not in supervisor.roots, what=f"{root_id} to be released")
+
+
+async def test_an_idle_daemon_releases_at_the_deadline_without_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release sleeps until the quiet window ends: no pass in between (P12-01).
+
+    One pass at boot, one when the root mounts, and the next is the one that
+    releases it. A sweep would have run every sixty seconds whether or not anything
+    could have come due.
+
+    Sabotage: put back a cadence, and the passes counted while it waits grow.
+    """
+    async with _releasing(tmp_path, monkeypatch, window=2.0) as supervisor:
+        passes: list[int] = []
+        sweep = supervisor.sweep
+
+        async def counted() -> list[str]:
+            passes.append(now_ms())
+            return await sweep()
+
+        supervisor.releaser.run = counted
+        supervisor.releaser.notice()  # the boot pass again, through the counter
+        await until(lambda: len(passes) == 1, what="the counted pass")
+        await supervisor.start("quiet")
+        await until(lambda: len(passes) == 2, what="the mount's pass")
+
+        await anyio.sleep(1.0)
+        assert len(passes) == 2, "nothing could have come due, and nothing ran"
+        await _released(supervisor, "quiet")
+        assert len(passes) == 3
+
+
+async def test_a_root_mounting_is_planned_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root that does nothing at all after it mounts is still released.
+
+    Sabotage: drop the releaser's notice from `start`, and a root that never runs a
+    turn is never planned for.
+    """
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        await supervisor.start("untouched")
+        await _released(supervisor, "untouched")
+
+
+async def test_a_turn_ending_lets_the_root_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commonest way a quiet window starts: a turn ends.
+
+    The turn is held open past the window, so the pass the mount planned finds the
+    root `running` and plans nothing. A turn shorter than that needs no notice: the
+    pass would find it over and plan from its last record.
+
+    Sabotage: drop `_recheck` from the `agent/status` listener, and nothing wakes
+    the releaser when the turn ends.
+    """
+    turn = anyio.Event()
+    stream = FakeAdapter.stream
+
+    async def held(self: FakeAdapter, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
+        await turn.wait()
+        async for chunk in stream(self, options):
+            yield chunk
+
+    monkeypatch.setattr(FakeAdapter, "stream", held)
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("worked")
+        await supervisor.prompt("worked", "hello")
+        await until(lambda: root.status == "running", what="the turn to start")
+        await _still_mounted(supervisor, "worked")
+
+        turn.set()
+        await _released(supervisor, "worked")
+
+
+async def test_the_last_watcher_leaving_lets_the_root_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sabotage: drop `recheck()` from `Root.unsubscribe`, and the root stays."""
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("watched")
+
+        def watcher(_method: str, _params: dict[str, Any]) -> None:
+            return None
+
+        root.subscribe(watcher)
+        await _still_mounted(supervisor, "watched")
+
+        root.unsubscribe(watcher)
+        await _released(supervisor, "watched")
+
+
+async def test_a_root_parking_on_a_person_lets_it_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`waiting` is releasable, and the desk is what says the root reads it now.
+
+    Held first by the ladder (`retrying` is work in hand), so the only thing that
+    can make it releasable is the ask: the desk outranks the ladder in
+    `Root.status`.
+
+    Sabotage: drop the desk's `root.recheck()` when it opens an ask, and the root
+    stays.
+    """
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("parked")
+        root.retry(reason="the provider is down")
+        await _still_mounted(supervisor, "parked")
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_ask_a_person, root)
+            await until(lambda: root.status == "waiting", what="the root to park")
+            await _released(supervisor, "parked")
+            tasks.cancel_scope.cancel()
+
+
+async def _ask_a_person(root: Root) -> None:
+    await root.ctx.require(APPROVAL).request(
+        agent=StubAgent(ctx=root.ctx, session=root.session), tool_name="write", call_id="c1"
+    )
+
+
+async def test_a_child_settling_lets_the_root_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child's record is heard on the bus, before `beneath`'s watcher guard.
+
+    Sabotage: move the releaser's notice back under `beneath`'s `not root.subscribers`
+    return, and an unwatched parent stays mounted after its child is done.
+    """
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("parent")
+        child = spawned(root, "c")
+        await _still_mounted(supervisor, "parent")
+
+        log_event(child, STATUS, {"status": "done"})
+        await _released(supervisor, "parent")
+
+
+async def test_a_schedule_ending_lets_the_root_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sabotage: drop the releaser's notice from `_watch_schedules`, and the root
+    stays after its last appointment is withdrawn."""
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("booked")
+        seam = root.ctx.require(SCHEDULE)
+        seam.create(root.session, Schedule(id="s", kind="cron", spec="0 9 * * *", prompt="go"))
+        await _still_mounted(supervisor, "booked")
+
+        seam.cancel(root.session, "s")
+        await _released(supervisor, "booked")
+
+
+@pytest.mark.parametrize("end", ["give_up", "recovered"])
+async def test_the_ladder_ending_lets_the_root_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, end: str
+) -> None:
+    """`retrying` holds a root; `failed` and a recovered `idle` do not, and neither
+    moves the agent's own status, so the root says so itself.
+
+    Sabotage: drop `recheck()` from `Root.give_up` or `Root.recovered`, and that case
+    stays mounted.
+    """
+    async with _releasing(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("laddered")
+        root.retry(reason="the provider is down")
+        await _still_mounted(supervisor, "laddered")
+
+        if end == "give_up":
+            root.give_up("the provider is down", attempts=3)
+        else:
+            root.recovered()
+        await _released(supervisor, "laddered")
 
 
 async def test_a_root_with_a_live_child_is_not_released(
@@ -2290,18 +2508,18 @@ async def test_the_scheduler_sleeps_until_something_is_due(
     async with supervised(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("timed")
         assert supervisor.next_wake(now=now_ms()) is None, "nothing scheduled, nothing to wake for"
-        supervisor.tasks.start_soon(supervisor.keep_schedules, anyio.Event())
+        supervisor.tasks.start_soon(supervisor.scheduler.keep, anyio.Event())
         await until(lambda: supervisor._last_pass > 0, what="the first pass")
-        assert supervisor.planned is None, "asleep until told"
+        assert supervisor.scheduler.planned is None, "asleep until told"
 
         at = now_ms() + 300
         root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="soon", kind="once", spec=str(at), prompt="go")
         )
-        await until(lambda: supervisor.planned is not None, what="the plan to move")
-        assert not_none(supervisor.planned) >= at
+        await until(lambda: supervisor.scheduler.planned is not None, what="the plan to move")
+        assert not_none(supervisor.scheduler.planned) >= at
         await until(
-            lambda: armed[-1:] == [supervisor.planned],
+            lambda: armed[-1:] == [supervisor.scheduler.planned],
             what="the wake to be armed at the planned instant",
         )
 
