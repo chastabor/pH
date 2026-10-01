@@ -21,7 +21,7 @@ loudly instead of inventing a path that protects nothing.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -58,6 +58,7 @@ __all__ = [
     "SessionPersistence",
     "StoredSession",
     "attach",
+    "gated",
     "write_on_unwind",
 ]
 
@@ -214,6 +215,22 @@ class SessionArchive(Protocol):
         """What is on record, most recently touched first."""
         ...
 
+    def holding(
+        self, types: frozenset[str], *, gate: str
+    ) -> Iterator[tuple[str, list[SessionEvent]]]:
+        """Every stored log, by id, with its own records of `types` — for a reader that
+        needs a few records out of every log, such as a daemon rebuilding its schedule
+        index (S18).
+
+        A log with no `gate` record yields none: `gate` is the record the rest mean
+        nothing without, a schedule's creation for its ticks and its cancel. One that
+        cannot be read is logged and left out, so a reader can tell "holds none" from
+        "could not say". **On the Protocol, not a walk over `read_own`**, because
+        every log is read and each backend has a cheaper way than parsing them all:
+        JSONL searches the bytes for `gate` first, Turso reads each database alone.
+        """
+        ...
+
     def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
         """Every stored session beneath `parent_id` — its children, theirs, and so on —
         ordered by id. Each row's `delegating_parent` says which level it is.
@@ -351,6 +368,13 @@ class ClaimingStore(Protocol):
         """Hold this session for `scope`'s life, or raise `SessionBusy` — and
         write every live log before letting go (`write_on_unwind`)."""
         ...
+
+
+def gated(events: list[SessionEvent], gate: str) -> list[SessionEvent]:
+    """`events`, or none of them when none is a `gate` record — the rule
+    `SessionArchive.holding` states, kept in one place for every backend that
+    filters after reading."""
+    return events if any(event.type == gate for event in events) else []
 
 
 def lineage_faults_of(

@@ -634,6 +634,34 @@ def test_a_new_appointment_whose_write_failed_is_left_for_a_rebuild(
     assert list(index.claims.iterdir()) == []
 
 
+def test_a_rebuild_that_cannot_vouch_writes_what_it_found_and_stays_in_doubt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon with nothing mounted reads a directory it can only guess is the
+    store. What it finds is worth waking for, so it is written, but a file marked
+    complete from a guess would never be rebuilt from the real store: one in
+    another directory, or of another kind, would go unread for good.
+
+    Sabotage: have `replace` vouch whatever it is told, and the guess is trusted.
+    """
+    index = _index(tmp_path)
+    assert rebuild_index(index, [], now=0)
+    _failing_writes(monkeypatch)
+    ScheduleService(index=index).create(
+        Session("lost"), Schedule(id="a", kind="once", spec="9000000", prompt="go")
+    )
+    monkeypatch.undo()
+    (tmp_path / INDEX_NAME).write_text("{ not json", encoding="utf-8")
+    due = Session("due")
+    ScheduleService().create(due, Schedule(id="b", kind="once", spec="9000000", prompt="go"))
+
+    assert rebuild_index(index, [("due", due.events)], now=now_ms(), vouch=False)
+
+    survey = index.survey()
+    assert set(index.read()) == {"due"}, "what the guess found is kept"
+    assert not survey.trusted and len(survey.abandoned) == 1, "and nothing is vouched for"
+
+
 def test_a_live_writers_claim_is_not_taken_for_a_lost_one(tmp_path: Path) -> None:
     """A claim is held with a lock for as long as its writer lives, so a survey that
     runs mid-write does not send a daemon to rebuild over every new schedule.

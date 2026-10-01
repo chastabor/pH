@@ -161,19 +161,13 @@ old, which is indistinguishable from a log nobody is writing.
 Beside the other two cadences rather than in the seam, where it was: ph-core
 held a constant only this loop read."""
 
-TICK_EVERY = 5.0
-"""How often due schedules are checked. The floor on a schedule's resolution.
-
-Five seconds rather than the sweeper's sixty: this decides when work *starts*,
-and a minute of slack on "run at 09:00" is a minute somebody notices."""
-
 SWEEP_EVERY = 60.0
 """How often the passivation sweep runs. A coarse tick, not a second timeout."""
 
 INVARIANTS_EVERY = 5 * 60.0
 """How often each live root is asked whether its pollable invariants hold (I6).
 
-**A fifth cadence rather than a ride on the sweep**, which is the same argument
+**A cadence of its own rather than a ride on the sweep**, which is the same argument
 `sweep` makes for carrying two halves: one cadence per *question*. The sweep's
 two halves both ask "is anyone still using this"; this asks whether the
 deployment is still telling the truth about itself, and folding it in would mean
@@ -185,7 +179,7 @@ and will almost always pass — it exists to catch a writer that bypassed
 the drift inside a working session, slow enough that the refold is not a tax
 anybody would later be tempted to remove.
 
-`0` turns it off, matching the other four.
+`0` turns it off, matching the others.
 """
 
 WATCH_EVERY = 30.0
@@ -1360,14 +1354,13 @@ class DaemonServer:
     A remembered value rather than a dirty flag: the thing being compared is the
     whole frame, and a flag would have to be set by every writer of every field
     that goes into one."""
-    tick_every: float = TICK_EVERY
     sweep_every: float = SWEEP_EVERY
     heartbeat_every: float = HEARTBEAT_EVERY
     watch_every: float = WATCH_EVERY
     invariants_every: float = INVARIANTS_EVERY
-    """The five cadences, named rather than a tuple: `serve` already threads
-    them past each other positionally into `start_soon`, and this is the one
-    place they are read back by a person."""
+    """The cadences, named rather than a tuple: `serve` already threads them past
+    each other positionally into `start_soon`, and this is the one place they are
+    read back by a person."""
     started: int = field(default_factory=now_ms)
     """When this daemon came up, for the uptime a status reply carries."""
     identity: tuple[int, int] | None = None
@@ -1404,7 +1397,7 @@ class DaemonServer:
             roots=len(supervisor.roots),
             starts_on=supervisor.starts_on(),
             passivate_after=supervisor.passivate_after,
-            tick_every=self.tick_every,
+            next_wake=supervisor.planned,
             sweep_every=self.sweep_every,
             heartbeat_every=self.heartbeat_every,
             watch_every=self.watch_every,
@@ -1781,7 +1774,7 @@ async def serve(
     ephemeral: bool = False,
     keep_alive: float = 0.0,
     sweep_every: float = SWEEP_EVERY,
-    tick_every: float = TICK_EVERY,
+    scheduling: bool = True,
     heartbeat_every: float = HEARTBEAT_EVERY,
     watch_every: float = WATCH_EVERY,
     invariants_every: float = INVARIANTS_EVERY,
@@ -1834,7 +1827,6 @@ async def serve(
                 supervisor=supervisor,
                 stop=anyio.Event(),
                 path=socket_path,
-                tick_every=tick_every,
                 sweep_every=sweep_every,
                 heartbeat_every=heartbeat_every,
                 watch_every=watch_every,
@@ -1848,9 +1840,9 @@ async def serve(
             # running, and the supervisor needs the server to say that the
             # answer moved. See `Supervisor.moved`.
             supervisor.recheck_lifetime = server.check_lifetime
-            # Four cadences, four tasks, one primitive: a cadence riding another's
+            # Each cadence its own task, one primitive: a cadence riding another's
             # counter advances only when that one *succeeds*, so a run of failing
-            # ticks would starve an unrelated record.
+            # passes would starve an unrelated record.
             if passivate_after is not None or ephemeral:
                 # `server.sweep`, not `supervisor.sweep`: the pass now ends with
                 # "and is there anything left to be up for", and the answer can
@@ -1859,22 +1851,16 @@ async def serve(
                 # questions are separate: `--passivate-after off` says keep the
                 # roots, not stay resident after the last one is gone.
                 tasks.start_soon(_every, sweep_every, server.stop, server.sweep, "the sweep")
-            if tick_every > 0:
-                # Woken before fired, and on the tick's own cadence rather than
-                # once at boot: a session can gain an appointment at any moment
-                # from a `phern -p` run in another process, and a root the sweeper
-                # released is unmounted again by the time its next one is due
-                # (P6-23). One small file read per pass buys both.
-                await supervisor.rehydrate()
-                tasks.start_soon(
-                    _every, tick_every, server.stop, supervisor.wake_and_tick, "the tick"
-                )
+            if scheduling:
+                # Asleep until something is due rather than polling; see
+                # `Supervisor.keep_schedules` and docs/seams/schedule.md.
+                tasks.start_soon(supervisor.keep_schedules, server.stop)
                 tasks.start_soon(
                     _every, heartbeat_every, server.stop, supervisor.heartbeat, "the heartbeat"
                 )
             if watch_every > 0:
-                # Its own cadence and its own `if`, not a rider on the tick: a test
-                # that turns the scheduler off to keep a timer out of its assertions
+                # Its own cadence and its own `if`, not a rider on the scheduler: a test
+                # that turns the scheduler off to keep it out of its assertions
                 # must not thereby turn off the thing that notices the daemon has no
                 # door.
                 tasks.start_soon(

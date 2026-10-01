@@ -37,18 +37,20 @@ import anyio
 import typer
 from rich.table import Table
 
+from ph.cancel import first_of
 from ph.json import JsonObject, as_obj, as_str
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import SHUTDOWN_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
+from ph.session import now_ms
 from ph.text import duration
 
 from . import verbs
 from .console import TypeOption, console, detail, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
-from .daemon.follow import EventFrame, Followed, first_of
+from .daemon.follow import EventFrame, Followed
 from .params import CancelScheduleParams, CreateScheduleParams
 from .payloads import DaemonStatusReply, StatusFacts
 from .protocol import (
@@ -172,15 +174,22 @@ def _starts_on(facts: DaemonStatusReply) -> str:
     return f"{starts.key} · {starts.route.label}"
 
 
-def _cadence(seconds: float) -> str:
-    """One of `serve`'s five cadences, in seconds — or `off` for zero.
+def _scheduler(facts: DaemonStatusReply) -> str:
+    """When the scheduler next wakes: it sleeps until then rather than ticking."""
+    if facts.next_wake is None:
+        return "idle — nothing scheduled"
+    return f"next wake in {duration(max(0, facts.next_wake - now_ms()))}"
 
-    **All five read `0` as off**, each behind its own `if x > 0` in `serve`, and
-    for a day only the newest one said so on screen while the other four printed
-    `0s`. `duration` cannot absorb the rule: zero milliseconds is a real and
-    different answer elsewhere (an uptime, a turn that took no measurable time),
-    where "off" would be a lie. So the convention lives here, once, next to the
-    only four-plus-one readers that share it.
+
+def _cadence(seconds: float) -> str:
+    """One of `serve`'s cadences, in seconds — or `off` for zero.
+
+    **Each reads `0` as off**, behind its own `if x > 0` in `serve`, and for a day
+    only the newest one said so on screen while the others printed `0s`.
+    `duration` cannot absorb the rule: zero milliseconds is a real and different
+    answer elsewhere (an uptime, a turn that took no measurable time), where "off"
+    would be a lie. So the convention lives here, once, next to the readers that
+    share it.
     """
     return duration(seconds * 1000) if seconds > 0 else "off"
 
@@ -665,7 +674,7 @@ def doctor() -> None:
                 ("roots", str(facts.roots)),
                 ("model", _starts_on(facts)),
                 ("passivate after", "off" if passivate is None else duration(passivate * 1000)),
-                ("tick", _cadence(facts.tick_every)),
+                ("scheduler", _scheduler(facts)),
                 ("sweep", _cadence(facts.sweep_every)),
                 ("heartbeat", _cadence(facts.heartbeat_every)),
                 ("socket watch", _cadence(facts.watch_every)),

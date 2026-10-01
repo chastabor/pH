@@ -46,7 +46,7 @@ from ..persistence.jsonl import (
     session_path,
 )
 from ..persistence.lease import lease_path
-from ..persistence.protocol import StoredSession, descendants_among, stored_row
+from ..persistence.protocol import StoredSession, descendants_among, gated, stored_row
 from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
 from ..seams.subagents import ADMITTED
@@ -826,6 +826,14 @@ class StoredLogs:
             for index, one in enumerate(self.sessions.values())
         ]
         return rows * limit if self.truncate else rows[:limit]
+
+    def holding(
+        self, types: frozenset[str], *, gate: str
+    ) -> Iterator[tuple[str, list[SessionEvent]]]:
+        for session_id in self.sessions:
+            if session_id == self.broken:
+                continue  # left out, as a store leaves out a log it cannot read
+            yield session_id, gated(self.read_own(session_id, types=types)[1], gate)
 
     def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
         return descendants_among(

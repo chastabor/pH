@@ -30,8 +30,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-import anyio
-
 from ph.json import JsonObject, JsonValue, as_int
 
 from .. import verbs
@@ -47,7 +45,7 @@ from ..payloads import (
 from ..protocol import Cursor
 from .client import DaemonClient
 
-__all__ = ["EventFrame", "Followed", "first_of"]
+__all__ = ["EventFrame", "Followed"]
 
 log = logging.getLogger("ph_app.daemon.follow")
 
@@ -216,19 +214,3 @@ class Followed:
             if not page.more:
                 return started
             cursor = page.cursor
-
-
-async def first_of(*events: anyio.Event) -> None:
-    """Wait for whichever of these happens first.
-
-    Two ways a follow ends — the root went idle, or the daemon went away — and
-    waiting on only the first is a hang whenever it is the second that happens.
-    """
-    async with anyio.create_task_group() as tasks:
-
-        async def stop_on(event: anyio.Event) -> None:
-            await event.wait()
-            tasks.cancel_scope.cancel()
-
-        for event in events:
-            tasks.start_soon(stop_on, event)

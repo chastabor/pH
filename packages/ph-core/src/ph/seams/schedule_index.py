@@ -335,9 +335,16 @@ class ScheduleIndex:
 
         return self._rewrite(apply, vouch=False)
 
-    def replace(self, read: Mapping[str, Appointment | None], *, since: Survey) -> bool:
+    def replace(
+        self, read: Mapping[str, Appointment | None], *, since: Survey, vouch: bool = True
+    ) -> bool:
         """Write a rebuild's answer, mark the file complete, and clear the claims it
         answered. Whether it was written.
+
+        `vouch` is whether the rebuild read the store the deployment keeps its logs
+        in. One that read somewhere else — a directory guessed with no store at hand —
+        still writes what it found, and leaves the file as complete as it was and the
+        claims where they are, so a rebuild that can vouch still comes.
 
         `read` holds each session whose log the rebuild read: its appointment, or
         `None` for none. **What the rebuild did not read, it keeps**, since a log
@@ -359,8 +366,10 @@ class ScheduleIndex:
                     found[session_id] = appointment
             return True
 
-        if not self._rewrite(apply, vouch=True):
+        if not self._rewrite(apply, vouch=vouch):
             return False
+        if not vouch:
+            return True
         for path in since.abandoned:
             with suppress(FileNotFoundError):
                 path.unlink()

@@ -31,6 +31,7 @@ __all__ = [
     "CancelToken",
     "Canceled",
     "Cancellation",
+    "first_of",
     "is_canceled",
     "raced",
     "until_canceled",
@@ -175,6 +176,24 @@ async def until_canceled(signal: Cancellation | None, scope: anyio.CancelScope) 
         return  # `sleep_forever` never returns; this is for the checker
     await signal.wait()
     scope.cancel()
+
+
+async def first_of(*events: anyio.Event) -> None:
+    """Wait for whichever of these happens first.
+
+    A wait on one of several endings — a follow's root going idle or its daemon
+    going away, a scheduler's plan moving or its daemon stopping — is a hang
+    whenever it is another that happens. Bound it with `anyio.move_on_after` for
+    a deadline as well.
+    """
+    async with anyio.create_task_group() as tasks:
+
+        async def stop_on(event: anyio.Event) -> None:
+            await event.wait()
+            tasks.cancel_scope.cancel()
+
+        for event in events:
+            tasks.start_soon(stop_on, event)
 
 
 async def raced[T](signal: Cancellation | None, work: Callable[[], Awaitable[T]]) -> T | None:

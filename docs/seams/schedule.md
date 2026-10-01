@@ -1,7 +1,7 @@
 # `ctx.schedule` — work a root will do later, folded from its own log
 
 **Module:** `ph/seams/schedule.py` · **Row:** `schedule` · **Consumers:** the
-daemon's tick cadence, `/autonomous`
+daemon's scheduler (`Supervisor.keep_schedules`), `/autonomous`
 
 Three kinds, one mechanism: `once` at a moment, `interval` every so often, and
 `cron` on an expression.
@@ -63,8 +63,17 @@ one — a small file read per pass, rather than a scan of every stored log.
 That index is a **derived cache**: losing it costs a late wake, not a lost
 schedule, because the schedule itself is in the session's log.
 
+**The daemon sleeps until something is due; it does not poll.** It knows from the
+index and its roots' logs when it next has work (`Supervisor.next_wake`): a
+schedule due on a mounted root, or an appointment of a session it has not mounted.
+It sleeps until then, and no pass comes sooner than a second after the last
+(`PASS_FLOOR`). A schedule is made or canceled in a root's log, which the daemon
+watches, and a root mounting moves the plan too: either wakes it to plan again.
+**With nothing scheduled it has no deadline at all**, so making a schedule is the
+opt-in. The first pass is at boot.
+
 **A daemon rebuilds it from the logs when it can't vouch for itself** (S18), in the
-background, at most once a minute:
+background. Each pass surveys the index, and a rebuild starts only on one of these:
 * **Incomplete.** Only a rebuild writes `complete: true`, and a writer keeps what it
   found. So a missing, corrupt or older file, or one a writer made from any of
   those, is incomplete.
@@ -72,16 +81,29 @@ background, at most once a minute:
   the new appointment is written. A write that fails, or a host that dies before
   it, leaves the mark unlocked.
 
-The rebuild reads the daemon's own `$PH_HOME/sessions` as JSONL. It keeps any entry
-for a log it didn't read, and any entry a writer changed while it read.
+In the ordinary case that is a guess at the first boot over a fresh `$PH_HOME`,
+then the rebuild the first root's store vouches for, and none after it.
+
+**It reads through a live root's store**, whatever its kind
+(`SessionArchive.holding`). It keeps any entry for a log it didn't read, and any
+entry a writer changed while it read.
+
+**A rebuild that leaves the index in doubt is tried again for a reason, never on a
+timer** (`Supervisor._rebuild`): a schedule made or canceled, one come due, or the
+first store to read through. A rebuild that failed on a read-only `$PH_HOME` fails
+the same way on the next pass, so it waits for something it depends on to have
+moved. With nothing mounted the daemon reads its own `$PH_HOME/sessions` as JSONL
+to wake what is due, and never vouches for that guess: the root it wakes brings
+the store that can.
 
 ## What it does not do
 
 * **Nothing here creates a schedule from the model's side by default.** There is
   no tool; `/autonomous` is what creates one, so a model cannot give itself
   appointments.
-* It does not guarantee promptness. A tick fires on the daemon's cadence, and a
-  process that is not running fires nothing until it is.
+* It does not guarantee promptness beyond the daemon being up: it wakes at the
+  moment a schedule is due, and a process that is not running fires nothing until
+  it is.
 * It is not cron. The OS already ships cron, anacron and systemd timers — pH
   schedules *inside a conversation* and is not trying to out-cron them.
   `wake_within` stays a knob defaulting to `None`, because a schedule attached to

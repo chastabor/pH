@@ -31,6 +31,7 @@ import os
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,6 +40,7 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from ph.agent.types import AgentDriver
+from ph.cancel import first_of
 from ph.cordis import Context, LoaderError, Profile
 from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
@@ -57,6 +59,7 @@ from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
 from ph.persistence import open_session, resumption_of
 from ph.persistence.jsonl import logs_holding
+from ph.persistence.protocol import SessionPersistence
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
 from ph.seams.models import (
@@ -69,6 +72,7 @@ from ph.seams.models import (
     start_on,
 )
 from ph.seams.schedule import (
+    CANCELED,
     CREATED,
     FOLDED,
     Schedule,
@@ -132,9 +136,9 @@ from .projections import commands_of, family_of, family_rows, readings_of, scree
 from .recovery import (
     CHILD_RETRY_LIMIT,
     FAILED,
+    PASS_FLOOR,
     PASSIVATE_AFTER,
     PASSIVATED,
-    REBUILD_EVERY,
     RECOVERED,
     RETRY,
     UNREACHABLE,
@@ -955,9 +959,21 @@ class Supervisor:
     cannot grow behind it."""
     _schedules: ScheduleIndex | None = None
     """The appointment index, built on first use. See `_index`."""
-    _rebuild_after: float = 0.0
-    """The earliest a rebuild of the index may start: never while one runs, and
-    `REBUILD_EVERY` after the last began. See `_doubt`."""
+    _moved: anyio.Event = field(default_factory=anyio.Event)
+    """Set when the scheduler's plan may be stale — a schedule created or canceled, a
+    root mounted — to wake it early. See `keep_schedules`."""
+    _occasions: int = 0
+    """How many times a schedule changed or one came due: each is a reason an index
+    rebuild that failed may now succeed (`_rebuild`)."""
+    _tried: tuple[bool, int] | None = None
+    """What the last rebuild that left the index in doubt was tried with: whether a
+    store was at hand, and `_occasions`. The same again is not tried again."""
+    _last_pass: int = 0
+    """When the last scheduler pass began. Anything due by then was attempted, so it
+    does not hold the next sleep at zero (`next_wake`)."""
+    planned: int | None = None
+    """When the scheduler means to wake next, epoch ms, or `None` while it sleeps
+    until told. Read by `phern agents doctor` rather than worked out again."""
 
     async def start(
         self,
@@ -1178,6 +1194,8 @@ class Supervisor:
 
             exits.callback(forget)
             self.roots[root_id] = root
+            # A root brings its store, which a rebuild in doubt can read through.
+            self._moved.set()
             # **A named profile that moved since this root began** (S6): kept,
             # unless the person's own file moved and a person is here to ask — then
             # held, and asked, before anything runs on either version.
@@ -1323,6 +1341,9 @@ class Supervisor:
             # child agent's events belong to its own transcript, and subscribing
             # here means never receiving them rather than receiving and discarding.
             exits.callback(session.observe(relay))
+            # A schedule made or canceled on this root, by whichever path: the log
+            # is where it happens, so the scheduler hears it from there.
+            exits.callback(session.observe(self._watch_schedules))
             # The children's are heard on the bus, and only as a row: what a watcher
             # is sent about them is `session.children`, never their chunks.
             ctx.on("session/event", beneath)
@@ -1751,7 +1772,7 @@ class Supervisor:
         schedule = root.ctx.get(SCHEDULE)
         return [] if schedule is None else list(schedule.live(root.session))
 
-    async def rehydrate(self, *, now: int | None = None) -> list[str]:
+    async def rehydrate(self, *, now: int) -> None:
         """Mount the unmounted roots that have an appointment due (P6-23).
 
         **The gap this closes is silence.** A schedule outlives its process and
@@ -1777,19 +1798,16 @@ class Supervisor:
         Failures are per root and logged: a session the index names but that will
         not mount costs its own appointment, not the pass.
 
-        **An index that cannot vouch for itself is rebuilt from the logs** (S18),
-        in the background, so this pass reads what the file says and a later one
-        what the rebuild found. See `_doubt`.
+        **An index that cannot vouch for itself is rebuilt from the logs** (S18)
+        before it is read, so this pass wakes what the rebuild found (`_rebuild`).
         """
-        stamp = now if now is not None else now_ms()
+        stamp = now
         appointments: dict[str, Appointment] = {}
         index = self._index()
         if index is not None:
-            survey = index.survey()
-            appointments = survey.appointments
-            if not survey.trusted:
-                self._doubt(index, stamp)
-        woken: list[str] = []
+            if not index.survey().trusted:
+                await self._rebuild(index)
+            appointments = index.read()
         for entry in sorted(appointments.values(), key=lambda one: one.next_at):
             if entry.session_id in self.roots or entry.next_at > stamp:
                 continue
@@ -1814,8 +1832,6 @@ class Supervisor:
                 entry.session_id,
                 entry.next_at,
             )
-            woken.append(entry.session_id)
-        return woken
 
     def _index(self) -> ScheduleIndex | None:
         """The index this daemon reads, or `None` when nothing indexes.
@@ -1828,7 +1844,7 @@ class Supervisor:
         canonicalizes three paths, a handful of syscalls — so re-deriving it per
         call was measurable once `booked()` joined the turn path. The index
         object holds a path, not a snapshot: `read()` still goes to disk every
-        time, which is what keeps a schedule created by another process visible.
+        time, so each pass plans from the index as it is.
         """
         if self._schedules is None:
             try:
@@ -1839,39 +1855,45 @@ class Supervisor:
                 )
         return self._schedules
 
-    def _doubt(self, index: ScheduleIndex, stamp: int) -> None:
-        """Start a rebuild of an index that cannot vouch for itself (S18).
+    async def _rebuild(self, index: ScheduleIndex) -> None:
+        """Rebuild an index that cannot vouch for itself (S18), unless nothing it
+        depends on has moved since the last try left it in doubt — no timer
+        (docs/seams/schedule.md).
 
-        **Off the loop and off the pass.** A rebuild reads every stored log, and a
-        boot that waited on it would answer no connection until it finished, which
-        is the cost the index exists to spare. One at a time, `REBUILD_EVERY` apart.
-
-        **The daemon's own `$PH_HOME/sessions`, read as JSONL** — `sessions_directory`'s
-        answer, and its limit: a store elsewhere, or of another kind, has none of its
-        logs read.
+        Through a live root's store, whatever its kind (`SessionArchive.holding`).
+        With none mounted, the daemon's own `$PH_HOME/sessions` as JSONL — a guess,
+        so what it finds is written and not vouched for, and the first root to
+        mount is the reason to try again.
         """
-        if stamp < self._rebuild_after:
+        store = self._store()
+        attempt = (store is not None, self._occasions)
+        if attempt == self._tried:
             return
-        directory = self.sessions_directory()
-        if directory is None:
-            return
-        self._rebuild_after = math.inf
-        self.tasks.start_soon(self._rebuild, index, directory, stamp)
-
-    async def _rebuild(self, index: ScheduleIndex, directory: Path, stamp: int) -> None:
+        self._tried = attempt
+        if store is not None:
+            logs = partial(store.holding, FOLDED, gate=CREATED)
+        else:
+            logs = partial(logs_holding, resolve_roots().sessions_dir(), FOLDED, gate=CREATED)
         try:
             written = await anyio.to_thread.run_sync(
-                lambda: rebuild_index(
-                    index, logs_holding(directory, FOLDED, gate=CREATED), now=now_ms()
-                )
+                lambda: rebuild_index(index, logs(), now=now_ms(), vouch=store is not None)
             )
         except Exception:
             log.warning("ph_app.daemon: could not rebuild the schedule index", exc_info=True)
-        else:
-            if written:
-                log.info("ph_app.daemon: rebuilt the schedule index from %s", directory)
-        finally:
-            self._rebuild_after = stamp + REBUILD_EVERY * 1000
+            return
+        if written:
+            log.info(
+                "ph_app.daemon: rebuilt the schedule index%s",
+                "" if store is not None else ", from a guess no store vouches for",
+            )
+
+    def _store(self) -> SessionPersistence | None:
+        """A live root's store, which answers for the daemon (`sessions_directory`)."""
+        for root in self.roots.values():
+            store = root.ctx.get(SESSION_PERSISTENCE)
+            if store is not None:
+                return store
+        return None
 
     def appointments(self) -> dict[str, Appointment]:
         """Every appointment on record, or empty when nothing indexes."""
@@ -1908,11 +1930,9 @@ class Supervisor:
         mounts one store somewhere private; reading it from outside the row would
         be a worse trade for a picker.
         """
-        for root in self.roots.values():
-            store = root.ctx.get(SESSION_PERSISTENCE)
-            if store is not None:
-                found: Path | None = store.directory()
-                return found
+        store = self._store()
+        if store is not None:
+            return store.directory()
         return resolve_roots().sessions_dir()
 
     def busy(self) -> bool:
@@ -1952,22 +1972,86 @@ class Supervisor:
         """
         if any(self._live_schedules(root) for root in self.roots.values()):
             return True
-        appointments = self.appointments()
-        if not appointments:
-            return False
-        mounted = {root.session.id for root in self.roots.values()}
-        return any(session_id not in mounted for session_id in appointments)
+        return bool(self._unmounted_appointments())
+
+    def _unmounted_appointments(self) -> list[Appointment]:
+        """The index's appointments for sessions no root has mounted. A mounted
+        root's own seam answers for it, and the index can only be staler
+        (`booked`)."""
+        return [
+            entry for entry in self.appointments().values() if entry.session_id not in self.roots
+        ]
 
     async def wake_and_tick(self, *, now: int | None = None) -> list[str]:
         """One scheduler pass: mount what is due, then fire what is mounted.
 
         The two are separate methods because they answer to different owners —
         `rehydrate` reads an index this daemon does not write, `tick` drives roots
-        it does — and one cadence because a root woken for an appointment that is
-        not then fired in the same pass waits a whole interval to be noticed.
+        it does — and one pass because a root woken for an appointment that is not
+        then fired in the same pass would wait for the next to be noticed.
+
+        Marked as begun before either runs, so a pass that raises does not leave
+        what it was attempting to wake the scheduler again at once (`next_wake`).
         """
-        await self.rehydrate(now=now)
-        return await self.tick(now=now)
+        stamp = now if now is not None else now_ms()
+        self._last_pass = stamp
+        await self.rehydrate(now=stamp)
+        return await self.tick(now=stamp)
+
+    def notice_schedules(self) -> None:
+        """A schedule moved: wake the scheduler to plan again, and let an index in
+        doubt be rebuilt again (`_rebuild`)."""
+        self._occasions += 1
+        self._moved.set()
+
+    def _watch_schedules(self, _session: Session, event: SessionEvent) -> None:
+        if event.type in (CREATED, CANCELED):
+            self.notice_schedules()
+
+    def next_wake(self, *, now: int) -> int | None:
+        """When the scheduler next has work, or `None` when it has none at all.
+
+        The earlier of a schedule due on a mounted root, by its log, and an
+        appointment of a session not mounted, by the index. Anything due by the
+        last pass was attempted then — fired, or declined and logged — so it does
+        not hold the sleep at zero; and no pass begins sooner than `PASS_FLOOR`
+        after the last, so an interval of a millisecond is not a busy loop.
+        """
+        moments = [
+            due
+            for root in self.roots.values()
+            if (seam := root.ctx.get(SCHEDULE)) is not None
+            and (due := seam.next_due(root.session, now=now)) is not None
+        ]
+        moments.extend(entry.next_at for entry in self._unmounted_appointments())
+        ahead = [moment for moment in moments if moment > self._last_pass]
+        if not ahead:
+            return None
+        return max(min(ahead), self._last_pass + int(PASS_FLOOR * 1000))
+
+    async def keep_schedules(self, stop: anyio.Event) -> None:
+        """The scheduler: a pass, then sleep until the next has work (P5-06, P6-23).
+
+        Asleep rather than polling, and with nothing scheduled, asleep until told:
+        making a schedule is the opt-in (docs/seams/schedule.md). The first pass is
+        at once, so a boot wakes what came due while the daemon was down. A wake by
+        the clock is a due wake, which may retry a rebuild that failed (`_rebuild`).
+        """
+        while True:
+            # Before the pass, so a change it makes or meets still wakes the next.
+            self._moved = moved = anyio.Event()
+            try:
+                await self.wake_and_tick()
+            except Exception:
+                log.exception("ph_app.daemon: the scheduler pass failed")
+            self.planned = self.next_wake(now=now_ms())
+            delay = math.inf if self.planned is None else (self.planned - now_ms()) / 1000
+            with anyio.move_on_after(max(0.0, delay)) as sleep:
+                await first_of(stop, moved)
+            if stop.is_set():
+                return
+            if sleep.cancelled_caught:
+                self._occasions += 1
 
     async def tick(self, *, now: int | None = None) -> list[str]:
         """Fire whatever is due on every mounted root (P5-06). Returns their ids.
@@ -2004,7 +2088,7 @@ class Supervisor:
                     fired.append(entry.id)
                 # Only when something was appended: adding `or schedule.live(...)`
                 # folds the whole log a second time to decide whether to flush a
-                # buffer the first fold has just left empty, every five seconds.
+                # buffer the first fold has just left empty, on every pass.
                 if claimed:
                     await self._flush(root)
             except Exception:

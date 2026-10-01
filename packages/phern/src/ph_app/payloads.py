@@ -432,7 +432,9 @@ class DaemonStatusReply(CapabilityBlock):
     """Seconds, or `None` for a daemon that never passivates. Optional because
     the absence is a *setting* and not a missing field — `exclude_none` would
     drop it, so the reader defaults it back to `None` and prints "off"."""
-    tick_every: float
+    next_wake: int | None = None
+    """When the scheduler next wakes, epoch ms, or `None` while it has nothing
+    planned: it sleeps until then rather than ticking."""
     sweep_every: float
     heartbeat_every: float
     watch_every: float

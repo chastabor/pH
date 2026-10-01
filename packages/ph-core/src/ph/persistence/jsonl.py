@@ -641,6 +641,11 @@ class JsonlSessionStore:
         await claim_session(scope, self.root, session_id)
         write_on_unwind(scope, self)
 
+    def holding(
+        self, types: frozenset[str], *, gate: str
+    ) -> Iterator[tuple[str, list[SessionEvent]]]:
+        return logs_holding(self.root, types, gate=gate)
+
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
 

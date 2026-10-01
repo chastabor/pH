@@ -54,6 +54,26 @@ nothing says the log holds it. With no sink registered, nothing is read.
 The cost is lag, not loss: a record ships at the next flush, which every step,
 tool call and turn end makes. It still carries its event's own `time`.
 
+## Limit: the shutdown tail is in the log, not the ledger
+
+A mount's rows unwind in reverse mount order, each layer before the ones it stands
+on, and that order stays: it is what makes a teardown readable as the mount read
+backwards. Telemetry (row 53 in `ph-base`) therefore unwinds before the agent row
+(5), and what an agent's teardown appends — `workspace/disposed`, a child's
+tombstone, a canceled turn's closers — is written only by the mount's last write
+(`ph.persistence.write_on_unwind`), after telemetry has gone. Measured over one
+turn of the base profile, every record shipped but `workspace/disposed`. An OTLP
+sink misses the same tail, and a little more: a profile appends its row after
+telemetry's, so it unwinds first.
+
+**Not fixed by reordering rows.** Mounting the durability rows before `agent`
+would bring the teardown flush inside telemetry's life, at the price of an unwind
+order that is a list of exceptions rather than the layering. A fix has to work
+with the order — for instance a later reader that exports, from the stored log,
+what lies past the last record the ledger holds for that session. Until then the
+log is complete and the ledger is not, which is the direction §8 already allows:
+the log is the trace.
+
 ## One exception to mirroring
 
 Ledger records mirror session events one-to-one, except that **only the first

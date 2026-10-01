@@ -818,6 +818,27 @@ async def test_a_seeded_child_writes_only_what_this_store_lacks(
     assert [event.seq for event in store.read("c")[1]] == list(range(inherited + 1))
 
 
+async def test_every_backend_says_which_logs_hold_a_record(store: SessionPersistence) -> None:
+    """S18's rebuild read JSONL files under one directory, so a store of another
+    kind had none of its logs read — and the index was marked complete anyway.
+    `holding` is the Protocol's question, answered by each backend its own way.
+
+    Sabotage: answer Turso's `holding` from JSONL files, as the rebuild did, and it
+    finds nothing.
+    """
+    gated, plain = _session(store, "gated"), _session(store, "plain")
+    _append(store, gated, "turn/start", {"turn": 1})
+    _append(store, gated, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    _append(store, plain, "turn/start", {"turn": 1})
+    await store.flush(gated)
+    await store.flush(plain)
+
+    found = dict(store.holding(frozenset({"turn/start", "turn/end"}), gate="turn/end"))
+
+    assert [event.type for event in found["gated"]] == ["turn/start", "turn/end"]
+    assert found["plain"] == [], "no gate record, so none of its records"
+
+
 async def test_a_listing_row_says_the_same_thing_from_either_backend(
     store: SessionPersistence,
 ) -> None:

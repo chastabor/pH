@@ -338,7 +338,7 @@ async def test_schedule_creates_lists_and_cancels(
     that pair is the wire's shape, and putting it in front of a person is how a
     CLI comes to be a transcription of a protocol.
     """
-    async with serving(tmp_path, monkeypatch, tick_every=0.0):
+    async with serving(tmp_path, monkeypatch, scheduling=False):
         empty = await _ph("agents", "schedule", "delta")
         # Listing refuses on a root nobody has started — the honest answer, and
         # the same one `session/snapshot` gives.
@@ -380,7 +380,7 @@ async def test_a_schedule_needs_one_timing_and_something_to_say(
     timing flags is the other half: whichever one lost would be a schedule
     firing on a rule its author did not write.
     """
-    async with serving(tmp_path, monkeypatch, tick_every=0.0):
+    async with serving(tmp_path, monkeypatch, scheduling=False):
         mute = await _ph("agents", "schedule", "eps", "--every", "60000")
         assert mute.exit_code == 2
         assert "--prompt" in mute.output

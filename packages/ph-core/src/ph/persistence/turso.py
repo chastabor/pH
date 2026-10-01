@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +58,7 @@ from .protocol import (
     StoredSession,
     attach,
     descendants_among,
+    gated,
     stored_row,
     write_on_unwind,
 )
@@ -362,6 +363,28 @@ class TursoSessionStore:
         """
         await claim_session(scope, self.root, session_id)
         write_on_unwind(scope, self)
+
+    def holding(
+        self, types: frozenset[str], *, gate: str
+    ) -> Iterator[tuple[str, list[SessionEvent]]]:
+        """One database at a time. A database whose rows never name `gate` is not
+        read, as JSONL searches a log's bytes first — most hold none of it."""
+        needle = f'"{gate}"'
+        for path, _stat in session_dbs(self.root):
+            session_id = path.name[: -len(SUFFIX)]
+            try:
+                with _reading(path) as connection:
+                    named = connection.execute(
+                        "SELECT 1 FROM events WHERE instr(wire, ?) > 0 LIMIT 1", (needle,)
+                    ).fetchone()
+                if named is None:
+                    yield session_id, []
+                    continue
+                _header, events = self.read_own(session_id, family=path.parent.name, types=types)
+            except Exception:
+                log.warning("ph.persistence.turso: could not read %s", path, exc_info=True)
+                continue
+            yield session_id, gated(events, gate)
 
     def stored(self, *, limit: int = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.

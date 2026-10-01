@@ -440,6 +440,11 @@ class ScheduleService:
         """The schedules that could still fire."""
         return [state for state in self.states(session).values() if not state.canceled]
 
+    def next_due(self, session: Session, *, now: int) -> int | None:
+        """The earliest moment any live schedule here wants — the moment it is
+        overdue for, if one is — or `None` when none will fire again."""
+        return _soonest(self.live(session), now=now)
+
     def claim(self, session: Session, *, now: int) -> list[Schedule]:
         """Claim everything due, write-ahead, and return it for delivery.
 
@@ -481,9 +486,7 @@ class ScheduleService:
         if self.index is None:
             return
         stamp = now if now is not None else now_ms()
-        self.index.record(
-            session.id, next_at=_soonest(self.live(session), now=stamp), now=stamp, new=new
-        )
+        self.index.record(session.id, next_at=self.next_due(session, now=stamp), now=stamp, new=new)
 
     def heartbeat(self, session: Session, *, now: int, live: int) -> None:
         """Record that the scheduler is still watching this root.
@@ -501,10 +504,15 @@ def _soonest(states: Iterable[ScheduleState], *, now: int) -> int | None:
 
 
 def rebuild_index(
-    index: ScheduleIndex, logs: Iterable[tuple[str, Sequence[SessionEvent]]], *, now: int
+    index: ScheduleIndex,
+    logs: Iterable[tuple[str, Sequence[SessionEvent]]],
+    *,
+    now: int,
+    vouch: bool = True,
 ) -> bool:
     """Rebuild `index` from every stored log, for an index that cannot vouch for
     itself (S18). Blocking: it reads every log `logs` yields. Whether it was written.
+    `vouch` is whether `logs` are the deployment's own store (`ScheduleIndex.replace`).
 
     `logs` yields each session's id and its `FOLDED` records: none for a log with
     no schedule, which withdraws any entry it had. A log `logs` leaves out keeps
@@ -523,7 +531,7 @@ def rebuild_index(
             if soonest is None
             else Appointment(session_id, soonest, max(event.time for event in events))
         )
-    return index.replace(read, since=survey)
+    return index.replace(read, since=survey, vouch=vouch)
 
 
 class Config(WireModel):

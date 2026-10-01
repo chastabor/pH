@@ -28,6 +28,11 @@ event's own `time`, so the latency the first chunk reports is the one it had, an
 the export lags only by the distance to the next flush, which every step, tool
 call and turn end makes.
 
+**Limit: the shutdown tail is not exported.** Rows unwind in reverse mount order,
+so this row goes before the agent row, and what an agent's teardown appends is
+written only by the mount's last write, after it. That order stays; see
+`docs/seams/session_telemetry.md` for why, and for what a fix has to respect.
+
 @module ph.seams.telemetry
 """
 

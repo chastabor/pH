@@ -59,6 +59,7 @@ from typing import Any, Protocol, cast
 import anyio
 from textual.binding import Binding
 
+from ph.cancel import first_of
 from ph.cordis import maybe_await
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import answer_to_wire
@@ -80,7 +81,7 @@ from .. import verbs
 from ..attach import Tray, stage_bytes
 from ..daemon.client import DaemonClient
 from ..daemon.duplex import answering
-from ..daemon.follow import EventFrame, Followed, first_of
+from ..daemon.follow import EventFrame, Followed
 from ..params import (
     BrowseParams,
     CommandParams,

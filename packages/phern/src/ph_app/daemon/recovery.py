@@ -230,6 +230,15 @@ from what the transcript shows.
 """
 
 
+PASS_FLOOR: float = 1.0
+"""The least time, in seconds, between two scheduler passes the clock wakes.
+
+The scheduler sleeps until the next appointment rather than ticking, so nothing
+else bounds how often it runs: an `interval` of a millisecond would be a busy
+loop. A second is finer than any schedule a person sets, and a pass costs a turn.
+"""
+
+
 WAKE_WITHIN: float | None = None
 """How stale an indexed appointment may be and still wake its root, or `None`.
 
@@ -247,11 +256,4 @@ default is that a schedule somebody deliberately created is a schedule they mean
 
 It only ever bites on appointments nobody has kept: one a daemon is serving
 refreshes its entry every time it fires.
-"""
-
-REBUILD_EVERY: float = 60.0
-"""The least time, in seconds, between two rebuilds of the schedule index (S18).
-
-A rebuild reads every stored log, and one whose write fails leaves the index
-still in doubt. Without a floor, the next tick would start the whole scan again.
 """

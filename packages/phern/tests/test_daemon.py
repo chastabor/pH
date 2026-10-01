@@ -102,7 +102,7 @@ chunk, and rendering a payload for zero watchers measured **6.6 µs an event —
 **The schedule tick flushes only when something was appended.** The condition also
 read `or schedule.live(...)`, which folded the whole log a second time to decide to
 flush a buffer the first fold had just left empty: **24 ms a root at 500 000
-events, every five seconds**.
+events, on every pass**.
 
 ## Why `passivatable` checks quiet before it folds
 
@@ -155,8 +155,9 @@ from daemon_helpers import (
 
 from ph.agent.inbox import InboxTarget
 from ph.agent_loop.driver import ReactLoopAgent
-from ph.cordis import Context, Profile
-from ph.json import JsonObject, as_str
+from ph.bundles import BASE, HEADLESS
+from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
+from ph.json import JsonObject, JsonValue, as_str
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
 from ph.paths import resolve_roots
 from ph.persistence import session_path
@@ -164,15 +165,16 @@ from ph.seams.models import ModelChoice
 from ph.seams.schedule import Schedule
 from ph.seams.schedule_index import INDEX_NAME, ScheduleIndex
 from ph.seams.subagents import ADMITTED, DELETED, PARENT_TEARDOWN, STATUS, SubagentService
-from ph.session import Session, SessionEvent, SessionHeader, session_written
+from ph.session import Session, SessionEvent, SessionHeader, now_ms, session_written
 from ph.session.kinds import SESSION_HOLDER, WORKSPACE_RESTORE, credential_hold
-from ph.testing import ReapedHost, log_event, not_none, stored_log, stored_types
+from ph.testing import ReapedHost, log_event, not_none, noting, raising, stored_log, stored_types
 from ph_app import runtime as runtime_module
 from ph_app import verbs
 from ph_app.daemon import recovery, server
+from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.projections import family_of, family_rows
-from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
+from ph_app.daemon.recovery import CHILD_RETRY_LIMIT, PASS_FLOOR
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import NotARoot, Root, RootStartAbandoned, Supervisor
 from ph_app.payloads import SessionChildrenNotice, SessionEventNotice
@@ -2139,19 +2141,12 @@ async def test_a_session_with_no_appointment_is_left_alone(tmp_path: Path) -> No
         assert reopened.id == "no-appointment"
 
 
-async def test_a_daemon_rebuilds_an_index_it_cannot_trust(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """S18: an index that lost its contents is rebuilt from the logs, not left to
-    correct itself one session at a time as each is opened — which, for a session
-    nobody opens, is the silence P6-23 closed.
-
-    Off the pass, so the first pass reads what the file says and a later one what
-    the rebuild found.
-
-    Sabotage: drop the `_doubt` call from `rehydrate`, and the appointment never fires.
-    """
-    async with supervised(tmp_path, monkeypatch) as first:
+async def _lost_appointment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: Profile | None = None
+) -> int:
+    """A root's interval schedule, written to its log, and an index that lost it.
+    When it was made, so a pass can be run after it is due."""
+    async with supervised(tmp_path, monkeypatch, profile=profile) as first:
         root = await first.start("appointed")
         root.ctx.require(SCHEDULE).create(
             root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
@@ -2159,14 +2154,163 @@ async def test_a_daemon_rebuilds_an_index_it_cannot_trust(
         made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
         await first._flush(root)
     (tmp_path / INDEX_NAME).write_text("{ not json", encoding="utf-8")
+    return made
+
+
+async def test_a_daemon_rebuilds_an_index_it_cannot_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S18: an index that lost its contents is rebuilt from the logs before the pass
+    reads it, not left to correct itself one session at a time as each is opened —
+    which, for a session nobody opens, is the silence P6-23 closed.
+
+    With nothing mounted the read is a guess, so what it finds is woken and not
+    vouched for; the root that wakes brings the store that can vouch.
+
+    Sabotage: drop the rebuild from `rehydrate`, and the appointment never fires.
+    """
+    made = await _lost_appointment(tmp_path, monkeypatch)
 
     async with supervised(tmp_path, monkeypatch) as second:
-        assert await second.wake_and_tick(now=made + 600_000) == [], "the file says nothing"
-        await until(lambda: ScheduleIndex(tmp_path).survey().trusted, what="the rebuild")
-
         fired = await second.wake_and_tick(now=made + 600_000)
 
         assert fired == ["s"], "the logs said what the file had lost"
+        assert not ScheduleIndex(tmp_path).survey().trusted, "a guess vouches for nothing"
+        await second.wake_and_tick(now=made + 600_000)
+        assert ScheduleIndex(tmp_path).survey().trusted, "the woken root's store did"
+
+
+async def test_a_daemon_rebuilds_through_its_roots_store_whatever_its_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S18's rebuild read JSONL files under one directory, so a deployment that keeps
+    its logs in Turso had none of them read — and the index was marked complete, so
+    an appointment it had lost stayed lost.
+
+    With nothing mounted the daemon can only guess, and the guess finds nothing.
+    Once a root mounts, the rebuild reads through that root's store, whatever kind.
+
+    Sabotage: have `_rebuild` read the guessed directory with a root mounted too,
+    and the lost appointment never fires.
+    """
+    # Base's JSONL row disabled and the Turso one inserted, as a profile swaps them.
+    turso: list[JsonValue] = [
+        {"id": "session-persistence", "disabled": True},
+        {"insert": [{"id": "session-persistence-turso", "name": "session-persistence-turso"}]},
+    ]
+    profile = Profile.from_documents(
+        [*load_profile_documents([BASE, HEADLESS]), ProfileDocument("turso", turso)]
+    )
+    made = await _lost_appointment(tmp_path, monkeypatch, profile)
+
+    async with supervised(tmp_path, monkeypatch, profile=profile) as second:
+        stamp = made + 600_000
+        assert await second.wake_and_tick(now=stamp) == []
+        assert not ScheduleIndex(tmp_path).survey().trusted, "a guess vouches for nothing"
+
+        await second.start("bystander")
+        assert await second.wake_and_tick(now=stamp) == ["s"], "the store said what was lost"
+        assert ScheduleIndex(tmp_path).survey().trusted
+
+
+async def test_a_rebuild_that_failed_waits_for_a_change_not_a_timer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuild that failed — on a read-only `$PH_HOME`, say — fails the same way
+    on the next pass, and the daemon used to try every minute for as long as it did.
+    It tries again only once something it depends on moved: a schedule made or
+    canceled, one come due, or a store to read through.
+
+    Sabotage: have `_rebuild` try whenever the index is in doubt, and the second
+    pass tries again with nothing changed.
+    """
+    attempts: list[int] = []
+    monkeypatch.setattr(
+        supervisor_module,
+        "rebuild_index",
+        lambda *_args, **_kwargs: noting(attempts, 1, raising(OSError("read-only file system"))),
+    )
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        (tmp_path / INDEX_NAME).write_text("{ not json", encoding="utf-8")
+        await supervisor.wake_and_tick(now=1)
+        await supervisor.wake_and_tick(now=2)
+        assert len(attempts) == 1, "nothing changed, so nothing was tried again"
+
+        supervisor.notice_schedules()
+        await supervisor.wake_and_tick(now=3)
+        assert len(attempts) == 2, "a change is a reason to try again"
+
+
+async def test_an_appointment_the_pass_left_does_not_hold_the_sleep_at_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An appointment due by the last pass was attempted then — and one it declined
+    (`wake_within`) or could not mount is still overdue in the index. Planned from as
+    it stands, it would wake the scheduler at once, every time: a busy loop. It waits
+    for the next wake or change instead.
+
+    Sabotage: drop the last-pass filter from `next_wake`, and the overdue entry is
+    the next wake.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        supervisor.wake_within = 1.0
+        ScheduleIndex(tmp_path).record("abandoned", next_at=5, now=0)
+
+        assert await supervisor.wake_and_tick(now=100_000) == []
+
+        assert "abandoned" not in supervisor.roots, "declined: confirmed too long ago"
+        assert supervisor.next_wake(now=100_000) is None
+
+
+async def test_no_pass_comes_sooner_than_the_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no tick, nothing else bounds how often the scheduler runs: an interval of
+    a millisecond would wake it a thousand times a second.
+
+    Sabotage: drop `PASS_FLOOR` from `next_wake`, and the next wake is a millisecond
+    away.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("eager")
+        root.ctx.require(SCHEDULE).create(
+            root.session, Schedule(id="s", kind="interval", spec="1", prompt="again")
+        )
+        stamp = now_ms()
+        await supervisor.wake_and_tick(now=stamp)
+
+        planned = supervisor.next_wake(now=stamp)
+        assert planned is not None and planned >= stamp + PASS_FLOOR * 1000
+
+
+async def test_the_scheduler_sleeps_until_something_is_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No tick. With nothing scheduled the scheduler has no deadline, and a schedule
+    made on a root wakes it, by its log, to sleep until that one is due — which it
+    then fires.
+
+    Sabotage: drop the schedule watch from `_start`, and the sleeper never learns of
+    the appointment.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("timed")
+        assert supervisor.next_wake(now=now_ms()) is None, "nothing scheduled, nothing to wake for"
+        supervisor.tasks.start_soon(supervisor.keep_schedules, anyio.Event())
+        await until(lambda: supervisor._last_pass > 0, what="the first pass")
+        assert supervisor.planned is None, "asleep until told"
+
+        at = now_ms() + 300
+        root.ctx.require(SCHEDULE).create(
+            root.session, Schedule(id="soon", kind="once", spec=str(at), prompt="go")
+        )
+        await until(lambda: supervisor.planned is not None, what="the plan to move")
+        assert not_none(supervisor.planned) >= at
+
+        await until(
+            lambda: any(e.type == "schedule/tick" for e in root.session.events_from(0)),
+            what="the appointment to fire",
+        )
 
 
 async def test_catch_up_is_unbounded_by_default(tmp_path: Path) -> None:
