@@ -144,6 +144,7 @@ from .recovery import (
     UNREACHABLE,
     VERIFY_AFTER,
     VIOLATED,
+    WAKE_RETRY_DELAYS,
     WAKE_WITHIN,
     Recovery,
     floored,
@@ -982,6 +983,10 @@ class Supervisor:
     `None` — the default — catches up on whatever was missed, however long the
     daemon was down, which is the scheduler's whole promise. A deployment that
     would rather not resurrect a long-abandoned session sets a bound here."""
+    wake_retry_delays: tuple[float, ...] = WAKE_RETRY_DELAYS
+    """How long after a pass that could not mount a session for its appointment the
+    next tries again, one step per consecutive failing pass, the last repeated
+    (`recovery.WAKE_RETRY_DELAYS` says why there is a retry at all)."""
     roots: dict[str, Root] = field(default_factory=dict)
     recheck_lifetime: Callable[[], None] = _nothing
     """Say that what holds the *daemon* may have moved — `serve` points this at
@@ -1018,7 +1023,8 @@ class Supervisor:
     wake, which may retry a rebuild that failed (`_rebuild`).
 
     Told by `notice_schedules` (a schedule made or canceled, by the log) and by a root
-    mounting, which brings its store and its own appointments."""
+    mounting, which brings its store and its own appointments. A session that would
+    not mount for its appointment is retried on a bounded backoff (`_wake_retry`)."""
     verifier: Planner = field(init=False)
     """The invariant check (I6, P12-04): a pass that checks every root that is settled
     and has had nothing written for `verify_after` (`_verify_quiet`), then a sleep
@@ -1047,6 +1053,12 @@ class Supervisor:
     _last_pass: int = 0
     """When the last scheduler pass began. Anything due by then was attempted, so it
     does not hold the next sleep at zero (`next_wake`)."""
+    _wake_failures: int = 0
+    """How many scheduler passes in a row left an appointment behind because its
+    session would not mount; the rung of `wake_retry_delays` the next retry takes."""
+    _wake_retry: int | None = None
+    """When the next pass retries a wake that failed, epoch ms, or `None` while none
+    has. Planned by `next_wake` beside the appointments themselves."""
     _last_verify: int = 0
     """When the last invariant pass began, which floors the next (`next_verify`)."""
     _last_release: int = 0
@@ -1906,7 +1918,12 @@ class Supervisor:
         once rather than twice or never.
 
         Failures are per root and logged: a session the index names but that will
-        not mount costs its own appointment, not the pass.
+        not mount costs its own appointment, not the pass. **It is tried again**,
+        `wake_retry_delays` after this pass, a rung further up for each pass in a
+        row that leaves one behind, until a pass wakes everything it meant to.
+        `next_wake` would otherwise never plan for it — it drops moments already
+        attempted, so the lease a `phern -p` held at the appointed minute would
+        have cost the appointment for as long as nothing else woke the scheduler.
 
         **An index that cannot vouch for itself is rebuilt from the logs** (S18)
         before it is read, so this pass wakes what the rebuild found (`_rebuild`).
@@ -1918,6 +1935,7 @@ class Supervisor:
             if not index.survey().trusted:
                 await self._rebuild(index)
             appointments = index.read()
+        left_behind = False
         for entry in sorted(appointments.values(), key=lambda one: one.next_at):
             if entry.session_id in self.roots or entry.next_at > stamp:
                 continue
@@ -1931,6 +1949,7 @@ class Supervisor:
             try:
                 await self.start(entry.session_id)
             except Exception:
+                left_behind = True
                 log.warning(
                     "ph_app.daemon: could not wake %s for its schedule",
                     entry.session_id,
@@ -1942,6 +1961,13 @@ class Supervisor:
                 entry.session_id,
                 entry.next_at,
             )
+        if left_behind:
+            rung = min(self._wake_failures, len(self.wake_retry_delays) - 1)
+            self._wake_failures += 1
+            self._wake_retry = stamp + int(self.wake_retry_delays[rung] * 1000)
+        else:
+            self._wake_failures = 0
+            self._wake_retry = None
 
     def _index(self) -> ScheduleIndex | None:
         """The index this daemon reads, or `None` when nothing indexes.
@@ -2147,7 +2173,9 @@ class Supervisor:
         appointment of a session not mounted, by the index. Anything due by the
         last pass was attempted then — fired, or declined and logged — so it does
         not hold the sleep at zero; and no pass begins sooner than `PASS_FLOOR`
-        after the last, so an interval of a millisecond is not a busy loop.
+        after the last, so an interval of a millisecond is not a busy loop. An
+        appointment whose session would not mount is the one attempt that is
+        planned again, at the moment `rehydrate` set for it.
         """
         moments = [
             due
@@ -2156,6 +2184,8 @@ class Supervisor:
             and (due := seam.next_due(root.session, now=now)) is not None
         ]
         moments.extend(entry.next_at for entry in self._unmounted_appointments())
+        if self._wake_retry is not None:
+            moments.append(self._wake_retry)
         ahead = [moment for moment in moments if moment > self._last_pass]
         if not ahead:
             return None

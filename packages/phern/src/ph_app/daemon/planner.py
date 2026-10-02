@@ -14,6 +14,8 @@ The rules the three would otherwise each carry, held once:
   the next sleep instead of being swallowed by this one.
 * **A failing pass is logged and the loop goes on.** A housekeeping pass that
   raised would otherwise take the daemon's task group, and every root, with it.
+  **So is a failing plan**, which sleeps until told: a job that cannot say when it
+  is next due waits for the next notice rather than ending the process.
 * **`stop` is read before the alarm**, so a daemon stopping at the moment
   something came due stops, instead of counting a due wake.
 
@@ -73,9 +75,10 @@ class Planner:
             self._moved = moved = anyio.Event()
             try:
                 await self.run()
+                self.planned = self.plan(now_ms())
             except Exception:
                 log.exception("ph_app.daemon: %s failed", self.what)
-            self.planned = self.plan(now_ms())
+                self.planned = None
             alarm = Alarm(self.planned)
             await first_of(stop, moved, alarm)
             if stop.is_set():

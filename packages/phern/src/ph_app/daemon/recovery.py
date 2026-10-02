@@ -50,6 +50,7 @@ __all__ = [
     "UNREACHABLE",
     "VERIFY_AFTER",
     "VIOLATED",
+    "WAKE_RETRY_DELAYS",
     "Recovery",
     "floored",
     "recovery_of",
@@ -259,6 +260,23 @@ def floored(moment: int, last_pass: int) -> int:
     """`moment`, or `PASS_FLOOR` after `last_pass` if that is later (epoch ms)."""
     return max(moment, last_pass + int(PASS_FLOOR * 1000))
 
+
+WAKE_RETRY_DELAYS: tuple[float, ...] = (30.0, 60.0, 120.0, 300.0, 600.0)
+"""Seconds after a scheduler pass that could not mount a session for its appointment
+before the next pass tries again: one step up this ladder per consecutive failing
+pass, the last step repeated (`Supervisor.rehydrate`, `next_wake`).
+
+A one-shot backoff of `RETRY_DELAYS`' kind, not a cadence: nothing is tried while
+no wake has failed, and the moment is planned, named by `phern agents doctor`, and
+dropped the first time a pass wakes everything it meant to. It exists because the
+usual reason a wake fails is a lease another process holds on the session's log — a
+`phern -p` run on it at the appointed minute — and that process releasing it is
+not something this daemon can be told. Without it an appointment the pass left
+behind was planned for by nothing: `next_wake` drops moments already attempted, so
+a quiet daemon never looked again, and `booked()` kept it up for a schedule it would
+never keep. Declining an appointment as too stale (`WAKE_WITHIN`) is not a failure
+and is not retried: it will not be younger next time.
+"""
 
 WAKE_WITHIN: float | None = None
 """How stale an indexed appointment may be and still wake its root, or `None`.

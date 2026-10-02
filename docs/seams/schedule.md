@@ -72,6 +72,16 @@ watches, and a root mounting moves the plan too: either wakes it to plan again.
 **With nothing scheduled it has no deadline at all**, so making a schedule is the
 opt-in. The first pass is at boot.
 
+**A session the pass could not mount for its appointment is tried again.** The usual
+cause is a lease: a `phern -p` running on that session at the appointed minute holds
+its log, and that process letting go is nothing this daemon can be told. So the
+pass plans a retry, `WAKE_RETRY_DELAYS` later (30 s, then a minute, two, five, ten,
+and ten thereafter, one step per pass in a row that leaves an appointment behind),
+and drops it the first time a pass wakes everything it meant to. That is a bounded
+backoff, the shape of the retry ladder, not a cadence: nothing is planned while no
+wake has failed. An appointment declined as too stale (`wake_within`) is not a
+failure and is not retried.
+
 **The sleep is on the wall clock** (`ph.wall_clock`). The loop's own deadlines run
 on the monotonic clock, which stops while the machine is suspended, so a laptop
 closed overnight used to wake the scheduler late by however long it slept. A

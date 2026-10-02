@@ -2604,6 +2604,102 @@ async def test_an_appointment_the_pass_left_does_not_hold_the_sleep_at_zero(
         assert supervisor.next_wake(now=100_000) is None
 
 
+async def _kept_appointment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    """A root's interval schedule, written to its log and to the index, and the root
+    released: what a second daemon finds at boot. When it was made."""
+    async with supervised(tmp_path, monkeypatch) as first:
+        root = await first.start("appointed")
+        root.ctx.require(SCHEDULE).create(
+            root.session, Schedule(id="s", kind="interval", spec="1000", prompt="tick")
+        )
+        made = root.ctx.require(SCHEDULE).states(root.session)["s"].created_at
+        await first._flush(root)
+    return made
+
+
+def _mount_refusing(monkeypatch: pytest.MonkeyPatch, *, times: int | None) -> list[int]:
+    """`mounted` that refuses the first `times` mounts (every one, for `None`) the
+    way a lease another process holds refuses them, then mounts as usual. Returns
+    the list each attempt appends to."""
+    attempts: list[int] = []
+    real = runtime_module.mounted
+
+    @asynccontextmanager
+    async def refusing(profile: Profile, *, project: Path | None = None) -> AsyncIterator[Context]:
+        attempts.append(1)
+        if times is None or len(attempts) <= times:
+            raise OSError("the session's log is held by another process")
+        async with real(profile, project=project) as ctx:
+            yield ctx
+
+    monkeypatch.setattr(runtime_module, "mounted", refusing)
+    return attempts
+
+
+async def test_a_session_that_would_not_mount_for_its_appointment_is_woken_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wake the pass could not make is planned again, and the retry mounts the root
+    with nothing else happening: no client, no schedule change, no other wake.
+
+    The pass drops moments it already attempted (`next_wake`), which is right for
+    an appointment it fired or declined and wrong for one it could not reach: a
+    `phern -p` holding the session's lease at the appointed minute cost the
+    appointment for as long as the daemon stayed quiet, while `booked()` kept the
+    daemon up for it.
+
+    Sabotage: drop `_wake_retry` from `next_wake`, and the retry never comes. Drop
+    the attempt count assertion's floor (`PASS_FLOOR`) and a cadence would pass it.
+    """
+    await _kept_appointment(tmp_path, monkeypatch)
+    attempts = _mount_refusing(monkeypatch, times=1)
+    async with supervised(tmp_path, monkeypatch) as second:
+        second.wake_retry_delays = (0.2,)
+        second.tasks.start_soon(second.scheduler.keep, anyio.Event())
+        await until(lambda: len(attempts) == 1, what="the first wake to be refused")
+        assert "appointed" not in second.roots
+        await until(
+            lambda: second.scheduler.planned is not None,
+            what="the refused wake to be planned again",
+        )
+
+        await until(lambda: "appointed" in second.roots, what="the retry to mount the root")
+        assert attempts == [1, 1], "one retry, not a cadence"
+        assert second.next_wake(now=now_ms()) is not None, "its schedule is planned from its log"
+        assert second._wake_retry is None, "and the retry is dropped once the wake is made"
+
+
+async def test_a_refused_wake_backs_off_and_stops_growing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each pass that leaves an appointment behind plans the next a rung further up
+    `wake_retry_delays`; the last rung repeats; a declined appointment is not a
+    failure, so it plans no retry.
+
+    Sabotage: plan every retry from the first rung, and the second pass plans
+    `+2 s` where `+5 s` is asserted.
+    """
+    made = await _kept_appointment(tmp_path, monkeypatch)
+    _mount_refusing(monkeypatch, times=None)
+    async with supervised(tmp_path, monkeypatch) as second:
+        second.wake_retry_delays = (2.0, 5.0)
+        # Well past due, so the pass reaches the mount rather than finding
+        # nothing due yet.
+        stamp = made + 600_000
+
+        await second.wake_and_tick(now=stamp)
+        assert second.next_wake(now=stamp) == stamp + 2_000
+        await second.wake_and_tick(now=stamp + 2_000)
+        assert second.next_wake(now=stamp + 2_000) == stamp + 7_000
+        await second.wake_and_tick(now=stamp + 7_000)
+        assert second.next_wake(now=stamp + 7_000) == stamp + 12_000, "the last rung repeats"
+
+        # Too stale to wake is a decision, not a failure: nothing to try again.
+        second.wake_within = 0.001
+        await second.wake_and_tick(now=stamp + 12_000)
+        assert second.next_wake(now=stamp + 12_000) is None
+
+
 async def test_no_pass_comes_sooner_than_the_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -679,6 +679,31 @@ and removing that directory is the fix.
 | P12-07 | **Landed (2026-10-02).** Guest `NOTE_EXIT` (`kqueue-exit`); `POLL_SECONDS` gone | — | `test_lifecycle`: host SIGKILL during a blocking cell, sabotage-checked |
 | P12-08 | **Landed (2026-10-02).** Docs, doctor rows, `_every` deleted, Phase 12 in `Implementation_Plan.md` | all | `test_non_guarantees`, doc links |
 
+## Review after landing (2026-10-02)
+
+A read of every converted loop against the poll it replaced, asking what used to
+be covered by the cadence and is now covered by nothing. Two things, both fixed:
+
+* **A wake the scheduler could not make was never tried again.** `rehydrate` logged
+  "could not wake" and moved on, `next_wake` drops moments already attempted, and
+  `booked()` kept the daemon up for the appointment it would never keep. The usual
+  cause is a lease a `phern -p` holds on the session at the appointed minute, and
+  that process letting go is nothing the daemon can be told. Now the pass plans a
+  retry on `recovery.WAKE_RETRY_DELAYS` (30 s up to 10 min, one rung per failing
+  pass), dropped the first time a pass wakes everything it meant to. A decline by
+  `wake_within` is not retried. Tests: the retry mounts the root with no other event
+  and no cadence (attempt count), the ladder grows and caps, and a decline plans
+  nothing; sabotage-checked by dropping the retry from `next_wake`.
+* **`Planner` guarded the pass and not the plan.** No plan raises today (`index.read`
+  answers empty, `due_at` returns `None`), but one that did would have ended the
+  daemon's task group. The plan now sits under the same guard and a failing one
+  sleeps until told. `test_planner.py`, sabotage-checked.
+
+Everything else held: every term of release, lifetime and the verifier has its
+notice; the kernel watcher is canceled by `run` and woken by `begin_abort` and a
+post-stall pong; the heartbeat's only readers were display; each deleted pass did
+one job.
+
 ## Reuse (do not rewrite)
 
 * `keep_schedules`, `notice_schedules` and `next_wake` (`supervisor.py:2001–2056`)
