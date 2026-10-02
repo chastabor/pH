@@ -1,7 +1,8 @@
 # Event-driven daemon: the sweep, the kernel clock, the invariant check and the socket watch
 
 *Phase 12. Four timers become events and one timer is deleted. The scheduler went
-first in `8cbb94a`; this phase finishes the job.*
+first in `8cbb94a`; this phase finishes the job. **All nine rows landed by
+2026-10-02.***
 
 ## Context
 
@@ -588,6 +589,20 @@ it asks. There is no cadence.
 
 ### P12-07: the guest's parent watch waits on kqueue
 
+**Landed (2026-10-02), on the mac rig.** As designed below. `_watch_parent`
+registers `EVFILT_PROC` / `NOTE_EXIT` with `EV_ONESHOT`, re-reads `os.getppid()`
+after registering, and blocks a daemon thread in `kevent`; `ESRCH` at registration
+exits at once. `POLL_SECONDS` is gone from `lifecycle.py` and its `__all__`, and
+`boot-ack` reports `kqueue-exit`. The registration was checked under a
+deny-default Seatbelt profile before it was written in, since the guest runs
+confined there. `test_lifecycle` now kills the host twice, idle and inside a
+`time.sleep(3600)` cell whose first line touches a marker the test waits for;
+the sabotage check (the watch not started) fails exactly the blocking case, and
+the idle case passes on the socket's EOF alone, which is the argument for the
+thread made concrete. The mechanism test asserts the platform's own name rather
+than membership in a set, so a Linux host that fell through to kqueue would be
+caught. Section 11 of `docs/dev-notes/linux-macos-differences.md` records it.
+
 This is row 6, the answer to "why is it needed".
 
 * **Why it exists.** The guest runs model-written cells, and it is started with
@@ -621,6 +636,19 @@ This is row 6, the answer to "why is it needed".
 
 ### P12-08: docs and bookkeeping
 
+**Landed (2026-10-02).** Most of it had landed with the row it belonged to
+(`_every`, `_cadence` and the doctor rows with P12-05; the protocol entry with
+P12-06; the seam docs with P12-01 and P12-04). What this row added: the
+dev note's §11 and the mac-rig verification of §9 and §10 (`test_wall_clock` and
+`test_path_watch` pass there; the across-a-suspend row stays a manual check), the
+protocol docstring's closing sentence, and the Phase 12 section of
+`plans/Implementation_Plan.md`. Also found on the mac rig, and not a defect in
+this repository: a stale editable install of the pre-rename `ph-app` distribution
+in the venv, whose old `tui-screen-trajectory` entry point shadowed `phern`'s and
+failed thirteen tests across four packages, with an ignored `packages/ph-app` of
+nothing but `__pycache__` failing the packaging tests. `uv pip uninstall ph-app`
+and removing that directory is the fix.
+
 * `DESIGN.md:1025`: passivation is "at `PASSIVATE_AFTER` of quiet", not "on a 60 s
   sweep".
 * `docs/seams/schedule.md`: the scheduler's wake uses P12-00 and there is no
@@ -648,8 +676,8 @@ This is row 6, the answer to "why is it needed".
 | P12-03 | **Landed (2026-10-01).** Kernel clock sleeps until its next deadline; `probe_seconds: float \| None`; `POLL_SECONDS` gone | — | kernel wake count, cross-task abort, stall re-arm, probe off |
 | P12-04 | **Landed (2026-10-01).** Invariants checked after writes settle (`verifier`, fed by `session/durable`); `check_invariants` flag; the five-minute poll gone | — | `test_daemon_invariants` (socket-free), seq gate |
 | P12-05 | **Landed (2026-10-01).** Socket watch on inotify and kqueue (`ph.path_watch`); `_every` gone | — | `test_path_watch`; the daemon watch tests (socket-free) |
-| P12-07 | guest `NOTE_EXIT` | — | macOS kernel test: host SIGKILL during a blocking cell |
-| P12-08 | docs, doctor rows, delete `_every` | all | `test_non_guarantees`, doc links |
+| P12-07 | **Landed (2026-10-02).** Guest `NOTE_EXIT` (`kqueue-exit`); `POLL_SECONDS` gone | — | `test_lifecycle`: host SIGKILL during a blocking cell, sabotage-checked |
+| P12-08 | **Landed (2026-10-02).** Docs, doctor rows, `_every` deleted, Phase 12 in `Implementation_Plan.md` | all | `test_non_guarantees`, doc links |
 
 ## Reuse (do not rewrite)
 

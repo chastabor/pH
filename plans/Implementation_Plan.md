@@ -757,6 +757,38 @@ carry, and never asks for the family.
 
 ---
 
+### Phase 12 — Nothing wakes up on a clock to ask whether something changed *(2026-09-30 → 2026-10-02; nine rows, all landed)*
+
+**Why a phase.** An audit of every package's `src/` found six timed polls left after
+the scheduler stopped ticking in `8cbb94a`: the sixty-second sweep that released quiet
+roots and expired the daemon's keep-alive, the kernel watcher's 50 ms tick, the
+five-minute invariant check, the thirty-second `lstat` of the daemon's own socket, the
+five-minute heartbeat record, and the guest's one-second `getppid()` on macOS. Each
+became a deadline computed in advance and slept until, or an event the kernel delivers
+(inotify, kqueue, `NOTE_EXIT`), or was deleted. One rule came out of it: a wait ends
+because the thing it waits on happened, or because a deadline that could be named in
+advance arrived. Deadlines that name a moment sleep on the wall clock, because the
+monotonic clock stops while the machine does. The full account is
+`plans/Event_Driven_Daemon_Plan.md`; `docs/dev-notes/linux-macos-differences.md`
+§9–§11 record what each kernel does differently.
+
+| ID | Work item | Delivers | Gate |
+|---|---|---|---|
+| P12-06 | **Landed.** The heartbeat is deleted, not converted; old logs still open, since every heartbeat was `ignorable` (`PROTOCOL_VERSION` 7) | rule 6 | `test_log_writers`, `test_trajectory`, `test_schedule` |
+| P12-00 | **Landed.** `ph.wall_clock`: `sleep_until`, `Alarm` (timerfd on `CLOCK_REALTIME`; kqueue `EVFILT_TIMER` with `NOTE_MACH_CONTINUOUS_TIME`); `first_of` takes any `Waitable` | — | `test_wall_clock` |
+| P12-01 | **Landed.** Root release sleeps until a root's quiet window ends; `Planner` (pass, plan, notice) shared by the scheduler, the releaser, the lifetime clock and the verifier; one test per notice, each sabotage-checked | A5 | `test_daemon` |
+| P12-02 | **Landed.** The daemon's keep-alive and spawn window are deadlines; `DaemonServer.sweep` is gone; `nextRelease` on the wire | — | `test_daemon_lifetime` |
+| P12-03 | **Landed.** The kernel clock sleeps until its next probe, grace or stall deadline; `probe_seconds: float \| None`; `POLL_SECONDS` gone | — | `test_kernel` |
+| P12-04 | **Landed.** Invariants are checked once a written-to root settles (`Supervisor.verifier`, fed by `session/durable`, debounced by `VERIFY_AFTER`); `checkInvariants` replaces `invariantsEvery` | I6 | `test_daemon_invariants` |
+| P12-05 | **Landed.** The socket watch hears the filesystem (`ph.path_watch`: inotify, kqueue); unavailable means checked at each request, never a cadence; `socketWatch` replaces `watchEvery`; `_every` deleted | — | `test_path_watch`, `test_daemon` |
+| P12-07 | **Landed.** The guest's parent watch waits on kqueue `NOTE_EXIT` (`kqueue-exit`), closing the one-second window; the host killed during a blocking cell is the gate | F3 | `test_lifecycle` |
+| P12-08 | **Landed.** `DESIGN.md` §5.4, the schedule and invariants seam docs, the dev note's §9–§11, the protocol 7 entry, the doctor rows, this section | rule 6 | `test_non_guarantees`, doc links |
+
+**The version bump.** Protocol 7 moves once, with 0.7.0: `daemon/status` drops
+`sweepEvery`, `heartbeatEvery`, `watchEvery` and `invariantsEvery` for `nextRelease`,
+`socketWatch` and `checkInvariants`. No log-format bump: the only record removed was
+written `ignorable`, and a log that holds it still opens.
+
 ## 5. Engineering rules that hold across every phase
 
 1. **Declare, never derive.** Aliases are fixed at class definition (`WireModel`); a name is never reconstructed from a wire string. Same for event modes (`events.declare`) and tool outputs (mandatory `output`).

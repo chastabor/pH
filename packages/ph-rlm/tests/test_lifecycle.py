@@ -41,10 +41,22 @@ async def main():
         boot_timeout=60.0,
     )
     await kernel.start([])
-    print(kernel._process.pid, flush=True)
-    await anyio.sleep(300)
+    async with anyio.create_task_group() as tasks:
+        if {busy!r}:
+            # A cell in synchronous Python: the guest's event loop, and with it
+            # the socket read that would hear the host's EOF, does not run until
+            # it returns. The marker says the cell is past its first line.
+            tasks.start_soon(kernel.run, {cell!r}, (), None)
+        print(kernel._process.pid, flush=True)
+        await anyio.sleep(300)
 
 anyio.run(main)
+"""
+
+BLOCKING_CELL = """
+import pathlib, time
+pathlib.Path({marker!r}).touch()
+time.sleep(3600)
 """
 
 
@@ -56,10 +68,28 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _await(path: Path, *, seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path.name} never appeared"
+        time.sleep(0.05)
+
+
 @pytest.mark.skipif(not sys.platform.startswith(("linux", "darwin")), reason="POSIX re-parenting")
-def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path) -> None:
+@pytest.mark.parametrize("busy", [False, True], ids=["idle", "in a blocking cell"])
+def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path, busy: bool) -> None:
+    """Killed while idle, and killed while a cell blocks the guest's loop.
+
+    The second is the case the socket cannot cover (P12-07): a cell in
+    `time.sleep` never yields to the reader that would see the host's EOF, so
+    only a mechanism outside the loop — `PR_SET_PDEATHSIG`, or the kqueue
+    `NOTE_EXIT` thread on macOS — ends the guest.
+    """
+    marker = tmp_path / "cell-started"
+    cell = textwrap.dedent(BLOCKING_CELL).format(marker=str(marker))
+    program = textwrap.dedent(HOST).format(root=str(tmp_path), busy=busy, cell=cell)
     host = subprocess.Popen(
-        [sys.executable, "-c", textwrap.dedent(HOST).format(root=str(tmp_path))],
+        [sys.executable, "-c", program],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -70,6 +100,8 @@ def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path) -
         assert line.isdigit(), f"the host did not report a child pid: {host.stderr!r}"
         child = int(line)
         assert _alive(child)
+        if busy:
+            _await(marker)
 
         # Not `terminate()`: `SIGKILL` is the case where no cleanup code of ours
         # runs at all, on any platform.
@@ -89,10 +121,11 @@ def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path) -
 def test_the_guest_reports_which_mechanism_it_armed() -> None:
     """`boot-ack` carries it, so the log says what was in force on this host.
 
-    Not cosmetic: the three mechanisms have genuinely different guarantees, and
-    a session that ran under `getppid-poll` had a one-second window where a
-    hard-killed host could leave a stray. That belongs in the record.
+    Not cosmetic: the mechanisms have genuinely different guarantees. Until
+    P12-07, a session on macOS ran under `getppid-poll`, with a one-second window
+    where a hard-killed host could leave a stray; a log that names it says so.
     """
     from ph_runtime.lifecycle import die_with_parent
 
-    assert die_with_parent() in {"pdeathsig", "getppid-poll", "job-object"}
+    expected = {"linux": "pdeathsig", "darwin": "kqueue-exit", "win32": "job-object"}
+    assert die_with_parent() == expected[sys.platform]

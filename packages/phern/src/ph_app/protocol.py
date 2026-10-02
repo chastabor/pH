@@ -184,8 +184,8 @@ for `nextRelease`, when the next quiet root may be released, absent while none
 can be. Invariants are checked when a root settles (P12-04): `invariantsEvery`
 becomes `checkInvariants`, a flag. The socket is watched by the kernel (P12-05):
 `watchEvery` becomes `socketWatch`, how (`inotify`, `kqueue`, `off`, or
-`unavailable: <why>`). The rest of Phase 12 changes this reply again
-before 0.7.0 ships.
+`unavailable: <why>`). That is the whole of Phase 12's change to this reply; the
+guest's parent watch (P12-07) moved to kqueue without touching the wire.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

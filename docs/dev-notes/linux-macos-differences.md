@@ -248,8 +248,9 @@ sleep and logs that a suspend will delay the wake.
   schedule's `schedule/tick` should appear within a second or two, with a `dueAt`
   before the resume.
 - **macOS:** the same schedule, then `pmset sleepnow` and wake the machine after
-  the schedule's moment. Same expectation. Until this has been run on the mac rig,
-  the macOS row of the table is the header file's word, not a measurement.
+  the schedule's moment. Same expectation. `test_wall_clock` passes on the mac rig
+  (2026-10-02), so the timer fires at its moment; the across-a-suspend row is
+  still the header file's word until someone closes the lid on it.
 
 **Rule:** a deadline that names a moment (an appointment, a keep-alive expiry)
 waits on the wall clock. A deadline that names an interval inside a running piece
@@ -281,8 +282,34 @@ would have seen the path resolve to a different inode; the watch does not. Nothi
 in pH's own lifecycle mounts over `$PH_RUNTIME`, so this is recorded rather than
 covered.
 
-**The macOS side has not been run on the mac rig yet.** `test_path_watch.py` holds
-both; its name-filter test is Linux-only for the reason in the table.
+`test_path_watch.py` holds both and passes on the mac rig (2026-10-02); its
+name-filter test is Linux-only for the reason in the table.
+
+### 11. Dying with the host: the kernel does it on Linux, a thread waits for it on macOS
+
+The runtime guest must not outlive a hard-killed host (F3): `SIGKILL`, the OOM
+killer or a segfault runs no teardown, and POSIX re-parents the guest instead of
+ending it. Its socket's EOF is not enough, because the read that would see it runs
+on the guest's event loop, and a cell in synchronous Python (`time.sleep(3600)`, a
+tight loop, a long native call) never yields to it. So each kernel needs a
+mechanism outside the loop (`ph_runtime.lifecycle`, P12-07):
+
+| | Linux | macOS |
+|---|---|---|
+| mechanism | `prctl(PR_SET_PDEATHSIG, SIGKILL)`; under `bwrap`, also `--die-with-parent` | a daemon thread blocked in `kevent` on `EVFILT_PROC` / `NOTE_EXIT` for the parent pid, then `os._exit(0)` |
+| who acts | the kernel, when the parent thread exits | the thread, when the parent is reaped |
+| a parent gone before arming | the signal is delivered at once | `ESRCH` at registration, and `os.getppid()` re-read after it |
+| reported in `boot-ack` as | `pdeathsig` | `kqueue-exit` |
+| under confinement | the sandbox's init takes the whole namespace down | Seatbelt's deny-default profile allows the kqueue registration; checked on the rig |
+
+Before P12-07 the macOS thread read `os.getppid()` once a second, which left a
+one-second window and one wake per second per guest for nothing. Logs from before
+then name `getppid-poll`.
+
+`packages/ph-rlm/tests/test_lifecycle.py` kills a host with `SIGKILL` twice, once
+with the guest idle and once with it inside a blocking cell, and asserts the guest
+is gone. The idle case passes on the socket's EOF alone; the blocking case is the
+one the mechanism exists for, and it fails with the watch removed.
 
 ---
 
@@ -310,4 +337,5 @@ adding one is a mechanism of the kind the fourteen turned out not to have.
 
 `test.sh` · `docs/seams/sandbox.md` (the two backends and their doors) ·
 `docs/seams/workspace.md` (canonical roots) · `packages/ph-rlm/tests/test_boot_report.py`
-· `packages/phern/tests/test_daemon_framing.py` · plan rows P6-40, P6-41
+· `packages/phern/tests/test_daemon_framing.py` · plan rows P6-40, P6-41 ·
+`plans/Event_Driven_Daemon_Plan.md` (P12-00, P12-05, P12-07 for §9–§11)

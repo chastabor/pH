@@ -651,10 +651,11 @@ class Kernel:
         one of the two), rather than over only the first.
 
         The die-with-parent mechanism it applied is logged rather than stored: the
-        three carry genuinely different guarantees — a session that ran under
-        `getppid-poll` had a one-second window in which a hard-killed host could
-        leave a stray — and that belongs in the record. What it *could not apply*
-        is stored, because `describe()` reports it: see `applied_limits`.
+        mechanisms carry genuinely different guarantees, and a log that names one
+        says what was in force. (Before P12-07 a macOS guest ran under
+        `getppid-poll`, with a one-second window in which a hard-killed host could
+        leave a stray; `kqueue-exit` closed it.) What it *could not apply* is
+        stored, because `describe()` reports it: see `applied_limits`.
         """
         while True:
             line = await self._recv_line()

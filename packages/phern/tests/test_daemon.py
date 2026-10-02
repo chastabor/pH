@@ -2234,7 +2234,10 @@ async def test_a_failing_check_does_not_end_the_watch(
     monkeypatch.setattr(server, "socket_identity", flaky)
     async with _watched(tmp_path, monkeypatch) as (daemon, path):
         root = await daemon.supervisor.start("watched")
-        await until(lambda: len(calls) == 1, what="the opening check to fail")
+        # At least one, not exactly one: kqueue reports any write in the socket's
+        # directory, and the daemon writes there (`processes.jsonl`) as the root
+        # mounts, so on macOS the watch has usually asked again by now.
+        await until(lambda: len(calls) >= 1, what="the opening check to fail")
         path.unlink()
 
         await until(lambda: bool(_notices(root)), what="the removal to be recorded anyway")
