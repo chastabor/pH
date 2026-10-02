@@ -44,6 +44,7 @@ __all__ = [
     "GRACE_SECONDS",
     "SHUTDOWN_SECONDS",
     "install_lifecycle",
+    "leave_on",
     "temporary_directory",
 ]
 
@@ -142,7 +143,7 @@ def install_lifecycle(
             log.exception("ph.resources: orderly disposal failed")
         finally:
             finished.set()
-            _leave(signum)
+            leave_on(signum)
 
     def dispose_blocking(reason: str) -> None:
         """The no-loop path: `atexit`, or a signal before the loop started."""
@@ -159,13 +160,13 @@ def install_lifecycle(
         if on_signal is not None:
             on_signal(signum)
         if finished.is_set():  # pragma: no cover - a second signal
-            _leave(signum)
+            leave_on(signum)
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             dispose_blocking(signal.Signals(signum).name)
-            _leave(signum)
+            leave_on(signum)
             return
         task = loop.create_task(unwind(signum))
         pending.add(task)
@@ -189,8 +190,11 @@ def install_lifecycle(
     return release
 
 
-def _leave(signum: int) -> None:
-    """Re-raise `signum` with the default handler, so the exit code is honest."""
+def leave_on(signum: int) -> None:
+    """Re-raise `signum` with the default handler, so the exit code is honest.
+
+    Public for the daemon's second-signal exit (`ph_app.daemon.server`), which is
+    this same act."""
     try:
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)

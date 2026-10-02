@@ -14,16 +14,22 @@ process holding it.
 A schedule is `schedule/created` until a matching `schedule/canceled`. A firing
 is `schedule/tick`, appended **before** the work is delivered.
 
-That ordering is A10's write-ahead applied to time, and the asymmetry is the
-whole argument:
+That ordering is A10's write-ahead applied to time. The tick and the prompt it
+delivers are appended together and reach disk in the flush that ends the
+scheduler's pass for that root (`Supervisor.tick`). What a crash costs depends on
+where it lands:
 
-| | cost |
-|---|---|
-| tick recorded, then lost to a crash | **one skipped run** |
-| tick delivered, then lost to a crash | a **repeated** run |
+| crash lands | on the next start | cost |
+|---|---|---|
+| before that flush | neither record is on disk, so the moment is still due and fires | a **late** run, never a lost one |
+| after the flush, before the turn's first model request | the tick is on disk and the prompt is in the inbox, which `_start` rings | the run happens, late |
+| during the turn | repair closes the turn as interrupted; the tick is on disk, so the moment is not fired again | **one skipped run** |
 
-For a schedule whose payload sends a prompt, repeating bills twice and confuses
-the transcript. So: **at-most-once, deliberately**, and the log says which.
+The model request is itself a barrier (`session-checkpoint-policy` flushes before
+every request), so no row can bill a run twice. Putting the record before the
+work is what rules out the fourth row, a turn that ran and left no tick, which
+would fire again and bill twice. So: **at-most-once, deliberately**, and the log
+says which.
 
 ## Missed ticks coalesce
 

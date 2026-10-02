@@ -840,8 +840,12 @@ async def withdraw_adoption(ctx: Context, session: Session, *, reason: str) -> N
     adopted = logged_environment(session).adopted
     if adopted is None:
         return
-    _LOG.append(session, WITHDRAWN, {**adopted.to_wire(), "reason": reason})
-    await session_written(ctx, session)
+    record = _LOG.append(session, WITHDRAWN, {**adopted.to_wire(), "reason": reason})
+    # Through the one door every change here takes: a withdrawal the log could
+    # not hold would steer this start from memory and the next from disk, where
+    # the version is still pending and will not mount again. `OverrideNotRecorded`
+    # names the write instead, as `adopt_version` does for the adoption.
+    await _recorded(ctx, session, f"{adopted.name} was not withdrawn", [record])
 
 
 SAVED = "profile/saved"

@@ -166,7 +166,7 @@ async def test_effects_release_in_reverse_even_when_one_fails() -> None:
 # ------------------------------------------------- installing and removing --
 #
 # The signal *path* is proved above, in a subprocess, because a test that let
-# `_leave` run would kill the runner. What that cannot show is what installing
+# `leave_on` run would kill the runner. What that cannot show is what installing
 # leaves behind, and it is the half an embedded host depends on: `ph` is also a
 # library, and a harness that permanently captured `SIGINT` from the process
 # that mounted it would take the interrupt away from its owner.
@@ -200,12 +200,12 @@ def test_a_signal_with_no_loop_running_disposes_where_it_stands(
 
     There is nowhere to schedule a teardown, so it runs synchronously through
     `anyio.run` rather than being dropped — which is what would happen if the
-    handler assumed a loop. `_leave` is patched because its whole job is to make
+    handler assumed a loop. `leave_on` is patched because its whole job is to make
     the process die with the signal's own exit code, and that is not something a
     test can survive.
     """
     left: list[int] = []
-    monkeypatch.setattr(resources, "_leave", left.append)
+    monkeypatch.setattr(resources, "leave_on", left.append)
     root = Context()
     disposed: list[str] = []
     root.add_disposer(lambda: disposed.append("root"))
@@ -231,7 +231,7 @@ def test_the_root_is_disposed_once_however_many_signals_arrive(
     raises is one that does not finish. The same flag is why `atexit` is a no-op
     after a signal has already unwound the root.
     """
-    monkeypatch.setattr(resources, "_leave", lambda _signum: None)
+    monkeypatch.setattr(resources, "leave_on", lambda _signum: None)
     root = Context()
     disposed: list[str] = []
     root.add_disposer(lambda: disposed.append("root"))
@@ -254,7 +254,7 @@ def test_a_host_is_told_before_the_teardown_starts(monkeypatch: pytest.MonkeyPat
     go away; called after the unwind it would be told about a teardown it had
     already rendered the wreckage of.
     """
-    monkeypatch.setattr(resources, "_leave", lambda _signum: None)
+    monkeypatch.setattr(resources, "leave_on", lambda _signum: None)
     order: list[str] = []
     root = Context()
     root.add_disposer(lambda: order.append("disposed"))
@@ -281,7 +281,7 @@ async def test_a_signal_inside_the_loop_schedules_rather_than_blocks(
     abandoning the very teardown this exists to run.
     """
     left: list[int] = []
-    monkeypatch.setattr(resources, "_leave", left.append)
+    monkeypatch.setattr(resources, "leave_on", left.append)
     root = Context()
     disposed: list[str] = []
     root.add_disposer(lambda: disposed.append("root"))
@@ -317,7 +317,7 @@ def test_a_teardown_that_raises_still_leaves(monkeypatch: pytest.MonkeyPatch) ->
     running, which is not something the operator chose.
     """
     left: list[int] = []
-    monkeypatch.setattr(resources, "_leave", left.append)
+    monkeypatch.setattr(resources, "leave_on", left.append)
     root = Context()
     root.add_disposer(_explode)
     release = install_lifecycle(root)
@@ -336,7 +336,7 @@ async def test_a_teardown_that_raises_inside_the_loop_still_leaves(
 ) -> None:
     """The scheduled half of the claim above."""
     left: list[int] = []
-    monkeypatch.setattr(resources, "_leave", left.append)
+    monkeypatch.setattr(resources, "leave_on", left.append)
     root = Context()
     root.add_disposer(_explode)
     release = install_lifecycle(root)
@@ -361,7 +361,7 @@ def test_leaving_re_raises_the_signal_under_the_default_handler(
 
     A harness that caught `SIGTERM`, cleaned up and then exited 0 would tell
     everything watching it — a supervisor, a shell, CI — that it finished its
-    work. `_leave` restores the default disposition and re-raises, so the process
+    work. `leave_on` restores the default disposition and re-raises, so the process
     dies of the signal it was sent and the code says so.
 
     `os.kill` is patched: the real call is the one thing in this module a test
@@ -372,7 +372,7 @@ def test_leaving_re_raises_the_signal_under_the_default_handler(
     monkeypatch.setattr(signal, "signal", lambda number, handler: dispositions.append(handler))
     dispositions: list[Any] = []
 
-    resources._leave(signal.SIGTERM)
+    resources.leave_on(signal.SIGTERM)
 
     assert dispositions == [signal.SIG_DFL], "it left its own handler in place"
     assert killed == [(os.getpid(), signal.SIGTERM)]

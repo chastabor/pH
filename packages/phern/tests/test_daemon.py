@@ -187,6 +187,7 @@ from ph.testing import (
 )
 from ph_app import runtime as runtime_module
 from ph_app import verbs
+from ph_app.attach import prompt_message
 from ph_app.daemon import recovery, server
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.client import DaemonClient
@@ -2406,6 +2407,33 @@ async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
         assert supervisor.roots == {}, "the mount that finished under aclose was released"
         assert "in-flight" not in supervisor._mounting
         tasks.cancel_scope.cancel()
+
+
+async def test_a_resumed_root_runs_the_work_its_log_still_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prompt acked and flushed before the last process died, and never claimed:
+    `Inbox` replays it, `status` reports it as `running`, and until this nothing
+    rang for it, so the root sat "running" with nothing running until the next
+    prompt or tick, which then ran both as one turn.
+
+    Sabotage: drop the `has_pending` ring from `_start`, and the turn never comes.
+    """
+    async with supervised(tmp_path, monkeypatch) as first:
+        root = await first.start("owed")
+        # Logged, not rung: what `prompt` does up to the line the old process
+        # never reached.
+        root.agent.followup(prompt_message("still owed"))
+        await first._flush(root)
+        assert root.status == "running", "the inbox is work in hand"
+
+    async with supervised(tmp_path, monkeypatch) as second:
+        root = await second.start("owed")
+        await until(
+            lambda: any(e.type == "assistant/message" for e in root.session.events_from(0)),
+            what="the owed turn to run on resume",
+        )
+        assert root.status == "idle"
 
 
 # ------------------------------------------------------- P6-23: rehydration --

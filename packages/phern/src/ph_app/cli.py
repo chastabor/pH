@@ -764,6 +764,14 @@ def daemon(
     if life.survives_logout is not True:
         err.print(f"[yellow]this socket does not survive logout:[/yellow] {life.verdict()}")
         err.print(f"[yellow]  {life.advice}[/yellow]")
+    # Before `serve` can log: detached, this process's stderr is the null device,
+    # and this file is where its warnings go (`ph_app.daemon.logs`). Right above
+    # the `try` whose `finally` releases it, so nothing between can skip that.
+    from .daemon.logs import configure_daemon_logging, release_daemon_logging  # noqa: PLC0415
+
+    log_path = roots.daemon_log()
+    configure_daemon_logging(log_path)
+    err.print(f"[dim]logging to {log_path}[/dim]")
     try:
         # The path that was printed, not a second resolution of it: a message
         # naming one socket while the bind takes another is the kind of thing
@@ -785,6 +793,9 @@ def daemon(
                 ephemeral=ephemeral or window > 0,
                 keep_alive=window,
                 path=socket_path,
+                # `kill`, `systemctl stop` and Ctrl-C end this process the way
+                # `phern agents shutdown` does, instead of the way `kill -9` does.
+                signals=True,
             )
         )
     except DaemonUnavailable as error:
@@ -793,6 +804,10 @@ def daemon(
         # `RuntimeError`, and the comment in `doctor` above records this file
         # having been bitten by that already.
         fail(f"[red]{detail(error)}[/red]", cause=error)
+    finally:
+        # A host running this command in-process (a test runner) gets its
+        # logging back the way it was; the real daemon is exiting anyway.
+        release_daemon_logging(log_path)
 
 
 def reinvoke(

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 from base64 import b64decode
 from binascii import Error as BinasciiError
 from collections.abc import Awaitable, Callable, Sequence
@@ -44,7 +45,7 @@ from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
 from ph.path_watch import EntryWatch, Mechanism, WatchUnavailable
 from ph.paths import resolve_roots
-from ph.resources import GRACE_SECONDS
+from ph.resources import GRACE_SECONDS, leave_on
 from ph.seams.attachments import mime_for
 from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.schedule import Schedule
@@ -1747,6 +1748,33 @@ class DaemonServer:
             self.check_lifetime()
 
 
+async def _stop_on_signals(server: DaemonServer) -> None:
+    """`SIGTERM` or `SIGINT` asks for the stop a `shutdown` frame asks for.
+
+    Without this the default action ends the process at once, which is `SIGKILL`
+    with a politer name: no flush of what the roots' logs still owe, no leases
+    given back on the ordinary path, the socket left for the next daemon's
+    `_clear_stale`. `kill`, `systemctl stop`, `launchctl` and a Ctrl-C in a
+    foreground `phern daemon` all arrive this way. Asked once, the teardown runs
+    under its own budget (`GRACE_SECONDS`, in `serve`'s `finally`). Asked
+    **again** while that runs, the person wants out now: the default handler is
+    put back and the signal re-raised, so a teardown that will not end cannot
+    become a process that will not either.
+
+    Started as a task in `serve`'s group, so it is alive for the whole teardown
+    and canceled with the listener at the end.
+    """
+    with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as arriving:
+        async for signum in arriving:
+            name = signal.Signals(signum).name
+            if not server.stop.is_set():
+                log.info("ph_app.daemon: stopping on %s", name)
+                server.stop.set()
+                continue
+            log.warning("ph_app.daemon: %s again while stopping; leaving at once", name)
+            leave_on(signum)
+
+
 async def _clear_stale(path: Path) -> None:
     """Remove a socket nobody is listening on; refuse one somebody is.
 
@@ -1776,6 +1804,7 @@ async def serve(
     path: Path | None = None,
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
+    signals: bool = False,
 ) -> None:
     """Run the supervisor until `shutdown`.
 
@@ -1783,6 +1812,11 @@ async def serve(
     a test, or `phern agents` starting a daemon on demand — can wait for the door
     to open rather than poll for the file to appear. The file exists before it
     is listening, which is exactly the window a poll would land in.
+
+    `signals` makes `SIGTERM` and `SIGINT` the same stop a `shutdown` frame is
+    (`_stop_on_signals`). Off by default and on for `phern daemon` only: a
+    process-wide handler belongs to the process that *is* the daemon, not to a
+    test or an embedding host that runs `serve` inside something else.
     """
     socket_path = path or resolve_roots().ensure().daemon_socket()
     await _clear_stale(socket_path)
@@ -1854,6 +1888,8 @@ async def serve(
             tasks.start_soon(supervisor.releaser.keep, server.stop)
             tasks.start_soon(supervisor.verifier.keep, server.stop)
             tasks.start_soon(server.lifetime_clock.keep, server.stop)
+            if signals:
+                tasks.start_soon(_stop_on_signals, server)
             if scheduling:
                 # See `Supervisor.scheduler` and docs/seams/schedule.md.
                 tasks.start_soon(supervisor.scheduler.keep, server.stop)

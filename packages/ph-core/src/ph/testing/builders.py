@@ -1075,3 +1075,9 @@ def logged_events(session_id: str) -> list[SessionEvent]:
     """
     _header, events = read_session(stored_log(resolve_roots().sessions_dir(), session_id))
     return events
+
+
+async def unwritten(*_args: object) -> bool:
+    """`session_written` for a log that cannot be written: patch it in where a door
+    must then refuse, or change nothing."""
+    return False

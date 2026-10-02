@@ -45,7 +45,7 @@ from ph.session_profile import (
     resolved_environment,
     saved_base,
 )
-from ph.testing import not_none, write_profile
+from ph.testing import not_none, unwritten, write_profile
 from ph_app.cli import app
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.supervisor import Root
@@ -425,6 +425,35 @@ def test_a_one_shot_start_takes_back_a_version_that_will_not_mount(
     assert not_none(env.base).name == "work"
     types = logged_types("solo")
     assert types.index(WITHDRAWN) < len(types) - 1, "and the prompt ran after it"
+
+
+def test_a_take_back_the_log_cannot_hold_refuses_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`profile/withdrawn` is what stops the refused version being applied at every
+    start. Written and not checked, a withdrawal the log could not hold steered
+    this start from memory while the disk still said the version was pending, so
+    the next start mounted it, failed, and withdrew it again. Now it goes through
+    the door every other change here takes, and the start says what was not done.
+
+    Sabotage: put back the unchecked `session_written`, and the command exits 0 with
+    the version still pending on disk.
+    """
+    write_profile("work", WORK)
+    write_profile("broken", BROKEN)
+    started = runner.invoke(app, ["-p", "hi", "--profile", "work", "--session", "solo"])
+    assert started.exit_code == 0, started.output
+    lines, missed = anyio.run(adopt_version, "broken", ["solo"], named_version("broken"))
+    assert not missed, lines
+    _refusing(monkeypatch, lambda profile: profile.name == "broken")
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
+
+    again = runner.invoke(app, ["-p", "again", "--session", "solo"])
+
+    assert again.exit_code != 0
+    assert "broken was not withdrawn" in again.stderr
+    env = recorded_environment(resolve_roots().sessions_dir(), "solo")
+    assert not_none(env.adopted).name == "broken", "nothing on disk says otherwise"
 
 
 async def test_rpc_takes_back_a_version_that_will_not_mount(

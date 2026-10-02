@@ -353,10 +353,12 @@ that will" (`resources.py`). It states its own limit: `SIGKILL` runs
 nothing on any platform, which is why the crash-recovery layer (paired events,
 reconciliation) exists separately.
 
-> **Not currently wired.** `install_lifecycle` has no production caller —
-> `phern daemon` calls bare `anyio.run(...)`. Signals are handled only by default
-> cancellation, and the daemon's shielded 10-second `finally` is what makes that
-> survivable. See §8.
+> **Not what the daemon uses.** `install_lifecycle` has no production caller.
+> `phern daemon` runs `serve(signals=True)` instead: the first `SIGTERM` or
+> `SIGINT` sets the same stop a `shutdown` frame does, so teardown runs `serve`'s
+> own order (socket, then roots, under one `GRACE_SECONDS` budget), and a second
+> signal while that runs re-raises with the default handler
+> (`server._stop_on_signals`, `resources.leave_on`). See §8.
 
 ### 2.6 Dispatch: four modes, and every event is declared
 
@@ -1059,11 +1061,15 @@ root **and each is flushed**, because the way out has stopped being reliable and
 the likely next action is `kill`. It is *not* reported as `failed`: that would put
 the recovery ladder to work climbing over a socket.
 
-**The lease is daemon-against-daemon and no further.** A `phern -p --session x` run
-against a daemon-held session still opens it, because the lease is not in the
-store (`supervisor.py`). `thread_local=False` is load-bearing and its
-absence is silent: filelock's re-entrancy counter is thread-local, so a lease
-taken on a worker thread releases nothing.
+**The lease is the store's, so it holds against every writer.** Every session is
+opened through `ph.persistence.open_session`, which asks the store to claim it: a
+daemon's roots, the one-shot modes and every sub-agent's log alike. So a
+`phern -p --session x` against a session a daemon holds, or that another
+`phern -p` holds, is refused with `session_already_active` rather than appending
+beside it (`persistence/lease.py`). The claim is an `flock` on an open descriptor,
+so a crashed process gives it back by dying. `thread_local=False` is load-bearing
+and its absence is silent: filelock's re-entrancy counter is thread-local, so a
+lease taken on a worker thread releases nothing.
 
 **Cancellation vocabulary.** `AgentCancelCause.kind` is
 `user | parent | hook | disposed | legacy` — but only **three** are ever
@@ -1855,7 +1861,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | Gap | Status |
 |---|---|
 | `sandbox-local` ships `bwrap` and Seatbelt, both verified against a real kernel — the blind Seatbelt profile was wrong in four places a Mac found (P6-40). Landlock is unwritten | P6-04, P6-40; Landlock open |
-| `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `phern daemon` calls bare `anyio.run` | unwired |
+| `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `phern daemon` handles signals through `serve(signals=True)`, which stops the server rather than disposing a bare context | unwired; a candidate for deletion |
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
@@ -1872,6 +1878,8 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | **A screen a third-party row contributes is invisible to a remote front end.** `ScreenDefinition.build()` cannot travel, so `screens/list` is intersected with what the client can draw and everything else is silently not offered. Every screen pH ships is drawable; a row's own is not | P5-15, gated by `test_a_screen_this_build_cannot_draw_is_not_offered`; P7-07 closes it |
 | **A turn parked on a human is closed as interrupted on resume, and its ask is not re-posed.** Repair settles the open `approval/asked` or `question/asked` (P10-09) and closes the turn, because the model's `tool_use` block is still unanswered — it rides the *assistant message*, and a message carrying one with no matching `tool_result` is a log several providers reject (`tool/call` is not surface-eligible and no provider sees it; since P7-15 it is written after the gate, so a parked turn has none and repairs as `TOOL_NOT_STARTED`). The model reads "not started" and asks again, to whoever is attached then. Within one daemon's life `AskDesk.join` re-poses an open ask to a front end that attaches | P5-13, by decision; gated by `test_repair.py::test_a_turn_parked_on_a_human_settles_the_question_it_was_parked_on` |
 | **`freeze_json_value` re-copies an already-frozen tree, and the fast path is refused on purpose.** Every container is rebuilt on every pass, so a re-admitted tree pays a second structural copy — 0.95 µs for a streamed chunk, **232 µs for a 500-node tool result**, scaling with node count rather than bytes. Four paths pay it: `Session.admit` per wire event on a remote front end, `Session(seed=…)`, `resume_session` on every rehydrate, and `SessionStore.fork`. A validation-only pre-walk that returns the input when it is already frozen measured at about half the cost. It is **not built**, because this function is where A1 is enforced: a second route through the gate is correct only insofar as its "already frozen?" predicate is, nothing in the type system tells a `MappingProxyType` over a frozen tree from one over a live dict, and a predicate like that can only be validated by enumerating hostile shapes in tests — the wrong kind of guarantee for a gate. Waiting on a design that is **structurally** safe: a frozen tree that carries its own proof (a distinct wrapper the walker recognizes by identity), or a freeze idempotent by construction | deferred by decision; measured and documented in `session/json.py`, P6-44 |
+| **A one-shot run does not sweep children.** `phern -p` opens its session and loads the children, but only the daemon calls `resume_children`, so a child a crashed run left `running` still reads as working in its own log, and in the model's child list, until a daemon mounts the root and readmits or ends it. The parent's `task` call is repaired as `TOOL_OUTCOME_UNKNOWN` either way | open; found in the 2026-10-02 restart review |
+| **Off Linux the orphan sweep reports and never kills.** It proves a recorded pid is still the process it journaled by `/proc`'s start time, which only Linux has (`orphans.process_start_token`), so on macOS a child that outlived a hard-killed host is listed `unverifiable` and left running. The kernel guest dies with its host on both (`pdeathsig`, `kqueue-exit`); a `!!` or shell-tool child has no such mechanism | stated in `ph.orphans`; macOS open |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
 | **Per-service isolation is implemented** (`isolate:` on a row, §2.7 — dsh's `isolate.fs`), but a realm's provider cannot be **swapped mid-session**: dsh's example — "we start processing sensitive data, so we swap the filesystem to read-only and the agent still sees the same filesystem" — has no pH spelling. `fs.rebase` is a `claim_slot`, so the *root* can change under a stable `ctx.fs`; read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. The mechanism a swap needs (`claim_slot` releasing to a new claimant) exists; no row drives it and nothing has asked for it. **Deferred by decision, not by omission**: it will be built when a use case shows up, and the use case will decide whether the answer is a provider swap, a rule, or a new realm | deferred until a use case |
 

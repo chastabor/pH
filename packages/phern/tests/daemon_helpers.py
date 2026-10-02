@@ -35,11 +35,14 @@ from ph.seams.approval import ApprovalAnswer
 from ph.session import Session
 from ph.session_profile import BASE as PROFILE_BASE
 from ph.testing import StubAgent, admitted_child, logged_events, not_none
+from ph_app import verbs
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
 from ph_app.daemon.server import DaemonServer, serve
 from ph_app.daemon.supervisor import Root, Supervisor
+from ph_app.payloads import DaemonStatusReply
+from ph_app.protocol import NoParams
 
 __all__ = [
     "PROFILE",
@@ -377,29 +380,40 @@ def daemon_in_thread(tmp_path: Path, *, profile: Profile | None = None) -> Itera
         thread.join(timeout=10)
 
 
-async def shut_down(path: Path) -> None:
-    """Stop a daemon that is *not* in this process, through its only handle.
-
-    Connect, pump, `initialize`, `shutdown`, wait for the close: the sequence a
-    spawned daemon leaves a test no alternative to, written once rather than in
-    every test that spawns one.
-    """
+@asynccontextmanager
+async def asking(path: Path) -> AsyncIterator[DaemonClient]:
+    """A client of a daemon that is *not* in this process: connected, pumping and
+    initialized, and closed when the block ends — the sequence a spawned daemon
+    leaves a test no alternative to, written once rather than in every test that
+    spawns one."""
     client = await DaemonClient.connect(path)
     try:
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(client.pump)
             await client.call("initialize")
-            await client.notify("shutdown")
-            with anyio.fail_after(20):
-                await client.closed.wait()
+            yield client
+            tasks.cancel_scope.cancel()
     finally:
-        # `close_clients`' rule, which this was the one caller not following:
-        # the stream is what ends a pump, and a client left to the garbage
-        # collector is a socket closed at an arbitrary later moment — on the
-        # session-wide loop every test shares. That is the shape a stray
+        # `close_clients`' rule: the stream is what ends a pump, and a client left
+        # to the garbage collector is a socket closed at an arbitrary later moment
+        # — on the session-wide loop every test shares. That is the shape a stray
         # callback comes from, and issue 58 is the standing row for one.
         with suppress(Exception):
             await client.aclose()
+
+
+async def shut_down(path: Path) -> None:
+    """Stop a daemon that is *not* in this process, through its only handle."""
+    async with asking(path) as client:
+        await client.notify("shutdown")
+        with anyio.fail_after(20):
+            await client.closed.wait()
+
+
+async def daemon_status(path: Path) -> DaemonStatusReply:
+    """`daemon/status` from a daemon that is *not* in this process."""
+    async with asking(path) as client:
+        return await client.call(verbs.DAEMON_STATUS, NoParams())
 
 
 def daemon_socket() -> Path:

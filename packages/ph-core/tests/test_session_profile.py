@@ -42,7 +42,7 @@ from ph.session_profile import (
     saved_base,
     switch_base,
 )
-from ph.testing import MountProfile, log_event, not_none, stored_events
+from ph.testing import MountProfile, log_event, not_none, stored_events, unwritten
 
 pytestmark = pytest.mark.anyio
 
@@ -159,10 +159,6 @@ async def test_a_base_switch_clears_the_overrides_the_new_base_already_says(
     assert switch[0].batch is not None and switch[0].batch == switch[1].batch, "one batch"
 
 
-async def _unwritten(*_args: object) -> bool:
-    return False
-
-
 async def test_a_base_switch_the_log_cannot_hold_is_refused(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,7 +173,7 @@ async def test_a_base_switch_the_log_cannot_hold_is_refused(
     session = ctx.require(SESSIONS).create("unswitched")
     await record_base(ctx, session)
     saved = not_none(saved_base(session))
-    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
     with pytest.raises(OverrideNotRecorded, match="base was not changed"):
         await switch_base(ctx, session, saved, command="adopt again")
@@ -250,7 +246,7 @@ async def test_a_refused_override_is_not_in_force_when_its_record_is_written_lat
     ctx = await mount()
     session = ctx.require(SESSIONS).create("refused-override")
     await record_base(ctx, session)
-    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
     with pytest.raises(OverrideNotRecorded, match='"llm-retry" was not changed'):
         await override(
@@ -280,7 +276,7 @@ async def test_a_refused_clear_leaves_the_override_in_force(
     session = ctx.require(SESSIONS).create("refused-clear")
     await record_base(ctx, session)
     log_event(session, OVERRIDE, _override("llm-retry", "/retry 5"))
-    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
     with pytest.raises(OverrideNotRecorded, match="not cleared"):
         await clear_overrides(ctx, session, None, command="/profile clear")
@@ -299,7 +295,7 @@ async def test_a_base_the_log_cannot_hold_refuses_the_start(
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("unbased")
-    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
     with pytest.raises(OverrideNotRecorded, match="base was not recorded"):
         await record_base(ctx, session)
@@ -317,7 +313,7 @@ async def test_a_refused_adoption_is_not_what_starts_next(
     ctx = await mount()
     session = ctx.require(SESSIONS).create("refused-adoption")
     await record_base(ctx, session)
-    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
     assert not await record_adopted(ctx, session, ProfileBase("elsewhere", (), (), "0"))
 

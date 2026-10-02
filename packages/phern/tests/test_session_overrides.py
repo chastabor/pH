@@ -22,7 +22,7 @@ from ph.keys import MOUNT
 from ph.paths import resolve_roots
 from ph.session import now_ms
 from ph.session_profile import OVERRIDE, Override, overrides, rebuilt, saved_base
-from ph.testing import logged_events, not_none
+from ph.testing import logged_events, not_none, unwritten
 from ph_app.cli import app
 from ph_app.profiles import compose_profile
 
@@ -80,11 +80,6 @@ async def test_a_value_already_in_force_leaves_no_record(tmp_path: Path) -> None
         assert len(_logged("unchanged")) == 1
 
 
-async def _unwritten(*_args: object) -> bool:
-    """A log that cannot be written, for the doors that must then change nothing."""
-    return False
-
-
 async def test_a_change_whose_record_cannot_be_written_is_not_made(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -92,7 +87,7 @@ async def test_a_change_whose_record_cannot_be_written_is_not_made(
     reachable with nothing on disk to say so."""
     async with running(tmp_path) as daemon:
         root = await daemon.root("unwritable")
-        monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+        monkeypatch.setattr("ph.session_profile.session_written", unwritten)
 
         shown = await run_command(root, "/sandbox allow host example.com")
 
@@ -163,7 +158,7 @@ def test_a_start_option_the_log_cannot_hold_is_refused(monkeypatch: pytest.Monke
     Sabotage: ignore `session_written`'s answer in `opened`, and the start succeeds.
     """
 
-    monkeypatch.setattr("ph.session_profile.session_written", _unwritten)
+    monkeypatch.setattr("ph.session_profile.session_written", unwritten)
     result = runner.invoke(
         app, ["-p", "hi", "--session", "unrecorded", "--patch", "{id: tool-bash, disabled: true}"]
     )

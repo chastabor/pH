@@ -1474,6 +1474,18 @@ class Supervisor:
             ctx.on("commands/change", verbs)
             ctx.on("screens/change", drew)
             self.tasks.start_soon(self._run, root)
+            if root.agent.inbox.has_pending and not root.recovery.failed:
+                # Work the log holds that no turn claimed: a prompt acked and
+                # flushed before the last process died, or left behind by a
+                # passivation mid-ladder. `Inbox` replays it, `status` reports it
+                # as `running`, and nothing else rings for it — the next prompt
+                # or tick would, and would run both as one turn. A `restart`
+                # comes through here too. **Not past a spent ladder**:
+                # the message a root gave up on is still in its inbox, and a ring
+                # here would be one more attempt per daemon lifetime, which is
+                # the retry-forever the folded count exists to end. That root
+                # waits for a person, as `give_up` said it would.
+                root.ring()
             if root.held_on_profile:
                 # The ask ends with the root: released first, it is asked again at
                 # the next start, where the hold is found again.
@@ -1682,7 +1694,7 @@ class Supervisor:
         as a passivation would — without the passivation's record, since it did not go
         quiet — and mounted again. Its watchers and answerers move to the new root,
         which a connection finds by id, and are told what changed: the route, the
-        verbs and the screens are the new mount's. A prompt still in the inbox is rung.
+        verbs and the screens are the new mount's. A prompt still in the inbox is rung by `_start`.
         An adopted version that will not mount is withdrawn by `_start`, so the root
         comes back on what it ran in, and its log says why (`profile/withdrawn`).
         Returns the new root, or `None` when it did not start at all.
@@ -1713,8 +1725,6 @@ class Supervisor:
         back.publish(back.status_notice())
         back.publish(SessionCommandsNotice(session_id=back.id, commands=commands_of(back)))
         back.publish(SessionScreensNotice(session_id=back.id, screens=screens_of(back)))
-        if back.agent.inbox.has_pending:
-            back.ring()
         return back
 
     async def adopt(self, root: Root, version: ProfileBase) -> None:

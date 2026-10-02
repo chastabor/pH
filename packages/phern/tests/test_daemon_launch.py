@@ -23,14 +23,18 @@ the lock is what turns the loser into a client.
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import private_runtime, running, shut_down
+from daemon_helpers import daemon_status, private_runtime, running, shut_down, until
 
+from ph.orphans import process_alive
+from ph.paths import resolve_roots
 from ph_app.cli import spawn_command
 from ph_app.daemon.launch import DaemonAbsent, ensure_daemon
 
@@ -197,3 +201,39 @@ async def test_a_socket_that_exists_but_refuses_is_not_a_reason_to_spawn_twice(
     assert started.spawned, "a file is not a daemon"
 
     await shut_down(started.path)
+
+
+def _gone(pid: int) -> bool:
+    """Whether `pid` has exited. `ensure_daemon` spawns the daemon as a child of
+    this process and never waits on it, so once it exits it is a zombie until
+    reaped, and `os.kill(pid, 0)` still succeeds on a zombie: reap it instead."""
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        # Not our child after all: the plain liveness test is the right one.
+        return not process_alive(pid)
+    return reaped == pid
+
+
+async def test_sigterm_stops_a_daemon_the_way_shutdown_does() -> None:
+    """`kill <pid>`, `systemctl stop`, `launchctl`: each sends `SIGTERM`, and the
+    default action is `SIGKILL` with a politer name — no teardown, the socket left
+    behind. A spawned daemon now takes it as the stop a `shutdown` frame asks for,
+    and says so in the log file it keeps under `$PH_HOME`, which is also the first
+    place a detached daemon's words have ever landed.
+
+    Sabotage: start `serve` without `signals=True`, and the socket outlives the
+    process; drop `configure_daemon_logging` from the command, and no file is written.
+    """
+    started = await ensure_daemon(argv=spawn_command(profile="headless", keep=True))
+    assert started.spawned
+    pid = (await daemon_status(started.path)).pid
+    assert not _gone(pid)
+
+    os.kill(pid, signal.SIGTERM)
+
+    await until(lambda: _gone(pid), what="the daemon to leave on SIGTERM", seconds=20)
+    assert not started.path.exists(), "an orderly stop unlinks its own socket"
+    log = resolve_roots().daemon_log()
+    await until(lambda: log.exists(), what="the daemon's log file")
+    assert "stopping on SIGTERM" in log.read_text(encoding="utf-8")
