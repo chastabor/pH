@@ -256,6 +256,34 @@ waits on the wall clock. A deadline that names an interval inside a running piec
 of work (a cancel grace, a boot timeout) stays monotonic, because the work slept
 too.
 
+### 10. Watching a path: inotify names the entry, kqueue only says the directory moved
+
+The daemon notices its socket being removed or replaced (logout reaping
+`$XDG_RUNTIME_DIR`, a second daemon binding the same path) through
+`ph.path_watch.EntryWatch` (P12-05), not a thirty-second `lstat`. The two kernels
+answer differently:
+
+| | Linux | macOS |
+|---|---|---|
+| mechanism | `inotify` (ctypes, `ph.libc`) | kqueue `EVFILT_VNODE` on `O_EVTONLY` descriptors |
+| the entry's directory | `IN_CREATE`, `IN_DELETE`, `IN_MOVED_*`, each event naming the entry | `NOTE_WRITE`: *some* entry changed |
+| ancestors up to `/` | removed or renamed (`IN_DELETE_SELF`, `IN_MOVE_SELF`) | `NOTE_DELETE`, `NOTE_RENAME`, `NOTE_REVOKE` |
+| another file in the directory | ignored | wakes the reader, which `lstat`s once |
+| arming fails | `ENOSPC` / `EMFILE` at the inotify limits | descriptor exhaustion |
+
+When it cannot be armed, the daemon logs once and checks the socket at each request
+from a connected client (`socketWatch: unavailable: …`). A daemon that lost its path
+is unreachable to new clients, the doctor included, so the connected ones are the
+ones that can be told. There is no fallback cadence.
+
+**Neither kernel reports a filesystem mounted over the directory.** The old poll
+would have seen the path resolve to a different inode; the watch does not. Nothing
+in pH's own lifecycle mounts over `$PH_RUNTIME`, so this is recorded rather than
+covered.
+
+**The macOS side has not been run on the mac rig yet.** `test_path_watch.py` holds
+both; its name-filter test is Linux-only for the reason in the table.
+
 ---
 
 ## What to do when a test fails on one platform only

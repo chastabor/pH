@@ -473,6 +473,40 @@ records, which put about 160 ms on a 500k-event log in front of the reply. Now:
 
 ### P12-05: the socket watch hears the filesystem
 
+**Landed (2026-10-01).** As designed below, with these differences:
+
+* **`ph/libc.py` holds the one `CDLL` and `failed()`** for `ph.wall_clock` and
+  `ph.path_watch`, as the earlier review asked.
+* **`EntryWatch` is a class per platform**, with `mechanism`, `changes()` and
+  `close()`. `serve` arms it right after taking `identity`, starts
+  `DaemonServer.keep_watching`, and closes it at teardown.
+* **Teardown ends the watch before it unlinks the socket.** The unlink is this
+  daemon closing its own door, and an event-driven watch would hear it every time;
+  the cadence only hit that window by chance. `keep_watching` runs in its own
+  cancel scope, which `serve`'s `finally` cancels first. A first version guarded
+  `check_reachable` on `stop`, which a `/simplify` pass moved to the teardown order:
+  `stop` says shutdown was asked for, not that the socket is being unlinked.
+* **`keep_watching` contains failures** (`_asked`), as a planner pass does, so a
+  check that raises cannot end the daemon's task group.
+* **Unavailable means checked at each request** (`check_unwatched`, called from
+  `_Connection._dispatch`). A daemon that lost its path is unreachable to new
+  clients, the doctor included, so asking only when `daemon/status` is called would
+  almost never happen. `DaemonServer.watching` (a `path_watch.Mechanism`) and
+  `watch_refused` back the wire's `socketWatch`. `serve` always arms the watch.
+* **`ph.path_watch` shares its arming in `_Watch`**; each platform supplies
+  `_open`, `_add`, `changes` and `close`.
+* **`_every`, `WATCH_EVERY`, `watch_every` and `agents._cadence` are gone**, and the
+  doctor row prints `socketWatch` (P12-08's items for them are done here).
+* **Tests, socket-free and each sabotage-checked.** `test_path_watch.py` covers the
+  entry removed, replaced and renamed away; another entry in the directory ignored
+  (Linux); the directory going away ending the watch; an ancestor renamed; a missing
+  directory refused; and descriptors given back. `test_daemon.py` covers the daemon
+  hearing its socket removed and replaced; no `lstat` while nothing moves; a
+  stopping daemon staying silent; and the doctor's check when the watch could not be
+  armed. The reaped-runtime gate drops `watch_every` and still needs a socket.
+* **macOS is written but unverified on hardware.** Section 10 of
+  `docs/dev-notes/linux-macos-differences.md` records it and the overmount limit.
+
 **`ph/path_watch.py`**, a new ph-core module beside `ph.lingering` (which owns
 `socket_identity`). Platform selection uses static module-top imports. It
 provides `EntryWatch(path)`, armed synchronously in `__init__` so `serve` can
@@ -613,7 +647,7 @@ This is row 6, the answer to "why is it needed".
 | P12-02 | **Landed (2026-10-01)** with P12-01. Lifetime deadlines; `DaemonServer.sweep` gone | P12-00 | `test_daemon_lifetime` without `sweep_every`; `unplugged` |
 | P12-03 | **Landed (2026-10-01).** Kernel clock sleeps until its next deadline; `probe_seconds: float \| None`; `POLL_SECONDS` gone | — | kernel wake count, cross-task abort, stall re-arm, probe off |
 | P12-04 | **Landed (2026-10-01).** Invariants checked after writes settle (`verifier`, fed by `session/durable`); `check_invariants` flag; the five-minute poll gone | — | `test_daemon_invariants` (socket-free), seq gate |
-| P12-05 | socket watch on inotify and kqueue | — | the reaped-dir test with no cadence; replaced; ancestor |
+| P12-05 | **Landed (2026-10-01).** Socket watch on inotify and kqueue (`ph.path_watch`); `_every` gone | — | `test_path_watch`; the daemon watch tests (socket-free) |
 | P12-07 | guest `NOTE_EXIT` | — | macOS kernel test: host SIGKILL during a blocking cell |
 | P12-08 | docs, doctor rows, delete `_every` | all | `test_non_guarantees`, doc links |
 

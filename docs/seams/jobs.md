@@ -1,7 +1,7 @@
 # `ctx.jobs` — background work with a handle, a cancel and a completion
 
 **Module:** `ph/seams/jobs.py` · **Row:** `jobs-local` · **Consumers:** the
-subagent drive loop, `/refine`, the daemon's cadences
+subagent drive loop, `/refine`
 
 Anything long-running that is not a turn: a planner pass, a watcher, a background
 build.

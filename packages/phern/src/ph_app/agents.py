@@ -14,7 +14,7 @@ socket that is *absent* means nothing was started, and a socket that is *present
 but refuses* means something crashed and left its path behind.
 
 **Nothing here re-derives what the daemon knows.** `doctor` reports the socket
-the daemon bound, the policy it was started with, the cadences it is running and
+the daemon bound, the policy it was started with, the jobs it is running and
 whether that socket outlives a logout — all read back over the wire, because a
 client printing what *it* would have chosen would agree with a daemon started
 differently and say nothing at all. The one exception is when the connect itself
@@ -188,19 +188,6 @@ def _release(facts: DaemonStatusReply) -> str:
     if facts.next_release is None:
         return "nothing quiet enough to plan for"
     return f"next in {duration(max(0, facts.next_release - now_ms()))}"
-
-
-def _cadence(seconds: float) -> str:
-    """One of `serve`'s cadences, in seconds — or `off` for zero.
-
-    **Each reads `0` as off**, behind its own `if x > 0` in `serve`, and for a day
-    only the newest one said so on screen while the others printed `0s`.
-    `duration` cannot absorb the rule: zero milliseconds is a real and different
-    answer elsewhere (an uptime, a turn that took no measurable time), where "off"
-    would be a lie. So the convention lives here, once, next to the readers that
-    share it.
-    """
-    return duration(seconds * 1000) if seconds > 0 else "off"
 
 
 def _summary(kind: str, event: JsonObject) -> str:
@@ -685,7 +672,7 @@ def doctor() -> None:
                 ("passivate after", "off" if passivate is None else duration(passivate * 1000)),
                 ("scheduler", _scheduler(facts)),
                 ("release", _release(facts)),
-                ("socket watch", _cadence(facts.watch_every)),
+                ("socket watch", facts.socket_watch),
                 ("invariants", "checked when a root settles" if facts.check_invariants else "off"),
                 *_reachability(facts),
             ),

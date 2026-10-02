@@ -215,19 +215,27 @@ def age(server: DaemonServer) -> None:
 async def unplugged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    path: Path | None = None,
     **options: Any,  # noqa: ANN401
 ) -> AsyncIterator[DaemonServer]:
-    """A `DaemonServer` with no socket, on `supervised`, with its lifetime clock running.
+    """A `DaemonServer` with no bound socket, on `supervised`, with its lifetime clock
+    running.
 
-    For the lifetime tests that never connect a client (a root parking on a person,
-    a ladder giving up, a spawn window closing), so they run where unix sockets do
-    not. Root release is not started, and `passivate_after` is off unless a test
-    asks.
+    For the daemon tests that never connect a client (a root parking on a person, a
+    ladder giving up, a spawn window closing, the socket watch), so they run where
+    unix sockets do not. `path` is what the server believes its socket is: a plain
+    file there is enough for the watch tests, since the watch is about a name in a
+    directory. Root release is not started, and `passivate_after` is off unless a
+    test asks.
     """
     async with supervised(tmp_path, monkeypatch) as supervisor:
         supervisor.passivate_after = None
         server = DaemonServer(
-            supervisor=supervisor, stop=anyio.Event(), path=tmp_path / "unbound.sock", **options
+            supervisor=supervisor,
+            stop=anyio.Event(),
+            path=path if path is not None else tmp_path / "unbound.sock",
+            **options,
         )
         supervisor.tasks.start_soon(server.lifetime_clock.keep, server.stop)
         try:

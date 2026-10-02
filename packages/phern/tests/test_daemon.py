@@ -135,6 +135,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -151,6 +152,7 @@ from daemon_helpers import (
     running,
     spawned,
     supervised,
+    unplugged,
     until,
 )
 from rlm_fixtures import ModelGate
@@ -162,6 +164,9 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.json import JsonObject, JsonValue, as_str
 from ph.keys import SCHEDULE, SESSIONS, WORKSPACE
+from ph.lingering import socket_identity
+from ph.orphans import JOURNAL_NAME
+from ph.path_watch import EntryWatch
 from ph.paths import resolve_roots
 from ph.persistence import session_path
 from ph.seams.models import ModelChoice
@@ -174,6 +179,7 @@ from ph.testing import (
     ReapedHost,
     log_event,
     not_none,
+    noted,
     noting,
     raising,
     stored_log,
@@ -189,7 +195,7 @@ from ph_app.daemon.recovery import CHILD_RETRY_LIMIT, PASS_FLOOR
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import NotARoot, Root, RootStartAbandoned, Supervisor
 from ph_app.payloads import SessionChildrenNotice, SessionEventNotice
-from ph_app.protocol import DaemonError
+from ph_app.protocol import DaemonError, NoParams
 from ph_app.runtime import mounted
 
 RESTORING, RESTORED = WORKSPACE_RESTORE.opened, WORKSPACE_RESTORE.settled
@@ -1970,7 +1976,7 @@ async def test_a_reaped_runtime_dir_reaches_every_root_as_a_record(
     distance from the terminal that could have warned them.
     """
     socket = reaped_host() / "daemon.sock"
-    async with running(tmp_path, path=socket, watch_every=0.05) as daemon:
+    async with running(tmp_path, path=socket) as daemon:
         supervisor = daemon.running.supervisor
         first = await supervisor.start("alpha")
         second = await supervisor.start("beta")
@@ -1991,8 +1997,8 @@ async def test_a_reaped_runtime_dir_reaches_every_root_as_a_record(
         # times across every log and hoping the payloads happen to be equal.
         assert said["pid"] == os.getpid()
         assert _notices(second)[0].data["since"] == said["since"]
-        # Once, not once per watch pass: the transition is one-way, and a record
-        # appended every thirty seconds forever would bury the log it explains.
+        # Once, not once per change heard: the transition is one-way, and a
+        # record appended at every later change would bury the log it explains.
         await anyio.sleep(0.2)
         assert len(_notices(first)) == 1
 
@@ -2122,6 +2128,157 @@ async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
         assert await built.check_reachable() == ""
         assert built.status().unreachable_since is None
         tasks.cancel_scope.cancel()
+
+
+def _socket_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A plain file where this test's daemon socket would be, in its `$PH_RUNTIME`.
+
+    The watch is about a name in a directory, so a plain file stands in for the
+    socket, and what `serve` captures as `identity` is an `lstat` of whatever is
+    there.
+    """
+    path = private_runtime(tmp_path, monkeypatch) / "daemon.sock"
+    path.touch()
+    return path
+
+
+@asynccontextmanager
+async def _watched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[server.DaemonServer, Path]]:
+    """A daemon watching its socket by event, with no socket (P12-05)."""
+    path = _socket_file(tmp_path, monkeypatch)
+    async with unplugged(tmp_path, monkeypatch, path=path) as daemon:
+        daemon.identity = socket_identity(path)
+        watch = EntryWatch(path)
+        daemon.supervisor.tasks.start_soon(daemon.keep_watching, watch)
+        try:
+            yield daemon, path
+        finally:
+            watch.close()
+
+
+def _replaced(path: Path) -> None:
+    """A new file moved over the path in one step, as a rebinding daemon leaves it:
+    one event, and the entry it names is already the new one."""
+    fresh = path.with_name("fresh")
+    fresh.touch()
+    os.replace(fresh, path)
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [(Path.unlink, "removed"), (_replaced, "replaced")],
+    ids=["removed", "replaced"],
+)
+async def test_the_watch_hears_its_socket_taken(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: Callable[[Path], object],
+    reason: str,
+) -> None:
+    """Without a cadence: the record follows the change, not the next tick.
+
+    Sabotage: stop `keep_watching` asking after a change, and nothing is recorded.
+    """
+    async with _watched(tmp_path, monkeypatch) as (daemon, path):
+        root = await daemon.supervisor.start("watched")
+        change(path)
+
+        await until(lambda: bool(_notices(root)), what="the change to be recorded")
+        assert _notices(root)[0].data["reason"] == reason
+
+
+async def test_the_watch_asks_nothing_while_nothing_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One `lstat` at the start, and none after while the socket stays put, however
+    busy the directory around it.
+
+    Sabotage: put a cadence back in `keep_watching`, and the count grows.
+    """
+    asked: list[Path] = []
+    monkeypatch.setattr(
+        server, "socket_identity", lambda path: noted(asked, path, socket_identity(path))
+    )
+    async with _watched(tmp_path, monkeypatch) as (daemon, path):
+        await until(lambda: len(asked) == 1, what="the opening check")
+        other = path.with_name(JOURNAL_NAME)
+        for _ in range(3):
+            other.touch()
+            other.unlink()
+        await anyio.sleep(0.3)
+        if sys.platform == "linux":
+            # kqueue's `NOTE_WRITE` on a directory does not name the entry, so on
+            # macOS each of those changes costs one `lstat` — still no cadence.
+            assert len(asked) == 1, f"{len(asked)} checks with the socket untouched"
+        assert daemon.unreachable_since is None
+
+
+async def test_a_failing_check_does_not_end_the_watch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check that raises is logged and the watch goes on, as a failing planner pass
+    does: raised, it would end the watch and take the daemon's task group with it.
+
+    Sabotage: drop the `except` from `DaemonServer._asked`, and the task group fails.
+    """
+    calls: list[Path] = []
+
+    def flaky(path: Path) -> tuple[int, int] | None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise RuntimeError("a bad lstat")
+        return socket_identity(path)
+
+    monkeypatch.setattr(server, "socket_identity", flaky)
+    async with _watched(tmp_path, monkeypatch) as (daemon, path):
+        root = await daemon.supervisor.start("watched")
+        await until(lambda: len(calls) == 1, what="the opening check to fail")
+        path.unlink()
+
+        await until(lambda: bool(_notices(root)), what="the removal to be recorded anyway")
+
+
+async def test_an_orderly_shutdown_records_no_unreachable(
+    tmp_path: Path, reaped_host: ReapedHost
+) -> None:
+    """Teardown unlinks the daemon's own socket. That is the daemon closing its door,
+    not losing it, and every root would otherwise carry a false
+    `supervisor/unreachable` from every ordinary shutdown.
+
+    Shut down the way a person does it, so teardown runs in `serve`'s own order.
+
+    Sabotage: move `watching.cancel()` after the unlink in `serve`, and this records.
+    """
+    socket = reaped_host() / "daemon.sock"
+    async with running(tmp_path, path=socket) as daemon:
+        root = await daemon.running.supervisor.start("calm")
+        client = await daemon.client()
+        await client.notify(verbs.SHUTDOWN, NoParams())
+        await until(lambda: not socket.exists(), what="teardown to unlink the socket")
+        await anyio.sleep(0.2)
+    assert _notices(root) == []
+
+
+async def test_a_watch_that_could_not_be_armed_is_checked_at_each_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No cadence to fall back on: a connected client's request is the check, since
+    a daemon that lost its path is unreachable to new ones.
+
+    Sabotage: drop the `check_reachable` from `check_unwatched`, and a socket that is
+    gone stays unreported.
+    """
+    path = _socket_file(tmp_path, monkeypatch)
+    async with unplugged(tmp_path, monkeypatch, path=path, watch_refused="no inotify") as daemon:
+        daemon.identity = socket_identity(path)
+        path.unlink()
+
+        await daemon.check_unwatched()
+
+        assert daemon.status().socket_watch == "unavailable: no inotify"
+        assert daemon.unreachable_since is not None
 
 
 # --- P7-19: a root's lifetime is the daemon's --------------------------------

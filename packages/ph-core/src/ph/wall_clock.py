@@ -48,6 +48,7 @@ from dataclasses import dataclass
 import anyio
 import anyio.lowlevel
 
+from .libc import LIBC, failed
 from .session import now_ms
 
 __all__ = ["Alarm", "sleep_until"]
@@ -111,33 +112,28 @@ if sys.platform == "linux":
     class _Itimerspec(ctypes.Structure):
         _fields_ = [("it_interval", _Timespec), ("it_value", _Timespec)]
 
-    _libc = ctypes.CDLL(None, use_errno=True)
-    _libc.timerfd_create.argtypes = [ctypes.c_int, ctypes.c_int]
-    _libc.timerfd_create.restype = ctypes.c_int
-    _libc.timerfd_settime.argtypes = [
+    LIBC.timerfd_create.argtypes = [ctypes.c_int, ctypes.c_int]
+    LIBC.timerfd_create.restype = ctypes.c_int
+    LIBC.timerfd_settime.argtypes = [
         ctypes.c_int,
         ctypes.c_int,
         ctypes.POINTER(_Itimerspec),
         ctypes.POINTER(_Itimerspec),
     ]
-    _libc.timerfd_settime.restype = ctypes.c_int
-
-    def _failed(call: str) -> OSError:
-        code = ctypes.get_errno()
-        return OSError(code, f"{call}: {os.strerror(code)}")
+    LIBC.timerfd_settime.restype = ctypes.c_int
 
     async def _wall_wait(at: int) -> None:
         # `TFD_NONBLOCK` and `TFD_CLOEXEC` are defined as `O_NONBLOCK` and
         # `O_CLOEXEC`, so the `os` constants are right on every architecture.
-        fd: int = _libc.timerfd_create(_CLOCK_REALTIME, os.O_NONBLOCK | os.O_CLOEXEC)
+        fd: int = LIBC.timerfd_create(_CLOCK_REALTIME, os.O_NONBLOCK | os.O_CLOEXEC)
         if fd < 0:
-            raise _failed("timerfd_create")
+            raise failed("timerfd_create")
         try:
             # A zero `it_value` disarms the timer, which a moment at the epoch would
             # be. `sleep_until` returns early for anything past, so it never is.
             when = _Itimerspec(_Timespec(0, 0), _Timespec(at // 1000, (at % 1000) * 1_000_000))
-            if _libc.timerfd_settime(fd, _TFD_TIMER_ABSTIME, ctypes.byref(when), None) != 0:
-                raise _failed("timerfd_settime")
+            if LIBC.timerfd_settime(fd, _TFD_TIMER_ABSTIME, ctypes.byref(when), None) != 0:
+                raise failed("timerfd_settime")
             while True:
                 await anyio.wait_readable(fd)
                 # The expiry count, which nothing needs: reading it is what says the

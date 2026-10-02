@@ -22,8 +22,9 @@ one fix for both:
 
 That first case is the silent failure this module exists to make loud, and it
 has two readers. `phern doctor` and `phern daemon` ask *before*: is this deployment
-one where the socket will survive? The daemon asks *after*, on a cadence, of
-its own socket — `socket_identity` — because by then no new client can connect
+one where the socket will survive? The daemon asks *after*, whenever the kernel
+says its socket's entry moved (`ph.path_watch`), of its own socket —
+`socket_identity` — because by then no new client can connect
 to be told anything, and the only surfaces left are the daemon's log and the
 roots' own transcripts.
 

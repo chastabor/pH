@@ -15,9 +15,10 @@ daemon's socket is a lie about this daemon. `$PH_RUNTIME` sits under
 `$XDG_RUNTIME_DIR`, which logind reaps at logout for a user who is not lingering,
 so the door can be removed while the process behind it keeps running — and every
 later client is told "no daemon socket" and to start one, which the leases the
-first is still holding will refuse. `watch` compares the socket's inode against
-the one bound here, and says so in each root's own log, because by then the
-surfaces that could carry the news are exactly the ones that went away.
+first is still holding will refuse. `keep_watching` compares the socket's inode
+against the one bound here, whenever the kernel says its entry moved, and says so
+in each root's own log, because by then the surfaces that could carry the news are
+exactly the ones that went away.
 
 @module ph_app.daemon.server
 """
@@ -41,6 +42,7 @@ from ph.cordis import Profile
 from ph.keys import ATTACHMENTS, COMMANDS, CREDENTIALS, PERMISSION_PRESETS, TOOLS
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
+from ph.path_watch import EntryWatch, Mechanism, WatchUnavailable
 from ph.paths import resolve_roots
 from ph.resources import GRACE_SECONDS
 from ph.seams.attachments import mime_for
@@ -150,16 +152,6 @@ if TYPE_CHECKING:
 __all__ = ["DaemonServer", "serve"]
 
 log = logging.getLogger("ph_app.daemon")
-
-WATCH_EVERY = 30.0
-"""How often the daemon checks that the socket at its path is still its own (P5-11).
-
-The thing being watched changes at most once in the life of a process — a
-logout, a reboot's worth of directory — so this is not a poll on a hot fact. It
-is a bound on how long the log takes to say what happened, and thirty seconds
-means the record's timestamp still lines up with the logout a person is trying
-to correlate it with. One `lstat`, no roots walked.
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +436,7 @@ class _Connection:
         each branch a different static type without a cast per branch, which is
         a dict with extra steps.
         """
+        await self.server.check_unwatched()
         if not self.spoke:
             self.spoke = True
             self.server.served = True
@@ -1317,8 +1310,12 @@ class DaemonServer:
     A remembered value rather than a dirty flag: the thing being compared is the
     whole frame, and a flag would have to be set by every writer of every field
     that goes into one."""
-    watch_every: float = WATCH_EVERY
-    """The socket watch's cadence, read back by a person through `status`."""
+    watching: Mechanism | None = None
+    """How the socket's entry is watched (P5-11, P12-05), or `None` when it is not:
+    refused (`watch_refused`), or a server built by hand. Set by `serve`."""
+    watch_refused: str | None = None
+    """Why the watch could not be armed, or `None`. Then nothing hears the socket
+    move, and `check_unwatched` asks at each client request instead."""
     lifetime_clock: Planner = field(init=False)
     """The daemon's own two deadlines (P7-08, P12-02): an armed keep-alive expiring,
     and an auto-started daemon nobody has spoken to reaching `SPAWN_TIMEOUT`
@@ -1380,12 +1377,31 @@ class DaemonServer:
         past it (`spent`), so the two cannot disagree."""
         return self.started + int(SPAWN_TIMEOUT * 1000)
 
+    @property
+    def socket_watch(self) -> str:
+        """`inotify`, `kqueue`, `off`, or `unavailable: <why>`, for `daemon/status`."""
+        if self.watching is not None:
+            return self.watching
+        return "off" if self.watch_refused is None else f"unavailable: {self.watch_refused}"
+
+    async def check_unwatched(self) -> None:
+        """Check the socket, when nothing is watching it, as a client's request
+        arrives (`_Connection._dispatch`).
+
+        A watch that could not be armed must not quietly become a cadence (§12
+        decision 4). A request is the moment that can still be acted on: a daemon
+        that lost its path is unreachable to new clients, the doctor included, so
+        the clients that can be told are the ones already connected, and they are
+        the ones sending requests."""
+        if self.watch_refused is not None:
+            await self.check_reachable()
+
     def status(self) -> DaemonStatusReply:
         """What this daemon is, for `phern agents doctor`.
 
         Everything here is read from the running process rather than re-derived
         by the client: the socket it bound, the policy it was started with, the
-        cadences it is actually running. A doctor that reported what the *client*
+        jobs it is actually running. A doctor that reported what the *client*
         would have chosen would agree with a daemon started differently and say
         nothing at all.
         """
@@ -1401,7 +1417,7 @@ class DaemonServer:
             passivate_after=supervisor.passivate_after,
             next_wake=supervisor.scheduler.planned,
             next_release=supervisor.releaser.planned,
-            watch_every=self.watch_every,
+            socket_watch=self.socket_watch,
             check_invariants=supervisor.check_invariants,
             unreachable_since=self.unreachable_since,
             # `report()`'s shape as models — a list of sections, each a title
@@ -1473,7 +1489,7 @@ class DaemonServer:
         return lifetime(self.path)
 
     async def check_reachable(self) -> str:
-        """One watch pass: is the socket at our path still ours? (P5-11)
+        """Is the socket at our path still ours? (P5-11)
 
         `""` when it is. Two shapes of no, wanting the same record and not the same
         sentence: `removed` is logout reaping `$XDG_RUNTIME_DIR` out from under a daemon
@@ -1489,8 +1505,7 @@ class DaemonServer:
         """
         if self.identity is None or self.unreachable_since is not None:
             # Nothing to compare against (a caller that built this by hand), or
-            # already latched. Either way there is no transition to find, and the
-            # `lstat` below is skipped for the life of the process.
+            # already latched. Either way there is no transition to find.
             return ""
         current = socket_identity(self.path)
         if current == self.identity:
@@ -1525,6 +1540,39 @@ class DaemonServer:
         )
         await self.supervisor.announce_unreachable(note)
         return reason
+
+    async def keep_watching(self, watch: EntryWatch) -> None:
+        """The socket watch (P5-11, P12-05): `check_reachable` whenever the kernel
+        says the socket's entry may have moved, and never on a clock.
+
+        Once at the start, for the moment between `serve` taking `identity` and
+        arming `watch`. It ends when the answer is no (the latch is one-way, so
+        there is nothing further to hear) or when the watched directory is gone,
+        after the check that finds it so. `serve` owns the watch and closes it.
+        """
+        if await self._asked():
+            return
+        try:
+            async for _ in watch.changes():
+                if await self._asked():
+                    return
+        except OSError:
+            # The watch broke under us (its descriptor, the kernel): said once, and
+            # the socket is then checked at each request instead.
+            log.exception("ph_app.daemon: the socket watch failed; checking on requests instead")
+            self.watch_refused = "the watch failed"
+            self.watching = None
+
+    async def _asked(self) -> bool:
+        """`check_reachable`, contained: whether it found the socket gone.
+
+        A failing check is logged and the watch goes on, as a failing planner pass
+        does: raised, it would take the task group, and every root, with it."""
+        try:
+            return bool(await self.check_reachable())
+        except Exception:
+            log.exception("ph_app.daemon: the socket check failed")
+            return False
 
     def holds(self, *, now: int | None = None) -> list[Hold]:
         """Why this daemon is still up — every reason, in the order asked.
@@ -1699,32 +1747,6 @@ class DaemonServer:
             self.check_lifetime()
 
 
-async def _every(
-    seconds: float, stop: anyio.Event, work: Callable[..., Awaitable[Any]], what: str
-) -> None:
-    """Run `work` on a fixed cadence until the daemon stops.
-
-    **One reading of `stop`, not three**: the timeout falls through to the work
-    and a set event returns, so the loop condition and a trailing guard cannot
-    disagree about what "stopped" means. That reasoning was written once and
-    then depended on by every cadence, so one change to shutdown semantics is
-    one edit. The socket watch is what still runs on it; P12-05 retires it, and
-    this with it.
-
-    A failing pass is logged and the cadence continues: work that raised would
-    otherwise take the task group with it, and with it every root, over a
-    housekeeping pass. That is the reasoning `_drive` contains a crash for.
-    """
-    while True:
-        with anyio.move_on_after(seconds):
-            await stop.wait()
-            return
-        try:
-            await work()
-        except Exception:
-            log.exception("ph_app.daemon: %s failed", what)
-
-
 async def _clear_stale(path: Path) -> None:
     """Remove a socket nobody is listening on; refuse one somebody is.
 
@@ -1750,7 +1772,6 @@ async def serve(
     ephemeral: bool = False,
     keep_alive: float = 0.0,
     scheduling: bool = True,
-    watch_every: float = WATCH_EVERY,
     check_invariants: bool = True,
     path: Path | None = None,
     ready: anyio.Event | None = None,
@@ -1785,6 +1806,23 @@ async def serve(
     # rather than by assumption (P5-11). A local as well as a field because the
     # teardown below needs it whether or not the server was ever built.
     identity = socket_identity(socket_path)
+    # Armed the instant after, for the same reason: a change between the two would
+    # be one nothing heard (P12-05).
+    watch: EntryWatch | None = None
+    refused: str | None = None
+    try:
+        watch = EntryWatch(socket_path)
+    except WatchUnavailable as error:
+        refused = str(error)
+        log.error(
+            "ph_app.daemon: cannot watch %s (%s); it is checked at each request from "
+            "a connected client instead",
+            socket_path,
+            error,
+        )
+    # Its own scope, so teardown can end the watch before it unlinks the socket:
+    # that unlink is this daemon closing its own door, not losing it.
+    watching = anyio.CancelScope()
     async with anyio.create_task_group() as tasks:
         # Built inside the group so `tasks` is a required field rather than an
         # Optional with a "not serving" guard: a supervisor that cannot start a
@@ -1802,7 +1840,8 @@ async def serve(
                 supervisor=supervisor,
                 stop=anyio.Event(),
                 path=socket_path,
-                watch_every=watch_every,
+                watching=watch.mechanism if watch is not None else None,
+                watch_refused=refused,
                 ephemeral=ephemeral,
                 keep_alive=keep_alive,
                 identity=identity,
@@ -1818,14 +1857,13 @@ async def serve(
             if scheduling:
                 # See `Supervisor.scheduler` and docs/seams/schedule.md.
                 tasks.start_soon(supervisor.scheduler.keep, server.stop)
-            if watch_every > 0:
-                # Its own cadence and its own `if`, not a rider on the scheduler: a test
-                # that turns the scheduler off to keep it out of its assertions
-                # must not thereby turn off the thing that notices the daemon has no
-                # door.
-                tasks.start_soon(
-                    _every, watch_every, server.stop, server.check_reachable, "the socket watch"
-                )
+            if watch is not None:
+
+                async def keep_watching(armed: EntryWatch) -> None:
+                    with watching:
+                        await server.keep_watching(armed)
+
+                tasks.start_soon(keep_watching, watch)
             if started is not None:
                 # Handed out rather than reachable through the socket: a test
                 # whose subject is the supervisor's own concurrency has no wire
@@ -1838,6 +1876,11 @@ async def serve(
                     ready.set()
                 await server.stop.wait()
         finally:
+            # **The watch ends before anything below touches the socket**: the
+            # unlink is this daemon closing its own door, and a watch still running
+            # would hear it as the door being taken and say so in every root.
+            # Cancelled before the first await below, so it cannot run in between.
+            watching.cancel()
             # **The socket goes first, and only if it is still ours** (E2).
             #
             # *Only if ours*, because `check_reachable` latches `replaced` for a
@@ -1882,3 +1925,5 @@ async def serve(
             # unwound above by their own channels closing, so this cancels a
             # listener rather than a turn.
             tasks.cancel_scope.cancel()
+            if watch is not None:
+                watch.close()

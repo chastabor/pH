@@ -182,7 +182,9 @@ daemon on the same release fixes both. Root release and the daemon's own
 keep-alive went the same way (P12-01, P12-02): `daemon/status` drops `sweepEvery`
 for `nextRelease`, when the next quiet root may be released, absent while none
 can be. Invariants are checked when a root settles (P12-04): `invariantsEvery`
-becomes `checkInvariants`, a flag. The rest of Phase 12 changes this reply again
+becomes `checkInvariants`, a flag. The socket is watched by the kernel (P12-05):
+`watchEvery` becomes `socketWatch`, how (`inotify`, `kqueue`, `off`, or
+`unavailable: <why>`). The rest of Phase 12 changes this reply again
 before 0.7.0 ships.
 
 **Nothing refuses on this number, and that is worth saying where it is
@@ -434,7 +436,7 @@ def served(*names: str) -> dict[str, bool]:
     and silently not reach `daemon/status`. Here the only thing said twice is
     `PROTOCOL_VERSION`, which is a constant reference and cannot disagree with
     itself. Split out rather than spreading `model_dump()` because a `**` spread
-    would take `pid`, `socket` and the ten cadences with it and stop mypy
+    would take `pid`, `socket` and the daemon's settings with it and stop mypy
     checking any of them.
     """
     return {"sessions": True, "streaming": True, **dict.fromkeys(names, True)}

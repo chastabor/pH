@@ -23,15 +23,10 @@ import pytest
 from ph import wall_clock
 from ph.cancel import first_of
 from ph.session import now_ms
-from ph.testing import raising, settled
+from ph.testing import open_fds, raising, settled
 from ph.wall_clock import Alarm, sleep_until
 
 pytestmark = pytest.mark.anyio
-
-
-def _open_fds() -> set[str]:
-    """This process's descriptors. `/dev/fd` lists them on Linux and macOS alike."""
-    return set(os.listdir("/dev/fd"))
 
 
 def _timerfd_infos() -> list[str]:
@@ -83,14 +78,14 @@ async def test_an_event_that_ends_the_race_leaves_the_alarm_unrung(ahead: int | 
 async def test_the_timer_is_closed_whichever_way_the_wait_ends() -> None:
     """A daemon sleeps once per plan for weeks, so a descriptor left per wait is a
     leak that ends at `EMFILE`."""
-    before = _open_fds()
+    before = open_fds()
 
     with anyio.fail_after(5):
         await sleep_until(now_ms() + 20)
     with anyio.move_on_after(0.05):
         await sleep_until(now_ms() + 60_000)
 
-    assert _open_fds() == before
+    assert open_fds() == before
 
 
 async def test_without_a_timer_the_wait_still_ends_on_time_and_says_why(

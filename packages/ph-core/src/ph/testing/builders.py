@@ -772,6 +772,13 @@ def session_of(agent: AgentHandle) -> Session:
     return session
 
 
+def open_fds() -> set[str]:
+    """This process's open descriptors, by number. `/dev/fd` lists them on Linux and
+    macOS alike, so a test of something that holds one (a timer, a watch) can say
+    it gave it back."""
+    return set(os.listdir("/dev/fd"))
+
+
 def noted[I, T](bucket: list[I], item: I, answer: T) -> T:
     """Record that a listener ran, then answer with a value already in hand.
 

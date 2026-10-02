@@ -438,7 +438,10 @@ class DaemonStatusReply(CapabilityBlock):
     next_release: int | None = None
     """When the next quiet root may be released, epoch ms, or `None` while none can
     be: release sleeps until then rather than sweeping (P12-01)."""
-    watch_every: float
+    socket_watch: str
+    """How the socket's path is watched (P5-11, P12-05): `inotify`, `kqueue`, `off`, or
+    `unavailable: <why>`, in which case the daemon checks it whenever it is asked.
+    It used to be `watchEvery`, a thirty-second `lstat`."""
     check_invariants: bool
     """Whether a root's pollable invariants are checked when it settles (I6, P12-04),
     rather than on the five-minute cadence that `invariantsEvery` used to name."""
