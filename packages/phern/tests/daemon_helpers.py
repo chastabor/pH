@@ -123,7 +123,7 @@ class _Daemon:
         Waiting on `closed` rather than sleeping, because that event is set by
         the pump itself when the stream ends: the fact, not a guess about how
         long it takes. Bounded, since a teardown that can hang is one that will —
-        `install_lifecycle` makes the same trade for the same reason.
+        `stop_on_signals`' hard stop makes the same trade for the same reason.
         """
         for client in self.clients:
             with suppress(Exception):

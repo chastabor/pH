@@ -149,6 +149,7 @@ from .recovery import (
     Recovery,
     floored,
     recovery_of,
+    resume_children,
 )
 
 _LOG = log_writer(__name__)
@@ -1612,10 +1613,7 @@ class Supervisor:
 
     async def _resume_children(self, root: Root) -> None:
         """Put back to work what this root's children are owed (P5-04)."""
-        subagents = root.ctx.get(SUBAGENTS)
-        if subagents is None:
-            return
-        revived = await subagents.resume_children(root.agent, retry_limit=CHILD_RETRY_LIMIT)
+        revived = await resume_children(root.ctx, root.agent)
         if revived:
             log.info(
                 "ph_app.daemon: root %s put %d admitted child(ren) back to work",

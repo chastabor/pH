@@ -7,15 +7,11 @@ convention: `subprocess.Popen` and `tempfile.mkdtemp` outside the seams are a
 test failure, because the fiftieth plugin author will not have read §4.9.
 
 Shutdown is the other half. A harness that leaves child processes behind on
-`SIGTERM` is a harness that leaks a runtime per crash, so:
-
-* every host (the daemon, `phern -p`, `--mode rpc`) takes `SIGTERM`/`SIGINT` as its
-  orderly stop, with a **hard stop** behind it that kills what the process still
-  owns and leaves (`stop_on_signals`), because a shutdown path that can hang is a
-  shutdown path that will;
-* `install_lifecycle` is an older form of the same rule for a bare `Context`:
-  disposed on `atexit`, and on a signal within a grace period. Nothing ships that
-  calls it.
+`SIGTERM` is a harness that leaks a runtime per crash, so every host (the daemon,
+`phern -p`, `--mode rpc`) takes `SIGTERM`/`SIGINT` as its orderly stop, with a
+**hard stop** behind it that kills what the process still owns and leaves
+(`stop_on_signals`), because a shutdown path that can hang is a shutdown path that
+will.
 
 `SIGKILL` itself runs nothing, on any platform (N7). That is why the crash
 layer exists separately: paired events and the orphan journal (Phase 3).
@@ -25,12 +21,11 @@ layer exists separately: paired events and the orphan journal (Phase 3).
 
 from __future__ import annotations
 
-import asyncio
-import atexit
 import logging
 import os
 import shutil
 import signal
+import sys
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable
@@ -38,7 +33,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import NoReturn
 
 import anyio
 from anyio.abc import TaskStatus
@@ -53,8 +48,8 @@ __all__ = [
     "HARD_STOP_THREAD",
     "SHUTDOWN_SECONDS",
     "Stopped",
-    "install_lifecycle",
     "leave_on",
+    "run_until_signaled",
     "stop_on_signals",
     "temporary_directory",
     "until_signaled",
@@ -119,94 +114,6 @@ async def temporary_directory(ctx: Context, *, prefix: str = "ph-") -> Path:
     return created[0]
 
 
-def install_lifecycle(
-    ctx: Context,
-    *,
-    grace_seconds: float = GRACE_SECONDS,
-    on_signal: Callable[[int], None] | None = None,
-) -> Disposer:
-    """Dispose `ctx` on exit and on `SIGTERM`/`SIGINT`.
-
-    A signal handler runs on the main thread, *interrupting* whatever the event
-    loop was doing — so it cannot block waiting for an async teardown without
-    deadlocking the loop it needs. Instead it schedules the teardown as a task
-    and returns; the loop then runs it, and the shutdown task is what finally
-    leaves.
-
-    Past the grace period pH stops trusting its own teardown and re-raises the
-    signal with the default handler: a shutdown path that can hang is a shutdown
-    path that will. `SIGKILL` runs nothing on any platform (N7), which is why the
-    crash-recovery layer exists separately.
-
-    Returns a disposer that removes the handlers, so a test or an embedded host
-    can install and remove them without leaking global state.
-    """
-    finished = threading.Event()
-    # A task with no reference can be garbage-collected mid-flight, which would
-    # abandon the very teardown this exists to run.
-    pending: set[asyncio.Task[None]] = set()
-
-    async def unwind(signum: int) -> None:
-        try:
-            # **The budget is handed to `dispose`, not wrapped around it.** This
-            # was a shielded `move_on_after` here, and once `Context.dispose`
-            # grew its own shield that scope became *inert* — a shielded child
-            # is by definition immune to a parent's cancellation, so the outer
-            # deadline could never land. Two constants for one tunable is how an
-            # inner budget silently becomes dead code (`daemon/server.py` names
-            # the hazard); here it was the outer one that died.
-            await ctx.dispose(deadline=anyio.current_time() + grace_seconds)
-        except Exception:
-            log.exception("ph.resources: orderly disposal failed")
-        finally:
-            finished.set()
-            leave_on(signum)
-
-    def dispose_blocking(reason: str) -> None:
-        """The no-loop path: `atexit`, or a signal before the loop started."""
-        if finished.is_set():
-            return
-        finished.set()
-        log.debug("ph.resources: disposing the root scope (%s)", reason)
-        try:
-            anyio.run(_dispose_within, ctx, grace_seconds)
-        except Exception:
-            log.exception("ph.resources: orderly disposal failed")
-
-    def handle(signum: int, _frame: object) -> None:
-        if on_signal is not None:
-            on_signal(signum)
-        if finished.is_set():  # pragma: no cover - a second signal
-            leave_on(signum)
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            dispose_blocking(signal.Signals(signum).name)
-            leave_on(signum)
-            return
-        task = loop.create_task(unwind(signum))
-        pending.add(task)
-        task.add_done_callback(pending.discard)
-
-    previous: dict[int, Any] = {}
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        try:
-            previous[signum] = signal.signal(signum, handle)
-        except (ValueError, OSError):  # pragma: no cover - non-main thread
-            log.debug("ph.resources: cannot install a handler for %s here", signum)
-
-    atexit.register(dispose_blocking, "atexit")
-
-    def release() -> None:
-        atexit.unregister(dispose_blocking)
-        for signum, handler in previous.items():
-            with suppress(ValueError, OSError):  # pragma: no cover
-                signal.signal(signum, handler)
-
-    return release
-
-
 async def stop_on_signals(
     stop: Callable[[int], bool],
     *,
@@ -259,26 +166,31 @@ async def stop_on_signals(
                 log.warning(
                     "ph.resources: %s while stopping; leaving at once", signal.Signals(signum).name
                 )
-                if journal is not None:
-                    journal.kill_owned()
-                leave_on(signum)
+                _leave_now(signum, journal, leave=leave_on)
     finally:
         if hard is not None:
             hard.cancel()
 
 
-def _leave_now(signum: int, journal: OrphanJournal | None) -> None:
-    """The hard stop, on its own thread: what the process still owns is killed, and
-    the process leaves without running another line of its unwind.
+def _exit_on(signum: int) -> NoReturn:
+    os._exit(128 + signum)
 
-    `os._exit` rather than `leave_on`, because only the main thread may set a
-    signal's handler. Exiting is in the `finally` so that nothing the kill raises
-    can keep a process alive past its bound."""
+
+def _leave_now(
+    signum: int, journal: OrphanJournal | None, *, leave: Callable[[int], NoReturn] = _exit_on
+) -> NoReturn:
+    """The hard stop: what the process still owns is killed, and the process leaves
+    without running another line of its unwind.
+
+    On its own thread it leaves by `os._exit` rather than `leave_on`, because only
+    the main thread may set a signal's handler; a second signal, on the loop, passes
+    `leave_on`. Leaving is in the `finally` so that nothing the kill raises can keep
+    a process alive past its bound."""
     try:
         if journal is not None:
             journal.kill_owned()
     finally:
-        os._exit(128 + signum)
+        leave(signum)
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,11 +208,13 @@ async def until_signaled[T](
     let a signal stop it the way it stops the daemon (`stop_on_signals`).
 
     The first `SIGTERM` or `SIGINT` cancels `run`, so the mount it holds unwinds as
-    it does on any exit, and what comes back is `Stopped`. The host then leaves
-    through the signal (`leave_on`), which also ends a worker thread still blocked
-    on stdin. Before this the default action ended the process at once, which is a
-    crash under another name: children were left `running`, which spends one of
-    their restart attempts at the next start, and the log's unwritten tail was lost.
+    it does on any exit, and what comes back is `Stopped`. Before this the default
+    action ended the process at once, which is a crash under another name: children
+    were left `running`, which spends one of their restart attempts at the next
+    start, and the log's unwritten tail was lost.
+
+    A host must then leave through the signal rather than return; from synchronous
+    code, `run_until_signaled` is this with that step included.
     """
     signaled: list[int] = []
     body = anyio.CancelScope()
@@ -330,23 +244,38 @@ async def until_signaled[T](
     return finished[0]
 
 
-def leave_on(signum: int) -> None:
+def run_until_signaled[T](
+    run: Callable[[], Awaitable[T]], *, on_stop: Callable[[int], None] | None = None
+) -> T:
+    """A one-shot host's whole life from synchronous code: `run` under
+    `until_signaled`, and a run a signal stopped never returns.
+
+    Once its unwind is over, `on_stop` is told the signal (a host's one line on
+    stderr), stdio is flushed, and the process leaves through the signal
+    (`leave_on`), so whoever sent it reads the exit it asked for. Through the signal
+    rather than by returning, because `--mode rpc` can still have a worker thread
+    blocked reading stdin, and the interpreter would wait for it at exit. Flushed
+    first, since the default action writes nothing more: `--mode json` has already
+    streamed its events to stdout. What `run` raises comes back as itself.
+    """
+    outcome = anyio.run(until_signaled, run)
+    if not isinstance(outcome, Stopped):
+        return outcome
+    if on_stop is not None:
+        on_stop(outcome.signum)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    leave_on(outcome.signum)
+
+
+def leave_on(signum: int) -> NoReturn:
     """Re-raise `signum` with the default handler, so the exit code is honest.
 
     Public for the hosts that leave this way once their unwind is over, or when a
-    second signal says not to wait for it (`stop_on_signals`)."""
-    try:
+    second signal says not to wait for it (`stop_on_signals`). The default action
+    ends the process before `os.kill` returns; where it cannot be sent, the same
+    code is the exit's own."""
+    with suppress(ValueError, OSError):
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
-    except (ValueError, OSError):  # pragma: no cover
-        raise SystemExit(128 + signum) from None
-
-
-async def _dispose_within(ctx: Context, grace_seconds: float) -> None:
-    """`anyio.run`'s entry point for the no-loop path.
-
-    A function rather than `partial`, because `dispose`'s budget is an *instant*
-    and `anyio.current_time()` is only meaningful once the loop this call starts
-    is running.
-    """
-    await ctx.dispose(deadline=anyio.current_time() + grace_seconds)
+    raise SystemExit(128 + signum)

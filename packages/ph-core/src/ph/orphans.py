@@ -151,8 +151,9 @@ def _kinfo_start_token(raw: bytes, pid: int) -> str | None:
 
     `kp_proc.p_starttime` is the struct's first field. It is a `timeval`, so the
     token is in microseconds where Linux's is in clock ticks. **The pid is checked
-    before the time is trusted**, because these offsets were read from
-    `<sys/proc.h>` rather than from a compiler. A layout that moved has to read as
+    before the time is trusted**, because these offsets are constants rather than a
+    compiler's. They match `sizeof`/`offsetof` in the macOS 26 SDK (arm64,
+    checked 2026-10-02), but a layout that moves in a later kernel has to read as
     no token, which the sweep spares, and never as a steady wrong one. A pid that
     has gone comes back empty.
     """
@@ -249,10 +250,8 @@ class OrphanJournal:
             log.warning("ph.orphans: could not read the orphan journal", exc_info=True)
             return SweepReport()
         # Whole lines only: one still being written is carried over with the rest.
-        judged = read.rfind(b"\n") + 1
-        report, keep = _judge(
-            _live(records_in(read[:judged].decode(errors="replace").splitlines()))
-        )
+        judged, live = _outstanding(read)
+        report, keep = _judge(live)
         # Nothing read, nothing owed: every `phern` invocation otherwise wrote a temp
         # file and renamed it over a journal that was empty.
         if read:
@@ -296,9 +295,9 @@ class OrphanJournal:
         owner = self._owned_by()
         # Whole lines only, as `sweep` reads them: one still being appended is a
         # spawn too new to have been recorded completely.
-        lines = read[: read.rfind(b"\n") + 1].decode(errors="replace").splitlines()
+        _, live = _outstanding(read)
         killed: list[int] = []
-        for pid, record in sorted(_live(records_in(lines)).items()):
+        for pid, record in sorted(live.items()):
             if (record.get("owner"), record.get("ownerToken")) != owner:
                 continue
             recorded = record.get("startToken")
@@ -378,6 +377,14 @@ class OrphanJournal:
 def _identity(found: os.stat_result) -> tuple[int, int]:
     """Which file a path named when it was read: a compaction gives it another."""
     return found.st_dev, found.st_ino
+
+
+def _outstanding(read: bytes) -> tuple[int, dict[int, dict[str, Any]]]:
+    """The spawn records a journal's bytes leave outstanding, read to its last whole
+    line, and where that line ends. The one rule `sweep` and `kill_owned` share for
+    which records are judged at all."""
+    judged = read.rfind(b"\n") + 1
+    return judged, _live(records_in(read[:judged].decode(errors="replace").splitlines()))
 
 
 def _live(records: Iterable[dict[str, Any]]) -> dict[int, dict[str, Any]]:

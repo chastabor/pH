@@ -44,7 +44,7 @@ from ph.json import JsonObject, as_obj
 from ph.keys import DIAGNOSTICS
 from ph.lingering import lifetime
 from ph.paths import RuntimeDirError, resolve_roots
-from ph.resources import Stopped, leave_on, until_signaled
+from ph.resources import run_until_signaled
 from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.seams.models import ModelChoice, ModelChoiceError, ModelList
 from ph.selectors import matches_any, unknown_namespaces
@@ -326,13 +326,11 @@ def default(
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio. A signal stops it the
         # way it stops the daemon, and a peer closing it by `SIGTERM` is the common
-        # case (`until_signaled`).
+        # case (`run_until_signaled`).
         try:
-            served = anyio.run(partial(until_signaled, partial(run_rpc, composed, choice=choice)))
+            run_until_signaled(partial(run_rpc, composed, choice=choice), on_stop=_say_stopped)
         except MountRefusal as error:
             fail_unmounted(profile, error)
-        if isinstance(served, Stopped):
-            _leave_stopped(served)
         return
 
     if prompt is None:
@@ -354,7 +352,7 @@ def default(
     from ph.session_profile import OverrideNotRecorded  # noqa: PLC0415
 
     try:
-        outcome = anyio.run(partial(until_signaled, route))
+        outcome = run_until_signaled(route, on_stop=_say_stopped)
     except MountRefusal as error:
         # A row that *declined* — `containment.strict` with no backend (E8) — is
         # the sentence doctor prints, with doctor's exit code, and not the
@@ -382,9 +380,6 @@ def default(
         # option the log could not record, which is not run on.
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
-    if isinstance(outcome, Stopped):
-        _leave_stopped(outcome)
-        return
     if mode == "json":
         # Already written, event by event, as each committed.
         return
@@ -405,19 +400,9 @@ def default(
         fail(f"[red]the turn failed:[/red] {detail(outcome.failure)}", code=1)
 
 
-def _leave_stopped(stopped: Stopped) -> None:
-    """A one-shot run a signal stopped, once its unwind is over: said on stderr, and
-    left through the signal, so whoever sent it reads the exit it asked for.
-
-    Through the signal rather than by returning, because `--mode rpc` can still have
-    a worker thread blocked reading stdin, and the interpreter would wait for it at
-    exit. Flushed first, since the default action writes nothing more: `--mode
-    json` has already streamed its events to stdout.
-    """
-    err.print(f"[yellow]stopped on {signal.Signals(stopped.signum).name}[/yellow]")
-    sys.stdout.flush()
-    sys.stderr.flush()
-    leave_on(stopped.signum)
+def _say_stopped(signum: int) -> None:
+    """A one-shot run a signal stopped, said on stderr once its unwind is over."""
+    err.print(f"[yellow]stopped on {signal.Signals(signum).name}[/yellow]")
 
 
 NO_DIAGNOSTICS_ROW = "none — this profile mounts no `diagnostics` row, so no row can report"

@@ -36,7 +36,7 @@ import json
 import os
 import signal
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -76,7 +76,7 @@ from ph.testing import admitted_child, hold_session, log_event, stored_log
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
-from ph_app.protocol import PROTOCOL_VERSION
+from ph_app.protocol import PROTOCOL_VERSION, request
 from ph_app.runtime import mounted
 from ph_rlm.presentation import IPYTHON
 
@@ -289,25 +289,40 @@ async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
     assert frames[0]["id"] == 1
 
 
-async def test_an_rpc_host_sweeps_the_children_a_stopped_run_left_working(
-    profile: Profile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An rpc peer is a serving host, and only the daemon swept a root's children.
+async def _rpc_prompt(profile: Profile, session_id: str) -> None:
+    prompt = request(1, "session/prompt", {"sessionId": session_id, "prompt": "hello"})
+    await run_rpc(profile, stdin=io.StringIO(f"{json.dumps(prompt)}\n"), out=io.StringIO())
 
-    So a child that a stopped or crashed run left `running` still read as working:
-    in its own log, in the model's list of its children, and to the `task` crash
-    check, which told the model it "is started again with its parent". That stayed
-    true for as long as the peer served the session. The sweep runs where the
-    session's agent is made, because a readmitted child hangs off its parent's
-    agent, and this transport makes the agent at the first prompt.
+
+# `print` stands for the one-shot modes: `--mode json` and transcript make their
+# agent through the same `runtime.prompted`.
+_HOSTS: dict[str, Callable[[Profile, str], Awaitable[object]]] = {
+    "rpc": _rpc_prompt,
+    "print": lambda profile, sid: run_print(profile, "hello", session_id=sid),
+}
+
+
+@pytest.mark.parametrize("host", sorted(_HOSTS))
+async def test_every_host_sweeps_the_children_a_stopped_run_left_working(
+    host: str, profile: Profile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every host that makes a root's agent sweeps its children, not only the daemon.
+
+    Before, a child that a stopped or crashed run left `running` still read as
+    working under `--mode rpc` and the one-shot modes: in its own log, in the
+    model's list of its children, and to the `task` crash check, which told the
+    model it "is started again with its parent" — which those hosts never made
+    true. The sweep runs where the session's agent is made, because a readmitted
+    child hangs off its parent's agent: at rpc's first prompt, and in `prompted`
+    before the one-shot's turn.
 
     Asserted on a child whose owner nothing here mounts, the one decision a host can
     be checked by without running a provider: nothing can readmit it, so the sweep
     ends it in its own log. The bound is the daemon's, and only a host can be
     checked for passing it, since the seam states none.
 
-    Sabotage: drop `_resume_children` from `RpcServer._prompt`, and the child is
-    still `running`.
+    Sabotage: drop `resume_children` from `RpcServer._prompt` or from
+    `runtime.prompted`, and the child is still `running`.
     """
     bounds: list[int] = []
     original = SubagentService.resume_children
@@ -322,13 +337,7 @@ async def test_an_rpc_host_sweeps_the_children_a_stopped_run_left_working(
         child = admitted_child(ctx, parent, "r1", {"prompt": "look"})
         log_event(child, STATUS, {"status": "running"})
 
-    prompt = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "session/prompt",
-        "params": {"sessionId": "kids", "prompt": "hello"},
-    }
-    await run_rpc(profile, stdin=io.StringIO(f"{json.dumps(prompt)}\n"), out=io.StringIO())
+    await _HOSTS[host](profile, "kids")
 
     child_id = child_session_id("kids", "r1")
     header, events = read_session(stored_log(tmp_path / "sessions", child_id, family="kids"))
@@ -395,7 +404,6 @@ async def test_a_signal_mid_turn_hands_a_print_runs_session_back(
     Sabotage: drop the `body.cancel()` in `until_signaled`'s stop, and the run waits
     on its model call until the bound below fails it.
     """
-    from ph.llm.fake import FakeAdapter
 
     async def stuck(self: object, options: object) -> AsyncIterator[Any]:
         os.kill(os.getpid(), signal.SIGTERM)

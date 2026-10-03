@@ -80,7 +80,7 @@ def test_a_live_process_has_a_start_token_and_a_reaped_one_has_none() -> None:
 
     Sabotage: return `None` from `_darwin_start_token`, and this fails on a Mac.
     """
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    child = _sleeper()
     try:
         token = process_start_token(child.pid)
         assert token is not None, f"no start token on {sys.platform}"
@@ -92,19 +92,20 @@ def test_a_live_process_has_a_start_token_and_a_reaped_one_has_none() -> None:
 
 
 def test_a_kinfo_proc_for_another_pid_reads_as_no_token() -> None:
-    """The guard on macOS's layout, which nobody compiled.
+    """The guard on macOS's layout, which is constants rather than a compiler's.
 
-    The offsets in `_kinfo_start_token` come from `<sys/proc.h>`. If they are wrong,
-    the value at offset 0 could stay steady for one process, and a steady wrong token
-    is the one failure that leads to a kill: it matches. So the pid at offset 40 has
-    to be the pid that was asked about before the time is used. Built from bytes, so
-    it runs where `sysctl` is not.
+    The offsets in `_kinfo_start_token` match today's SDK. If a later kernel moves
+    them, the value at offset 0 could stay steady for one process, and a steady wrong
+    token is the one failure that leads to a kill: it matches. So the pid at
+    `_KINFO_PID_OFFSET` has to be the pid that was asked about before the time is
+    used. Built from bytes, so it runs where `sysctl` is not.
 
     Sabotage: drop the `recorded != pid` check, and the second assertion fails.
     """
-    raw = bytearray(648)
+    at = orphans._KINFO_PID_OFFSET
+    raw = bytearray(orphans._KINFO_PROC_SIZE)
     raw[0:12] = (1_700_000_000).to_bytes(8, sys.byteorder) + (42).to_bytes(4, sys.byteorder)
-    raw[40:44] = (4321).to_bytes(4, sys.byteorder)
+    raw[at : at + 4] = (4321).to_bytes(4, sys.byteorder)
 
     assert orphans._kinfo_start_token(bytes(raw), 4321) == "1700000000.000042"
     assert orphans._kinfo_start_token(bytes(raw), 1234) is None, "another pid's record"
@@ -192,9 +193,7 @@ def test_a_strays_own_children_go_with_it(tmp_path: Path) -> None:
 def _sleeper() -> subprocess.Popen[bytes]:
     """A child that would outlive this test, spawned as the seam spawns: a session
     leader, so the journal's kill takes its group."""
-    return subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
-    )
+    return subprocess.Popen(["sleep", "60"], start_new_session=True)
 
 
 def test_a_host_leaving_kills_only_what_it_still_owns(tmp_path: Path) -> None:

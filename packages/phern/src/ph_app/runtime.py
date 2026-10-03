@@ -33,6 +33,7 @@ from ph.wire import validation_summary
 
 from .attach import ingest, prompt_message
 from .console import err
+from .daemon.recovery import resume_children
 from .profiles import NAMED, StartingProfile, host_rows, kept_note, session_profile
 from .sessions import not_a_root, recorded_start
 
@@ -198,6 +199,10 @@ async def prompted(
         # command, not a turn — nothing is logged and there is nothing to unwind.
         refs = await ingest(ctx, attachments)
         agent = ctx.require(AGENTS).create(session, entry.options())
+        # Settled before the parent's turn can ask after them. A session this run
+        # minted has none, and would only pay a scan of its family to find that.
+        if session_id is not None:
+            await resume_children(ctx, agent)
         agent.followup(prompt_message(prompt, refs))
         await agent.run()
         await ctx.require(SESSIONS).flush(session)

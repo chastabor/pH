@@ -37,9 +37,16 @@ the inbox and running again is meaningful.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from ph.keys import SUBAGENTS
 from ph.session import Session
+
+if TYPE_CHECKING:
+    from ph.agent.types import AgentDriver
+    from ph.cordis import Context
 
 __all__ = [
     "CHILD_RETRY_LIMIT",
@@ -54,6 +61,7 @@ __all__ = [
     "Recovery",
     "floored",
     "recovery_of",
+    "resume_children",
 ]
 
 RETRY = "supervisor/retry"
@@ -100,8 +108,8 @@ interrupted* — and an answer that lived in `ph-core` made one question two, in
 two packages, in two vocabularies, for whoever came to tune it. `ctx.subagents`
 owns the sweep, the fold and the records; how many attempts they are worth is the
 host's, and `resume_children` takes it with no default so a host cannot get the
-number by saying nothing. `--mode rpc` sweeps with this one too
-(`ph_app.modes.rpc_mode`): a second host is not a second policy.
+number by saying nothing. `--mode rpc` and the one-shot modes sweep with this one
+too, through `resume_children` below: a second host is not a second policy.
 
 Three for the same reason `RETRY_DELAYS` has three rungs — what a harness
 stopping interrupts is transient by construction, and a child caught mid-turn
@@ -117,6 +125,21 @@ starting, which is already the wait. Which is also why the two do not share
 child would either report the root's bound or force delays into a type that has
 none. `spent` is the word worth sharing, and it costs nothing to say twice.
 """
+
+
+async def resume_children(ctx: Context, agent: AgentDriver) -> Sequence[str]:
+    """Put back to work what `agent`'s session's children are owed (P5-04):
+    readmitted, held, or ended, each in its own log. Returns the revived.
+
+    Called by every host once it has made a root's agent — the daemon's supervisor,
+    `--mode rpc` and the one-shot modes (`ph_app.runtime.prompted`) — because a
+    readmitted child hangs off its parent's agent. Bounded by `CHILD_RETRY_LIMIT`:
+    one harness, one answer to how many restarts a child's work is worth.
+    """
+    subagents = ctx.get(SUBAGENTS)
+    if subagents is None:
+        return ()
+    return await subagents.resume_children(agent, retry_limit=CHILD_RETRY_LIMIT)
 
 
 @dataclass(frozen=True, slots=True)
