@@ -73,7 +73,7 @@ uv prints where it put `phern` — `~/.local/bin` by default — and `uv tool
 update-shell` fixes a PATH that misses it. Afterwards the deployment answers to
 its own name: `uv tool upgrade phern`, `uv tool uninstall phern`. `--editable`
 reaches every member through the workspace, so a `git pull` is the whole
-upgrade. Coming from 0.5, read [*Upgrading from 0.5*](#upgrading-from-05) first.
+upgrade. Coming from 0.6, read [*Upgrading from 0.6*](#upgrading-from-06) first.
 
 `phern doctor` reports what you actually got — which rows mounted, which
 profiles this install can compose, and why any of them refused.
@@ -357,6 +357,48 @@ attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` �
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Upgrading from 0.6
+
+0.7 takes the daemon off the clock — nothing wakes up to ask whether something
+changed; a wait ends when the thing it waits on happens, or at a deadline named in
+advance — and gives every host the same orderly stop on a signal. What that
+changes for an 0.6 setup:
+
+- **Restart the daemon.** It speaks protocol 7: `daemon/status` drops
+  `sweepEvery`, `heartbeatEvery`, `watchEvery` and `invariantsEvery` for
+  `nextRelease`, `socketWatch` and `checkInvariants`, and a client and a daemon
+  from different releases refuse each other's reply. `phern agents shutdown`, and
+  the next command that needs one starts the new one.
+- **Sessions carry on.** The log format is still 3. A root with a live schedule no
+  longer writes `schedule/heartbeat` every five minutes, and a log that already
+  holds heartbeats still opens, since each was written `ignorable`. Whether a
+  daemon is alive is a question `phern agents doctor` or the OpenTelemetry sink
+  asks it, not a record in the log.
+- **A session has one writer, whoever it is.** The lease is the store's now, so
+  `phern -p --session x` against a session a daemon or another `phern -p` holds is
+  refused with `session_already_active` instead of appending beside it. The lease
+  is an `flock`, so a process that crashed gives it back by dying; there is no
+  stale lock to clear.
+- **A signal stops a run the way `phern agents shutdown` does.** The first
+  `SIGTERM` or Ctrl-C to `phern daemon`, `phern -p`, `--mode json`, transcript or
+  `--mode rpc` suspends each sub-agent in its own log (resumable, no restart
+  attempt spent), stops child processes and writes the logs; a one-shot run prints
+  `stopped on SIGTERM` and exits with the signal's status. A stop still running
+  15 seconds later is ended, killing what the process still owns, and a second
+  signal does that at once.
+- **The one-shot modes resume sub-agents.** `phern -p --session`, `--mode json`,
+  transcript and `--mode rpc` run the daemon's resume sweep before the first
+  prompt, so a child an interrupted run left `running` is readmitted, or ended if
+  it is spent, rather than left as it was.
+- **The daemon logs to `$PH_HOME/logs/daemon.log`.** A detached daemon's warnings
+  used to go to the null device.
+- **For code built on pH:** `ph.resources.install_lifecycle` is gone. A host takes
+  signals with `stop_on_signals` (async, for its whole life) or
+  `run_until_signaled` (a one-shot run from synchronous code). Also gone:
+  `ph.cancel.POLL_SECONDS`, `ph_runtime.lifecycle.POLL_SECONDS`, and the schedule
+  seam's `HEARTBEAT` and `ScheduleService.heartbeat`. `ph.cancel.first_of` takes
+  any `Waitable`, a `ph.wall_clock.Alarm` among them.
+
 ## Upgrading from 0.5
 
 0.6 gives every session its own log — a sub-agent's records are in the sub-agent's,
@@ -514,7 +556,7 @@ enumerated list of platform gaps — which is empty on both platforms today.
 ## Building a release
 
 Every member is released together, at one version: each pins the others exactly
-(`ph-core==0.6.0`), so a change in any of them is a release of all seven.
+(`ph-core==0.7.0`), so a change in any of them is a release of all seven.
 
 ```bash
 # 1. The version, everywhere it is written: `version` and the `==` pins between

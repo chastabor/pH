@@ -227,6 +227,25 @@ the request edge, so the value never enters a row, an event, or a child process
 (I-3). `${env:…}` interpolation is available for everything that is not a
 secret, with `${env:VAR:-default}` for a fallback.
 
+## Upgrading from 0.6
+
+- **Restart the daemon** (`phern agents shutdown`): it speaks protocol 7, and a
+  client and a daemon from different releases refuse each other's `daemon/status`.
+- **Sessions carry on.** The log format is still 3; a root with a schedule no
+  longer writes a heartbeat every five minutes, and logs that hold them still open.
+- **Nothing in the daemon wakes on a clock.** Quiet roots are released, invariants
+  checked and the socket watched when something happens or a deadline arrives, not
+  on a cadence; `phern agents doctor` shows the next release where it showed the
+  sweep.
+- **A session has one writer.** `phern -p --session x` against a session a daemon
+  or another run holds is refused with `session_already_active`.
+- **A signal stops a run the way `phern agents shutdown` does**: `SIGTERM` or
+  Ctrl-C suspends each sub-agent, resumable, and writes the logs before exiting,
+  and the one-shot modes now resume an interrupted session's sub-agents first.
+- **The daemon logs to `$PH_HOME/logs/daemon.log`.**
+- **For code built on pH:** `ph.resources.install_lifecycle` is gone; use
+  `stop_on_signals` or `run_until_signaled`.
+
 ## Upgrading from 0.5
 
 - **Restart the daemon** (`phern agents shutdown`): it speaks protocol 6, and a
