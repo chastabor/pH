@@ -79,8 +79,12 @@ def die_with_parent() -> str:
             return "pdeathsig"
     if sys.platform == "win32":  # pragma: no cover — the host owns the Job Object
         return "job-object"
-    _watch_parent()
-    return "kqueue-exit"
+    if sys.platform == "darwin":
+        _watch_parent()
+        return "kqueue-exit"
+    # A Linux whose `prctl` could not be reached (no `libc.so.6`): kqueue is not
+    # there to fall back on. Confined, `bwrap --die-with-parent` still holds.
+    return "none"  # pragma: no cover
 
 
 def _set_pdeathsig() -> bool:
@@ -92,33 +96,35 @@ def _set_pdeathsig() -> bool:
     return applied == 0
 
 
-def _watch_parent() -> None:
-    """Block a daemon thread on the parent's exit event, then end this process.
+if sys.platform == "darwin":
 
-    The order closes the re-parent race: the parent is read, the event is
-    registered against that pid, and the parent is read again. A host that died
-    between the first read and the registration is caught by `ESRCH` or by the
-    second read showing a different parent; one that dies after is what the event
-    is for. `os._exit`, not `sys.exit`, for the reason `Runner._end_runaway`
-    gives: the thing being escaped may be a cell that does not yield.
-    """
-    original = os.getppid()
-    kq = select.kqueue()
-    exited = select.kevent(
-        original,
-        filter=select.KQ_FILTER_PROC,
-        flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-        fflags=select.KQ_NOTE_EXIT,
-    )
-    try:
-        kq.control([exited], 0, 0)
-    except ProcessLookupError:  # pragma: no cover — the host died during the spawn
-        os._exit(0)
-    if os.getppid() != original:  # pragma: no cover — likewise
-        os._exit(0)
+    def _watch_parent() -> None:
+        """Block a daemon thread on the parent's exit event, then end this process.
 
-    def watch() -> None:  # pragma: no cover — ends the process
-        kq.control(None, 1, None)
-        os._exit(0)
+        The order closes the re-parent race: the parent is read, the event is
+        registered against that pid, and the parent is read again. A host that died
+        between the first read and the registration is caught by `ESRCH` or by the
+        second read showing a different parent; one that dies after is what the event
+        is for. `os._exit`, not `sys.exit`, for the reason `Runner._end_runaway`
+        gives: the thing being escaped may be a cell that does not yield.
+        """
+        original = os.getppid()
+        kq = select.kqueue()
+        exited = select.kevent(
+            original,
+            filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+            fflags=select.KQ_NOTE_EXIT,
+        )
+        try:
+            kq.control([exited], 0, 0)
+        except ProcessLookupError:  # pragma: no cover — the host died during the spawn
+            os._exit(0)
+        if os.getppid() != original:  # pragma: no cover — likewise
+            os._exit(0)
 
-    threading.Thread(target=watch, name="ph-parent-watch", daemon=True).start()
+        def watch() -> None:  # pragma: no cover — ends the process
+            kq.control(None, 1, None)
+            os._exit(0)
+
+        threading.Thread(target=watch, name="ph-parent-watch", daemon=True).start()
