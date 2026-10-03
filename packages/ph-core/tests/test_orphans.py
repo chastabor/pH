@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from ph import orphans
 from ph.cordis import Context
 from ph.keys import SUBPROCESS
 from ph.orphans import OrphanJournal, argv_digest, process_alive, process_start_token
@@ -27,7 +28,8 @@ from ph.testing import MountProfile
 pytestmark = [
     pytest.mark.anyio,
     pytest.mark.skipif(
-        not sys.platform.startswith("linux"), reason="the start token is read from /proc"
+        not sys.platform.startswith("linux") and sys.platform != "darwin",
+        reason="the start token is read from /proc or sysctl",
     ),
 ]
 
@@ -65,6 +67,48 @@ def test_a_spawn_is_recorded_with_a_start_token(tmp_path: Path) -> None:
     assert record["pid"] == os.getpid()
     assert record["startToken"] == process_start_token(os.getpid())
     assert record["argv"] == argv_digest(["python", "-m", "ph_runtime"])
+
+
+def test_a_live_process_has_a_start_token_and_a_reaped_one_has_none() -> None:
+    """Every kill below rests on this, on each platform the module runs on.
+
+    `test_a_spawn_is_recorded_with_a_start_token` compares a record with a fresh read,
+    and `None` equals `None`: on macOS, which had no token until `sysctl` was asked,
+    it passed while every stray there was left `unverifiable`. Asserted on a real
+    child, because a token that drifts between reads of one process makes the sweep
+    spare every stray it should kill.
+
+    Sabotage: return `None` from `_darwin_start_token`, and this fails on a Mac.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        token = process_start_token(child.pid)
+        assert token is not None, f"no start token on {sys.platform}"
+        assert process_start_token(child.pid) == token, "one process, two tokens"
+    finally:
+        child.kill()
+        child.wait()
+    assert process_start_token(child.pid) is None, "a reaped pid still has a token"
+
+
+def test_a_kinfo_proc_for_another_pid_reads_as_no_token() -> None:
+    """The guard on macOS's layout, which nobody compiled.
+
+    The offsets in `_kinfo_start_token` come from `<sys/proc.h>`. If they are wrong,
+    the value at offset 0 could stay steady for one process, and a steady wrong token
+    is the one failure that leads to a kill: it matches. So the pid at offset 40 has
+    to be the pid that was asked about before the time is used. Built from bytes, so
+    it runs where `sysctl` is not.
+
+    Sabotage: drop the `recorded != pid` check, and the second assertion fails.
+    """
+    raw = bytearray(648)
+    raw[0:12] = (1_700_000_000).to_bytes(8, sys.byteorder) + (42).to_bytes(4, sys.byteorder)
+    raw[40:44] = (4321).to_bytes(4, sys.byteorder)
+
+    assert orphans._kinfo_start_token(bytes(raw), 4321) == "1700000000.000042"
+    assert orphans._kinfo_start_token(bytes(raw), 1234) is None, "another pid's record"
+    assert orphans._kinfo_start_token(b"", 4321) is None, "what a pid that has gone reads"
 
 
 def test_a_reaped_child_is_not_swept(tmp_path: Path) -> None:
@@ -143,6 +187,49 @@ def test_a_strays_own_children_go_with_it(tmp_path: Path) -> None:
                     os.kill(pid, 9)
         if stray.poll() is None:  # pragma: no cover
             stray.wait()
+
+
+def _sleeper() -> subprocess.Popen[bytes]:
+    """A child that would outlive this test, spawned as the seam spawns: a session
+    leader, so the journal's kill takes its group."""
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+
+
+def test_a_host_leaving_kills_only_what_it_still_owns(tmp_path: Path) -> None:
+    """The hard stop's half of the journal: a host that will not finish its unwind
+    kills its own live children on the way out (`kill_owned`).
+
+    One journal per user per boot holds other runs' records too, so the restraint
+    is the sweep's. A dead run's stray is the next sweep's to judge, not this
+    host's. A pid whose start token no longer matches is somebody else's process.
+
+    Sabotage: drop the owner check, and the dead run's stray is killed with this
+    host's own.
+    """
+    journal = _journal(tmp_path)
+    mine, theirs, reused = _sleeper(), _sleeper(), _sleeper()
+    try:
+        for child in (mine, theirs, reused):
+            journal.record(pid=child.pid, argv=["x"], label=None)
+        _orphaned(journal, theirs.pid)
+        records = [json.loads(line) for line in journal.path.read_text().splitlines()]
+        for record in records:
+            if record.get("pid") == reused.pid:
+                record["startToken"] = "0"
+        journal.path.write_text("".join(json.dumps(one) + "\n" for one in records))
+
+        assert journal.kill_owned() == (mine.pid,)
+
+        assert mine.wait(timeout=10) != 0, "this host's own child outlived it"
+        assert theirs.poll() is None, "a dead run's stray is the sweep's, not this host's"
+        assert reused.poll() is None, "a pid that came back as something else was killed"
+    finally:
+        for child in (mine, theirs, reused):
+            if child.poll() is None:
+                child.kill()
+                child.wait()
 
 
 def test_a_live_owners_children_are_left_alone(tmp_path: Path) -> None:
@@ -259,7 +346,6 @@ def test_a_spawn_recorded_while_a_sweep_compacts_is_kept(
     """
     import threading
 
-    from ph import orphans
     from ph.paths import write_atomic
 
     journal = _journal(tmp_path)
@@ -293,8 +379,6 @@ def test_a_spawn_recorded_while_a_sweep_judges_is_carried_over(
 
     Sabotage: compact to the records judged alone, and the late spawn is gone.
     """
-    from ph import orphans
-
     journal = _journal(tmp_path)
     held = _dead_pid()
     journal.record(pid=held, argv=["x"], label=None)

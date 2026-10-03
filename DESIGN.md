@@ -346,19 +346,30 @@ so one bad teardown cannot strand the rest.
 > `session_written` on the mount; anything needing the *child's* scope — its own
 > services, its workspace — is not (`ph_rlm/subagents.py`).
 
-Process-level shutdown is the other half. `ph.resources.install_lifecycle`
-disposes the root on `atexit` and on `SIGTERM`/`SIGINT` with a grace period, then
-**self-`SIGKILL`s**, "because a shutdown path that can hang is a shutdown path
-that will" (`resources.py`). It states its own limit: `SIGKILL` runs
-nothing on any platform, which is why the crash-recovery layer (paired events,
-reconciliation) exists separately.
+Process-level shutdown is the other half, and every host takes it the same way
+(`ph.resources.stop_on_signals`). The first `SIGTERM` or `SIGINT` asks for the
+host's orderly stop, and the unwind does the work: each sub-agent is suspended in
+its own log (`queued`, resumable, no restart attempt spent), each child process
+is stopped by its disposer, logs are written and leases given back. The daemon's
+stop is the one a `shutdown` frame sets, so teardown runs `serve`'s own order
+(socket, then roots, under one `GRACE_SECONDS` budget). `phern -p`, `--mode json`,
+transcript and `--mode rpc` are run under `until_signaled`, which cancels the run
+so its mount unwinds, and the CLI then leaves through the signal
+(`resources.leave_on`) so the exit status is the signal's.
 
-> **Not what the daemon uses.** `install_lifecycle` has no production caller.
-> `phern daemon` runs `serve(signals=True)` instead: the first `SIGTERM` or
-> `SIGINT` sets the same stop a `shutdown` frame does, so teardown runs `serve`'s
-> own order (socket, then roots, under one `GRACE_SECONDS` budget), and a second
-> signal while that runs re-raises with the default handler
-> (`server._stop_on_signals`, `resources.leave_on`). See §8.
+**A hard stop bounds it**, "because a shutdown path that can hang is a shutdown
+path that will". The first signal arms a thread that fires `SHUTDOWN_SECONDS`
+later unless the stop has finished. A thread, because it exists for a loop that
+has stopped answering. It kills what the process still owns in the orphan journal
+(`OrphanJournal.kill_owned`) and exits `128 + signum`, so no shell command a
+stuck host started outlives it. A second signal is the same stop at once. Its
+limit is the old one: `SIGKILL` runs nothing on any platform, which is why the
+crash-recovery layer (paired events, reconciliation, the orphan sweep) exists
+separately.
+
+> `ph.resources.install_lifecycle` is an older form of this rule for a bare
+> `Context` (dispose on `atexit` and on a signal, then re-raise), and nothing that
+> ships calls it. See §8.
 
 ### 2.6 Dispatch: four modes, and every event is declared
 
@@ -1861,7 +1872,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | Gap | Status |
 |---|---|
 | `sandbox-local` ships `bwrap` and Seatbelt, both verified against a real kernel — the blind Seatbelt profile was wrong in four places a Mac found (P6-40). Landlock is unwritten | P6-04, P6-40; Landlock open |
-| `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; `phern daemon` handles signals through `serve(signals=True)`, which stops the server rather than disposing a bare context | unwired; a candidate for deletion |
+| `install_lifecycle` (signal handling, grace period, self-`SIGKILL`) has **no production caller**; every host handles signals through `stop_on_signals` instead, which asks the host for its own stop rather than disposing a bare context | unwired; a candidate for deletion |
 | `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
@@ -1878,8 +1889,8 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | **A screen a third-party row contributes is invisible to a remote front end.** `ScreenDefinition.build()` cannot travel, so `screens/list` is intersected with what the client can draw and everything else is silently not offered. Every screen pH ships is drawable; a row's own is not | P5-15, gated by `test_a_screen_this_build_cannot_draw_is_not_offered`; P7-07 closes it |
 | **A turn parked on a human is closed as interrupted on resume, and its ask is not re-posed.** Repair settles the open `approval/asked` or `question/asked` (P10-09) and closes the turn, because the model's `tool_use` block is still unanswered — it rides the *assistant message*, and a message carrying one with no matching `tool_result` is a log several providers reject (`tool/call` is not surface-eligible and no provider sees it; since P7-15 it is written after the gate, so a parked turn has none and repairs as `TOOL_NOT_STARTED`). The model reads "not started" and asks again, to whoever is attached then. Within one daemon's life `AskDesk.join` re-poses an open ask to a front end that attaches | P5-13, by decision; gated by `test_repair.py::test_a_turn_parked_on_a_human_settles_the_question_it_was_parked_on` |
 | **`freeze_json_value` re-copies an already-frozen tree, and the fast path is refused on purpose.** Every container is rebuilt on every pass, so a re-admitted tree pays a second structural copy — 0.95 µs for a streamed chunk, **232 µs for a 500-node tool result**, scaling with node count rather than bytes. Four paths pay it: `Session.admit` per wire event on a remote front end, `Session(seed=…)`, `resume_session` on every rehydrate, and `SessionStore.fork`. A validation-only pre-walk that returns the input when it is already frozen measured at about half the cost. It is **not built**, because this function is where A1 is enforced: a second route through the gate is correct only insofar as its "already frozen?" predicate is, nothing in the type system tells a `MappingProxyType` over a frozen tree from one over a live dict, and a predicate like that can only be validated by enumerating hostile shapes in tests — the wrong kind of guarantee for a gate. Waiting on a design that is **structurally** safe: a frozen tree that carries its own proof (a distinct wrapper the walker recognizes by identity), or a freeze idempotent by construction | deferred by decision; measured and documented in `session/json.py`, P6-44 |
-| **A one-shot run does not sweep children.** `phern -p` opens its session and loads the children, but only the daemon calls `resume_children`, so a child a crashed run left `running` still reads as working in its own log, and in the model's child list, until a daemon mounts the root and readmits or ends it. The parent's `task` call is repaired as `TOOL_OUTCOME_UNKNOWN` either way | open; found in the 2026-10-02 restart review |
-| **Off Linux the orphan sweep reports and never kills.** It proves a recorded pid is still the process it journaled by `/proc`'s start time, which only Linux has (`orphans.process_start_token`), so on macOS a child that outlived a hard-killed host is listed `unverifiable` and left running. The kernel guest dies with its host on both (`pdeathsig`, `kqueue-exit`); a `!!` or shell-tool child has no such mechanism | stated in `ph.orphans`; macOS open |
+| **A one-shot run does not sweep children.** `phern -p`, `--mode json` and transcript mode open the session and load its children, but only the daemon and `--mode rpc` call `resume_children`. So a child that a crashed run left `running`, or that a run's unwind suspended (`queued`, `SUSPENDED_DETAIL`: "started again when its parent is"), still reads as working in its own log and in the model's child list until a host that sweeps opens the root. A `task` call a crash cut short is answered from that child's log with `STILL_WORKING` ("it is started again with its parent … do not delegate the same task again"), which a one-shot run never makes true. The parts of the sweep that only write are skipped too: delivering a `ChildNotice` the parent's log lacks, revoking what is beneath an ended child, and ending what nothing can readmit | open for the one-shot modes; rpc closed 2026-10-02; found in the 2026-10-02 restart review |
+| **The orphan sweep's macOS identity check has not run on a Mac.** A recorded pid is proven to be the process it journaled by its start time (`orphans.process_start_token`): `/proc` on Linux, and on macOS the `kinfo_proc` that `sysctl` returns. Its offsets were read from `<sys/proc.h>`, not compiled, and are guarded by the pid at offset 40, so a wrong layout reads as no token and the stray is spared as `unverifiable`, as it was before. `test_orphans.py` now runs on macOS. An `unverifiable` stray reaches a person only as a count in an INFO log line: `subprocess-local` discards the `SweepReport` whose docstring says `phern doctor` reads it. The kernel guest dies with its host on both (`pdeathsig`, `kqueue-exit`), and so does a confined shell command on Linux (`bwrap --die-with-parent --unshare-pid`). An unconfined `!!` or shell-tool child does not, nor any shell child on macOS (Seatbelt has no equivalent). A signal's stop kills those too: the disposers stop them, and past the bound the hard stop does (`kill_owned`). Only a `SIGKILL` of pH leaves one running, until the next start's sweep | macOS token written 2026-10-02, unverified on a Mac; `SweepReport` unread |
 | `LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=` — the one provider slot outside the ownership sweep | documented in place |
 | **Per-service isolation is implemented** (`isolate:` on a row, §2.7 — dsh's `isolate.fs`), but a realm's provider cannot be **swapped mid-session**: dsh's example — "we start processing sensitive data, so we swap the filesystem to read-only and the agent still sees the same filesystem" — has no pH spelling. `fs.rebase` is a `claim_slot`, so the *root* can change under a stable `ctx.fs`; read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. The mechanism a swap needs (`claim_slot` releasing to a new claimant) exists; no row drives it and nothing has asked for it. **Deferred by decision, not by omission**: it will be built when a use case shows up, and the use case will decide whether the answer is a provider swap, a rule, or a new realm | deferred until a use case |
 

@@ -12,10 +12,11 @@ journal is in `$PH_RUNTIME`, which a reboot wipes (`OrphanJournal._append`).
 
 The pid is not enough to sweep by: pids are reused, and killing the wrong
 process is far worse than leaving a stray. Each record therefore carries a
-**start token** — on Linux, the kernel's own `starttime` for that pid — and a
-stray is killed only when the token still matches. Where the token cannot be
-read at all, the record is reported and **not** killed: an honest "there may be
-a stray" beats a confident kill of something else.
+**start token** — the kernel's own record of when that pid started, from `/proc`
+on Linux and `sysctl` on macOS — and a stray is killed only when the token still
+matches. Where the token cannot be read at all, the record is reported and
+**not** killed: an honest "there may be a stray" beats a confident kill of
+something else.
 
 **Here rather than in `ph_rlm.kernel`, where it was built.** The reasoning above
 is about POSIX and `SIGKILL`, not about the RLM guest — it was simply the first
@@ -34,6 +35,7 @@ import hashlib
 import logging
 import os
 import signal
+import struct
 import sys
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -94,6 +96,10 @@ def argv_digest(argv: Sequence[str]) -> str:
 def process_start_token(pid: int) -> str | None:
     """A value that changes when a pid is reused, or `None` if unknowable here.
 
+    When the kernel says the process started: `starttime` in `/proc/<pid>/stat` on
+    Linux, and on macOS, which has no `/proc`, the start time in the `kinfo_proc`
+    that `sysctl` returns (`_darwin_start_token`).
+
     `None` is the honest answer on a platform pH cannot ask, and it is load
     bearing: the sweep refuses to kill what it cannot identify.
     """
@@ -107,7 +113,56 @@ def process_start_token(pid: int) -> str | None:
         tail = raw.rpartition(")")[2].split()
         # /proc(5): field 22 overall is `starttime`, which is index 19 after comm.
         return tail[19] if len(tail) > 19 else None
+    if sys.platform == "darwin":
+        return _darwin_start_token(pid)
     return None
+
+
+_KERN_PROC_PID = (1, 14, 1)
+"""`CTL_KERN`, `KERN_PROC`, `KERN_PROC_PID`: the MIB that, with a pid after it, names
+that process's `struct kinfo_proc` (`<sys/sysctl.h>`)."""
+
+_KINFO_PROC_SIZE = 648
+"""`sizeof(struct kinfo_proc)` on 64-bit macOS, x86_64 and arm64 alike. A kernel
+whose struct grew answers `ENOMEM` to a buffer this size, which reads as no token."""
+
+_KINFO_PID_OFFSET = 40
+"""Where `kp_proc.p_pid` sits: after `p_starttime` (a 16-byte `timeval`), two
+pointers, `p_flag`, and `p_stat` padded to four."""
+
+
+def _darwin_start_token(pid: int) -> str | None:
+    """`pid`'s start time on macOS, from `sysctl`, as `ps` and psutil read it. It
+    needs no privilege and answers for any pid."""
+    # macOS only, and the one thing in this module that needs ctypes: a Linux
+    # start reads `/proc` and should not pay 1.4 ms to load a handle it never calls.
+    from .libc import sysctl  # noqa: PLC0415
+
+    try:
+        raw = sysctl((*_KERN_PROC_PID, pid), _KINFO_PROC_SIZE)
+    except (OSError, AttributeError):
+        return None
+    return _kinfo_start_token(raw, pid)
+
+
+def _kinfo_start_token(raw: bytes, pid: int) -> str | None:
+    """The start token in a `struct kinfo_proc`, or `None` unless `raw` is one for
+    `pid`.
+
+    `kp_proc.p_starttime` is the struct's first field. It is a `timeval`, so the
+    token is in microseconds where Linux's is in clock ticks. **The pid is checked
+    before the time is trusted**, because these offsets were read from
+    `<sys/proc.h>` rather than from a compiler. A layout that moved has to read as
+    no token, which the sweep spares, and never as a steady wrong one. A pid that
+    has gone comes back empty.
+    """
+    if len(raw) < _KINFO_PID_OFFSET + 4:
+        return None
+    seconds, micros = struct.unpack_from("=qi", raw, 0)
+    (recorded,) = struct.unpack_from("=i", raw, _KINFO_PID_OFFSET)
+    if recorded != pid or seconds <= 0:
+        return None
+    return f"{seconds}.{micros:06d}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +268,45 @@ class OrphanJournal:
                 len(report.unverifiable),
             )
         return report
+
+    def kill_owned(self) -> tuple[int, ...]:
+        """Kill every child this process journaled and has not reaped, and whatever
+        each one started. Returns the pids killed.
+
+        **For a host leaving without its unwind**: the hard stop past a signal's grace
+        period, or a second signal (`ph.resources.stop_on_signals`). The unwind would
+        have stopped each child through its own disposer, and past the grace nothing
+        is waiting for that. Leaving them would be the hard-killed host this journal
+        exists for, made on purpose. The kernel guest and a `bwrap`-confined command
+        die with their host anyway. An unconfined shell command does not, and on
+        macOS no shell command does.
+
+        Synchronous, and it takes no lock, because its caller may be a thread beside
+        a loop that has stopped answering. Only this process's records, matched by
+        owner pid and owner start token, and only a child whose start token still
+        matches. That is the sweep's restraint (`_judge`): a child reaped just before
+        its `reap` line was written left a pid that may now belong to anybody.
+        Nothing is written. The next sweep finds these pids dead and compacts them
+        away.
+        """
+        try:
+            read = self.path.read_bytes()
+        except OSError:
+            return ()
+        owner = self._owned_by()
+        # Whole lines only, as `sweep` reads them: one still being appended is a
+        # spawn too new to have been recorded completely.
+        lines = read[: read.rfind(b"\n") + 1].decode(errors="replace").splitlines()
+        killed: list[int] = []
+        for pid, record in sorted(_live(records_in(lines)).items()):
+            if (record.get("owner"), record.get("ownerToken")) != owner:
+                continue
+            recorded = record.get("startToken")
+            if recorded is None or recorded != process_start_token(pid):
+                continue
+            if _kill(pid):
+                killed.append(pid)
+        return tuple(killed)
 
     # ------------------------------------------------------------ internals --
 

@@ -17,6 +17,8 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,14 @@ import pytest
 
 from ph import resources
 from ph.cordis import Context
-from ph.resources import install_lifecycle, temporary_directory
+from ph.orphans import process_alive
+from ph.resources import (
+    HARD_STOP_THREAD,
+    Stopped,
+    install_lifecycle,
+    temporary_directory,
+    until_signaled,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -376,3 +385,174 @@ def test_leaving_re_raises_the_signal_under_the_default_handler(
 
     assert dispositions == [signal.SIG_DFL], "it left its own handler in place"
     assert killed == [(os.getpid(), signal.SIGTERM)]
+
+
+# ----------------------------------------------------- stopping on a signal --
+#
+# The hard stop ends the process it runs in, so the two tests of it run a host in
+# a subprocess. The graceful path, which returns, is tested in this one.
+
+_STUCK_HOST = textwrap.dedent(
+    """
+    import subprocess, sys
+    from functools import partial
+    import anyio
+    from ph.orphans import host_journal
+    from ph.resources import until_signaled
+
+    async def stuck() -> None:
+        stray = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+        )
+        journal = host_journal()
+        assert journal is not None
+        journal.record(pid=stray.pid, argv=["stray"], label=None)
+        print(stray.pid, flush=True)
+        # An unwind that never ends: the signal cancels the run, and the shield is
+        # what a disposer stuck past every budget looks like from here.
+        with anyio.CancelScope(shield=True):
+            await anyio.sleep(60)
+
+    anyio.run(partial(until_signaled, stuck, within=float(sys.argv[1])))
+    """
+)
+
+
+def _stuck_host(tmp_path: Path, *, within: float) -> tuple[subprocess.Popen[str], int]:
+    """A host whose unwind will not end, holding one journaled child. Returns the
+    host and the child's pid, once the child is on the record."""
+    env = {
+        **os.environ,
+        "PH_HOME": str(tmp_path / "home"),
+        "PH_RUNTIME": str(tmp_path / "runtime"),
+    }
+    host = subprocess.Popen(
+        [sys.executable, "-c", _STUCK_HOST, str(within)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert host.stdout is not None
+    return host, int(host.stdout.readline())
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while process_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return not process_alive(pid)
+
+
+def _leave_nothing(host: subprocess.Popen[str], stray: int) -> None:
+    if host.poll() is None:
+        host.kill()
+        host.wait()
+    if process_alive(stray):
+        os.killpg(stray, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics")
+def test_a_stop_that_overruns_its_bound_kills_what_the_host_owns_and_leaves(
+    tmp_path: Path,
+) -> None:
+    """The bound on a graceful stop, and what it leaves behind: nothing.
+
+    A host told to stop by `SIGTERM` unwinds, and its unwind is what stops each
+    child it started. One whose unwind does not end is stopped from a thread, and a
+    shell command it started must not outlive it, since nothing on Linux kills an
+    unconfined one and nothing on macOS kills any. So the hard stop kills what the
+    process still owns in the orphan journal, then exits `128 + signum`.
+
+    Sabotage: drop `kill_owned` from `_leave_now`, and the stray outlives its host.
+    """
+    host, stray = _stuck_host(tmp_path, within=0.5)
+    try:
+        host.send_signal(signal.SIGTERM)
+
+        assert host.wait(timeout=20) == 128 + signal.SIGTERM
+        assert _gone_within(stray, 5), "the host's child outlived its hard stop"
+    finally:
+        _leave_nothing(host, stray)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics")
+def test_a_second_signal_leaves_at_once_and_takes_the_hosts_children(tmp_path: Path) -> None:
+    """A person who asks twice is not made to wait out the bound.
+
+    The second signal is the hard stop's own act, with no wait: what the process
+    owns is killed, and it leaves through the signal's default action, so the code
+    is the signal's rather than one this process chose.
+
+    Sabotage: drop the second-signal branch of `stop_on_signals`, and the host
+    waits out its sixty-second bound.
+    """
+    host, stray = _stuck_host(tmp_path, within=60)
+    try:
+        host.send_signal(signal.SIGTERM)
+        # Time for the first to be taken as the stop; a second before that is the
+        # default action, which is the test failing the other way.
+        time.sleep(0.5)
+        host.send_signal(signal.SIGTERM)
+
+        assert host.wait(timeout=20) == -signal.SIGTERM
+        assert _gone_within(stray, 5), "the host's child outlived its second signal"
+    finally:
+        _leave_nothing(host, stray)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics")
+async def test_a_signal_stops_a_one_shot_run_through_its_own_unwind() -> None:
+    """The graceful path: the run is canceled, its unwind runs, and the bound is
+    lifted once that unwind is over.
+
+    A hard stop left armed after the stop it bounds would end a process that had
+    already finished stopping cleanly, partway through whatever it did next.
+
+    Sabotage: drop the `hard.cancel()` in `stop_on_signals`, and the thread is still
+    armed when the run comes back.
+    """
+    unwound: list[str] = []
+
+    async def run() -> str:
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+            await anyio.sleep(30)
+        finally:
+            unwound.append("unwound")
+        return "finished"
+
+    assert await until_signaled(run) == Stopped(signal.SIGTERM)
+    assert unwound == ["unwound"]
+
+    def armed() -> bool:
+        return any(thread.name == HARD_STOP_THREAD for thread in threading.enumerate())
+
+    deadline = time.monotonic() + 2
+    while armed() and time.monotonic() < deadline:
+        await anyio.sleep(0.01)
+    assert not armed(), "the hard stop is still armed after the stop it bounds"
+
+
+async def test_a_run_no_signal_reaches_returns_its_own_value() -> None:
+    async def run() -> str:
+        return "finished"
+
+    assert await until_signaled(run) == "finished"
+
+
+async def test_a_runs_own_failure_comes_back_as_itself() -> None:
+    """Not in an `ExceptionGroup`, which is how the run's task group would raise it.
+
+    The CLI names the refusals it turns into a sentence (`SessionBusy`, a model it
+    cannot route), and a group matches none of them, so a session another process
+    held came back as a traceback.
+
+    Sabotage: let the run raise through the group, and this is an `ExceptionGroup`.
+    """
+
+    async def run() -> str:
+        raise LookupError("no such session")
+
+    with pytest.raises(LookupError, match="no such session"):
+        await until_signaled(run)

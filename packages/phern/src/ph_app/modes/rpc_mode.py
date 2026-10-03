@@ -24,13 +24,14 @@ import anyio
 from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
-from ph.keys import AGENTS, SESSIONS, TOOLS
+from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
 from ph.persistence import open_session
 from ph.seams.models import ModelChoice, start_on
 from ph.session import Session, SessionEvent, SessionForkError, new_session_id
 from ph.wire import WireModel
 
 from .. import verbs
+from ..daemon.recovery import CHILD_RETRY_LIMIT
 from ..payloads import (
     SessionEventNotice,
     SessionNotice,
@@ -227,11 +228,27 @@ class RpcServer:
                 command=f"session/prompt {asked.spelled}" if named else asked.flags,
             )
             agent = served.agent = ctx.require(AGENTS).create(session, entry.options())
+            await _resume_children(ctx, agent)
         self._notify(SessionStatusNotice(session_id=session.id, status="running"))
         await agent.prompt(params.prompt)
         await ctx.require(SESSIONS).flush(session)
         self._notify(SessionStatusNotice(session_id=session.id, status="idle"))
         return {"sessionId": session.id, "events": len(session.events)}
+
+
+async def _resume_children(ctx: Context, agent: AgentDriver) -> None:
+    """Put back to work what a served session's children are owed, as the daemon
+    does where it resumes a root (P5-04): readmitted, held, or ended, each in its own
+    log (`SubagentService.resume_children`).
+
+    When the session's agent is made, because a readmitted child hangs off its
+    parent's agent, and this transport makes it at the first prompt — which may name
+    the route. Bounded by the daemon's ladder (`CHILD_RETRY_LIMIT`): one harness, one
+    answer to how many restarts a child's work is worth.
+    """
+    subagents = ctx.get(SUBAGENTS)
+    if subagents is not None:
+        await subagents.resume_children(agent, retry_limit=CHILD_RETRY_LIMIT)
 
 
 async def run_rpc(
@@ -247,7 +264,11 @@ async def run_rpc(
     async with AsyncExitStack() as exits:
         server = RpcServer(profile=profile, exits=exits, out=sink, choice=choice)
         while True:
-            line = await anyio.to_thread.run_sync(source.readline)
+            # Abandoned on cancel, so a signal stops a server waiting for its peer's
+            # next line rather than waiting for it as well. The thread stays blocked
+            # in `readline`, and the host leaving through the signal is what ends it
+            # (`ph_app.cli._leave_stopped`).
+            line = await anyio.to_thread.run_sync(source.readline, abandon_on_cancel=True)
             if not line:
                 return
             text = line.strip()

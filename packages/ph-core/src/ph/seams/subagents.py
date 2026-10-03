@@ -1996,7 +1996,8 @@ class SubagentService:
         a seam that answered it for a caller who said nothing would be choosing
         one. The daemon states it beside the root's own ladder
         (`ph_app.daemon.recovery.CHILD_RETRY_LIMIT`), which is where somebody
-        tuning restart behavior will already be looking.
+        tuning restart behavior will already be looking; `--mode rpc` reads the
+        same bound.
         """
         session = parent.session
         if session is None:

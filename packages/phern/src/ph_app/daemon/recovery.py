@@ -100,7 +100,8 @@ interrupted* — and an answer that lived in `ph-core` made one question two, in
 two packages, in two vocabularies, for whoever came to tune it. `ctx.subagents`
 owns the sweep, the fold and the records; how many attempts they are worth is the
 host's, and `resume_children` takes it with no default so a host cannot get the
-number by saying nothing.
+number by saying nothing. `--mode rpc` sweeps with this one too
+(`ph_app.modes.rpc_mode`): a second host is not a second policy.
 
 Three for the same reason `RETRY_DELAYS` has three rungs — what a harness
 stopping interrupts is transient by construction, and a child caught mid-turn

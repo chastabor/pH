@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from anyio.abc import ByteStream
+from anyio.abc import ByteStream, TaskStatus
 
 from ph.agent.types import AgentCancelCause
 from ph.cordis import Profile
@@ -45,7 +45,7 @@ from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
 from ph.path_watch import EntryWatch, Mechanism, WatchUnavailable
 from ph.paths import resolve_roots
-from ph.resources import GRACE_SECONDS, leave_on
+from ph.resources import GRACE_SECONDS, stop_on_signals
 from ph.seams.attachments import mime_for
 from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.schedule import Schedule
@@ -1748,7 +1748,9 @@ class DaemonServer:
             self.check_lifetime()
 
 
-async def _stop_on_signals(server: DaemonServer) -> None:
+async def _stop_on_signals(
+    server: DaemonServer, *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+) -> None:
     """`SIGTERM` or `SIGINT` asks for the stop a `shutdown` frame asks for.
 
     Without this the default action ends the process at once, which is `SIGKILL`
@@ -1756,23 +1758,29 @@ async def _stop_on_signals(server: DaemonServer) -> None:
     given back on the ordinary path, the socket left for the next daemon's
     `_clear_stale`. `kill`, `systemctl stop`, `launchctl` and a Ctrl-C in a
     foreground `phern daemon` all arrive this way. Asked once, the teardown runs
-    under its own budget (`GRACE_SECONDS`, in `serve`'s `finally`). Asked
-    **again** while that runs, the person wants out now: the default handler is
-    put back and the signal re-raised, so a teardown that will not end cannot
-    become a process that will not either.
+    under its own budget (`GRACE_SECONDS`, in `serve`'s `finally`), and every
+    root's children are suspended in their own logs as it goes. Asked **again**
+    while that runs, or once a `shutdown` frame has already started it, the person
+    wants out now.
+
+    **The shared rule** (`ph.resources.stop_on_signals`): leaving at once kills what
+    this process still has in the orphan journal before it goes, and so does the
+    hard stop the first signal arms. That stop fires if the teardown has not ended
+    within `SHUTDOWN_SECONDS`, so a teardown that will not end cannot become a
+    process that will not either, nor leave a shell command running behind it.
 
     Started as a task in `serve`'s group, so it is alive for the whole teardown
-    and canceled with the listener at the end.
+    and canceled with the listener at the end, which is what disarms the hard stop.
     """
-    with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as arriving:
-        async for signum in arriving:
-            name = signal.Signals(signum).name
-            if not server.stop.is_set():
-                log.info("ph_app.daemon: stopping on %s", name)
-                server.stop.set()
-                continue
-            log.warning("ph_app.daemon: %s again while stopping; leaving at once", name)
-            leave_on(signum)
+
+    def stopping(signum: int) -> bool:
+        if server.stop.is_set():
+            return False
+        log.info("ph_app.daemon: stopping on %s", signal.Signals(signum).name)
+        server.stop.set()
+        return True
+
+    await stop_on_signals(stopping, task_status=task_status)
 
 
 async def _clear_stale(path: Path) -> None:
@@ -1889,7 +1897,9 @@ async def serve(
             tasks.start_soon(supervisor.verifier.keep, server.stop)
             tasks.start_soon(server.lifetime_clock.keep, server.stop)
             if signals:
-                tasks.start_soon(_stop_on_signals, server)
+                # Started rather than scheduled: a signal that came before the
+                # receiver was in place would take the default action.
+                await tasks.start(_stop_on_signals, server)
             if scheduling:
                 # See `Supervisor.scheduler` and docs/seams/schedule.md.
                 tasks.start_soon(supervisor.scheduler.keep, server.stop)

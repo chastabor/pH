@@ -33,18 +33,52 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
+import time
+from collections.abc import AsyncIterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
+from rlm_fixtures import HOST_INTERPRETER
 
-from ph.cordis import Profile
-from ph.keys import SESSION_TELEMETRY
-from ph.persistence import SessionBusy, read_session
-from ph.testing import hold_session, stored_log
+from ph.cordis import Profile, ProfileDocument
+from ph.cordis import context as cordis_context
+from ph.keys import SESSION_TELEMETRY, SUBAGENTS
+from ph.llm.fake import FakeAdapter
+from ph.llm.types import (
+    BlockEnd,
+    BlockStart,
+    Finish,
+    FinishReason,
+    GenerateOptions,
+    StreamChunk,
+    TokenUsage,
+    ToolCallBlock,
+    ToolCallDelta,
+    UsageChunk,
+    text_of,
+)
+from ph.persistence import SessionBusy, open_session, read_session
+from ph.resources import Stopped, until_signaled
+from ph.seams.subagents import (
+    STATUS,
+    SUSPENDED_DETAIL,
+    UNRECOVERABLE_DETAIL,
+    SubagentService,
+    child_state_of,
+)
+from ph.session import child_session_id
+from ph.testing import admitted_child, hold_session, log_event, stored_log
+from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
 from ph_app.protocol import PROTOCOL_VERSION
+from ph_app.runtime import mounted
+from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -253,6 +287,235 @@ async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
     # A peer sending garbage must not take the endpoint down.
     assert len(frames) == 1
     assert frames[0]["id"] == 1
+
+
+async def test_an_rpc_host_sweeps_the_children_a_stopped_run_left_working(
+    profile: Profile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An rpc peer is a serving host, and only the daemon swept a root's children.
+
+    So a child that a stopped or crashed run left `running` still read as working:
+    in its own log, in the model's list of its children, and to the `task` crash
+    check, which told the model it "is started again with its parent". That stayed
+    true for as long as the peer served the session. The sweep runs where the
+    session's agent is made, because a readmitted child hangs off its parent's
+    agent, and this transport makes the agent at the first prompt.
+
+    Asserted on a child whose owner nothing here mounts, the one decision a host can
+    be checked by without running a provider: nothing can readmit it, so the sweep
+    ends it in its own log. The bound is the daemon's, and only a host can be
+    checked for passing it, since the seam states none.
+
+    Sabotage: drop `_resume_children` from `RpcServer._prompt`, and the child is
+    still `running`.
+    """
+    bounds: list[int] = []
+    original = SubagentService.resume_children
+
+    async def spy(self: Any, parent: Any, *, retry_limit: int) -> Any:  # noqa: ANN401
+        bounds.append(retry_limit)
+        return await original(self, parent, retry_limit=retry_limit)
+
+    monkeypatch.setattr(SubagentService, "resume_children", spy)
+    async with mounted(profile) as ctx:
+        parent = await open_session(ctx, "kids")
+        child = admitted_child(ctx, parent, "r1", {"prompt": "look"})
+        log_event(child, STATUS, {"status": "running"})
+
+    prompt = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/prompt",
+        "params": {"sessionId": "kids", "prompt": "hello"},
+    }
+    await run_rpc(profile, stdin=io.StringIO(f"{json.dumps(prompt)}\n"), out=io.StringIO())
+
+    child_id = child_session_id("kids", "r1")
+    header, events = read_session(stored_log(tmp_path / "sessions", child_id, family="kids"))
+    state = child_state_of(child_id, header, events)
+    assert state.status == "error", f"the child was left {state.status}"
+    assert state.detail == UNRECOVERABLE_DETAIL
+    assert bounds == [CHILD_RETRY_LIMIT], "the daemon's own ladder bound, not another"
+
+
+async def test_a_signal_stops_an_rpc_server_waiting_on_its_peer(profile: Profile) -> None:
+    """A peer that closes `--mode rpc` with `SIGTERM` is the common case.
+
+    The server spends its life in a worker thread blocked on the peer's next line,
+    and a thread call does not let a cancellation through by default. So the stop a
+    signal asks for waited for a line the peer was never going to send, and the
+    hard stop ended the process with its sessions unwound by nobody.
+
+    Sabotage: drop `abandon_on_cancel` from `run_rpc`'s read, and the stop waits for
+    the line this test writes after five seconds.
+    """
+    read_end, write_end = os.pipe()
+    stdin = os.fdopen(read_end, "r")
+    # A line after five seconds, so a server still waiting for one is reported as
+    # slow rather than hanging the suite.
+    late = anyio.Event()
+
+    async def serving() -> None:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(partial(run_rpc, profile, stdin=stdin, out=io.StringIO()))
+            await anyio.sleep(0.2)
+            os.kill(os.getpid(), signal.SIGTERM)
+            await late.wait()
+
+    async def unblock() -> None:
+        await anyio.sleep(5)
+        os.write(write_end, b"\n")
+
+    started = time.monotonic()
+    try:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(unblock)
+            stopped = await until_signaled(serving)
+            elapsed = time.monotonic() - started
+            tasks.cancel_scope.cancel()
+    finally:
+        os.close(write_end)
+        await anyio.sleep(0.05)
+        stdin.close()
+
+    assert stopped == Stopped(signal.SIGTERM)
+    assert elapsed < 3, f"the stop waited {elapsed:.1f}s for the peer's next line"
+
+
+async def test_a_signal_mid_turn_hands_a_print_runs_session_back(
+    profile: Profile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`phern -p` under `SIGTERM` ended at once: the default action, which is a crash
+    with a politer name. Now the run is canceled and its mount unwinds.
+
+    Asserted by what only a finished unwind leaves: the lease given back, so the
+    next run on the session is not refused, and a log that reads whole, holding
+    both turns.
+
+    Sabotage: drop the `body.cancel()` in `until_signaled`'s stop, and the run waits
+    on its model call until the bound below fails it.
+    """
+    from ph.llm.fake import FakeAdapter
+
+    async def stuck(self: object, options: object) -> AsyncIterator[Any]:
+        os.kill(os.getpid(), signal.SIGTERM)
+        await anyio.sleep_forever()
+        yield  # pragma: no cover
+
+    with monkeypatch.context() as patched:
+        patched.setattr(FakeAdapter, "stream", stuck)
+        with anyio.fail_after(30):
+            stopped = await until_signaled(partial(run_print, profile, "hello", session_id="cut"))
+    assert stopped == Stopped(signal.SIGTERM)
+
+    await run_json(profile, "and again", session_id="cut", out=io.StringIO())
+
+    _header, events = read_session(stored_log(tmp_path / "sessions", "cut"))
+    assert [event.seq for event in events] == list(range(len(events)))
+    assert sum(event.type == "turn/start" for event in events) == 2
+
+
+CHILD_TASK = "look into it"
+
+
+def _from_the_child(options: GenerateOptions) -> bool:
+    """Whether a request is the child's. Its task reached it as a user message; the
+    parent holds the same words only inside its own tool call."""
+    return any(
+        message.role == "user" and CHILD_TASK in text_of(message.content)
+        for message in options.messages
+    )
+
+
+def _cell_answered(options: GenerateOptions) -> bool:
+    """Whether the parent's request already carries its cell's result."""
+    return any(
+        block.type == "tool-result" for message in options.messages for block in message.content
+    )
+
+
+async def _delegating_cell() -> AsyncIterator[StreamChunk]:
+    """The parent's first step: one cell that spawns a child and does not wait for it."""
+    arguments = json.dumps(
+        {"program": f"h = await rlm.run(prompt={CHILD_TASK!r}, name='scout')\nh['name']"}
+    )
+    yield BlockStart(index=0, block_type="tool-call")
+    yield ToolCallDelta(index=0, id="cell-1", name=IPYTHON, arguments_delta=arguments)
+    yield BlockEnd(index=0, block=ToolCallBlock(id="cell-1", name=IPYTHON, arguments=arguments))
+    yield UsageChunk(usage=TokenUsage(input_tokens=10, output_tokens=10))
+    yield Finish(reason=FinishReason(kind="tool-calls"))
+
+
+async def test_a_print_run_suspends_a_child_still_working_when_its_turn_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guest_coverage: None
+) -> None:
+    """What `phern -p` does with an `rlm.run` child its turn ended without, pinned.
+
+    `rlm.run` hands back an admission and does not wait, and the parent's run ends
+    when its own inbox is empty, so a one-shot can finish its turn while a child is
+    still working. Its mount then unwinds: the drain waits for the child's drive
+    for at most `DRAIN_SECONDS`, and the provider suspends what is left (`queued`,
+    `SUSPENDED_DETAIL`), keeping it resumable and spending no restart attempt. The
+    parent is not driven again, so the printed answer is the one its turn gave, and
+    the child's work waits for a host that readmits it (DESIGN.md §8, "A one-shot
+    run does not sweep children").
+
+    Held at its model call, the child is mid-turn when the parent's turn ends, and
+    the drain's window is shortened so the test does not spend the real five
+    seconds waiting out a child that never finishes.
+
+    Sabotage: drop the `suspend` disposer from `ph_rlm.subagents.apply`, and the
+    parent's teardown revokes the child instead: it ends `canceled`, and no later
+    start resumes its work.
+    """
+    drain = 0.5
+    monkeypatch.setattr(cordis_context, "DRAIN_SECONDS", drain)
+    original = FakeAdapter.stream
+    child_working = anyio.Event()
+    asked: list[str] = []
+
+    async def scripted(self: FakeAdapter, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
+        if _from_the_child(options):
+            asked.append("child")
+            child_working.set()
+            await anyio.sleep_forever()
+        if _cell_answered(options):
+            # Only once the child is mid-turn, so the parent's turn ends on a child
+            # that is working rather than one that has not started.
+            await child_working.wait()
+            asked.append("parent answers")
+            async for chunk in original(self, options):
+                yield chunk
+            return
+        asked.append("parent delegates")
+        async for chunk in _delegating_cell():
+            yield chunk
+
+    monkeypatch.setattr(FakeAdapter, "stream", scripted)
+    profile = compose_profile(
+        "rlm",
+        then=[ProfileDocument("test", [{"id": "code-runtime-python", "config": HOST_INTERPRETER}])],
+    )
+
+    started = time.monotonic()
+    with anyio.fail_after(60):
+        result = await run_print(profile, "hello", session_id="delegator")
+    elapsed = time.monotonic() - started
+
+    assert result.text == "ok", "the answer the parent's own turn gave"
+    assert asked == ["parent delegates", "child", "parent answers"], (
+        "the parent was driven again after its turn"
+    )
+    assert elapsed >= drain, "the run left without waiting for the child's drive"
+
+    parent, _events = read_session(stored_log(tmp_path / "sessions", "delegator"))
+    async with mounted(compose_profile("headless")) as ctx:
+        children = await ctx.require(SUBAGENTS).load_children("delegator", parent.family)
+    (child,) = children.values()
+    assert child.starts == 1, "the child never started"
+    assert child.status == "queued", f"the child was left {child.status}"
+    assert child.detail == SUSPENDED_DETAIL
+    assert not child.deleted, "a stop is not a revocation"
 
 
 async def test_a_second_one_shot_run_on_one_session_resumes_it(
