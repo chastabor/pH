@@ -231,7 +231,7 @@ def _assert_contiguous(events: list[SessionEvent], session_id: str, chain: list[
 
 
 def lineage_faults(
-    listed: Iterable[tuple[str, str | None]], exists: Callable[[str], bool]
+    listed: Iterable[tuple[str, str | None]], exists: Callable[[str, str], bool]
 ) -> list[tuple[str, str]]:
     """Stored sessions whose lineage will not materialize, and why (§5.4a).
 
@@ -256,7 +256,9 @@ def lineage_faults(
     * **A missing ancestor** — settled with `exists`, not with listing
       membership, because `stored()` takes a limit and a parent below the cut is
       present rather than gone. Reporting those would make the check cry wolf on
-      every large store.
+      every large store. `exists(ancestor, descendant)` is asked with the listed
+      session whose chain reached it, so the asker can look where that lineage is
+      filed (`lineage_faults_of`).
     * **A cycle**, when it closes inside the listing.
     * **A chain past `MAX_DEPTH`**, which `materialize` refuses outright. Easy to
       miss because forks are shallow — but `roll` adds a generation per segment,
@@ -276,7 +278,7 @@ def lineage_faults(
 
 
 def _chain_fault(
-    session_id: str, parents: dict[str, str | None], exists: Callable[[str], bool]
+    session_id: str, parents: dict[str, str | None], exists: Callable[[str, str], bool]
 ) -> str | None:
     """Why one session's chain will not materialize, or `None` if it will.
 
@@ -296,7 +298,7 @@ def _chain_fault(
             # Outside the listing. Present on disk means the chain continues
             # somewhere this survey cannot see, which is not a fault; absent
             # means every descendant of it is already unreadable.
-            return None if exists(current) else f"ancestor {current} is missing"
+            return None if exists(current, session_id) else f"ancestor {current} is missing"
         seen.add(current)
         current = parents[current]
     return None

@@ -50,7 +50,7 @@ from ..paths import make_directories, resolve_roots, sync_directory
 from ..seams.diagnostics import Diagnostic, contribute
 from ..session import Session, SessionEvent, SessionHeader
 from ..wire import WireModel
-from .families import children_under, locate_under, logs_under, path_under
+from .families import children_under, locate_under, logs_under, path_under, stored_under
 from .lease import claim_session
 from .lineage import materialize
 from .protocol import (
@@ -161,7 +161,7 @@ class TursoSessionStore:
         if session.id in self._progress:
             return
         # The family is on the header in hand; remembering it here is what keeps
-        # the writer's `_path_for` a function of what this store already knows,
+        # the writer's path a function of what this store already knows,
         # rather than a search on every write.
         #
         # From `durable_length`, not from zero. What is below that line is
@@ -225,7 +225,7 @@ class TursoSessionStore:
         old, and nothing said so.
         """
         if buffer.connection is None:
-            buffer.connection = _open(self._path_for(session.id, buffer.family))
+            buffer.connection = _open(session_db(self.root, session.id, buffer.family))
         connection = buffer.connection
         cursor = connection.cursor()
         try:
@@ -271,8 +271,8 @@ class TursoSessionStore:
 
     # ------------------------------------------------------------- reading --
 
-    def exists(self, session_id: str) -> bool:
-        return locate_db(self.root, session_id) is not None
+    def exists(self, session_id: str, *, family: str | None = None) -> bool:
+        return stored_under(self.root, session_id, SUFFIX, family)
 
     def read(
         self, session_id: str, *, family: str | None = None
@@ -300,7 +300,10 @@ class TursoSessionStore:
 
         Through a connection of its own (`_reading`), closed when the call returns.
         """
-        with _reading(self._path_for(session_id, family)) as connection:
+        path = self._found(session_id, family)
+        if path is None:
+            raise NoStoredSession(f"no stored session {session_id!r}")
+        with _reading(path) as connection:
             cursor = connection.cursor()
             rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
             if not rows:
@@ -324,20 +327,20 @@ class TursoSessionStore:
                 if types is None or record.get("type") in types
             ]
 
-    def _path_for(self, session_id: str, family: str | None = None) -> Path:
-        """This session's database, by what is known before what is on disk.
+    def _found(self, session_id: str, family: str | None = None) -> Path | None:
+        """This session's database by what is known before what is on disk, `None`
+        when a search finds it nowhere.
 
-        A family in hand — from the caller, or from the buffer this store is
-        already keeping — is a path. Anything else is searched for, and a session
-        that is neither tracked nor on disk is a root about to be written, whose
-        family is its own id.
+        A family in hand — from the caller, or from the buffer this store is already
+        keeping — is a path. Anything else is searched for, and a read stops at
+        `None` rather than trying `locate`'s fallback, a path the search just tried.
         """
         if family is None:
             buffer = self._progress.get(session_id)
             family = buffer.family if buffer is not None else None
         if family:
             return session_db(self.root, session_id, family)
-        return locate_db(self.root, session_id) or session_db(self.root, session_id, session_id)
+        return locate_db(self.root, session_id)
 
     def directory(self) -> Path | None:
         return self.root
@@ -349,9 +352,10 @@ class TursoSessionStore:
         database has no path to lock, and `locate` returning `None` silently
         disabled I-5. The lease is keyed by the session id now
         (`lease.claim_session`), so this answers the ordinary question instead:
-        where does this session's storage live.
+        where does this session's storage live — for a session neither tracked nor
+        on disk, a root about to be written, whose family is its own id.
         """
-        return self._path_for(session_id)
+        return self._found(session_id) or session_db(self.root, session_id, session_id)
 
     async def claim(self, session_id: str, *, scope: Context) -> None:
         """Hold this database against every other writer for `scope`'s life (I-5).

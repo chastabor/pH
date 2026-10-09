@@ -344,12 +344,13 @@ class SessionPersistence(SessionArchive, Protocol):
         """Drop what this backend holds in memory for one session."""
         ...
 
-    def exists(self, session_id: str) -> bool:
+    def exists(self, session_id: str, *, family: str | None = None) -> bool:
         """Whether this backend has a stored log under that id.
 
-        A search of the store, since an id alone does not say where a log is filed:
-        blocking, so off the event loop. To read the log when there is one,
-        `read_if_stored` searches once.
+        `family`, as `read_own` takes it, is where the log is filed, and the answer
+        is for there alone: one `stat`. Without it, a search of the store, since an
+        id alone does not say where a log is filed: blocking, so off the event loop.
+        To read the log when there is one, `read_if_stored` searches once.
         """
         ...
 
@@ -435,9 +436,17 @@ def lineage_faults_of(
     Backend-neutral on purpose, and so not a `SessionPersistence` method: it
     needs only the listing and `exists`, both already on the Protocol, and every
     backend implementing its own walk is what this whole module argues against.
+
+    An ancestor outside the listing is looked for in the family of the session
+    whose chain reached it, which every member of a lineage shares: one `stat`
+    each, where asked by id alone each was a search of the store.
     """
     listed = store.stored(limit=limit)
-    return lineage_faults(((one.session_id, one.parent) for one in listed), store.exists)
+    families = {one.session_id: one.family for one in listed}
+    return lineage_faults(
+        ((one.session_id, one.parent) for one in listed),
+        lambda ancestor, descendant: store.exists(ancestor, family=families[descendant]),
+    )
 
 
 def attach(ctx: Context, store: SessionPersistence) -> None:

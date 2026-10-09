@@ -42,6 +42,7 @@ from ph.testing import (
     assistant_payload,
     log_event,
     not_none,
+    raising,
     stored_events,
     stored_types,
     write_skill,
@@ -435,9 +436,9 @@ async def test_a_stored_child_is_written_where_its_header_files_it(
     log_event(grandchild, STATUS, {"status": "running"})
     await _as_an_earlier_process_left_them(ctx, parent.session, child, grandchild)
 
-    def searched(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("searched the store for a child whose family its state holds")
-
+    searched = raising(
+        AssertionError("searched the store for a child whose family its state holds")
+    )
     monkeypatch.setattr(jsonl, "locate_under", searched)
 
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)

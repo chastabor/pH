@@ -4,14 +4,10 @@ from __future__ import annotations
 
 from .jsonl import (
     JsonlSessionStore,
-    Resumption,
     append_records,
     read_records,
     read_session,
     records_in,
-    resume_session,
-    resumption_of,
-    resumptions,
     session_path,
 )
 from .lease import SessionBusy, claim_session
@@ -25,6 +21,7 @@ from .repair import (
     interrupted_turn_closers,
     repaired,
 )
+from .resume import Resumption, resume_session, resumption_of, resumptions
 
 __all__ = [
     "MAX_DEPTH",

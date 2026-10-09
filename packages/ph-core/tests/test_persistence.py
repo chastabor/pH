@@ -60,6 +60,7 @@ from ph.testing import (
     disk_fills_midway,
     log_event,
     noted,
+    raising,
     stored_log,
     user_payload,
     write_reference_fork,
@@ -1219,9 +1220,7 @@ async def test_a_reopened_child_is_looked_for_where_its_parent_files_it(
     assert await sessions.written(child)
     sessions.dispose(child.id)
 
-    def listed(*_args: object) -> None:
-        raise AssertionError("listed the store for a child whose family was known")
-
+    listed = raising(AssertionError("listed the store for a child whose family was known"))
     monkeypatch.setattr(families, "family_dirs", listed)
     reopened = await open_child_log(ctx, parent, "r1")
 
@@ -1259,6 +1258,25 @@ async def test_a_resumed_root_is_looked_for_once(
 
     assert searched.count("lead") == 1, searched
     assert resumed.header.family == stored.header.family
+
+
+async def test_a_session_minted_by_the_door_is_not_looked_for(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`open_session` with no id makes one, and a new id has no log to find: the
+    search for it listed every family in the store, for every new root.
+
+    Sabotage: read before creating whatever the id, and the store is searched.
+    """
+    from ph.persistence import jsonl, open_session
+
+    ctx = await mount(_root(tmp_path))
+
+    searched = raising(AssertionError("searched the store for an id the door had just made"))
+    monkeypatch.setattr(jsonl, "locate_under", searched)
+    session = await open_session(ctx)
+
+    assert ctx.require(SESSIONS).get(session.id) is session
 
 
 def test_a_log_not_on_record_stats_each_family_once(

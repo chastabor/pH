@@ -107,9 +107,17 @@ from ph.persistence.protocol import (
     SessionPersistence,
     StoredSession,
     descendants_among,
+    lineage_faults_of,
 )
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, family_for
-from ph.testing import MountProfile, log_event, not_none, reference_fork, user_payload
+from ph.testing import (
+    MountProfile,
+    log_event,
+    not_none,
+    raising,
+    reference_fork,
+    user_payload,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -758,9 +766,32 @@ async def test_a_broken_chain_is_visible_from_the_listing_alone(
 
     listed = store.stored()
     assert {one.session_id: one.parent for one in listed} == {"orphan": "vanished"}
-    assert lineage_faults(((one.session_id, one.parent) for one in listed), store.exists) == [
-        ("orphan", "ancestor vanished is missing")
-    ]
+    assert lineage_faults_of(store) == [("orphan", "ancestor vanished is missing")]
+
+
+async def test_an_ancestor_below_the_cut_is_looked_for_where_its_lineage_is_filed(
+    store: SessionPersistence, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent older than the listing's cut is asked about by id, and a lineage
+    shares one family, so it is one `stat` in the family of the child that names it.
+    Asked by id alone, each such ancestor was a search of every family in the store —
+    and a root with a cwd is filed under a tagged name its id does not carry.
+
+    Sabotage: drop `family` from the survey's `exists`, and the store is searched.
+    """
+    from ph.persistence import families
+
+    parent = _session(store, "p", cwd="/work")
+    for turn in range(2):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+    await store.flush(_reference_fork(store, "c", "p", boundary=4, family=parent.header.family))
+
+    searched = raising(AssertionError("searched the store for an ancestor whose family was known"))
+    assert [one.session_id for one in store.stored(limit=1)] == ["c"]
+    monkeypatch.setattr(families, "locate_under", searched)
+    assert lineage_faults_of(store, limit=1) == []
 
 
 async def test_a_healthy_store_reports_no_faults(store: SessionPersistence) -> None:
@@ -772,9 +803,8 @@ async def test_a_healthy_store_reports_no_faults(store: SessionPersistence) -> N
     await store.flush(parent)
     await store.flush(_reference_fork(store, "c", "p", boundary=4))
 
-    listed = store.stored()
-    assert len(listed) == 2
-    assert lineage_faults(((one.session_id, one.parent) for one in listed), store.exists) == []
+    assert len(store.stored()) == 2
+    assert lineage_faults_of(store) == []
 
 
 async def test_a_seeded_child_writes_only_what_this_store_lacks(
@@ -1089,7 +1119,7 @@ async def test_a_new_turso_database_is_on_disk_with_its_names(
     _append(store, session, "turn/start", {"turn": 1})
     await store.flush(session)
 
-    family = store._path_for(session.id).parent
+    family = not_none(store.locate(session.id)).parent
     assert synced == [tmp_path, root, family]
 
 
@@ -1170,9 +1200,7 @@ async def test_a_read_given_its_family_does_not_search_for_the_log(
     await store.flush(session)
     store.forget("rooted")
 
-    def searched(*_args: object) -> None:
-        raise AssertionError("searched every family for a log whose family was given")
-
+    searched = raising(AssertionError("searched every family for a log whose family was given"))
     monkeypatch.setattr(jsonl, "locate_under", searched)
     monkeypatch.setattr(turso, "locate_under", searched)
 
@@ -1273,8 +1301,8 @@ def test_the_survey_and_the_reader_agree_on_how_deep_is_too_deep() -> None:
     def chain(length: int) -> list[tuple[str, str | None]]:
         return [(f"s{n}", f"s{n + 1}" if n + 1 < length else None) for n in range(length)]
 
-    assert lineage_faults(chain(MAX_DEPTH), lambda session_id: True) == []
-    faults = dict(lineage_faults(chain(MAX_DEPTH + 1), lambda session_id: True))
+    assert lineage_faults(chain(MAX_DEPTH), lambda *_: True) == []
+    faults = dict(lineage_faults(chain(MAX_DEPTH + 1), lambda *_: True))
     assert f"more than {MAX_DEPTH} deep" in faults["s0"]
 
 
@@ -1285,8 +1313,8 @@ def test_a_parent_below_the_listing_cut_is_not_reported_as_missing() -> None:
     listing while being perfectly present on disk. Membership in the listing is
     therefore not the test; `exists` is.
     """
-    assert lineage_faults([("kid", "root")], lambda session_id: True) == []
-    assert lineage_faults([("kid", "root")], lambda session_id: False) == [
+    assert lineage_faults([("kid", "root")], lambda *_: True) == []
+    assert lineage_faults([("kid", "root")], lambda *_: False) == [
         ("kid", "ancestor root is missing")
     ]
 
@@ -1294,7 +1322,7 @@ def test_a_parent_below_the_listing_cut_is_not_reported_as_missing() -> None:
 def test_a_cycle_that_closes_inside_the_listing_is_named() -> None:
     """A hand-edited header can point at its own descendant. Both ends are
     unreadable, so both are reported rather than one arbitrarily chosen."""
-    assert lineage_faults([("a", "b"), ("b", "a")], lambda session_id: True) == [
+    assert lineage_faults([("a", "b"), ("b", "a")], lambda *_: True) == [
         ("a", "lineage cycles back through a"),
         ("b", "lineage cycles back through b"),
     ]

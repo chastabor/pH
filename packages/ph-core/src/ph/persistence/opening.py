@@ -24,9 +24,9 @@ from ..session import (
     valid_session_id,
 )
 from ..session_profile import opened
-from .jsonl import resume_session
 from .lease import SessionBusy
 from .protocol import ClaimingStore, SessionPersistence, read_if_stored
+from .resume import resume_session
 
 __all__ = ["open_session", "stored_session"]
 
@@ -86,7 +86,13 @@ async def open_session(
     """
     resolved = session_id or new_session_id()
     store = await _claimed(ctx, resolved)
-    session = await _resumed(ctx, store, resolved, family) if store is not None else None
+    # An id minted here is new — a second's timestamp and 24 random bits — so it is
+    # not looked for: that search lists the store for a log that cannot be there,
+    # and a clash in the same second between two live processes is the claim's to
+    # refuse.
+    session = (
+        await _resumed(ctx, store, resolved, family) if store is not None and session_id else None
+    )
     resumed = session is not None
     if session is None:
         fields = dict(meta or {})

@@ -43,7 +43,6 @@ from ..persistence.jsonl import (
     JsonlSessionStore,
     locate_session,
     read_session,
-    resume_session,
     session_path,
 )
 from ..persistence.lease import lease_path
@@ -55,6 +54,7 @@ from ..persistence.protocol import (
     read_if_stored,
     stored_row,
 )
+from ..persistence.resume import resume_session
 from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
 from ..seams.subagents import ADMITTED

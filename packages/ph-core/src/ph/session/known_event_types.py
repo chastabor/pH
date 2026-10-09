@@ -565,7 +565,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         ),
         "ph.llm.media": frozenset({"attachment/degraded", "attachment/oversized"}),
         "ph.llm.retry": frozenset({"llm/retry"}),
-        "ph.persistence.jsonl": frozenset({"session/resumed"}),
+        "ph.persistence.resume": frozenset({"session/resumed"}),
         "ph.seams.approval": frozenset({"approval/policy"}),
         "ph.seams.fs": frozenset({"fs/observed"}),
         "ph.seams.goals": frozenset({"goal/continued", "goal/gate", "goal/set", "goal/settled"}),

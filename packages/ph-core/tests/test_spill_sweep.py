@@ -346,7 +346,7 @@ def test_the_sweep_runs_only_where_a_stored_log_is_read() -> None:
     """
     assert _called("sweep_session") == ["ph.seams.spill"]
     assert _dispatches("session/loaded") == ["ph.session.store"]
-    assert sorted(_called("loaded")) == ["ph.persistence.jsonl", "ph.persistence.opening"]
+    assert sorted(_called("loaded")) == ["ph.persistence.opening", "ph.persistence.resume"]
 
 
 # ---------------------------------------------------------------- planned once --

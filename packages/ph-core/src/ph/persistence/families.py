@@ -28,6 +28,7 @@ __all__ = [
     "locate_under",
     "logs_under",
     "path_under",
+    "stored_under",
 ]
 
 
@@ -166,18 +167,33 @@ def locate_under(root: Path, name: str, suffix: str) -> Path | None:
     its source's family. Before, only a bare root was found without that scan, and
     since format 1 a root with a cwd is not bare, so nearly every lookup by id
     `stat`ed every family.
+
+    **The bare root's own path before any listing**, and not tried again in it. A
+    root opened with no cwd — the print and rpc hosts open theirs so — is filed
+    under its own id, and one `stat` finds it without a `scandir` of the store.
+    For a root with a cwd that `stat` misses, which costs one `stat`; dropping it
+    would cost every bare root a listing.
     """
     own = path_under(root, name, name, suffix)
     if own.is_file():
         return own
     wanted = f"{name}{suffix}"
     families = [one for one in family_dirs(root) if os.path.basename(one) != name]
-    likely = [one for one in families if _holds_lineage_of(Path(one).name, name)]
+    likely = [one for one in families if _holds_lineage_of(os.path.basename(one), name)]
     for family in [*likely, *(one for one in families if one not in likely)]:
         candidate = Path(family) / wanted
         if candidate.is_file():
             return candidate
     return None
+
+
+def stored_under(root: Path, name: str, suffix: str, family: str | None = None) -> bool:
+    """Whether a log for `name` is on disk: in `family` alone when one is given, one
+    `stat`, and anywhere under `root` when not (`locate_under`). `exists` for both
+    backends, which differ only in `suffix`."""
+    if family:
+        return path_under(root, family, name, suffix).is_file()
+    return locate_under(root, name, suffix) is not None
 
 
 def _holds_lineage_of(family: str, name: str) -> bool:
