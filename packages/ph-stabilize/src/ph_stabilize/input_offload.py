@@ -150,7 +150,7 @@ async def apply(ctx: Context, config: Config) -> None:
             return await next_(proposal)
         event, text = pending
         store = ctx.require(SPILL_STORE)
-        ref = await store.try_reserve_text(
+        ref = await store.try_save_text(
             owner=session.id,
             source="pasted message",
             # Named by the seq it replaces rather than upstream's uuid: the
@@ -172,11 +172,9 @@ async def apply(ctx: Context, config: Config) -> None:
             content_sample=content_preview(text),
         )
         # **The accounting and the replacement it describes, in one batch**
-        # (S14), and both before the blob appears at `ref.locator` — the ordering
-        # the open-time sweep depends on: a file on disk that the log does not
-        # name is garbage by definition.
-        # Apart, a flush between them landed the record with no replacement, and
-        # a resumed session never offloaded the paste again.
+        # (S14), and both after the blob is on disk (`SpillStore.save`). Apart, a
+        # flush between them landed the record with no replacement, and a resumed
+        # session never offloaded the paste again.
         with session.batch() as batch:
             _LOG.append(
                 batch,
@@ -184,7 +182,6 @@ async def apply(ctx: Context, config: Config) -> None:
                 {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
             )
             _append_preview(batch, event, ref, preview)
-        await store.commit(ref)
         # The config is returned untouched. `_build_request` calls
         # `derive_messages()` *after* this waterfall, so the loop picks the
         # replacement up on its own — which is what keeps one statement of the

@@ -357,28 +357,37 @@ async def test_what_an_ended_child_left_unfinished_is_revoked(
     assert stored_types(ctx, grandchild.id)[-2:] == [STATUS, DELETED]
 
 
-async def test_an_ended_childs_unfinished_children_are_revoked_together(
-    mount: MountProfile,
+@pytest.mark.parametrize("ended_children", [1, 2], ids=["one-ended-child", "two-ended-children"])
+async def test_ended_childrens_unfinished_children_are_revoked_together(
+    mount: MountProfile, ended_children: int
 ) -> None:
     """Each descendant's log is opened through `stored_session`, which settles what
     reading it owes before the tombstone is written — a spill sweep, and a `git`
-    reconcile per leaked tree. Walked one log at a time, a restart paid that back to
-    back for every descendant; nothing orders one tombstone against another, so they
-    are written together.
+    reconcile per leaked tree. Walked one log at a time, or one ended child's subtree
+    at a time, a restart paid that back to back; nothing orders one tombstone against
+    another, so every subtree's are written together.
 
-    Asserted as a rendezvous: each load waits for the other to begin. Sabotage: walk
-    the family one log at a time, and the first load never meets the second.
+    Asserted as a rendezvous: each load waits for the others to begin. Sabotage: walk
+    the logs one at a time — or revoke each ended child's family as the sweep reaches
+    it — and the first load never meets the second.
     """
     ctx = await mount()
     ctx.require(SUBAGENTS).register_provider("stub", _Readmitting(StubSubagentProvider(root=ctx)))
     parent = _parent(ctx)
     assert parent.session is not None
-    child = admitted_child(ctx, parent.session, "r1", {"prompt": "look"})
-    log_event(child, STATUS, {"status": "done"})
-    beneath = [admitted_child(ctx, child, run, {"prompt": "dig"}) for run in ("r2", "r3")]
+    ended = [
+        admitted_child(ctx, parent.session, f"r{index}", {"prompt": "look"})
+        for index in range(ended_children)
+    ]
+    for child in ended:
+        log_event(child, STATUS, {"status": "done"})
+    beneath = [
+        admitted_child(ctx, ended[index % ended_children], f"d{index}", {"prompt": "dig"})
+        for index in range(2)
+    ]
     for one in beneath:
         log_event(one, STATUS, {"status": "running"})
-    await _as_an_earlier_process_left_them(ctx, parent.session, child, *beneath)
+    await _as_an_earlier_process_left_them(ctx, parent.session, *ended, *beneath)
     waiting = {one.id for one in beneath}
     entered: set[str] = set()
     everyone = anyio.Event()
@@ -401,6 +410,40 @@ async def test_an_ended_childs_unfinished_children_are_revoked_together(
     assert met == [True, True], "the descendants were revoked one log at a time"
     for one in beneath:
         assert not_none(ctx.require(SUBAGENTS).state(one.id)).deleted_reason == PARENT_TEARDOWN
+
+
+async def test_a_stored_child_is_written_where_its_header_files_it(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child the sweep read from the store carries the family its own header files
+    it in (`ChildState.family`), so the write that ends or revokes it opens that path.
+    Looked up by id, it listed every family directory in the store — on the event
+    loop, once per child the sweep wrote to.
+
+    Sabotage: drop `family` from `_write_child`'s `stored_session`, and the store is
+    searched.
+    """
+    from ph.persistence import jsonl
+
+    ctx = await mount()
+    ctx.require(SUBAGENTS).register_provider("stub", _Readmitting(StubSubagentProvider(root=ctx)))
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1", {"prompt": "look"})
+    log_event(child, STATUS, {"status": "done"})
+    grandchild = admitted_child(ctx, child, "r2", {"prompt": "dig"})
+    log_event(grandchild, STATUS, {"status": "running"})
+    await _as_an_earlier_process_left_them(ctx, parent.session, child, grandchild)
+
+    def searched(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("searched the store for a child whose family its state holds")
+
+    monkeypatch.setattr(jsonl, "locate_under", searched)
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    revoked = not_none(ctx.require(SUBAGENTS).state(grandchild.id))
+    assert revoked.deleted_reason == PARENT_TEARDOWN
 
 
 @pytest.mark.parametrize("door", ["ended", "deleted"])

@@ -977,9 +977,9 @@ listeners a fresh session does. What a log read off disk owes before anything ru
 in it goes on `session/loaded` instead, which both ways a stored log is read
 (`resume_session`, `stored_session`) dispatch and await. Two rows do that work before
 the session is handed out: workspace reconciliation reclaims a crash's leaked trees
-and closes their pairs (`seams/workspace.py`), and the spill sweep publishes a blob a
-dead run staged but never renamed, so a locator the model follows in its first turn
-is there (`seams/spill.py`).
+and closes their pairs (`seams/workspace.py`), and the spill sweep collects the blobs
+no record names — a dead run's leftovers — and reports a record naming a blob that is
+not there (`seams/spill.py`).
 
 **Seed acceptance is one gate for every path** (fork, resume, replay, import):
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown

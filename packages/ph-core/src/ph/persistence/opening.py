@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 import anyio
@@ -94,7 +95,7 @@ async def open_session(
     return session
 
 
-async def stored_session(ctx: Context, session_id: str) -> Session:
+async def stored_session(ctx: Context, session_id: str, *, family: str | None = None) -> Session:
     """A stored session, claimed and loaded but **not resumed**: for adding a record
     to while nothing runs it — `phern profiles adopt` (session profiles, S6).
 
@@ -108,15 +109,23 @@ async def stored_session(ctx: Context, session_id: str) -> Session:
     What a log read off disk owes is still settled before the caller holds it
     (`SessionStore.loaded`).
 
+    `family` is where its log is filed, when the caller holds it, and then it is read
+    by that path (`SessionArchive.read`) rather than searched for — a parent writing to
+    its own child holds it. Exact, not a hint: a log not there is not looked for.
+
     :raises SessionBusy: when another process holds it.
     :raises LookupError: when there is no stored session by that id.
     """
     store = ctx.require(SESSION_PERSISTENCE)
     await _claimed(ctx, session_id)
-    if not store.exists(session_id):
-        raise LookupError(f"no stored session {session_id!r}")
-    # Off the loop: a long log is a long read, and the loop is every root's.
-    header, events = await anyio.to_thread.run_sync(store.read, session_id)
+    # One read, off the loop: a long log is a long read, a search for one whose
+    # family is not given lists the store, and the loop is every root's.
+    try:
+        header, events = await anyio.to_thread.run_sync(
+            partial(store.read, session_id, family=family)
+        )
+    except FileNotFoundError as missing:
+        raise LookupError(f"no stored session {session_id!r}") from missing
     stored = Session(session_id, seed=events, header=header, durable=len(events))
     sessions = ctx.require(SESSIONS)
     async with sessions.opening(sessions.adopt(stored)) as session:

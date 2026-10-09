@@ -234,7 +234,7 @@ class ResultSpill:
     """Becomes `SpillRef.retrieval_hint`."""
     blob: PlannedBlob
     """The result's bytes and their locator, hashed once for both the wording and
-    the stage."""
+    the write."""
     replacement: str
     """Names the locator the store will derive — which is why it can be built first."""
 
@@ -251,13 +251,13 @@ def plan_tool_result_spill(
     """Where one tool result would go, and what the model would read instead.
 
     **Decided before anything is written** (S14). The locator is derived rather than
-    reserved — the store's naming rule is a function of the content — so a caller can
+    stored — the store's naming rule is a function of the content — so a caller can
     refuse the spill on the replacement's own terms (the overflow clip, when the
     pointer would be longer than the result) before the store holds a byte of it
     and the log a record describing a relocation that did not happen.
 
     One recipe in two halves: where the file goes and the wording the model reads
-    to find it here, the staging and the `offload/spilled` accounting in
+    to find it here, the write and the `offload/spilled` accounting in
     `spill_tool_result`. Two rows perform this
     — this one when a result is oversized on arrival (G2), and the overflow clip
     when a retained batch has to shrink (§7.4 item 7) — and the second had
@@ -286,7 +286,7 @@ async def spill_tool_result(
     *,
     beside: Callable[[SessionBatch], object] | None = None,
 ) -> bool:
-    """Make a planned relocation: stage the blob, record it, publish it.
+    """Make a planned relocation: write the blob, then record it.
 
     `beside` appends into the batch that holds the `offload/spilled` record — the
     overflow clip's `tool/result` replace, which is the other half of the same
@@ -297,15 +297,14 @@ async def spill_tool_result(
     the content must not be the reason the model loses it. The seam logs why.
     """
     store = ctx.require(SPILL_STORE)
-    ref = await store.try_reserve(planned.blob, source=planned.source)
+    ref = await store.try_save(planned.blob, source=planned.source)
     if ref is None:
         return False
     # Where the original went. Declared ignorable in the vocabulary (the property
     # is the type's, not this call site's) — a reader that skips it loses the
     # forwarding address, not the conversation, because the replacement the model
-    # saw is what `tool/result` carries.
-    # Before the blob appears at `ref.locator` (`SpillStore.reserve`): a blob the
-    # log does not name is what the sweep collects.
+    # saw is what `tool/result` carries. After the blob is on disk (`SpillStore.save`),
+    # so no record names bytes that are not there.
     with session.batch() as batch:
         _LOG.append(
             batch,
@@ -314,7 +313,6 @@ async def spill_tool_result(
         )
         if beside is not None:
             beside(batch)
-    await store.commit(ref)
     return True
 
 

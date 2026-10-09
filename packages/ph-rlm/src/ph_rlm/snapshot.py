@@ -12,13 +12,11 @@ because its digest did not move. Snapshotting the namespace as one blob would
 append it again on every cell that touched anything at all, and the log would grow
 with the *size of the namespace* rather than the size of the change.
 
-**Staged, recorded, then published.** Write-ahead ordering (§4.9), through the spill
-store's `reserve`/`commit` pair (S11): a blob is durable, under the store's
-`.staging`, before the event naming it is appended, and is renamed to where the event
-says only after. A death between the two leaves a staged blob the log names — which
-the next read publishes — or one it does not, which the next read collects; a blob
-that could not be staged is recorded as a `clear`, and one that cannot be read on
-restore is reported by `kernel/restored` as failed. Nothing is dropped in silence.
+**Written, then recorded** (§4.9, S11): a blob is durable at its locator before the
+event naming it is appended (`SpillStore.save`). A death between the two leaves a
+blob nothing names, which the next read of the log collects; a blob that could not
+be written is recorded as a `clear`, and one that cannot be read on restore is
+reported by `kernel/restored` as failed. Nothing is dropped in silence.
 
 **`patch` is deliberately absent.** D17 allows a `bsdiff4` delta chain against an
 anchor *and* says to benchmark first, because `dill` output is not byte-stable
@@ -51,7 +49,7 @@ from ph.cordis import Context, plugin
 from ph.json import as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
-from ph.seams.spill import PlannedBlob, SpillClaim, SpillRef, SpillStore
+from ph.seams.spill import PlannedBlob, SpillClaim, SpillStore
 from ph.session import Session
 from ph.session.writers import log_writer
 from ph.wire import WireModel
@@ -181,19 +179,16 @@ class KernelSnapshotPolicy:
         """Append one `kernel/snapshot` per changed variable, and put their blobs where
         the records say they are.
 
-        **Through the spill store's `reserve`/`commit` pair** (S11), the ordering every
-        other producer keeps: each blob is staged — durably, under the store's
-        `.staging` — then the records are appended, **one batch for the cell**, then the
-        blobs are published. Written after the records instead, a blob the store could
-        not take was a `snap` naming nothing, dropped in silence on the next restore;
-        now one that cannot be staged is recorded as a `clear` saying so, which is
-        what a restore tells the model.
+        **Each blob written first, then the records, one batch for the cell** (S11),
+        the ordering every other producer keeps (`SpillStore.save`). Written after the
+        records instead, a blob the store could not take was a `snap` naming nothing,
+        dropped in silence on the next restore; now one that cannot be written is
+        recorded as a `clear` saying so, which is what a restore tells the model.
 
         In the log, not yet on disk: the next request's barrier puts the records on
         disk before the model reads the cell's result, and a blob is durable before
-        any record naming it is. The blobs are staged, and later published,
-        concurrently: each is a thread hop and an `fsync` or two, and the guest's
-        `done` waits on all of them.
+        any record naming it is. The blobs are written concurrently: each is a thread
+        hop and an `fsync` or two, and the guest's `done` waits on all of them.
         """
         session = self._session(namespace)
         if session is None:
@@ -204,19 +199,20 @@ class KernelSnapshotPolicy:
         if not encoded:
             return
         spill = self.ctx.get(SPILL_STORE)
-        refs: dict[int, SpillRef | None] = {}
+        failed: set[int] = set()
 
-        async def stage(store: SpillStore, index: int, var: str, blob: PlannedBlob) -> None:
-            refs[index] = await store.try_reserve(blob, source=f"kernel variable {var}")
+        async def save(store: SpillStore, index: int, var: str, blob: PlannedBlob) -> None:
+            if await store.try_save(blob, source=f"kernel variable {var}") is None:
+                failed.add(index)
 
         async with anyio.create_task_group() as group:
             for index, (record, blob) in enumerate(encoded):
                 # A blob comes back only when a store is mounted to take it.
                 if spill is not None and blob is not None:
-                    group.start_soon(stage, spill, index, record.var, blob)
+                    group.start_soon(save, spill, index, record.var, blob)
         with session.batch() as batch:
             for index, (record, _blob) in enumerate(encoded):
-                if index in refs and refs[index] is None:
+                if index in failed:
                     record = SnapshotRecord(
                         kind="clear",
                         var=record.var,
@@ -227,16 +223,11 @@ class KernelSnapshotPolicy:
                     "kernel/snapshot",
                     {"namespace": namespace, "run": run_id, "record": record.to_wire()},
                 )
-        if spill is not None:
-            async with anyio.create_task_group() as group:
-                for ref in refs.values():
-                    if ref is not None:
-                        group.start_soon(spill.commit, ref)
 
     def _encode(
         self, session: Session, namespace: str, raw: dict[str, Any]
     ) -> tuple[SnapshotRecord, PlannedBlob | None] | None:
-        """The record to append, and the blob to stage for it — `None` for an inline
+        """The record to append, and the blob to write for it — `None` for an inline
         record or a `clear`, which have nothing for the store.
 
         The payload is decoded **once** and handed on: base64-decoding it for the
@@ -271,10 +262,9 @@ class KernelSnapshotPolicy:
                 ),
                 None,
             )
-        # The store derives the locator, so the event can name it *before* the
-        # blob exists — write-ahead ordering (§4.9) — without this module
-        # mirroring the store's naming rule. Planned once: the locator here and
-        # the stage in `record` share one digest of the payload.
+        # The store derives the locator, so the record can name it without this
+        # module mirroring the store's naming rule. Planned once: the locator here
+        # and the write in `record` share one digest of the payload.
         planned = spill.plan(
             owner=_owner(namespace), suggested_name=f"{name}.dill", content=payload
         )

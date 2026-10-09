@@ -12,12 +12,13 @@ harness never tells the model something is gone when it is on disk.**
 ## The surface
 
 ```text
-await ctx.spill_store.reserve_text(text, ...)      # -> SpillRef, staged
-await ctx.spill_store.try_reserve_text(text, ...)  # -> SpillRef | None
-await ctx.spill_store.commit(ref)                  # publish, after the append
-await ctx.spill_store.save_text(text, ...)         # -> SpillRef, unordered
-await ctx.spill_store.load_text(ref)               # -> str
-ctx.spill_store.locator_for(...)                   # the name, before the write
+await ctx.spill_store.save_text(text, ...)      # -> SpillRef, before the append
+await ctx.spill_store.try_save_text(text, ...)  # -> SpillRef | None
+await ctx.spill_store.save(planned, ...)        # a blob already planned
+await ctx.spill_store.try_save(planned, ...)    # -> SpillRef | None
+await ctx.spill_store.load_text(ref)            # -> str
+ctx.spill_store.plan(...)                       # the name and the bytes, together
+ctx.spill_store.locator_for(...)                # the name, before the write
 ctx.spill_store.claim(...)
 ```
 
@@ -33,40 +34,38 @@ A `SpillRef` is three fields, and the third is the interesting one:
 rather than making the model guess. A locator with no hint is a reference the
 model has to reverse-engineer, and it will reverse-engineer it wrongly.
 
-`try_reserve_text` is the non-raising form: a spill that fails is an
+`try_save_text` is the non-raising form: a spill that fails is an
 optimization that did not happen, and the caller keeps the content inline rather
 than losing the turn. It is the *write*, so that fallback is still on the table
 when it answers `None` — nothing has been logged yet.
 
-## Reserve, append, commit
+## Write, then append
 
-A blob is garbage exactly when the log does not name it. That is what makes the
-sweep below safe, and it is a promise about **ordering** that only producers can
-keep: one that writes the file first and appends the locator second leaves its
-own blob indistinguishable from garbage for as long as that takes. While the sweep
-ran on another task at every open, it collected a live history file often enough
-to fail a test under load; it now runs only before a stored session is handed out,
-and the ordering is what lets a run that died midway be finished (below).
-
-So a producer that records a locator writes in two steps:
+A blob is garbage exactly when the log does not name it, which is what makes the
+sweep below safe. So a producer that records a locator writes the blob first and
+appends the record naming it second:
 
 ```python
-ref = await ctx.spill_store.try_reserve_text(
+ref = await ctx.spill_store.try_save_text(
     owner=session.id, source="tool result", suggested_name=name, content=text
 )
 if ref is None:
     return None  # fail open; nothing has been logged
-session.append("offload/spilled", {"callId": call_id, "locator": ref.locator})
-await ctx.spill_store.commit(ref)  # the blob appears, already named
+_LOG.append(session, "offload/spilled", {"callId": call_id, "locator": ref.locator})
 ```
 
-`reserve` stages the bytes under the owner's `.staging`, where no locator reaches
-them; `commit` is a rename within the owner's directory, so the blob appears whole,
-at a locator the log already names, or not at all. `save_text` remains for a caller with no log entry
-to keep in step — a test planting a blob, or a producer that appends nothing.
+The blob is durable before any record names it, so the log never names bytes that
+are not there, and a write that fails does so before anything is logged. A run that
+dies between the two leaves a file nothing names, which the next read collects.
 
-`locator_for` is the derivation underneath both, public for the same reason:
-a caller that must record a reference before writing needs the name first.
+It used to take three steps — reserve the bytes out of the locator's reach, append,
+then commit them into place — because the sweep ran on another task at every open
+and collected a blob caught between its write and its append, often enough to fail
+a test under load. It runs only before a stored session is handed out now, so that
+window is no hazard.
+
+`plan` and `locator_for` derive the name a blob will have, for a caller that must
+put it in the wording or the record that points at it before the write.
 
 ## Why this is not `ctx.attachments`
 
@@ -92,10 +91,10 @@ safe to be automatic *because* a spill has an owner: the session that produced i
 That is exactly the property an attachment lacks, which is why its collection is a
 command a person runs.
 
-It is also the repair. A blob the log names that is still staged — a run that died
-between the append and `commit` — is published; a stage nothing names, or a
-`write_atomic` temp a kill left behind, is collected. Both rest on nothing writing
-the session while it runs, which is why it has one caller and a test that says so.
+It collects a dead run's leftovers along with the rest — a blob whose record never
+landed, a `write_atomic` temp a kill interrupted — and reports a record naming a blob
+that is not there. Collecting rests on nothing writing the session while it runs,
+which is why it has one caller and a test that says so.
 
 ## The row
 

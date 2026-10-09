@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,14 +24,7 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import (
-    default_home_path,
-    holds,
-    make_directories,
-    replace_durably,
-    sync_directory,
-    write_atomic,
-)
+from ..paths import default_home_path, write_atomic
 from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -40,9 +32,6 @@ from ._registry import claim_entry
 __all__ = ["PlannedBlob", "SpillClaim", "SpillRef", "SpillStore", "apply", "handed_paths_of"]
 
 log = logging.getLogger("ph.seams.spill")
-
-STAGING = ".staging"
-"""Where `reserve` puts a blob until the log names it. See `_staging_for`."""
 
 
 class SpillRef(WireModel):
@@ -60,9 +49,9 @@ class PlannedBlob:
 
     One value rather than a locator and the bytes apart, for two reasons. The digest
     is taken **once**: `locator_for` hashes the whole payload, and a caller that
-    derived the locator for its record and then reserved the bytes hashed them
+    derived the locator for its record and then stored the bytes hashed them
     again — a second sha256 of a multi-megabyte tool result on the event loop. And
-    the name cannot come apart from what it names: `reserve` stages *these* bytes at
+    the name cannot come apart from what it names: `save` writes *these* bytes at
     *this* locator, with no second derivation to disagree.
     """
 
@@ -155,148 +144,78 @@ class SpillStore:
         """Where `content` will be written — derived, not written.
 
         The one home of the naming rule (digest + sanitized name), so a caller
-        that must record a blob's locator *before* writing it (write-ahead
-        ordering, §4.9) derives the same path the write will use rather than
-        mirroring the rule and hoping a test keeps the two in step.
+        that must name a blob's locator before storing it — in the wording that
+        replaces it, in the record that points at it — derives the same path the
+        write will use rather than mirroring the rule and hoping a test keeps the
+        two in step.
         """
         digest = hashlib.sha256(content).hexdigest()[:16]
         safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
         return self.owner_root(owner) / f"{digest}-{safe}"
 
-    async def save_bytes(
-        self, *, owner: str, source: str, suggested_name: str, content: bytes
-    ) -> SpillRef:
-        """Write binary `content` and return its reference.
-
-        Named by content digest, so re-spilling identical output costs one file
-        rather than one file per occurrence. Text spills through here too, as
-        UTF-8, so the naming rule has one implementation.
-        """
-        path = self.locator_for(owner=owner, suggested_name=suggested_name, content=content)
-        await anyio.to_thread.run_sync(_write, path, content)
-        return SpillRef(
-            locator=str(path),
-            bytes=len(content),
-            retrieval_hint=f'read the file at "{path}" for the full {source}',
-        )
-
-    async def save_text(
-        self, *, owner: str, source: str, suggested_name: str, content: str
-    ) -> SpillRef:
-        """Write `content` as UTF-8 and return its reference.
-
-        The unordered spelling, for a caller with no log entry to keep in step
-        with the write — a test planting a blob, or a producer that appends
-        nothing. Anything that records a locator wants `reserve_text` and
-        `commit` instead, in that order; `reserve` says why.
-        """
-        return await self.save_bytes(
-            owner=owner,
-            source=source,
-            suggested_name=suggested_name,
-            content=content.encode("utf-8"),
-        )
-
-    def _staging_for(self, locator: str) -> Path:
-        """Where a reserved blob waits. Derived, so nothing has to remember it.
-
-        Under the owner's own directory so the rename that publishes it cannot
-        cross a filesystem, and in a *subdirectory* so no locator reaches it before
-        `commit`: the sweep lists it separately, finishing what the log names and
-        collecting what it does not.
-        """
-        final = Path(locator)
-        return final.parent / STAGING / final.name
-
     def plan(self, *, owner: str, suggested_name: str, content: bytes) -> PlannedBlob:
-        """Where `content` will go, held with it — `reserve` stages what this names."""
+        """Where `content` will go, held with it — `save` writes what this names."""
         return PlannedBlob(
             self.locator_for(owner=owner, suggested_name=suggested_name, content=content),
             content,
         )
 
-    async def reserve(self, planned: PlannedBlob, *, source: str) -> SpillRef:
-        """Stage `planned` and return the reference it will have once committed.
+    async def save(self, planned: PlannedBlob, *, source: str) -> SpillRef:
+        """Write `planned` at its locator, durably, and return its reference.
 
-        **The write-ahead half of an ordering** (§4.9): the bytes are written somewhere
-        a locator does not reach, so the producer can append the locator *before* the
-        file exists at it, and the blob is referenced from the moment it appears. A
-        run that dies between the append and `commit` leaves the bytes one directory
-        down under the name the log already gives them, and the next read finishes the
-        rename (`_complete_staged`); one that dies before the append leaves a stage
-        nothing names, which the next read collects. It was written for a sweep that
-        ran beside producers, which no longer happens (`sweep_session`).
+        **Write first, then append the record naming it** (§4.9). The blob is on disk
+        before any record names it, so the log never names bytes that are not there,
+        and a write that fails does so while the producer has logged nothing — the
+        fallback `try_save` keeps open. A run that dies between the two leaves a file
+        nothing names, which the next read of the log collects (`sweep_session`).
 
-        Two calls rather than one because the failure has to stay on this side of
-        the append. Writing is what can fail, so it happens first and a caller
-        that cannot proceed without durability learns it before it has logged
-        anything; `commit` is a rename on the same filesystem, which is atomic
-        and, having got this far, all but certain.
+        It used to be staged out of the locator's reach, named, and only then renamed
+        into place (`reserve`, `commit`), because the sweep ran beside producers and
+        collected a blob caught between its write and its append. The sweep runs only
+        where nothing writes the session now, so that window is no hazard and the
+        bytes go straight to where the record will say they are.
 
-        **Bytes already published at the locator are linked, not rewritten** (`_stage`):
-        the name carries their digest, so what is there is what would be written.
+        Named by content digest, so re-spilling identical output costs one file rather
+        than one per occurrence, and bytes already there are not written again
+        (`_write`).
         """
-        path = planned.locator
-        await anyio.to_thread.run_sync(_stage, path, self._staging_for(str(path)), planned.content)
+        await anyio.to_thread.run_sync(_write, planned.locator, planned.content)
         return SpillRef(
-            locator=str(path),
+            locator=str(planned.locator),
             bytes=len(planned.content),
-            retrieval_hint=f'read the file at "{path}" for the full {source}',
+            retrieval_hint=f'read the file at "{planned.locator}" for the full {source}',
         )
 
-    async def reserve_text(
+    async def save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef:
-        """`reserve`, for text nobody planned, as UTF-8."""
+        """`save`, for text nobody planned, as UTF-8 — through the one naming rule."""
         planned = self.plan(
             owner=owner, suggested_name=suggested_name, content=content.encode("utf-8")
         )
-        return await self.reserve(planned, source=source)
+        return await self.save(planned, source=source)
 
-    async def try_reserve(self, planned: PlannedBlob, *, source: str) -> SpillRef | None:
-        """`reserve`, or `None` when the store could not take it.
+    async def try_save(self, planned: PlannedBlob, *, source: str) -> SpillRef | None:
+        """`save`, or `None` when the store could not take it.
 
         The fail-open spelling: a producer that cannot store a blob must not be the
         reason the model loses what it held — an offload keeps the text inline, a
-        kernel snapshot records a `clear`. Because the write happens here rather than
-        at `commit`, that fallback is still available: the caller has logged nothing.
+        kernel snapshot records a `clear`. The write comes before the append, so that
+        fallback is still available: the caller has logged nothing.
         """
-        return await _fail_open(
-            self.reserve(planned, source=source),
-            owner=planned.locator.parent.name,
-            name=planned.locator.name,
-        )
+        return await _fail_open(self.save(planned, source=source), what=str(planned.locator))
 
-    async def try_reserve_text(
+    async def try_save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef | None:
-        """`try_reserve`, for text as UTF-8 — a text that cannot be encoded is one the
+        """`try_save`, for text as UTF-8 — a text that cannot be encoded is one the
         store could not take, too."""
         return await _fail_open(
-            self.reserve_text(
+            self.save_text(
                 owner=owner, source=source, suggested_name=suggested_name, content=content
             ),
-            owner=owner,
-            name=suggested_name,
+            what=f"{owner}/{suggested_name}",
         )
-
-    async def commit(self, ref: SpillRef) -> bool:
-        """Publish a reserved blob at its locator. Call it *after* the append.
-
-        A rename within one directory, so the blob appears whole or not at all
-        and never appears unreferenced — and a durable one (`replace_durably`),
-        since the log naming the locator is `fsync`ed at the next barrier and the
-        rename must not be the half a power cut loses (S6). `False` rather than a
-        raise: by now the log names the locator, so the recoverable answer is a
-        reader reporting a blob it cannot find, not a turn that fails after the fact.
-        """
-        staged = self._staging_for(ref.locator)
-        try:
-            await anyio.to_thread.run_sync(_publish, staged, Path(ref.locator), ref.bytes)
-        except OSError:
-            log.warning("ph.seams.spill: could not publish %s", ref.locator, exc_info=True)
-            return False
-        return True
 
     async def load_text(self, locator: str) -> str:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_text(encoding="utf-8"))
@@ -325,22 +244,18 @@ class SpillStore:
         whenever a stored log is read, before the session is handed out, and a
         fold of a long log belongs off the event loop.
 
-        **It also finishes what a dead run started, and says what it cannot.**
-        The fold holds both halves of the comparison, so having used one of them
-        to find files nothing names, it uses the other for the two states a
-        crash can leave. A blob the log names that is still staged is *completed*
-        — the bytes are there and the log already says where they belong, so the
-        rename the dead run never reached is the repair. A blob the log names
-        that is nowhere is reported, because the alternative is the model being
-        handed a path that fails when it follows it.
+        **And it says what it cannot mend.** The fold holds both halves of the
+        comparison, so having used one of them to find files nothing names, it uses
+        the other for a log naming a blob that is nowhere — reported, because the
+        alternative is the model being handed a path that fails when it follows it.
 
         **Only where nothing writes the session.** Its one caller is the reader's
         `session/loaded`, before anyone holds the session — a test pins that it stays
-        the only one — and that is what lets it collect everything the log does not name —
-        a dead run's leftovers included: a stage that never reached its append, a
+        the only one — and that is what lets it collect everything the log does not
+        name, a dead run's leftovers included: a blob whose record never landed, a
         `write_atomic` temp a kill interrupted. Beside a producer it would delete what
-        that producer had written and not yet named, which is what it did while it
-        rode `session/created` (S7, D17), and why the leftovers used to be kept.
+        that producer had written and not yet named (`save` writes first), which is
+        what it did while it rode `session/created` (S7, D17).
         """
         claims = self.claims
         seed = session.header.first_own_seq
@@ -379,15 +294,9 @@ class SpillStore:
                         owners.add(owner)
             removed: list[str] = []
             for owner in sorted(owners):
-                directory = self.owner_root(owner)
-                staged = _collectable(directory / STAGING)
-                for completed in _complete_staged(directory, staged, referenced):
-                    log.info("ph.seams.spill: completed an interrupted write of %s", completed)
-                # A stage the log does not name is a reservation that never reached its
-                # append: every one that did is named, and was just finished above.
-                abandoned = [one for one in staged if str(directory / one.name) not in referenced]
-                listed = [*_collectable(directory), *abandoned]
-                removed.extend(_remove_unreferenced(listed, referenced))
+                removed.extend(
+                    _remove_unreferenced(_collectable(self.owner_root(owner)), referenced)
+                )
             for absent in sorted(one for one in referenced if not Path(one).exists()):
                 log.warning(
                     "ph.seams.spill: session %s names a blob that is not there: %s",
@@ -410,36 +319,8 @@ def _abort(claim: SpillClaim, session: Session) -> list[str]:
     return []
 
 
-def _complete_staged(directory: Path, staged: Iterable[Path], referenced: set[str]) -> list[str]:
-    """Publish the `staged` blobs the log already names. Returns what it finished.
-
-    The recovery half of write-ahead ordering. A run that died between appending
-    a locator and renaming the bytes into place leaves the log naming a blob that
-    is not at its locator — and the bytes sitting one directory down, under the
-    name they were always going to take. Finishing that rename is the whole
-    repair, and it needs no record of what was in flight: the log is the record.
-    """
-    completed: list[str] = []
-    for path in staged:
-        final = directory / path.name
-        if str(final) not in referenced:
-            continue
-        # Through `commit`'s own rule, so a stage whose blob is already published —
-        # a link a dead run never dropped, or a second reservation of the same
-        # bytes — is dropped rather than kept to pin the bytes past the blob.
-        existed = final.exists()
-        _publish(path, final, path.stat().st_size)
-        if not existed:
-            completed.append(str(final))
-    return completed
-
-
 def _collectable(directory: Path) -> list[Path]:
-    """The files in one directory a sweep may collect, if nothing names them.
-
-    Files only, so an owner directory's `.staging` is passed over here and listed in
-    its own right (`sweep_session`).
-    """
+    """The files in one owner directory a sweep may collect, if nothing names them."""
     if not directory.is_dir():
         return []
     return [path for path in sorted(directory.iterdir()) if path.is_file()]
@@ -455,77 +336,25 @@ def _remove_unreferenced(files: Iterable[Path], referenced: set[str]) -> list[st
     return gone
 
 
-async def _fail_open(reserving: Awaitable[SpillRef], *, owner: str, name: str) -> SpillRef | None:
-    """`reserving`'s ref, or `None` having said why — the `try_reserve_*` rule, once."""
+async def _fail_open(saving: Awaitable[SpillRef], *, what: str) -> SpillRef | None:
+    """`saving`'s ref, or `None` having said why — the `try_save*` rule, once."""
     try:
-        return await reserving
+        return await saving
     except Exception:
-        log.warning("ph.seams.spill: could not spill %s for %s", name, owner, exc_info=True)
+        log.warning("ph.seams.spill: could not spill %s", what, exc_info=True)
         return None
 
 
-def _stage(final: Path, staged: Path, payload: bytes) -> None:
-    """Put `payload` under `.staging`, for `commit` to publish at `final`.
-
-    **Bytes already published at `final` are hard-linked, not rewritten.** The name
-    carries their digest, so the file there *is* the write this would make — a
-    kernel variable returning to earlier bytes, a tool repeating its output — and a
-    link stages it for a directory entry instead of the whole blob and its `fsync`.
-
-    Any failure to link — a filesystem without hard links, a stage already there,
-    `final` gone since — falls through to the write, which is always correct.
-    """
-    if holds(final, len(payload)):
-        try:
-            make_directories(staged.parent)
-            os.link(final, staged)
-        except OSError:
-            pass
-        else:
-            sync_directory(staged.parent)
-            return
-    _write(staged, payload)
-
-
-def _publish(staged: Path, final: Path, size: int) -> None:
-    """Rename a stage into place — or find its bytes there already. `commit`'s rule,
-    and the open-time sweep's (`_complete_staged`).
-
-    **Already there, nothing staged**: a second reservation of the same bytes, whose
-    one staged name the first commit took. The digest in the name says `final` holds
-    these bytes, so that is success rather than a missing stage.
-
-    **A stage linked to `final`** (`_stage`) is the same file, and `rename` between
-    two links of one file does nothing — so the staging name is dropped instead, with
-    no rename and no sync of `final`'s directory. Kept, it would pin the blob's bytes
-    after the sweep collects `final`.
-    """
-    if not staged.exists():
-        if holds(final, size):
-            return
-    elif final.exists() and os.path.samefile(staged, final):
-        staged.unlink()
-        sync_directory(staged.parent)
-        return
-    replace_durably(staged, final)
-
-
 def _write(path: Path, payload: bytes) -> None:
-    """One spilled blob, at its locator or under `.staging` (L7).
+    """One spilled blob, at its locator (L7).
 
     K5's identical twin, and it had the same defect: the name carries the sha256
     of the bytes, and `write_bytes` truncates before it writes, so a crash
     mid-write leaves a prefix under a name that says it is complete. Nothing
     rewrites it, because the digest already matches what the caller asked for —
     which is what makes the lie permanent and what makes `skip_if_present` safe.
-
-    **Both callers, including the staging one.** `_staging_for` keeps the
-    locator's name, so the digest promises the contents there too. It is the
-    path that needed this most: `_complete_staged` republishes a staged file whose
-    locator the log names, so a torn reservation used to be renamed into the
-    locator as a complete blob. Through the temp there is no torn file to
-    publish — only, after a kill the `except` cannot reach, a `<name>.<hex>.tmp`
-    that no locator names, which the next sweep collects.
+    Through the temp there is no torn file — only, after a kill the `except` cannot
+    reach, a `<name>.<hex>.tmp` that no locator names, which the next sweep collects.
     """
     write_atomic(path, payload, skip_if_present=True)
 

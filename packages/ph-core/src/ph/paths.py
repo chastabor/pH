@@ -514,8 +514,8 @@ def write_atomic(
 
 def replace_durably(source: Path, target: Path) -> None:
     """`os.replace`, with the rename itself made durable: `target`'s directory is
-    synced after it. For a file already durable under another name — a spill
-    staged, then published — whose new name is what a log points at."""
+    synced after it. For a file already durable under another name whose new name
+    is what a reader points at."""
     os.replace(source, target)
     sync_directory(target.parent)
 

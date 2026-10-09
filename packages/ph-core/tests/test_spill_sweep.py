@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import ast
 import logging
-import os
 from pathlib import Path
 
 import pytest
@@ -39,7 +38,6 @@ from workspace_layout import parsed_modules
 
 from ph.cordis import Context
 from ph.keys import SESSIONS, SPILL_STORE
-from ph.seams import spill as spill_module
 from ph.seams.spill import SpillClaim, SpillRef, SpillStore
 from ph.session import Session, SessionStore
 from ph.testing import MountProfile, log_event
@@ -55,10 +53,8 @@ def _store(tmp_path: Path) -> SpillStore:
     return SpillStore(ctx=Context(), root=tmp_path / "spill")
 
 
-async def _reserve(store: SpillStore, content: bytes) -> SpillRef:
-    return await store.reserve(
-        store.plan(owner="s1", suggested_name="a", content=content), source="a"
-    )
+async def _save(store: SpillStore, content: bytes) -> SpillRef:
+    return await store.save(store.plan(owner="s1", suggested_name="a", content=content), source="a")
 
 
 def _claim(label: str, owner: str, event_type: str = SPILLED) -> SpillClaim:
@@ -232,83 +228,34 @@ async def test_a_withdrawn_claim_stops_contributing(tmp_path: Path) -> None:
     assert await store.sweep_session(session) == [ref.locator]
 
 
-# ---------------------------------------------- the ordering the sweep needs --
+# ------------------------------------------------- where and when it sweeps --
 
 
-async def test_a_reserved_blob_appears_only_once_committed(tmp_path: Path) -> None:
-    """`reserve` is the write and `commit` is the rename, so the blob never sits at
-    its locator before the log names it — and a sweep keeps it once it does."""
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(_claim("producer", session.id))
-
-    ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
-    assert not Path(ref.locator).exists(), "reserved, not yet published"
-
-    _named(session, SPILLED, ref.locator)
-    assert await store.commit(ref) is True
-    assert Path(ref.locator).read_text(encoding="utf-8") == "x"
-    assert await store.sweep_session(session) == [], "and it stays, now that the log names it"
-
-
-async def test_a_write_interrupted_before_its_rename_is_completed(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The repair half of write-ahead, and the reason no bookkeeping is needed.
-
-    A run that dies between appending the locator and renaming the bytes leaves
-    the log naming a blob that is not at its locator — with the bytes one
-    directory down, under the name they were always going to take. The sweep
-    holds both halves of that comparison already, so finishing the rename is the
-    whole repair, and the log is the only record of intent it needs.
-
-    This is what replaced a set of in-flight reservations. That set existed so
-    the sweep could delete abandoned staged files without eating a live one, and
-    it could not tell them apart for the reason write-ahead exists: neither is
-    referenced yet. Recovering instead of collecting removes the question.
-    """
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(_claim("producer", session.id))
-    ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
-    _named(session, SPILLED, ref.locator)  # the dead run got this far and no further
-
-    with caplog.at_level(logging.INFO, logger="ph.seams.spill"):
-        assert await store.sweep_session(session) == []
-
-    assert Path(ref.locator).read_text(encoding="utf-8") == "x", "the rename was finished"
-    assert not store._staging_for(ref.locator).exists()
-    assert "completed an interrupted write" in caplog.text
-
-
-async def test_a_stored_log_is_handed_out_with_its_interrupted_writes_finished(
-    mount: MountProfile,
-) -> None:
-    """The repair, before anything runs in the session — and the sweep's wiring.
-
-    The blob its log names is at its locator before anyone holds the session — not
-    still in `.staging` when a resumed model follows it, as it could be while the
-    sweep was detached (`SessionStore.loaded`).
+async def test_a_stored_log_is_swept_before_it_is_handed_out(mount: MountProfile) -> None:
+    """The sweep's wiring, through the mounted row: what a dead run left that its log
+    does not name is gone before anyone holds the session (`SessionStore.loaded`).
 
     Through the mounted row rather than `sweep_session`, because a fold that is
     wrong and a fold nobody calls fail differently: the second deletes nothing and
     looks exactly like a clean store, which is what P6-15 was.
 
+    Mounted without `workspace-reconcile`, the event's other listener: its own awaits
+    would give a detached sweep time to finish, and the test would pass for timing.
+
     Sabotage: put `spill-local`'s listener back on `session/created`, and the blob
-    is still staged when `loaded` returns.
+    is still there when `loaded` returns.
     """
-    ctx = await mount()
+    ctx = await mount({"id": "workspace-reconcile", "remove": True})
     store = ctx.require(SPILL_STORE)
     sessions = ctx.require(SESSIONS)
     crashed = Session("s1")
     store.claim(_claim("producer", crashed.id))
-    ref = await _reserve(store, b"x")
-    _named(crashed, SPILLED, ref.locator)  # the dead run got this far and no further
+    orphan = await _save(store, b"x")  # the dead run got this far, and no record landed
 
     session = sessions.adopt(Session(crashed.id, seed=list(crashed.events)))
     await sessions.loaded(session)
 
-    assert Path(ref.locator).read_text(encoding="utf-8") == "x", "handed out still staged"
+    assert not Path(orphan.locator).exists(), "handed out with its dead run's blob unswept"
 
 
 async def test_a_blob_the_log_names_and_nothing_holds_is_reported(
@@ -335,28 +282,6 @@ async def test_a_blob_the_log_names_and_nothing_holds_is_reported(
 
     assert "names a blob that is not there" in caplog.text
     assert "never-written.md" in caplog.text
-
-
-async def test_a_staged_blob_no_run_will_commit_is_collected(tmp_path: Path) -> None:
-    """A dead run's reservation that never reached its append is collected.
-
-    It used to be left, one file per run that died between the write and the
-    append, because a reservation in flight looks the same — and the sweep ran
-    beside producers. It runs only where nothing writes now (`sweep_session`), so
-    a stage nothing names can only be a dead run's.
-
-    Sabotage: list only the owner directory and not its `.staging`, and the stage
-    is still there.
-    """
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(_claim("producer", session.id))
-    ref = await _reserve(store, b"x")
-    staged = store._staging_for(ref.locator)
-
-    assert await store.sweep_session(session) == [str(staged)]
-
-    assert not staged.exists()
 
 
 async def test_a_temp_a_killed_write_left_is_collected(tmp_path: Path) -> None:
@@ -421,19 +346,19 @@ def test_the_sweep_runs_only_where_a_stored_log_is_read() -> None:
     assert sorted(_called("loaded")) == ["ph.persistence.jsonl", "ph.persistence.opening"]
 
 
-# ------------------------------------------------------- planned once, linked --
+# ---------------------------------------------------------------- planned once --
 
 
 async def test_a_planned_blob_is_hashed_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The locator a record names and the stage that fills it share one digest.
+    """The locator a record names and the write that fills it share one digest.
 
     A producer that must name a blob before storing it used to derive the locator
-    for its record and then reserve the bytes, which derived it again: a second
+    for its record and then store the bytes, which derived it again: a second
     sha256 of a multi-megabyte result, on the event loop, for an answer it had.
 
-    Sabotage: derive the locator again in `reserve`, and this counts two.
+    Sabotage: derive the locator again in `save`, and this counts two.
     """
     store = _store(tmp_path)
     derived: list[str] = []
@@ -445,63 +370,7 @@ async def test_a_planned_blob_is_hashed_once(
 
     monkeypatch.setattr(SpillStore, "locator_for", counting)
     planned = store.plan(owner="s1", suggested_name="a", content=b"x" * 64)
-    ref = await store.reserve(planned, source="a")
+    ref = await store.save(planned, source="a")
 
     assert derived == ["a"]
     assert ref.locator == str(planned.locator)
-
-
-async def test_bytes_already_published_are_linked_rather_than_written(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A blob whose digest is already at its locator costs a link, not a write.
-
-    The name carries the digest, so the file there is the write a reservation would
-    make — a kernel variable back at earlier bytes, a tool repeating its output.
-    Linked rather than skipped, so the sweep deleting the published copy before the
-    record lands cannot take the bytes; and the link is gone once committed, or it
-    would pin them after the sweep collects the blob.
-    """
-    store = _store(tmp_path)
-    first = await _reserve(store, b"same")
-    assert await store.commit(first)
-    written: list[Path] = []
-    monkeypatch.setattr(spill_module, "_write", lambda path, _payload: written.append(path))
-
-    again = await _reserve(store, b"same")
-    staged = store._staging_for(again.locator)
-
-    assert written == [], "the published bytes were written a second time"
-    assert os.path.samefile(staged, again.locator)
-    assert await store.commit(again)
-    assert not staged.exists(), "the staging link was left to pin the blob"
-    assert Path(again.locator).read_bytes() == b"same"
-
-
-async def test_two_reservations_of_the_same_bytes_both_commit(tmp_path: Path) -> None:
-    """They share one staged name, so the first commit takes it — and the second
-    finds its bytes published, which is success rather than a missing stage."""
-    store = _store(tmp_path)
-    one = await _reserve(store, b"same")
-    two = await _reserve(store, b"same")
-
-    assert await store.commit(one) and await store.commit(two)
-    assert Path(two.locator).read_bytes() == b"same"
-
-
-async def test_a_redundant_stage_the_log_names_is_dropped(tmp_path: Path) -> None:
-    """A dead run that linked a stage and appended its record, then died before the
-    commit that would have dropped the link: the blob is published and named, so
-    the stage is redundant — and kept, it would pin the bytes past the blob."""
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(_claim("producer", session.id))
-    first = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
-    await store.commit(first)
-    again = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
-    _named(session, SPILLED, again.locator)
-
-    assert await store.sweep_session(session) == []
-
-    assert not store._staging_for(again.locator).exists()
-    assert Path(again.locator).read_text(encoding="utf-8") == "x"

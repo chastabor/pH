@@ -59,11 +59,10 @@ def blob(size: int, *, lines: int = 40) -> str:
 def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every spill write fail, for the fail-open gates.
 
-    `reserve` is the one that writes — `commit` is a rename, and `reserve_text`
-    reaches it — so this is where a full disk is felt, and it is
-    deliberately the call every producer makes *before* it has appended anything.
-    That ordering is what leaves the fallback available at all: see
-    `SpillStore.reserve`.
+    `save` is the one that writes — `save_text` reaches it — so this is where a full
+    disk is felt, and it is deliberately the call every producer makes *before* it
+    has appended anything. That ordering is what leaves the fallback available at
+    all: see `SpillStore.save`.
 
     Patched on the class: `SpillStore` is a slots dataclass, so the instance has
     no room for an override.
@@ -72,7 +71,7 @@ def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
     async def refuse(_self: object, *_args: object, **_kwargs: object) -> NoReturn:
         raise OSError("no space left on device")
 
-    monkeypatch.setattr(SpillStore, "reserve", refuse)
+    monkeypatch.setattr(SpillStore, "save", refuse)
 
 
 def events_of(session: Session, event_type: str) -> list[Any]:

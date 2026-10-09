@@ -200,8 +200,8 @@ async def test_a_large_payload_goes_to_spill_and_the_event_names_it(
     [record] = [record for record in _snapshots(session) if record["var"] == "big"]
     assert "blob" not in record, "the payload is not inline"
     assert record["locator"]
-    # The event named the locator *before* the blob was written (write-ahead
-    # ordering, §4.9), so this asserts the derived path is the real one.
+    # The event names the locator the store derived before the write, so this
+    # asserts the derived path is the real one.
     assert Path(record["locator"]).exists()
     assert Path(record["locator"]).stat().st_size == record["bytes"]
 
@@ -250,10 +250,10 @@ async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
     """S11 — the record named a blob the store had refused.
 
     Written after the record, a blob that failed to write left a `snap` pointing at
-    nothing. Staged first now, so the refusal is known before anything is recorded,
+    nothing. Written first now, so the refusal is known before anything is recorded,
     and the record says the value is gone.
 
-    Sabotage: record the `snap` whether or not the blob was staged, and the record
+    Sabotage: record the `snap` whether or not the blob was written, and the record
     names a file that is not there.
     """
     ctx, session, agent = await mounted_runtime(
@@ -264,7 +264,7 @@ async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
     async def refuse(_self: Any, *_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
         raise OSError("the disk is full")
 
-    with patch.object(store, "reserve", refuse):
+    with patch.object(store, "save", refuse):
         await run_cell(ctx, "big = 'q' * 20_000", agent=agent, session=session)
 
     [record] = [record for record in _snapshots(session) if record["var"] == "big"]

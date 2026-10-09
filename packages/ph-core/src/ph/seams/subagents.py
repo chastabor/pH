@@ -1570,6 +1570,13 @@ class SubagentService:
         sweep ends a child it will not readmit this way, and records a hold on one
         waiting for a credential, and neither is a reason to rebuild its runtime.
         Nothing to write to — no live session, and none stored — is a no-op.
+
+        **Read by path when its state says where** (`ChildState.family`): every child
+        a sweep writes to was read from the store as it opened, with its header, so
+        its log is opened where that header files it. Looking it up by id instead
+        listed every family directory in the store, on the event loop, once per
+        child. One this service knows nothing of is looked for first, so no lease is
+        taken on an id with no log.
         """
         sessions = self.ctx.require(SESSIONS)
         live = sessions.get(session_id)
@@ -1577,9 +1584,14 @@ class SubagentService:
             await write(live)
             return
         store = self.ctx.get(SESSION_PERSISTENCE)
-        if store is None or not store.exists(session_id):
+        state = self.state(session_id)
+        family = state.family if state is not None else None
+        if store is None or (family is None and not store.exists(session_id)):
             return
-        child = await stored_session(self.ctx, session_id)
+        try:
+            child = await stored_session(self.ctx, session_id, family=family)
+        except LookupError:
+            return
         try:
             await write(child)
             await session_written(self.ctx, child)
@@ -2076,18 +2088,28 @@ class SubagentService:
         **An ended child's unfinished descendants are revoked** (`_revoke_beneath`):
         one given up on here takes them with it as its ending is written
         (`record_ended`), and one that ended in an earlier process left them to a
-        crash that came before they were.
+        crash that came before they were — every ended child's at once, before the
+        rest of the sweep.
         """
         session = parent.session
         if session is None:
             return []
         revived: list[str] = []
         delivered: set[str] | None = None
-        for state in self.children(session.id).values():
+        children = self.children(session.id)
+        # Their subtrees are disjoint from one another's and from every live child's,
+        # so nothing below orders against them.
+        await self._revoke_beneath(
+            *(
+                state.session_id
+                for state in children.values()
+                if state.run_id not in self._runs and not child_is_live(state)
+            )
+        )
+        for state in children.values():
             if state.run_id in self._runs:
                 continue
             if not child_is_live(state):
-                await self._revoke_beneath(state.session_id)
                 if state.notice is not None and not state.deleted:
                     delivered = _inbox_ids(session) if delivered is None else delivered
                     if state.notice.id not in delivered:
@@ -2124,9 +2146,10 @@ class SubagentService:
             revived.append(state.run_id)
         return revived
 
-    async def _revoke_beneath(self, session_id: str) -> None:
+    async def _revoke_beneath(self, *session_ids: str) -> None:
         """Tombstone (`PARENT_TEARDOWN`), each in its own log, every unfinished
-        descendant of a child that ended, that this process is not running.
+        descendant of each child in `session_ids` that ended, that this process is not
+        running.
 
         **A running one is its provider's**: a child's own children are effects of its
         scope, revoked as it unwinds (I2). What that teardown never reaches is a child
@@ -2135,9 +2158,10 @@ class SubagentService:
         child's ending and its children's left behind. Left alone, such a descendant
         reads as working for good: nothing readmits a child beneath one that ended, so
         it held its root out of passivation and asked for a credential it would never
-        use. Every level in one walk (`family`), best effort.
+        use. Every level of every subtree in one walk (`family`), best effort.
 
-        **The logs concurrently.** Each is opened through `stored_session`, which
+        **The logs concurrently**, every subtree's together — a resume hands over every
+        child that ended at once. Each is opened through `stored_session`, which
         settles what reading it owes before the write (`SessionStore.loaded`) — a
         spill sweep and a workspace reconcile, `git` per leaked tree — and one at a
         time a restart paid that back to back for every descendant. Nothing orders
@@ -2146,6 +2170,7 @@ class SubagentService:
         """
         pending = [
             state
+            for session_id in session_ids
             for state in self.family(session_id)
             if child_is_live(state) and state.run_id not in self._runs
         ]
@@ -2515,6 +2540,10 @@ class ChildState:
 
     session_id: str
     parent_id: str
+    family: str | None = None
+    """The family directory its log is filed in, as its own header says, so a write to
+    a child this process is not running reads that path rather than searching the
+    store for it (`SubagentService._write_child`). `None` for a log with no header."""
     admission: Admission | None = None
     admitted_at: float = 0.0
     status: SubagentStatus = "queued"
@@ -2699,7 +2728,11 @@ def child_state_of(
     """`child_state` over a header and events rather than a session: a log read from
     the store, which a resume holds before any `Session` is built for it."""
     parent = header.delegating_parent if header is not None else None
-    state = ChildState(session_id=session_id, parent_id=parent or "")
+    state = ChildState(
+        session_id=session_id,
+        parent_id=parent or "",
+        family=header.family if header is not None else None,
+    )
     for event in events:
         state = fold_child_event(state, event)
     return state

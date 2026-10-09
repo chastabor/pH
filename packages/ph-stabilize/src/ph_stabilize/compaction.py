@@ -1280,7 +1280,7 @@ class SummarizeEngine:
         """Write the history, record the accounting, then replace the surface."""
         history = render_for_summary(plan.messages, trimmed=False)
         store = self.ctx.require(SPILL_STORE)
-        ref = await store.try_reserve_text(
+        ref = await store.try_save_text(
             owner=session.id,
             source="conversation history",
             suggested_name=f"{HISTORY_PREFIX}/{session.seq}.md",
@@ -1345,10 +1345,6 @@ class SummarizeEngine:
                     source_event_seqs=plan.shadowed_seqs,
                 ),
             )
-        # After both appends, and outside the adjacency they require: the blob
-        # appears at a locator the log already names (`SpillStore.reserve`).
-        if ref is not None:
-            await store.commit(ref)
         return CompactionResult(
             trigger=trigger,
             summary=summary,
