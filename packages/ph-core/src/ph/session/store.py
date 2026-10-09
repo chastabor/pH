@@ -1,10 +1,11 @@
 """`ctx.sessions` — the live session store, and forking.
 
-Publishes five events: `session/created`, `session/disposed`, `session/event`
+Publishes six events: `session/created`, `session/disposed`, `session/event`
 (the post-commit append feed), `session/flush` (the awaited durability
 checkpoint, a `parallel` dispatch so every backend runs and the caller waits
-for all of them) and `session/durable` (what that checkpoint made durable, for
-a reader that must not run ahead of the log).
+for all of them), `session/durable` (what that checkpoint made durable, for
+a reader that must not run ahead of the log) and `session/loaded` (what a log
+read off disk owes before anything runs in it, awaited by the door that read it).
 
 Forking is the branching mechanism (D2): pH does not model branching as a
 message tree, it models it as `fork(source, boundary)` plus `seed_length`. The
@@ -51,9 +52,17 @@ __all__ = [
 log = logging.getLogger("ph.session")
 
 events.declare(
-    "session/created", "emit", owner="ph.session", doc="A session was published into the store."
+    "session/created",
+    "emit",
+    owner="ph.session",
+    doc="A session was published into the store; listener failures are contained per listener.",
 )
-events.declare("session/disposed", "emit", owner="ph.session", doc="A session left the store.")
+events.declare(
+    "session/disposed",
+    "emit",
+    owner="ph.session",
+    doc="A session left the store; listener failures are contained per listener.",
+)
 events.declare(
     "session/event",
     "emit",
@@ -71,6 +80,12 @@ events.declare(
     "emit",
     owner="ph.session",
     doc="A flush every backend finished: the log holds the session's events below the count.",
+)
+events.declare(
+    "session/loaded",
+    "parallel",
+    owner="ph.session",
+    doc="A stored log was read into the store; the door that read it awaits every listener.",
 )
 
 ForkRejection = Literal[
@@ -259,7 +274,11 @@ class SessionStore:
             self.ctx.emit("session/event", source, event, contained=True)
 
         self._entries[session.id] = _Entry(session=session, unobserve=session.observe(observer))
-        self.ctx.emit("session/created", session)
+        # Contained, for `session/event`'s reason: the session is published, and a
+        # listener that raises can neither take it back nor stop the next listener
+        # hearing it. Uncontained, one did both — `create` raised over a session it
+        # had already published, and every listener after the raise never heard of it.
+        self.ctx.emit("session/created", session, contained=True)
         return session
 
     def get(self, session_id: str) -> Session | None:
@@ -280,7 +299,8 @@ class SessionStore:
         if entry is None:
             return
         entry.unobserve()
-        self.ctx.emit("session/disposed", entry.session)
+        # Contained, as `session/created` is: the session has already left the store.
+        self.ctx.emit("session/disposed", entry.session, contained=True)
 
     async def flush(self, session: Session) -> None:
         """Await every backend's drain for this session — **ancestors first**.
@@ -335,6 +355,25 @@ class SessionStore:
             log.warning("ph.session: could not write session %s", session.id, exc_info=True)
             return False
         return True
+
+    async def loaded(self, session: Session) -> None:
+        """Settle what a log read off disk owes before anything runs in it.
+
+        Dispatched by both ways a stored log comes into the store — `resume_session`,
+        once `session/resumed` is recorded, and `stored_session` — and awaited, so the
+        caller holds the session only once every listener is done. `parallel`, for
+        `session/flush`'s reason: every listener runs, and the caller waits for all of
+        them. Only for a log read off disk: a fresh session or a fork has no crash of
+        its own to settle.
+
+        A listener that raises refuses the read, and the session is let go — left in
+        the store, it would be one that nothing settled.
+        """
+        try:
+            await self.ctx.parallel("session/loaded", session)
+        except BaseException:
+            self.dispose(session.id)
+            raise
 
     def lineage(self, session: Session) -> tuple[Session, ...]:
         """`session` and every ancestor **whose prefix it references**, oldest first.

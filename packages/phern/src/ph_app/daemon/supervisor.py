@@ -1517,7 +1517,8 @@ class Supervisor:
         concatenated a second session onto the first: one file, one header, and `seq`
         restarting at zero halfway through. Resuming is also what connects this to F6 —
         a root that died holding a worktree gets its `workspace/acquired` reconciled on
-        the way back up, because `session/created` fires for an adopted session too.
+        the way back up, because a resumed log awaits `session/loaded` before it is
+        handed out.
 
         The resume is announced, not silent: whoever started this daemon may not know a
         previous run crashed. The durable record is the `session/resumed` event, so a

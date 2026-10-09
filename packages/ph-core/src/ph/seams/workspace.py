@@ -913,9 +913,9 @@ class WorkspaceSeam:
     """Agent ids whose tree is being acquired or reclaimed right now, each with the
     event set when that is done (J6). **One act on an agent's tree at a time.**
 
-    Reconciliation is detached — `emit` schedules it and does not wait — and it runs
-    a `git worktree remove --force` per leaked tree, while the first `acquire` after
-    a resume asks the tier for the *same* agent's tree. Either order lost the tree:
+    A reclaim runs a `git worktree remove --force` per leaked tree, and an `acquire`
+    can ask the tier for the *same* agent's tree meanwhile: the row's catch-up and
+    `collect` run beside agents that are already working. Either order lost the tree:
     an acquire handed a root the reclaim was deleting, or a reclaim that found no
     holder deleting the tree an acquire had yet to hold — `acquire` awaits the
     scratch directory, its `acquiring` flush and the tier before `_held` names it.
@@ -2492,22 +2492,34 @@ async def apply(ctx: Context, config: Config) -> None:
 
 @plugin("workspace-reconcile", affects="environment", inject=[WORKSPACE])
 async def reconcile(ctx: Context, config: None) -> None:
-    """Run the seam's reconciliation whenever a session is opened (F6).
+    """Run the seam's reconciliation whenever a stored session is read (F6).
 
-    **On `session/created`, which is also the resume path** — `sessions.adopt`
-    publishes through it, so a session coming off disk meets the same listener as a
-    fresh one, and a fresh one folds an empty log. One mechanism rather than a
-    resume-only hook that a second way of opening a session would miss.
+    **On `session/loaded`, which the reader awaits** (`SessionStore.loaded`), so a
+    session is handed out with its crash already settled. It was `session/created`,
+    an `emit`, and so detached: reconciliation runs `git` per leaked tree, and its
+    `workspace/disposed` records landed wherever it happened to finish — after the
+    session had been handed out and its agent had started — bounded only by
+    `ctx.drain()`.
 
-    Detached, because `emit` schedules an async listener and does not wait:
-    reconciliation runs `git` per leaked tree. `ctx.drain()` is what a test — or a
-    shutdown — uses to know it has settled.
+    **A reconciliation that raises refuses neither the open nor this row.** A tree git
+    cannot remove and a log that cannot be written are answered inside the seam
+    (`_reclaim`, `session_written`); what still raises is a bug, and a session nobody
+    can open because its last run's housekeeping hit one would be the worse failure.
+    Logged, as the detached task's failure was.
     """
+    seam = ctx.require(WORKSPACE)
+
+    async def settle(session: Session) -> None:
+        try:
+            await seam.reconcile(session)
+        except Exception:
+            log.exception("ph.seams.workspace: could not reconcile %s", session.id)
+
     # Catch-up, for the reason `session-persistence-jsonl` does the same: a row
-    # activated after sessions already exist owes them what a fresh one gets.
+    # activated after sessions already exist owes them what a loaded one gets.
     for session in ctx.require(SESSIONS).list():
-        await ctx.require(WORKSPACE).reconcile(session)
-    ctx.on("session/created", ctx.require(WORKSPACE).reconcile)
+        await settle(session)
+    ctx.on("session/loaded", settle)
 
 
 @plugin("workspace-checkpoint", affects="environment", inject=[TOOLS, WORKSPACE])

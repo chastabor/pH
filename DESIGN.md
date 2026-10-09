@@ -973,8 +973,11 @@ never `now()`.
 crashed" versus "this was reopened": a clean stop synthesizes no closers.
 
 Because `adopt` emits `session/created`, the resume path meets the **same**
-listeners a fresh session does — which is how workspace reconciliation runs on
-resume without a resume-only hook (`seams/workspace.py`).
+listeners a fresh session does. What a log read off disk owes before anything runs
+in it goes on `session/loaded` instead, which both ways a stored log is read
+(`resume_session`, `stored_session`) dispatch and await — workspace reconciliation is
+that work (`seams/workspace.py`), so a crash's leaked trees are reclaimed and their
+pairs closed before the session is handed out.
 
 **Seed acceptance is one gate for every path** (fork, resume, replay, import):
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown

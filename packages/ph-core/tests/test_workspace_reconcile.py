@@ -19,6 +19,7 @@ is a claim about git rather than about our arithmetic.
 from __future__ import annotations
 
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +27,9 @@ from typing import Any, Literal
 import anyio
 import pytest
 
+from ph.cordis import Context
 from ph.keys import SESSIONS, WORKSPACE
+from ph.persistence import open_session, stored_session
 from ph.seams.workspace import (
     ContainmentTier,
     WorkspaceAccess,
@@ -59,19 +62,23 @@ from ph.testing.git import WORKTREE_ROWS, git, worktree_agent
 pytestmark = pytest.mark.anyio
 
 
-async def _reopen(mount: MountProfile, base: Path, session: Session) -> tuple[Any, Session]:
-    """The next open: a second process, the same log, and the drain that makes
-    the detached listener observable.
+async def _remount(mount: MountProfile, base: Path) -> Context:
+    """A second process over the same store, its `fs` root pointed at the repository
+    because that is what a person resuming in their project has."""
+    return await mount(*WORKTREE_ROWS, {"id": "fs", "config": {"root": str(base)}})
 
-    The `fs` root is pointed at the repository because that is what a person
-    resuming in their project has, and the three facts here — the seed, the
-    header, the drain — are the ones a reconciliation test must get right.
+
+async def _reopen(mount: MountProfile, base: Path, session: Session) -> tuple[Any, Session]:
+    """The next open: a second process, the same log, and the `session/loaded` a
+    reader awaits once the log is in the store.
+
+    The three facts here — the seed, the header, the load — are the ones a
+    reconciliation test must get right.
     """
-    ctx = await mount(*WORKTREE_ROWS, {"id": "fs", "config": {"root": str(base)}})
-    revived = ctx.require(SESSIONS).adopt(
-        Session(session.id, seed=list(session.events), header=session.header)
-    )
-    await ctx.drain()
+    ctx = await _remount(mount, base)
+    sessions = ctx.require(SESSIONS)
+    revived = sessions.adopt(Session(session.id, seed=list(session.events), header=session.header))
+    await sessions.loaded(revived)
     return ctx, revived
 
 
@@ -280,9 +287,9 @@ async def test_forking_does_not_reclaim_the_parents_live_worktree(
     """The defect this row shipped for one commit, and the reason the fold starts
     at `seed_length`.
 
-    `sessions.fork` seeds the child with the parent's transcript and publishes it
-    through `session/created` like any other session — so a fold over the whole
-    log reports the parent's **still-held** worktree as the child's leak, and
+    `sessions.fork` seeds the child with the parent's transcript, and the child's
+    log is reconciled like any other once it is read back — so a fold over the
+    whole log reports the parent's **still-held** worktree as the child's leak, and
     reconciliation removes a tree an agent is actively working in. Two things now
     stop it: the fold reads only what this session acquired, and the seam skips
     what it is still holding.
@@ -290,7 +297,7 @@ async def test_forking_does_not_reclaim_the_parents_live_worktree(
     ctx, session, _agent, workspace = await worktree_agent(mount, tmp_path)
 
     child = ctx.require(SESSIONS).fork(session)
-    await ctx.drain()
+    await ctx.require(WORKSPACE).reconcile(child)
 
     assert workspace_leaks(child) == [], "the fork folded its parent's live worktree as a leak"
     assert workspace.root.is_dir(), "forking reclaimed the parent's live worktree"
@@ -328,8 +335,8 @@ async def test_a_leak_no_mounted_tier_can_reclaim_is_left_alone(
     )
 
     with caplog.at_level("WARNING"):
-        ctx.require(SESSIONS).adopt(session)
-        await ctx.drain()
+        sessions = ctx.require(SESSIONS)
+        await sessions.loaded(sessions.adopt(session))
 
     assert tree.exists(), "a tree no mounted tier owns was removed anyway"
     assert "no mounted tier can reclaim" in caplog.text
@@ -441,13 +448,19 @@ class _Leaked:
         self.taken.append(again.root)
 
 
+def _gate(ctx: Context, held: Literal["acquire", "reclaim"]) -> _Gated:
+    """Put the mounted tier behind a `_Gated` that holds `held` open."""
+    seam = ctx.require(WORKSPACE)
+    gated = seam.provider = _Gated(inner=seam.provider, held=held)
+    return gated
+
+
 async def _leaked(
     mount: MountProfile, tmp_path: Path, held: Literal["acquire", "reclaim"]
 ) -> _Leaked:
     ctx, session, agent, workspace = await worktree_agent(mount, tmp_path)
     seam = ctx.require(WORKSPACE)
-    gated = _Gated(inner=seam.provider, held=held)
-    seam.provider = gated
+    gated = _gate(ctx, held)
     assert [one.agent_id for one in workspace_leaks(session)] == [agent.id]
     # The crash: the tree is leaked, and this process no longer holds it.
     await seam.dispose(agent.id)
@@ -459,16 +472,13 @@ async def _leaked(
 async def test_an_acquire_waits_for_the_reclaim_that_is_deleting_its_tree(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """J6 — reconciliation is detached, and the first `acquire` after a resume
-    asks for the same agent.
+    """J6 — a reclaim and an `acquire` can ask for the same agent's tree at once:
+    the row's catch-up and `collect` run beside agents already at work.
 
-    `emit` schedules an async listener and does not wait, so the sweep that
-    tears down a crash's leaked trees runs *beside* the lifecycle that is
-    bringing the session back. The provider derives a root from the session and
-    agent id, so the tree the reclaim is deleting is the tree the acquire is
-    about to reuse: the agent came up in a directory that vanished under it, or
-    `worktree remove` failed halfway and left a registration pointing at a
-    checkout the agent was already writing.
+    The provider derives a root from the session and agent id, so the tree the
+    reclaim is deleting is the tree the acquire is about to reuse: the agent came
+    up in a directory that vanished under it, or `worktree remove` failed halfway
+    and left a registration pointing at a checkout the agent was already writing.
 
     Asserted as a wait rather than as a race: the reclaim is held open, and an
     `acquire` for the same agent must still be unfinished. Without the guard it
@@ -544,3 +554,51 @@ async def test_a_reclaim_asks_again_for_an_acquire_begun_after_its_fold(
         leaked.gated.may_finish.set()
 
     assert leaked.taken and leaked.taken[0].is_dir()
+
+
+# -------------------------------------------------------------------- the door --
+
+
+@pytest.mark.needs_git
+@pytest.mark.parametrize("door", [open_session, stored_session], ids=["open", "stored"])
+async def test_a_door_hands_out_a_stored_session_with_its_crash_reconciled(
+    mount: MountProfile, tmp_path: Path, door: Callable[[Context, str], Awaitable[Session]]
+) -> None:
+    """F6's ordering, through both doors that read a log off disk.
+
+    Reconciliation rode `session/created`, an `emit`, so it ran detached: the door
+    handed the session out while the reclaim was still deleting, and the closing
+    `workspace/disposed` landed after whatever the new start wrote first, bounded
+    only by `drain()`. A stored log awaits `session/loaded` now, so the session
+    arrives with its crash settled and the closing record on disk.
+
+    Asserted as a wait: the reclaim is held open, and the door must not have
+    answered. Sabotage: put `workspace-reconcile` back on `session/created`, and
+    the door answers while the reclaim is still held.
+    """
+    crashed, session, _agent, workspace = await worktree_agent(mount, tmp_path)
+    # On disk, and then the process dies: nothing unwinds, so nothing is closed.
+    await crashed.require(SESSIONS).flush(session)
+    reopened = await _remount(mount, tmp_path / "repo")
+    gated = _gate(reopened, "reclaim")
+    handed: list[Session] = []
+
+    async def open_it() -> None:
+        handed.append(await door(reopened, session.id))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(open_it)
+        with anyio.fail_after(5):
+            await gated.entered.wait()
+        await anyio.sleep(0.05)
+
+        assert handed == [], "the door handed out a session its reconciliation had not settled"
+        gated.may_finish.set()
+
+    (revived,) = handed
+    assert not workspace.root.exists(), "the leaked worktree survived the open"
+    assert workspace_leaks(revived) == []
+    closing = [
+        one.data for one in stored_events(reopened, revived.id) if one.type == "workspace/disposed"
+    ]
+    assert [one.get("reconciled") for one in closing] == [True]

@@ -510,7 +510,7 @@ async def test_a_restarted_daemon_continues_the_log_rather_than_appending_to_it(
     through — which breaks A1 and makes every fold over that file double-count.
 
     Resuming is also what lets P4-14's reconciliation fire for a daemon root:
-    `session/created` is published for an adopted session too, so a root that
+    a resumed log awaits `session/loaded` before it is handed out, so a root that
     died holding a worktree gets it reclaimed on the way back up.
     """
     async with running(tmp_path) as daemon:

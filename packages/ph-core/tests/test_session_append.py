@@ -1,7 +1,7 @@
 """P0-08 — `Session.append`, the acceptance boundary.
 
 Gates: *`seq == len(log)` property; losslessness rejections; a raising listener
-does not un-append.*
+does not un-append, nor un-publish.*
 
 The last one is the subtle one. Once an event is in the log the append is
 **committed** — an observer that throws is a bug in the observer, not a reason
@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import pytest
 
+from ph.cordis import Context
 from ph.json import JsonValue, as_obj, as_seq, thaw_json
 from ph.session import (
     BatchRef,
@@ -31,6 +32,7 @@ from ph.session import (
 )
 from ph.session import surface as surface_module
 from ph.session.json import InvalidJsonValueError
+from ph.session.store import SessionStore
 from ph.testing import check_fold_laws, log_event, prefix_of, user_payload
 
 
@@ -138,6 +140,35 @@ def test_a_raising_observer_cannot_un_append() -> None:
     # The failing observer neither removed the event nor stopped the next one
     # from seeing it.
     assert seen == ["turn/start"]
+
+
+def test_a_raising_listener_cannot_un_publish_a_session() -> None:
+    """The store's lifecycle events are facts as an append is: `session/created` says
+    the session is published, `session/disposed` that it has left. Uncontained, a
+    listener that raised made `create` raise over a session it had already published,
+    and kept every listener after it from hearing of it — a backend's `track` among
+    them — and did the same to `dispose` the other way round.
+
+    Sabotage: drop `contained=True` from either emit in `SessionStore`, and `create`
+    or `dispose` raises.
+    """
+    ctx = Context()
+    store = SessionStore(ctx=ctx)
+    heard: list[str] = []
+
+    def bad_listener(_session: Session) -> None:
+        raise RuntimeError("bad listener")
+
+    ctx.on("session/created", bad_listener)
+    ctx.on("session/created", lambda session: heard.append(f"created {session.id}"))
+    ctx.on("session/disposed", bad_listener)
+    ctx.on("session/disposed", lambda session: heard.append(f"disposed {session.id}"))
+
+    session = store.create("s")
+    assert store.get("s") is session
+    store.dispose("s")
+    assert store.get("s") is None
+    assert heard == ["created s", "disposed s"]
 
 
 def test_reentrant_append_is_refused() -> None:

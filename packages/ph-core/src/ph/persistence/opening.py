@@ -104,6 +104,9 @@ async def stored_session(ctx: Context, session_id: str) -> Session:
     with the tools that can answer for it mounted. What is appended is written by
     the caller, or when the mount unwinds.
 
+    What a log read off disk owes is still settled before the caller holds it
+    (`SessionStore.loaded`).
+
     :raises SessionBusy: when another process holds it.
     :raises LookupError: when there is no stored session by that id.
     """
@@ -113,8 +116,11 @@ async def stored_session(ctx: Context, session_id: str) -> Session:
         raise LookupError(f"no stored session {session_id!r}")
     # Off the loop: a long log is a long read, and the loop is every root's.
     header, events = await anyio.to_thread.run_sync(store.read, session_id)
-    loaded = Session(session_id, seed=events, header=header, durable=len(events))
-    return ctx.require(SESSIONS).adopt(loaded)
+    stored = Session(session_id, seed=events, header=header, durable=len(events))
+    sessions = ctx.require(SESSIONS)
+    session = sessions.adopt(stored)
+    await sessions.loaded(session)
+    return session
 
 
 async def _claimed(ctx: Context, session_id: str) -> SessionPersistence | None:

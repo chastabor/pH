@@ -1016,6 +1016,9 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
             "closed": len(closers),
         },
     )
+    # After the resume is recorded and before anyone holds the session: what a log
+    # read off disk owes, a crash's leaked trees among it (`SessionStore.loaded`).
+    await ctx.require(SESSIONS).loaded(session)
     return session
 
 
