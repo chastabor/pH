@@ -67,7 +67,16 @@ from ph.seams.tui_screens import ID_MAX, ScreenDefinition, TuiScreenRegistry
 from ph.seams.tui_status import StatusField, StatusReading, TuiStatusRegistry
 from ph.session import Session, intents_of, open_intents
 from ph.session.kinds import APPROVAL_ASK, WORKSPACE_RESTORE, restore_settled
-from ph.testing import MountProfile, StubAgent, log_event, noted, raising, settled, stored_types
+from ph.testing import (
+    MountProfile,
+    StubAgent,
+    log_event,
+    not_none,
+    noted,
+    raising,
+    settled,
+    stored_types,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -739,8 +748,10 @@ async def test_a_spawned_child_is_terminated_and_reaped_on_disposal(tmp_path: Pa
 
 async def test_spill_round_trips_and_names_the_way_back(tmp_path: Path) -> None:
     store = SpillStore(ctx=Context(), root=tmp_path)
-    ref = await store.save_text(
-        owner="agent-a", source="tool result", suggested_name="bash.txt", content="x" * 100
+    ref = not_none(
+        await store.try_save_text(
+            owner="agent-a", source="tool result", suggested_name="bash.txt", content="x" * 100
+        )
     )
     assert ref.bytes == 100
     assert await store.load_text(ref.locator) == "x" * 100
@@ -750,8 +761,12 @@ async def test_spill_round_trips_and_names_the_way_back(tmp_path: Path) -> None:
 
 async def test_identical_content_spills_once(tmp_path: Path) -> None:
     store = SpillStore(ctx=Context(), root=tmp_path)
-    first = await store.save_text(owner="a", source="s", suggested_name="n", content="same")
-    second = await store.save_text(owner="a", source="s", suggested_name="n", content="same")
+    first = not_none(
+        await store.try_save_text(owner="a", source="s", suggested_name="n", content="same")
+    )
+    second = not_none(
+        await store.try_save_text(owner="a", source="s", suggested_name="n", content="same")
+    )
     assert first.locator == second.locator
 
 

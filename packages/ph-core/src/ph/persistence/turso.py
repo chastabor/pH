@@ -54,6 +54,7 @@ from .families import children_under, locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
 from .protocol import (
+    NoStoredSession,
     SessionPersistence,
     StoredSession,
     attach,
@@ -270,9 +271,7 @@ class TursoSessionStore:
 
     # ------------------------------------------------------------- reading --
 
-    def exists(self, session_id: str, *, family: str | None = None) -> bool:
-        if family is not None:
-            return session_db(self.root, session_id, family).is_file()
+    def exists(self, session_id: str) -> bool:
         return locate_db(self.root, session_id) is not None
 
     def read(
@@ -305,7 +304,7 @@ class TursoSessionStore:
             cursor = connection.cursor()
             rows = cursor.execute("SELECT wire FROM header WHERE id = ?", (session_id,)).fetchall()
             if not rows:
-                raise FileNotFoundError(f"session {session_id!r} has no header")
+                raise NoStoredSession(f"session {session_id!r} has no header")
             header = SessionHeader.model_validate(json.loads(rows[0][0]))
             # `ORDER BY seq` is the clustered key, so this is the log in the order
             # it was written — the property an append-only file gives for free.
@@ -460,7 +459,7 @@ def _reading(path: Path) -> closing[Connection]:
     between the file and its tables — reads as damage, the driver's own error.
     """
     if not path.is_file():
-        raise FileNotFoundError(f"no stored session at {path}")
+        raise NoStoredSession(f"no stored session at {path}")
     import turso  # noqa: PLC0415
 
     return closing(turso.connect(str(path)))

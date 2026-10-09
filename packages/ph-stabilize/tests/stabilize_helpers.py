@@ -14,7 +14,7 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 import pytest
 
@@ -22,9 +22,9 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context
 from ph.keys import AGENTS, APPROVAL, SESSIONS, WORKSPACE
 from ph.llm.types import ToolCallBlock, ToolResultBlock
-from ph.seams.spill import SpillStore
+from ph.seams import spill
 from ph.session import Session, derive_event_message
-from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, log_event
+from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, full_disk_batch, log_event
 from ph_stabilize import BUNDLE
 
 __all__ = [
@@ -59,19 +59,12 @@ def blob(size: int, *, lines: int = 40) -> str:
 def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every spill write fail, for the fail-open gates.
 
-    `save` is the one that writes — `save_text` reaches it — so this is where a full
-    disk is felt, and it is deliberately the call every producer makes *before* it
-    has appended anything. That ordering is what leaves the fallback available at
-    all: see `SpillStore.save`.
-
-    Patched on the class: `SpillStore` is a slots dataclass, so the instance has
-    no room for an override.
+    `write_atomic_all` is where the store writes — every `try_save*` reaches it — so
+    this is where a full disk is felt, one error per blob, and it is deliberately the
+    call every producer makes *before* it has appended anything. That ordering is
+    what leaves the fallback available at all: see `SpillStore.try_save`.
     """
-
-    async def refuse(_self: object, *_args: object, **_kwargs: object) -> NoReturn:
-        raise OSError("no space left on device")
-
-    monkeypatch.setattr(SpillStore, "save", refuse)
+    monkeypatch.setattr(spill, "write_atomic_all", full_disk_batch)
 
 
 def events_of(session: Session, event_type: str) -> list[Any]:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -25,7 +25,7 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import default_home_path, write_atomic, write_atomic_all
+from ..paths import default_home_path, write_atomic_all
 from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -52,7 +52,7 @@ class PlannedBlob:
     is taken **once**: `plan` hashes the whole payload, and a caller that
     derived the locator for its record and then stored the bytes hashed them
     again — a second sha256 of a multi-megabyte tool result on the event loop. And
-    the name cannot come apart from what it names: `save` writes *these* bytes at
+    the name cannot come apart from what it names: `try_save` writes *these* bytes at
     *this* locator, with no second derivation to disagree.
     """
 
@@ -142,7 +142,7 @@ class SpillStore:
         return self.root / owner
 
     def plan(self, *, owner: str, suggested_name: str, content: bytes) -> PlannedBlob:
-        """Where `content` will go, held with it — `save` writes what this names.
+        """Where `content` will go, held with it — `try_save` writes what this names.
 
         The one home of the naming rule (digest + sanitized name), so a caller
         that must name a blob's locator before storing it — in the wording that
@@ -154,14 +154,18 @@ class SpillStore:
         safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
         return PlannedBlob(self.owner_root(owner) / f"{digest}-{safe}", content)
 
-    async def save(self, planned: PlannedBlob, *, source: str) -> SpillRef:
-        """Write `planned` at its locator, durably, and return its reference.
+    async def try_save(self, planned: PlannedBlob, *, source: str) -> SpillRef | None:
+        """Write `planned` at its locator, durably, and return its reference — or `None`
+        when the store could not take it.
 
         **Write first, then append the record naming it** (§4.9). The blob is on disk
         before any record names it, so the log never names bytes that are not there,
-        and a write that fails does so while the producer has logged nothing — the
-        fallback `try_save` keeps open. A run that dies between the two leaves a file
-        nothing names, which the next read of the log collects (`sweep_session`).
+        and a write that fails does so while the producer has logged nothing. That is
+        what keeps the fail-open answer open: a producer that cannot store a blob must
+        not be the reason the model loses what it held — an offload keeps the text
+        inline, a kernel snapshot records a `clear`. A run that dies between the two
+        leaves a file nothing names, which the next read of the log collects
+        (`sweep_session`).
 
         It used to be staged out of the locator's reach, named, and only then renamed
         into place (`reserve`, `commit`), because the sweep ran beside producers and
@@ -169,56 +173,54 @@ class SpillStore:
         where nothing writes the session now, so that window is no hazard and the
         bytes go straight to where the record will say they are.
 
-        Named by content digest, so re-spilling identical output costs one file rather
-        than one per occurrence, and bytes already there are not written again
-        (`_write`).
+        A batch of one: `try_save_all` is the one writer.
         """
-        await anyio.to_thread.run_sync(_write, planned.locator, planned.content)
-        return _ref(planned, source)
+        [ref] = await self.try_save_all([(planned, source)])
+        return ref
 
-    async def save_text(
-        self, *, owner: str, source: str, suggested_name: str, content: str
-    ) -> SpillRef:
-        """`save`, for text nobody planned, as UTF-8 — through the one naming rule."""
-        planned = self.plan(
-            owner=owner, suggested_name=suggested_name, content=content.encode("utf-8")
-        )
-        return await self.save(planned, source=source)
+    def plan_text(self, *, owner: str, suggested_name: str, text: str) -> PlannedBlob | None:
+        """`plan`, for text as UTF-8 — `None` when the text has no UTF-8 form.
 
-    async def try_save(self, planned: PlannedBlob, *, source: str) -> SpillRef | None:
-        """`save`, or `None` when the store could not take it.
-
-        The fail-open spelling: a producer that cannot store a blob must not be the
-        reason the model loses what it held — an offload keeps the text inline, a
-        kernel snapshot records a `clear`. The write comes before the append, so that
-        fallback is still available: the caller has logged nothing.
+        A lone surrogate, which a `\\ud800` escape in a JSON tool result decodes to,
+        cannot be encoded, and a text that cannot be encoded is one the store could
+        not take: its producer keeps it inline, as it would after a refused write.
+        The one place text becomes bytes here, so every text producer refuses alike.
         """
-        return await _fail_open(self.save(planned, source=source), what=str(planned.locator))
+        try:
+            content = text.encode("utf-8")
+        except UnicodeEncodeError as error:
+            _refused(f"{owner}/{suggested_name}", error)
+            return None
+        return self.plan(owner=owner, suggested_name=suggested_name, content=content)
 
     async def try_save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef | None:
-        """`try_save`, for text as UTF-8 — a text that cannot be encoded is one the
-        store could not take, too."""
-        return await _fail_open(
-            self.save_text(
-                owner=owner, source=source, suggested_name=suggested_name, content=content
-            ),
-            what=f"{owner}/{suggested_name}",
-        )
+        """`try_save`, for text nobody planned (`plan_text`)."""
+        planned = self.plan_text(owner=owner, suggested_name=suggested_name, text=content)
+        return None if planned is None else await self.try_save(planned, source=source)
 
     async def try_save_all(self, blobs: Sequence[tuple[PlannedBlob, str]]) -> list[SpillRef | None]:
-        """`try_save` for several blobs one batch of records will name, in order.
+        """Write planned blobs, each with the `source` its reference names, and answer
+        their references in order — the store's one writer.
 
         For a producer that names more than one blob at once — a kernel cell's
         variables, which all live under one owner. One thread hop writes them all,
-        each file synced as `save` syncs it, and their directory is synced **once**
-        rather than once per blob (`write_atomic_all`), so a cell that spills K
-        variables costs one directory sync rather than K. The records come after
-        this returns, so every blob is durable before anything names it.
+        each file synced, and their directory is synced **once** rather than once per
+        blob (`write_atomic_all`), so a cell that spills K variables costs one
+        directory sync rather than K. The records come after this returns, so every
+        blob is durable before anything names it.
+
+        **Through a temp and a rename (L7)**, because the name carries the sha256 of
+        the bytes: a write that truncated first and was cut off left a prefix under a
+        name that says it is complete, and nothing rewrote it, since the digest
+        already matched. The same digest is what makes skipping a blob already there
+        safe, so re-spilling identical output costs one file rather than one per
+        occurrence. A kill the temp's cleanup cannot reach leaves a `<name>.<hex>.tmp`
+        that no locator names, which the next sweep collects.
 
         A blob that could not be written answers `None`, for the producer to record as
-        it would a refused `try_save`.
+        it would a refused `try_save`; the others are still written.
         """
         failures = await anyio.to_thread.run_sync(
             partial(
@@ -271,7 +273,7 @@ class SpillStore:
         the only one — and that is what lets it collect everything the log does not
         name, a dead run's leftovers included: a blob whose record never landed, a
         `write_atomic` temp a kill interrupted. Beside a producer it would delete what
-        that producer had written and not yet named (`save` writes first), which is
+        that producer had written and not yet named (`try_save` writes first), which is
         what it did while it rode `session/created` (S7, D17).
         """
         claims = self.claims
@@ -353,15 +355,6 @@ def _remove_unreferenced(files: Iterable[Path], referenced: set[str]) -> list[st
     return gone
 
 
-async def _fail_open(saving: Awaitable[SpillRef], *, what: str) -> SpillRef | None:
-    """`saving`'s ref, or `None` having said why — the `try_save*` rule, once."""
-    try:
-        return await saving
-    except Exception as error:
-        _refused(what, error)
-        return None
-
-
 def _refused(what: str, error: BaseException) -> None:
     """Say why a blob was not spilled."""
     log.warning("ph.seams.spill: could not spill %s", what, exc_info=error)
@@ -374,20 +367,6 @@ def _ref(planned: PlannedBlob, source: str) -> SpillRef:
         bytes=len(planned.content),
         retrieval_hint=f'read the file at "{planned.locator}" for the full {source}',
     )
-
-
-def _write(path: Path, payload: bytes) -> None:
-    """One spilled blob, at its locator (L7).
-
-    K5's identical twin, and it had the same defect: the name carries the sha256
-    of the bytes, and `write_bytes` truncates before it writes, so a crash
-    mid-write leaves a prefix under a name that says it is complete. Nothing
-    rewrites it, because the digest already matches what the caller asked for —
-    which is what makes the lie permanent and what makes `skip_if_present` safe.
-    Through the temp there is no torn file — only, after a kill the `except` cannot
-    reach, a `<name>.<hex>.tmp` that no locator names, which the next sweep collects.
-    """
-    write_atomic(path, payload, skip_if_present=True)
 
 
 class Config(WireModel):

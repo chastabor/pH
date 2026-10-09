@@ -80,7 +80,7 @@ from ph.keys import (
 from ph.llm.adapter import ResolvedModel
 from ph.llm.fake import FakeAdapter, text_script
 from ph.llm.types import text_of, user_text
-from ph.persistence import SessionBusy, open_session, resume_session
+from ph.persistence import SessionBusy, open_session
 from ph.seams.credentials import waiting_for
 from ph.seams.subagents import (
     ADMITTED,
@@ -119,6 +119,7 @@ from ph.testing import (
     log_event,
     not_none,
     reconciled_call,
+    resume_stored,
     run_tool,
     skill,
     stored_events,
@@ -1306,7 +1307,7 @@ async def _restart(
         ctx.require(SKILLS).register(skill(name))
     if prepare is not None:
         prepare(ctx)
-    session = await resume_session(ctx, session_id)
+    session = await resume_stored(ctx, session_id)
     parent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=RETRIES)
     return ctx, session, parent
@@ -1912,7 +1913,7 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
     # Over a snapshot, as `_restart` is: ending the child means claiming its log,
     # which the first harness — alive, and parked at the model — still holds.
     bare = await mount({"id": "session-persistence", "config": {"root": str(logs_after_a_crash())}})
-    revived = await resume_session(bare, session.id)
+    revived = await resume_stored(bare, session.id)
     await bare.require(SUBAGENTS).resume_children(
         bare.require(AGENTS).create(revived, FAKE_OPTIONS), retry_limit=RETRIES
     )

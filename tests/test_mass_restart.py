@@ -3,8 +3,9 @@
 Several sub-agents are working, each with its own session log. The process holding
 them is killed — `SIGKILL`, so no teardown of ours runs at all — and a fresh process
 opens the same `$PH_HOME` and does what the daemon does when it starts a root:
-`resume_session`, then `resume_children` (`Supervisor._start`). Every sub-agent must
-pick up where it left off, and every log must read back whole.
+reads the log and `resume_session`s it, then `resume_children`
+(`Supervisor._start`). Every sub-agent must pick up where it left off, and every log
+must read back whole.
 
 `mass_restart_host.py` is the process that is killed. It leaves one of each kind of
 in-flight work on disk: a turn whose `write` landed with no result recorded, a `!!`
@@ -48,13 +49,13 @@ from ph.llm.types import (
     content_from_wire,
     text_of,
 )
-from ph.persistence import interrupted_turn_closers, resume_session
+from ph.persistence import interrupted_turn_closers
 from ph.persistence.lease import SessionBusy, claim_session
 from ph.seams.credentials import waiting_for
 from ph.seams.subagents import ChildState
 from ph.session import Session, SessionEvent, declared_intents, open_intents, outcome_of
 from ph.session.kinds import APPROVAL_ASK, SHELL_COMMAND, TOOL_EFFECT
-from ph.testing import MountProfile, not_none, stored_types
+from ph.testing import MountProfile, not_none, resume_stored, stored_types
 
 pytestmark = pytest.mark.anyio
 
@@ -107,7 +108,7 @@ async def _restarted(mount: MountProfile) -> tuple[Context, Session, AgentDriver
         ("keyed",),
         FakeAdapter(respond=text_script("done"), route=ResolvedModel(credential=KEY)),
     )
-    root = await resume_session(ctx, "root")
+    root = await resume_stored(ctx, "root")
     parent = ctx.require(AGENTS).create(root, SCRIPTED)
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=RETRIES)
     return ctx, root, parent
@@ -225,7 +226,7 @@ async def test_every_log_reads_back_whole_and_a_second_restart_changes_nothing(
         assert interrupted_turn_closers(events) == [], f"{session_id} would be repaired again"
 
     again = await mount(dict(PROVIDER_ROW, config={"maxConcurrent": 2}))
-    revived = await resume_session(again, "root")
+    revived = await resume_stored(again, "root")
     assert revived.events[-1].data["closed"] == 0, "the second restart closed something"
 
 

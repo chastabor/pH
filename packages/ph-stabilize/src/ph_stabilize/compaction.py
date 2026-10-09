@@ -1079,11 +1079,12 @@ class SummarizeEngine:
         planned = plan_tool_result_spill(
             self.ctx, session, call_id=call_id, source=f"{call_id} result", text=text
         )
-        if len(planned.replacement) >= len(text):
-            # Replacing a small result with a nine-hundred-character pointer
-            # makes the request bigger. Upstream clips every message in an
-            # over-budget batch; the batch is what must shrink, and a member
-            # that would grow is not part of shrinking it.
+        if planned is None or len(planned.replacement) >= len(text):
+            # A text the store cannot take stays as it is. And replacing a small
+            # result with a nine-hundred-character pointer makes the request
+            # bigger. Upstream clips every message in an over-budget batch; the
+            # batch is what must shrink, and a member that would grow is not
+            # part of shrinking it.
             return False
         payload = thaw_json(event.data)
         thawed = payload.get("message")

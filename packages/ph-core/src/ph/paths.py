@@ -444,7 +444,7 @@ def write_atomic(
     Six sites had derived temp-and-rename independently, in five spellings of the
     temp name — two of them a fixed string, which any two concurrent writers
     collide on — and only one of the six removed the temp when the write failed.
-    The seventh, `spill._write`, had not derived it at all.
+    The seventh, the spill store's (`SpillStore.try_save_all`), had not derived it at all.
 
     **A random suffix, not the pid**, because the colliding writers can be
     inside one process: `ph_rlm.harness.service` writes a projection per

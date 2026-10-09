@@ -524,7 +524,7 @@ def test_a_turn_with_no_open_step_closes_only_the_turn() -> None:
 @pytest.mark.anyio
 async def test_resume_repairs_a_crashed_log_on_load(mount: MountProfile, tmp_path: Path) -> None:
     """The repair is on the load path, so nothing downstream sees an open turn."""
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("crashed")
@@ -534,7 +534,7 @@ async def test_resume_repairs_a_crashed_log_on_load(mount: MountProfile, tmp_pat
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("crashed")
 
-    revived = await resume_session(ctx, "crashed")
+    revived = await resume_stored(ctx, "crashed")
     types = [event.type for event in revived.events]
     # The closers, then the record that this was a resume: the repair is what
     # makes the log readable, and `session/resumed` is what makes the *seam*
@@ -559,7 +559,7 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
     session — because that is what a resume, a UI listing what needs attention, or
     an operator would actually ask.
     """
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("parked")
@@ -571,7 +571,7 @@ async def test_a_resumed_log_holds_no_question_nobody_can_answer(
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("parked")
 
-    revived = await resume_session(ctx, "parked")
+    revived = await resume_stored(ctx, "parked")
 
     assert open_intents(revived.events, APPROVAL_ASK) == (), (
         "the question is settled, not still being asked"
@@ -605,7 +605,7 @@ async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_
     are owed). This is the half that cannot live there: it exercises the real
     `resume_session`, and the parity tests set the boundary themselves.
     """
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("reopened")
@@ -617,7 +617,7 @@ async def test_a_session_can_be_resumed_more_than_once(mount: MountProfile, tmp_
 
     store = ctx.require(SESSION_PERSISTENCE)
     for reopen in (1, 2, 3):
-        revived = await resume_session(ctx, "reopened")
+        revived = await resume_stored(ctx, "reopened")
         assert revived.durable_length > 0, f"reopen {reopen}: nothing was declared durable"
         await ctx.require(SESSIONS).flush(revived)
         _, stored = store.read("reopened")
@@ -678,7 +678,7 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
 ) -> None:
     """End to end, and twice: the second resume finds nothing open and writes
     nothing, which is what keeps reopening a session from growing it."""
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("between")
@@ -687,13 +687,13 @@ async def test_an_orphan_outside_any_turn_is_settled_on_resume(
     await ctx.require(SESSIONS).flush(session)
     ctx.require(SESSIONS).dispose("between")
 
-    revived = await resume_session(ctx, "between")
+    revived = await resume_stored(ctx, "between")
     assert [event.type for event in revived.events][-2:] == ["shell/result", "session/resumed"]
     assert revived.events[-1].data["closed"] == 1
     await ctx.require(SESSIONS).flush(revived)
     ctx.require(SESSIONS).dispose("between")
 
-    again = await resume_session(ctx, "between")
+    again = await resume_stored(ctx, "between")
     assert again.events[-1].data["closed"] == 0
 
 
@@ -755,7 +755,7 @@ async def test_a_command_the_daemon_died_during_is_settled_on_resume(
     """P10-08, the real kind end to end: the journal puts the command on disk,
     the daemon dies before the result, and the next resume settles it as
     `outcome-unknown` — once."""
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
     session = ctx.require(SESSIONS).create("died")
@@ -766,7 +766,7 @@ async def test_a_command_the_daemon_died_during_is_settled_on_resume(
     # The daemon dies here: the command is on disk and its result never is.
     ctx.require(SESSIONS).dispose("died")
 
-    revived = await resume_session(ctx, "died")
+    revived = await resume_stored(ctx, "died")
     result = revived.latest("shell/result")
     assert result is not None
     assert thaw_json(result.data) == {
@@ -862,12 +862,12 @@ async def test_a_write_that_landed_is_reported_done_after_a_crash(
 ) -> None:
     """The file holds exactly the call's bytes, so the write happened — and the
     model reads the result the tool renders, not `TOOL_OUTCOME_UNKNOWN`."""
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx, target = await _crashed_write(mount, tmp_path, "landed")
     target.write_text("the plan", encoding="utf-8")
 
-    revived = await resume_session(ctx, "landed")
+    revived = await resume_stored(ctx, "landed")
     event, block, text = _result(revived)
 
     assert block["isError"] is False
@@ -880,12 +880,12 @@ async def test_a_write_that_landed_is_reported_done_after_a_crash(
 async def test_a_write_that_did_not_land_is_reported_not_started(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx, target = await _crashed_write(mount, tmp_path, "missed")
     assert not target.exists()
 
-    revived = await resume_session(ctx, "missed")
+    revived = await resume_stored(ctx, "missed")
     event, block, text = _result(revived)
 
     assert block["isError"] is True
@@ -898,11 +898,11 @@ async def test_a_tool_that_cannot_answer_keeps_the_unknown_text(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """`edit` declares no `reconcile`, so its crashed call reads as it always has."""
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx, _ = await _crashed_write(mount, tmp_path, "unanswered", tool="edit")
 
-    revived = await resume_session(ctx, "unanswered")
+    revived = await resume_stored(ctx, "unanswered")
     event, _block, _text = _result(revived)
 
     assert as_obj(event.data["error"])["code"] == TOOL_OUTCOME_UNKNOWN
@@ -940,12 +940,12 @@ async def test_a_crashed_cells_dispatch_is_asked_on_resume_and_named_in_its_resu
     Sabotage: stop `_reconciled` asking open dispatches and the dispatch reads
     `outcome-unknown`; stop repair naming them and the cell's result says nothing.
     """
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx, target = await _crashed_cell(mount, tmp_path, "cell")
     target.write_text("the plan", encoding="utf-8")
 
-    revived = await resume_session(ctx, "cell")
+    revived = await resume_stored(ctx, "cell")
 
     settle = not_none(revived.latest("tool/code-dispatch"))
     assert outcome_of(TOOL_DISPATCH, settle) == "done"
@@ -960,12 +960,12 @@ async def test_a_dispatch_its_tool_says_never_happened_reads_not_started(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """L6b's other answer: the tool checked, and the dispatch did not happen."""
-    from ph.persistence import resume_session
+    from ph.testing import resume_stored
 
     ctx, target = await _crashed_cell(mount, tmp_path, "cell-missed")
     assert not target.exists()
 
-    revived = await resume_session(ctx, "cell-missed")
+    revived = await resume_stored(ctx, "cell-missed")
 
     settle = not_none(revived.latest("tool/code-dispatch"))
     assert outcome_of(TOOL_DISPATCH, settle) == "not-started"

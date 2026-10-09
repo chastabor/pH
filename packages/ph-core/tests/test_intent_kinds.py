@@ -31,9 +31,9 @@ import pytest
 from workspace_layout import ParsedModule, import_base, parsed_modules, workspace_tests
 
 from ph.keys import SESSIONS
-from ph.persistence import UndeclaredIntentError, resume_session
+from ph.persistence import UndeclaredIntentError
 from ph.session.known_event_types import INTENT_PAIRS, IntentPair
-from ph.testing import MountProfile, isolated_intent_kinds, log_event, stored_types
+from ph.testing import MountProfile, isolated_intent_kinds, log_event, resume_stored, stored_types
 
 LEAF_MAY_IMPORT = frozenset(
     {"__future__", "ph.session.intents", "ph.session.events", "ph.session.writers", "ph.json"}
@@ -204,7 +204,7 @@ async def test_a_resume_without_a_packages_kinds_is_refused_by_name(
         isolated_intent_kinds(core=True),
         pytest.raises(UndeclaredIntentError, match=r'"client/command".*ph_app\.kinds'),
     ):
-        await resume_session(ctx, "verbs")
+        await resume_stored(ctx, "verbs")
     assert len(stored_types(ctx, "verbs")) == stored, "nothing written"
 
 
@@ -223,5 +223,5 @@ async def test_a_settled_intent_of_an_undeclared_kind_resumes(
     ctx = await mount({"id": "session-persistence", "config": {"root": str(tmp_path / "sessions")}})
 
     with isolated_intent_kinds(core=True):
-        revived = await resume_session(ctx, "verbs")
+        revived = await resume_stored(ctx, "verbs")
     assert revived.events[-1].data["closed"] == 0

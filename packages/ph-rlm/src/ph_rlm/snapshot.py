@@ -13,7 +13,7 @@ append it again on every cell that touched anything at all, and the log would gr
 with the *size of the namespace* rather than the size of the change.
 
 **Written, then recorded** (§4.9, S11): a blob is durable at its locator before the
-event naming it is appended (`SpillStore.save`). A death between the two leaves a
+event naming it is appended (`SpillStore.try_save`). A death between the two leaves a
 blob nothing names, which the next read of the log collects; a blob that could not
 be written is recorded as a `clear`, and one that cannot be read on restore is
 reported by `kernel/restored` as failed. Nothing is dropped in silence.
@@ -178,7 +178,7 @@ class KernelSnapshotPolicy:
         the records say they are.
 
         **Each blob written first, then the records, one batch for the cell** (S11),
-        the ordering every other producer keeps (`SpillStore.save`). Written after the
+        the ordering every other producer keeps (`SpillStore.try_save`). Written after the
         records instead, a blob the store could not take was a `snap` naming nothing,
         dropped in silence on the next restore; now one that cannot be written is
         recorded as a `clear` saying so, which is what a restore tells the model.

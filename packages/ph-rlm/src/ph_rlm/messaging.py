@@ -45,6 +45,7 @@ from ph.cordis import Context, plugin
 from ph.json import JsonObject, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock, PluginSource, create_user_message, text_of
+from ph.persistence import read_if_stored
 from ph.seams.code_runtime import CodeBindingNamespace
 from ph.seams.subagents import (
     STATUS,
@@ -431,12 +432,11 @@ async def apply(ctx: Context, config: Config) -> None:
         if persistence is None:
             return None
         try:
-            if not persistence.exists(session_id):
-                return ()
-            return persistence.read(session_id)[1]
+            stored = read_if_stored(persistence, session_id)
         except Exception:
             log.warning("ph_rlm.messaging: could not read %s to reconcile a send", session_id)
             return None
+        return () if stored is None else stored[1]
 
     async def log_of(session_id: str) -> Sequence[SessionEvent] | None:
         """A log as a resume finds it: live, else stored, else empty. The stored read

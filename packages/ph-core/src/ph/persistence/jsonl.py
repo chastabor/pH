@@ -39,7 +39,7 @@ from pydantic import ValidationError
 
 from ..cordis import DEPLOYMENT, Context, plugin
 from ..json import JsonObject, as_int, as_str, dumps
-from ..keys import SESSION_PERSISTENCE, SESSIONS, TOOLS
+from ..keys import SESSIONS, TOOLS
 from ..paths import make_directories, resolve_roots, sync_directory, write_all
 from ..session import (
     BatchRef,
@@ -55,6 +55,7 @@ from .families import children_under, locate_under, logs_under, path_under
 from .lease import claim_session
 from .lineage import materialize
 from .protocol import (
+    NoStoredSession,
     SessionPersistence,
     StoredSession,
     attach,
@@ -171,7 +172,7 @@ def read_stored(
         else locate_session(root, session_id)
     )
     if path is None or not path.is_file():
-        raise FileNotFoundError(f"no stored session {session_id!r}")
+        raise NoStoredSession(f"no stored session {session_id!r}")
     return read_session(path, upto=upto, types=types)
 
 
@@ -581,9 +582,7 @@ class JsonlSessionStore:
     # `self.root` and rebuilding a filename. A backend with no per-session file
     # answers all four; a backend with one answers them from the filesystem.
 
-    def exists(self, session_id: str, *, family: str | None = None) -> bool:
-        if family is not None:
-            return session_path(self.root, session_id, family).is_file()
+    def exists(self, session_id: str) -> bool:
         return locate_session(self.root, session_id) is not None
 
     def read(
@@ -976,10 +975,11 @@ def _unfinished_batch(events: Sequence[SessionEvent]) -> int:
     return events[-1].seq - ref.first + 1
 
 
-async def resume_session(ctx: Context, session_id: str, *, family: str | None = None) -> Session:
-    """Read a stored session, repair a crashed tail, and publish it.
-
-    `family` is `read`'s: where the log is filed, when the caller knows (`open_session`).
+async def resume_session(
+    ctx: Context, session_id: str, header: SessionHeader, events: list[SessionEvent]
+) -> Session:
+    """Repair a stored log's crashed tail and publish it — the log as `read` gave it,
+    read by the caller: `open_session`, which reads it to learn whether there is one.
 
     The repair runs on the seed rather than after publication, so a resumed
     session is provider-valid the first time anything reads it — an open turn
@@ -990,13 +990,6 @@ async def resume_session(ctx: Context, session_id: str, *, family: str | None = 
     signal for "this crashed" as against "this was reopened": a clean stop
     synthesizes no closers.
     """
-    # Through the Protocol, not through this backend's filename: a store that
-    # keeps sessions in a database has no path to build, and `resume_session` is
-    # the one function every host calls to pick work back up. Off the loop, as
-    # `stored_session` reads: a long log is a long read, and the loop is every root's.
-    header, events = await anyio.to_thread.run_sync(
-        partial(ctx.require(SESSION_PERSISTENCE).read, session_id, family=family)
-    )
     calls, intents = await _reconciled(ctx, session_id, header, events)
     closers = interrupted_turn_closers(events, calls, intents=intents)
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))

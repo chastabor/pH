@@ -172,7 +172,7 @@ async def apply(ctx: Context, config: Config) -> None:
             content_sample=content_preview(text),
         )
         # **The accounting and the replacement it describes, in one batch**
-        # (S14), and both after the blob is on disk (`SpillStore.save`). Apart, a
+        # (S14), and both after the blob is on disk (`SpillStore.try_save`). Apart, a
         # flush between them landed the record with no replacement, and a resumed
         # session never offloaded the paste again.
         with session.batch() as batch:

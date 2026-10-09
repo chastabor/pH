@@ -15,11 +15,18 @@ import anyio
 from ..cordis import Context
 from ..keys import SESSION_PERSISTENCE, SESSIONS, SUBAGENTS
 from ..seams.telemetry import ops_record
-from ..session import Session, SessionForkError, new_session_id, valid_session_id
+from ..session import (
+    Session,
+    SessionEvent,
+    SessionForkError,
+    SessionHeader,
+    new_session_id,
+    valid_session_id,
+)
 from ..session_profile import opened
 from .jsonl import resume_session
 from .lease import SessionBusy
-from .protocol import ClaimingStore, SessionPersistence
+from .protocol import ClaimingStore, SessionPersistence, read_if_stored
 
 __all__ = ["open_session", "stored_session"]
 
@@ -73,16 +80,15 @@ async def open_session(
     Exact, as `read` takes it: a child a restart reopens is one `stat` in its
     parent's directory, where by id alone it was searched for across every family in
     the store, once per child. A root has none to give, since a fork's family is not
-    in its id, so its log is searched for — off the loop.
+    in its id, so its log is searched for — off the loop, and **once**: the read
+    that finds it is the resume's (`read_if_stored`), where asking `exists` and
+    then reading looked it up twice.
     """
     resolved = session_id or new_session_id()
     store = await _claimed(ctx, resolved)
-    resumed = store is not None and await anyio.to_thread.run_sync(
-        partial(store.exists, resolved, family=family)
-    )
-    if resumed:
-        session = await resume_session(ctx, resolved, family=family)
-    else:
+    session = await _resumed(ctx, store, resolved, family) if store is not None else None
+    resumed = session is not None
+    if session is None:
         fields = dict(meta or {})
         if family is not None:
             fields["family"] = family
@@ -131,19 +137,36 @@ async def stored_session(ctx: Context, session_id: str, *, family: str | None = 
     """
     store = ctx.require(SESSION_PERSISTENCE)
     await _claimed(ctx, session_id)
-    # One read, off the loop: a long log is a long read, a search for one whose
-    # family is not given lists the store, and the loop is every root's.
-    try:
-        header, events = await anyio.to_thread.run_sync(
-            partial(store.read, session_id, family=family)
-        )
-    except FileNotFoundError as missing:
-        raise LookupError(f"no stored session {session_id!r}") from missing
+    found = await _read(store, session_id, family)
+    if found is None:
+        raise LookupError(f"no stored session {session_id!r}")
+    header, events = found
     stored = Session(session_id, seed=events, header=header, durable=len(events))
     sessions = ctx.require(SESSIONS)
     async with sessions.opening(sessions.adopt(stored)) as session:
         await sessions.loaded(session)
     return session
+
+
+async def _resumed(
+    ctx: Context, store: SessionPersistence, session_id: str, family: str | None
+) -> Session | None:
+    """The stored session, resumed, or `None` when nothing is stored under its id.
+
+    The log as read is this frame's alone, so it goes when the resume returns rather
+    than staying beside the session it seeded for the rest of the open.
+    """
+    found = await _read(store, session_id, family)
+    return None if found is None else await resume_session(ctx, session_id, *found)
+
+
+async def _read(
+    store: SessionPersistence, session_id: str, family: str | None
+) -> tuple[SessionHeader, list[SessionEvent]] | None:
+    """`read_if_stored`, off the loop — the read both doors open with: a long log is
+    a long read, a search for one whose family is not given lists the store, and the
+    loop is every root's."""
+    return await anyio.to_thread.run_sync(partial(read_if_stored, store, session_id, family=family))
 
 
 async def _claimed(ctx: Context, session_id: str) -> SessionPersistence | None:
@@ -152,8 +175,8 @@ async def _claimed(ctx: Context, session_id: str) -> SessionPersistence | None:
     The half of opening a session that `open_session` and `stored_session` share.
     **Before anything builds a path from it** (K9). `SessionStore.create` and
     `.adopt` check the id too, and by then it is too late: `claim` creates
-    `<root>/.leases/<id>.lock`, `exists` locates `<root>/<id>/<id>.jsonl`, and a
-    read *opens and parses* that file — all from the raw id, and all before a
+    `<root>/.leases/<id>.lock`, and a read locates `<root>/<id>/<id>.jsonl` and
+    *opens and parses* it — all from the raw id, and all before a
     `Session` object exists for the store to refuse.
 
     The lease lasts as long as `ctx`'s mount. A store that cannot claim is said out

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import errno
 import os
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,10 +43,18 @@ from ..persistence.jsonl import (
     JsonlSessionStore,
     locate_session,
     read_session,
+    resume_session,
     session_path,
 )
 from ..persistence.lease import lease_path
-from ..persistence.protocol import StoredSession, descendants_among, gated, stored_row
+from ..persistence.protocol import (
+    NoStoredSession,
+    StoredSession,
+    descendants_among,
+    gated,
+    read_if_stored,
+    stored_row,
+)
 from ..persistence.turso import TursoSessionStore
 from ..seams.skills import SkillService
 from ..seams.subagents import ADMITTED
@@ -383,6 +391,13 @@ def disk_fills_midway(fd: int, payload: bytes) -> None:
     `ENOSPC` — the half-written file every atomic or taken-back write must survive."""
     os.write(fd, payload[: len(payload) // 2])
     raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def full_disk_batch(items: Iterable[object], **_kwargs: object) -> list[OSError]:
+    """A `write_atomic_all` for a disk that is full: every file refused with `ENOSPC`,
+    each in its place, as the door answers a write it could not make. For the spill
+    store's fail-open gates, patched where `ph.seams.spill` holds the door."""
+    return [OSError(errno.ENOSPC, "No space left on device") for _ in items]
 
 
 def raising(error: BaseException) -> Callable[..., NoReturn]:
@@ -876,7 +891,9 @@ class StoredLogs:
         self.asked[session_id] = family
         if session_id == self.broken:
             raise ValueError("a torn log")
-        session = self.sessions[session_id]
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise NoStoredSession(f"no stored session {session_id!r}")
         return session.header, list(session.events)
 
 
@@ -888,8 +905,14 @@ def stored_events(ctx: Context, session_id: str) -> list[SessionEvent]:
     be handed. Seven tests spelled the read out before `stored_types` did, and two
     more its tolerant form before this.
     """
-    persistence = ctx.require(SESSION_PERSISTENCE)
-    return persistence.read(session_id)[1] if persistence.exists(session_id) else []
+    stored = read_if_stored(ctx.require(SESSION_PERSISTENCE), session_id)
+    return [] if stored is None else stored[1]
+
+
+async def resume_stored(ctx: Context, session_id: str) -> Session:
+    """`resume_session` over the log `ctx`'s store holds: `open_session` without its
+    claim or its start, for a test of the resume itself."""
+    return await resume_session(ctx, session_id, *ctx.require(SESSION_PERSISTENCE).read(session_id))
 
 
 def stored_types(ctx: Context, session_id: str) -> list[str]:

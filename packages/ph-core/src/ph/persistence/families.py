@@ -171,7 +171,7 @@ def locate_under(root: Path, name: str, suffix: str) -> Path | None:
     if own.is_file():
         return own
     wanted = f"{name}{suffix}"
-    families = family_dirs(root)
+    families = [one for one in family_dirs(root) if os.path.basename(one) != name]
     likely = [one for one in families if _holds_lineage_of(Path(one).name, name)]
     for family in [*likely, *(one for one in families if one not in likely)]:
         candidate = Path(family) / wanted

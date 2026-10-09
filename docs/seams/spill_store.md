@@ -13,12 +13,10 @@ harness never tells the model something is gone when it is on disk.**
 ## The surface
 
 ```text
-await ctx.spill_store.save_text(text, ...)      # -> SpillRef, before the append
-await ctx.spill_store.try_save_text(text, ...)  # -> SpillRef | None
-await ctx.spill_store.save(planned, ...)        # a blob already planned
-await ctx.spill_store.try_save(planned, ...)    # -> SpillRef | None
-await ctx.spill_store.load_text(ref)            # -> str
+await ctx.spill_store.try_save_text(text, ...)  # -> SpillRef | None, before the append
+await ctx.spill_store.try_save(planned, ...)    # a blob already planned
 await ctx.spill_store.try_save_all(blobs)       # several, one directory sync
+await ctx.spill_store.load_text(ref)            # -> str
 ctx.spill_store.plan(...)                       # the name and the bytes, together
 ctx.spill_store.claim(...)
 ```
@@ -35,10 +33,11 @@ A `SpillRef` is three fields, and the third is the interesting one:
 rather than making the model guess. A locator with no hint is a reference the
 model has to reverse-engineer, and it will reverse-engineer it wrongly.
 
-`try_save_text` is the non-raising form: a spill that fails is an
-optimization that did not happen, and the caller keeps the content inline rather
-than losing the turn. It is the *write*, so that fallback is still on the table
-when it answers `None` — nothing has been logged yet.
+Every write is non-raising: a spill that fails is an optimization that did not
+happen, and the caller keeps the content inline rather than losing the turn. It is
+the *write*, so that fallback is still on the table when it answers `None` — nothing
+has been logged yet. There is no raising form: every producer wanted the fallback,
+and the one writer underneath is `try_save_all`.
 
 ## Write, then append
 
@@ -59,8 +58,8 @@ The blob is durable before any record names it, so the log never names bytes tha
 are not there, and a write that fails does so before anything is logged. A run that
 dies between the two leaves a file nothing names, which the next read collects.
 
-It used to take three steps — reserve, append, commit; `SpillStore.save` says why it
-no longer does.
+It used to take three steps — reserve, append, commit; `SpillStore.try_save` says
+why it no longer does.
 
 `plan` derives the name a blob will have, for a caller that must put it in the
 wording or the record that points at it before the write.

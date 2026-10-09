@@ -59,6 +59,7 @@ from ph.testing import (
     MountProfile,
     disk_fills_midway,
     log_event,
+    noted,
     stored_log,
     user_payload,
     write_reference_fork,
@@ -1228,3 +1229,53 @@ async def test_a_reopened_child_is_looked_for_where_its_parent_files_it(
     assert [event.type for event in reopened.events][: len(child.events)] == [
         event.type for event in child.events
     ]
+
+
+async def test_a_resumed_root_is_looked_for_once(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root has no family to give `open_session`, so its log is searched for, and
+    the read that finds it is the resume's. Asking `exists` first and reading after
+    searched the store twice for every root a host picked back up.
+
+    Sabotage: ask `store.exists` before the read in `open_session`, and this counts two.
+    """
+    from ph.persistence import families, jsonl, open_session
+
+    ctx = await mount(_root(tmp_path))
+    sessions = ctx.require(SESSIONS)
+    stored = sessions.create("lead", meta={"cwd": "/work"})
+    log_event(stored, "turn/start", {"turn": 0})
+    assert await sessions.written(stored)
+    sessions.dispose(stored.id)
+    searched: list[str] = []
+    real = families.locate_under
+    monkeypatch.setattr(
+        jsonl,
+        "locate_under",
+        lambda root, name, suffix: noted(searched, name, real(root, name, suffix)),
+    )
+    resumed = await open_session(ctx, "lead")
+
+    assert searched.count("lead") == 1, searched
+    assert resumed.header.family == stored.header.family
+
+
+def test_a_log_not_on_record_stats_each_family_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A miss looks in its own directory first and then in every other — not in its
+    own again, which the listing holds too.
+
+    Sabotage: keep the own directory in the listing, and this probes it twice.
+    """
+    from ph.persistence.families import locate_under
+
+    for name in ("lead", "other1", "other2"):
+        (tmp_path / name).mkdir()
+    probed: list[Path] = []
+    real = Path.is_file
+    monkeypatch.setattr(Path, "is_file", lambda path: noted(probed, path, real(path)))
+
+    assert locate_under(tmp_path, "lead", ".jsonl") is None
+    assert len(probed) == len(set(probed)) == 3, probed

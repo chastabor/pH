@@ -291,6 +291,26 @@ async def test_a_spill_that_fails_keeps_the_original_result(
     assert not [e for e in session.events if e.type == "offload/spilled"]
 
 
+async def test_an_oversized_result_with_no_utf_8_form_stays_inline(
+    mount: MountProfile,
+) -> None:
+    """A lone surrogate, which a `\\ud800` escape in a JSON tool result decodes to,
+    has no UTF-8 form, so the store cannot take the result at all. It stays inline,
+    as one the disk refused does; the planner encoded it itself and the error left
+    the middleware instead.
+
+    Sabotage: encode in `plan_tool_result_spill` again, and the call raises.
+    """
+    ctx = await mount(profile=PROFILE)
+    session = ctx.require(SESSIONS).create("no-utf-8")
+    original = "\ud800" + blob(THRESHOLD)
+
+    event = await _run(ctx, session, "big", original)
+
+    assert model_text(event) == original
+    assert not [e for e in session.events if e.type == "offload/spilled"]
+
+
 # ----------------------------------------------------------- one at a time --
 
 
@@ -391,8 +411,10 @@ async def test_a_blob_whose_event_never_landed_is_swept_at_the_next_open(
     (spilled,) = events_of(session, "offload/spilled")
     live = Path(spilled.data["locator"])
 
-    orphan = await ctx.require(SPILL_STORE).save_text(
-        owner=session.id, source="a crash", suggested_name="never-recorded.md", content="lost"
+    orphan = not_none(
+        await ctx.require(SPILL_STORE).try_save_text(
+            owner=session.id, source="a crash", suggested_name="never-recorded.md", content="lost"
+        )
     )
     assert Path(orphan.locator).is_file(), "the crash-shaped file exists before the sweep"
 

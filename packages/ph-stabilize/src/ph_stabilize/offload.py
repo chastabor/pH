@@ -247,8 +247,10 @@ def plan_tool_result_spill(
     source: str,
     text: str,
     scope: Boundary | None = None,
-) -> ResultSpill:
-    """Where one tool result would go, and what the model would read instead.
+) -> ResultSpill | None:
+    """Where one tool result would go, and what the model would read instead — `None`
+    for a text the store cannot take at all (`SpillStore.plan_text`), which stays
+    inline.
 
     **Decided before anything is written** (S14). The locator is derived rather than
     stored — the store's naming rule is a function of the content — so a caller can
@@ -265,9 +267,11 @@ def plan_tool_result_spill(
     therefore the *sentence the model is given*. One relocation described two
     ways depending on which row did it is exactly the drift this prevents.
     """
-    blob = ctx.require(SPILL_STORE).plan(
-        owner=session.id, suggested_name=_result_name(call_id), content=text.encode("utf-8")
+    blob = ctx.require(SPILL_STORE).plan_text(
+        owner=session.id, suggested_name=_result_name(call_id), text=text
     )
+    if blob is None:
+        return None
     replacement = spill_wording(
         ctx,
         scope,
@@ -303,7 +307,7 @@ async def spill_tool_result(
     # Where the original went. Declared ignorable in the vocabulary (the property
     # is the type's, not this call site's) — a reader that skips it loses the
     # forwarding address, not the conversation, because the replacement the model
-    # saw is what `tool/result` carries. After the blob is on disk (`SpillStore.save`),
+    # saw is what `tool/result` carries. After the blob is on disk (`SpillStore.try_save`),
     # so no record names bytes that are not there.
     with session.batch() as batch:
         _LOG.append(
@@ -386,7 +390,7 @@ async def apply(ctx: Context, config: Config) -> None:
             # call, and a tool can be registered for one agent.
             scope=execution.scope,
         )
-        if not await spill_tool_result(ctx, session, planned):
+        if planned is None or not await spill_tool_result(ctx, session, planned):
             # Fail open, as upstream: an offload that cannot store the content
             # must not be the reason the model loses it.
             return decision

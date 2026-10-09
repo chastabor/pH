@@ -17,7 +17,7 @@ from .jsonl import (
 from .lease import SessionBusy, claim_session
 from .lineage import MAX_DEPTH, LineageError, ReadOne, lineage_faults, materialize
 from .opening import open_session, stored_session
-from .protocol import ClaimingStore
+from .protocol import ClaimingStore, NoStoredSession, read_if_stored
 from .repair import (
     TOOL_NOT_STARTED,
     TOOL_OUTCOME_UNKNOWN,
@@ -33,6 +33,7 @@ __all__ = [
     "ClaimingStore",
     "JsonlSessionStore",
     "LineageError",
+    "NoStoredSession",
     "ReadOne",
     "Resumption",
     "SessionBusy",
@@ -43,6 +44,7 @@ __all__ = [
     "lineage_faults",
     "materialize",
     "open_session",
+    "read_if_stored",
     "read_records",
     "read_session",
     "records_in",

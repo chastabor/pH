@@ -50,7 +50,14 @@ from ph.llm.types import text_of
 from ph.seams import spill as spill_module
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
 from ph.session.events import SurfaceReplace
-from ph.testing import FAKE_OPTIONS, log_event, plugin_payload, prefix_of, user_payload
+from ph.testing import (
+    FAKE_OPTIONS,
+    full_disk_batch,
+    log_event,
+    plugin_payload,
+    prefix_of,
+    user_payload,
+)
 from ph_rlm.kernel.manager import Kernel
 from ph_rlm.keys import KERNEL_SNAPSHOTS, PYTHON_RUNTIME
 from ph_rlm.snapshot import (
@@ -261,10 +268,7 @@ async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
     )
 
-    def refuse(items: list[Any], **_kwargs: Any) -> list[OSError]:  # noqa: ANN401
-        return [OSError("the disk is full") for _ in items]
-
-    with patch.object(spill_module, "write_atomic_all", refuse):
+    with patch.object(spill_module, "write_atomic_all", full_disk_batch):
         await run_cell(ctx, "big = 'q' * 20_000", agent=agent, session=session)
 
     [record] = [record for record in _snapshots(session) if record["var"] == "big"]

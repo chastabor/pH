@@ -54,13 +54,25 @@ without limit.
 
 __all__ = [
     "ClaimingStore",
+    "NoStoredSession",
     "SessionArchive",
     "SessionPersistence",
     "StoredSession",
     "attach",
     "gated",
+    "read_if_stored",
     "write_on_unwind",
 ]
+
+
+class NoStoredSession(FileNotFoundError):
+    """Nothing is stored under an id: how `read_own`, and so `read`, says so.
+
+    Its own type because whether a session is resumed or created turns on it
+    (`open_session`, through `read_if_stored`). Any other error reading a log that
+    is there, a file vanishing mid-read among them, is damage to report rather than
+    an absence to create a session over.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +189,9 @@ class SessionArchive(Protocol):
     ancestor is missing and would refuse a collection that is safe to make;
     `stored_survivors` wants `read`, because a tree is only accounted for by the
     whole lineage that built it.
+
+    **Every method blocks**, on a file read or a search of the store: call it off
+    the event loop.
     """
 
     def read_own(
@@ -202,6 +217,9 @@ class SessionArchive(Protocol):
         so the walk knows where an ancestor lives and passing it turns a directory search
         into a path — without it a chained read paid one scan per generation, which scales
         with the size of the store rather than the length of the log.
+
+        Raises `NoStoredSession` when, and only when, nothing is stored under that id
+        (in `family`, when given).
 
         Declared here rather than left to convention because it is the half a backend
         actually implements. Without it a third backend can satisfy this Protocol with a
@@ -269,7 +287,9 @@ class SessionArchive(Protocol):
         A backend whose file stores only its own run must walk `parent_session`
         to assemble the rest — `materialize(self.read_own, session_id, family=…)`
         is that walk, and both backends' `read` is exactly that one line.
-        `family` locates the first file, as `read_own`'s does; a listing row carries it.
+        `family` locates the first file, as `read_own`'s does; a listing row carries it,
+        and without it the store is searched. An ancestor that cannot be read is a
+        `LineageError`, never `NoStoredSession`: only this id's own log is an absence.
         """
         ...
 
@@ -324,17 +344,20 @@ class SessionPersistence(SessionArchive, Protocol):
         """Drop what this backend holds in memory for one session."""
         ...
 
-    def exists(self, session_id: str, *, family: str | None = None) -> bool:
+    def exists(self, session_id: str) -> bool:
         """Whether this backend has a stored log under that id.
 
-        `family`, as `read_own` takes it, is where the log is filed, and the answer is
-        for there alone: one `stat`. Without it the log is searched for across the
-        store, so this blocks — call it off the event loop.
+        A search of the store, since an id alone does not say where a log is filed:
+        blocking, so off the event loop. To read the log when there is one,
+        `read_if_stored` searches once.
         """
         ...
 
     def locate(self, session_id: str) -> Path | None:
-        """Where a person would find this log, or `None` if it is not a file."""
+        """Where a person would find this log, or `None` if it is not a file.
+
+        A search of the store, as `exists` is: off the event loop.
+        """
         ...
 
     def directory(self) -> Path | None:
@@ -380,6 +403,21 @@ def gated(events: list[SessionEvent], gate: str) -> list[SessionEvent]:
     `SessionArchive.holding` states, kept in one place for every backend that
     filters after reading."""
     return events if any(event.type == gate for event in events) else []
+
+
+def read_if_stored(
+    archive: SessionArchive, session_id: str, *, family: str | None = None
+) -> tuple[SessionHeader, list[SessionEvent]] | None:
+    """`archive.read`, or `None` when nothing is stored under that id (`NoStoredSession`).
+
+    One search of the store, where asking `exists` and then reading searched it
+    twice. A broken chain is never taken for an absence: an ancestor that cannot be
+    read is a `LineageError`. Blocking, as the read is.
+    """
+    try:
+        return archive.read(session_id, family=family)
+    except NoStoredSession:
+        return None
 
 
 def lineage_faults_of(

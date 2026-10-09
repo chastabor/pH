@@ -85,7 +85,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import anyio
 import pytest
@@ -1129,16 +1129,39 @@ async def test_a_turso_seq_is_written_once(tmp_path: Path) -> None:
     assert [(event.seq, event.data) for event in events] == [(0, {"turn": 1})]
 
 
+def test_a_read_of_nothing_stored_says_so_by_name(store: SessionPersistence) -> None:
+    """Whether `open_session` resumes or creates turns on this one error, so every
+    backend raises it for an absent id, given a family or not, and `read_if_stored`
+    answers `None` for it alone: any other error reading a log that is there is
+    damage, not an absence to create a session over.
+
+    Sabotage: raise a bare `FileNotFoundError` from either backend's miss, or catch
+    one in `read_if_stored`, and this fails.
+    """
+    from ph.persistence import NoStoredSession, read_if_stored
+
+    with pytest.raises(NoStoredSession):
+        store.read("absent")
+    with pytest.raises(NoStoredSession):
+        store.read("absent", family="absent")
+    assert read_if_stored(store, "absent") is None
+
+    class Vanishing:
+        def read(self, session_id: str, *, family: str | None = None) -> NoReturn:
+            raise FileNotFoundError("the log went mid-read")
+
+    with pytest.raises(FileNotFoundError, match="mid-read"):
+        read_if_stored(Vanishing(), "there")  # type: ignore[arg-type]
+
+
 async def test_a_read_given_its_family_does_not_search_for_the_log(
     store: SessionPersistence, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A listing row carries its family, and a read handed it reads a path. Without
     it the log was searched for across every family directory — per row, so a
-    listing's reads cost the size of the store times the rows it holds. Asking
-    whether it is there is the same `stat`.
+    listing's reads cost the size of the store times the rows it holds.
 
-    Sabotage: drop `family` from `materialize`'s first read, or from `exists`, and the
-    search runs.
+    Sabotage: drop `family` from `materialize`'s first read, and the search runs.
     """
     from ph.persistence import jsonl, turso
 
@@ -1153,8 +1176,6 @@ async def test_a_read_given_its_family_does_not_search_for_the_log(
     monkeypatch.setattr(jsonl, "locate_under", searched)
     monkeypatch.setattr(turso, "locate_under", searched)
 
-    assert store.exists("rooted", family=session.header.family)
-    assert not store.exists("rooted", family="elsewhere")
     _header, events = store.read("rooted", family=session.header.family)
 
     assert [event.type for event in events] == [event.type for event in session.events]

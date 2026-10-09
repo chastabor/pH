@@ -29,7 +29,6 @@ from ph.cancel import CancelToken
 from ph.cordis import Context
 from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.llm.types import ToolCallBlock, text_of
-from ph.persistence import resume_session
 from ph.seams.subagents import (
     STATUS,
     FamilyRole,
@@ -49,6 +48,7 @@ from ph.testing import (
     not_none,
     reconciled_call,
     result_text,
+    resume_stored,
     run_tool,
     stored_events,
     tool_result_payload,
@@ -370,7 +370,7 @@ async def test_a_send_a_crashed_cell_made_is_reported_delivered_after_a_restart(
     snapshot = str(logs_after_a_crash())
     fresh = await mount(*ROWS, {"id": "session-persistence", "config": {"root": snapshot}})
 
-    revived = await resume_session(fresh, session.id)
+    revived = await resume_stored(fresh, session.id)
 
     settle = not_none(revived.latest("tool/code-dispatch"))
     assert outcome_of(TOOL_DISPATCH, settle) == "done"

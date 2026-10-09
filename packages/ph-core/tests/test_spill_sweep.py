@@ -42,7 +42,7 @@ from ph.cordis import Context
 from ph.keys import SESSIONS, SPILL_STORE
 from ph.seams.spill import SpillClaim, SpillRef, SpillStore
 from ph.session import Session, SessionStore
-from ph.testing import MountProfile, log_event
+from ph.testing import MountProfile, log_event, not_none
 
 pytestmark = pytest.mark.anyio
 
@@ -55,8 +55,11 @@ def _store(tmp_path: Path) -> SpillStore:
     return SpillStore(ctx=Context(), root=tmp_path / "spill")
 
 
-async def _save(store: SpillStore, content: bytes) -> SpillRef:
-    return await store.save(store.plan(owner="s1", suggested_name="a", content=content), source="a")
+async def _save(store: SpillStore, content: str, *, owner: str = "s1") -> SpillRef:
+    """One blob in `owner`'s directory, named by its content as every blob is."""
+    return not_none(
+        await store.try_save_text(owner=owner, source="a", suggested_name="a", content=content)
+    )
 
 
 def _claim(label: str, owner: str, event_type: str = SPILLED) -> SpillClaim:
@@ -80,9 +83,9 @@ async def test_two_producers_sharing_an_owner_do_not_collect_each_other(
     one behaving correctly and the result being data loss."""
     store = _store(tmp_path)
     session = Session("s1")
-    mine = await store.save_text(owner=session.id, source="a", suggested_name="a", content="mine")
-    yours = await store.save_text(owner=session.id, source="b", suggested_name="b", content="yours")
-    orphan = await store.save_text(owner=session.id, source="c", suggested_name="c", content="none")
+    mine = await _save(store, "mine", owner=session.id)
+    yours = await _save(store, "yours", owner=session.id)
+    orphan = await _save(store, "none", owner=session.id)
     _named(session, SPILLED, mine.locator)
     _named(session, INPUT, yours.locator)
 
@@ -107,9 +110,9 @@ async def test_a_producer_this_profile_does_not_mount_keeps_its_blobs(tmp_path: 
     """
     store = _store(tmp_path)
     session = Session("s1")
-    mounted = await store.save_text(owner=session.id, source="a", suggested_name="a", content="a")
-    unmounted = await store.save_text(owner=session.id, source="b", suggested_name="b", content="b")
-    orphan = await store.save_text(owner=session.id, source="c", suggested_name="c", content="c")
+    mounted = await _save(store, "a", owner=session.id)
+    unmounted = await _save(store, "b", owner=session.id)
+    orphan = await _save(store, "c", owner=session.id)
     _named(session, SPILLED, mounted.locator)
     _named(session, INPUT, unmounted.locator)
     store.claim(_claim("tool-result-offload", session.id, SPILLED))
@@ -142,10 +145,10 @@ async def test_a_fork_does_not_sweep_a_directory_it_only_inherited(tmp_path: Pat
             locator=lambda data: str(data["locator"]),
         )
     )
-    early = await spill.save_text(owner="kernel/ns", source="v", suggested_name="a", content="a")
+    early = await _save(spill, "a", owner="kernel/ns")
     log_event(parent, KERNEL, {"namespace": "kernel/ns", "locator": early.locator})
     child = sessions.fork(parent, parent.events[-1].seq, "child")
-    later = await spill.save_text(owner="kernel/ns", source="v", suggested_name="b", content="b")
+    later = await _save(spill, "b", owner="kernel/ns")
     log_event(parent, KERNEL, {"namespace": "kernel/ns", "locator": later.locator})
 
     assert await spill.sweep_session(child) == []
@@ -159,9 +162,7 @@ async def test_an_owner_no_claim_names_is_never_visited(tmp_path: Path) -> None:
     deleted another session's blobs."""
     store = _store(tmp_path)
     session = Session("s1")
-    theirs = await store.save_text(
-        owner="someone-else", source="x", suggested_name="x", content="theirs"
-    )
+    theirs = await _save(store, "theirs", owner="someone-else")
     store.claim(_claim("ours", session.id))
 
     assert await store.sweep_session(session) == []
@@ -180,7 +181,7 @@ async def test_a_claim_that_raises_stops_the_sweep_rather_than_narrowing_it(
     conversation."""
     store = _store(tmp_path)
     session = Session("s1")
-    kept = await store.save_text(owner=session.id, source="a", suggested_name="a", content="live")
+    kept = await _save(store, "live", owner=session.id)
     _named(session, SPILLED, kept.locator)
     _named(session, INPUT, "irrelevant")
 
@@ -211,7 +212,7 @@ async def test_a_withdrawn_claim_stops_contributing(tmp_path: Path) -> None:
     """
     store = _store(tmp_path)
     session = Session("s1")
-    ref = await store.save_text(owner=session.id, source="a", suggested_name="a", content="x")
+    ref = await _save(store, "x", owner=session.id)
     log_event(session, KERNEL, {"record": {"locator": ref.locator}})
     release = store.claim(
         SpillClaim(
@@ -252,7 +253,7 @@ async def test_a_stored_log_is_swept_before_it_is_handed_out(mount: MountProfile
     sessions = ctx.require(SESSIONS)
     crashed = Session("s1")
     store.claim(_claim("producer", crashed.id))
-    orphan = await _save(store, b"x")  # the dead run got this far, and no record landed
+    orphan = await _save(store, "x")  # the dead run got this far, and no record landed
 
     session = sessions.adopt(Session(crashed.id, seed=list(crashed.events)))
     await sessions.loaded(session)
@@ -354,7 +355,7 @@ def test_the_sweep_runs_only_where_a_stored_log_is_read() -> None:
 async def test_blobs_saved_together_sync_their_directory_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A kernel cell's variables all go under one owner, and each `save` synced that
+    """A kernel cell's variables all go under one owner, and each `try_save` synced that
     directory after its rename — K variables, K syncs of one directory. Saved
     together, each file is still synced and the directory once, after all of them.
 
@@ -378,7 +379,7 @@ async def test_a_blob_saved_together_that_cannot_be_written_is_refused_alone(
     tmp_path: Path,
 ) -> None:
     """One variable the disk refuses is one `clear`, not a cell's worth: the others
-    are written and named as `save` would have done them."""
+    are written and named as `try_save` would have done them."""
     store = _store(tmp_path)
     planned = [store.plan(owner="s1", suggested_name=f"v{n}", content=bytes([n])) for n in range(3)]
     planned[1].locator.mkdir(parents=True)
@@ -398,7 +399,7 @@ async def test_a_planned_blob_is_hashed_once(
     for its record and then store the bytes, which derived it again: a second
     sha256 of a multi-megabyte result, on the event loop, for an answer it had.
 
-    Sabotage: derive the locator again in `save`, and this counts two.
+    Sabotage: derive the locator again in `try_save`, and this counts two.
     """
     store = _store(tmp_path)
     hashed: list[int] = []
@@ -410,7 +411,19 @@ async def test_a_planned_blob_is_hashed_once(
 
     monkeypatch.setattr(hashlib, "sha256", counting)
     planned = store.plan(owner="s1", suggested_name="a", content=b"x" * 64)
-    ref = await store.save(planned, source="a")
+    ref = not_none(await store.try_save(planned, source="a"))
 
     assert hashed == [64]
     assert ref.locator == str(planned.locator)
+
+
+async def test_text_that_cannot_be_encoded_is_refused_not_raised(tmp_path: Path) -> None:
+    """A lone surrogate — what a tool's output decoded with `surrogateescape` can hold —
+    has no UTF-8 form, and the producer keeps its text inline rather than losing the
+    turn to an encoding error."""
+    store = _store(tmp_path)
+
+    ref = await store.try_save_text(owner="s1", source="a", suggested_name="a", content="\ud800")
+
+    assert ref is None
+    assert not store.owner_root("s1").exists()
