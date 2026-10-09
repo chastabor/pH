@@ -30,8 +30,10 @@ dispatches by type in a single pass and runs the whole sweep on a worker thread:
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 from workspace_layout import parsed_modules
@@ -349,6 +351,44 @@ def test_the_sweep_runs_only_where_a_stored_log_is_read() -> None:
 # ---------------------------------------------------------------- planned once --
 
 
+async def test_blobs_saved_together_sync_their_directory_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kernel cell's variables all go under one owner, and each `save` synced that
+    directory after its rename — K variables, K syncs of one directory. Saved
+    together, each file is still synced and the directory once, after all of them.
+
+    Sabotage: sync each file's directory in `write_atomic_all`, and this counts three.
+    """
+    from ph import paths
+
+    store = _store(tmp_path)
+    store.owner_root("s1").mkdir(parents=True)
+    synced: list[Path] = []
+    monkeypatch.setattr(paths, "sync_directory", synced.append)
+    planned = [store.plan(owner="s1", suggested_name=f"v{n}", content=bytes([n])) for n in range(3)]
+
+    refs = await store.try_save_all([(one, "a") for one in planned])
+
+    assert [ref.locator if ref else None for ref in refs] == [str(one.locator) for one in planned]
+    assert synced == [store.owner_root("s1")]
+
+
+async def test_a_blob_saved_together_that_cannot_be_written_is_refused_alone(
+    tmp_path: Path,
+) -> None:
+    """One variable the disk refuses is one `clear`, not a cell's worth: the others
+    are written and named as `save` would have done them."""
+    store = _store(tmp_path)
+    planned = [store.plan(owner="s1", suggested_name=f"v{n}", content=bytes([n])) for n in range(3)]
+    planned[1].locator.mkdir(parents=True)
+
+    refs = await store.try_save_all([(one, "a") for one in planned])
+
+    assert [ref is not None for ref in refs] == [True, False, True]
+    assert planned[0].locator.is_file() and planned[2].locator.is_file()
+
+
 async def test_a_planned_blob_is_hashed_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -361,16 +401,16 @@ async def test_a_planned_blob_is_hashed_once(
     Sabotage: derive the locator again in `save`, and this counts two.
     """
     store = _store(tmp_path)
-    derived: list[str] = []
-    original = SpillStore.locator_for
+    hashed: list[int] = []
+    real = hashlib.sha256
 
-    def counting(self: SpillStore, **kwargs: object) -> Path:
-        derived.append(str(kwargs["suggested_name"]))
-        return original(self, **kwargs)  # type: ignore[arg-type]
+    def counting(data: bytes = b"") -> Any:  # noqa: ANN401
+        hashed.append(len(data))
+        return real(data)
 
-    monkeypatch.setattr(SpillStore, "locator_for", counting)
+    monkeypatch.setattr(hashlib, "sha256", counting)
     planned = store.plan(owner="s1", suggested_name="a", content=b"x" * 64)
     ref = await store.save(planned, source="a")
 
-    assert derived == ["a"]
+    assert hashed == [64]
     assert ref.locator == str(planned.locator)

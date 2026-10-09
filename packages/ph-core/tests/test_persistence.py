@@ -1194,3 +1194,37 @@ def test_a_log_is_found_in_its_lineage_before_every_other_family(
 
     assert locate_under(tmp_path, "lead-child-ab", ".jsonl") == child
     assert len(probed) <= 2, probed
+
+
+async def test_a_reopened_child_is_looked_for_where_its_parent_files_it(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child is filed in its parent's family, and `open_child_log` knows which, so
+    the log a restart reopens is a `stat` there. Opened by id alone it was searched
+    for, and a parent with a cwd is filed under a tagged name the child's id does not
+    carry: every family directory in the store, listed once per child readmitted.
+
+    Sabotage: drop `family` from `open_session`'s lookup, and the store is listed.
+    """
+    from ph.persistence import families
+    from ph.seams.subagents import open_child_log
+    from ph.session import child_session_id
+
+    ctx = await mount(_root(tmp_path))
+    sessions = ctx.require(SESSIONS)
+    parent = sessions.create("lead", meta={"cwd": "/work"})
+    child = sessions.create(child_session_id("lead", "r1"), meta={"parentSession": "lead"})
+    log_event(child, "turn/start", {"turn": 0})
+    assert await sessions.written(child)
+    sessions.dispose(child.id)
+
+    def listed(*_args: object) -> None:
+        raise AssertionError("listed the store for a child whose family was known")
+
+    monkeypatch.setattr(families, "family_dirs", listed)
+    reopened = await open_child_log(ctx, parent, "r1")
+
+    assert reopened.header.family == parent.header.family
+    assert [event.type for event in reopened.events][: len(child.events)] == [
+        event.type for event in child.events
+    ]

@@ -581,7 +581,9 @@ class JsonlSessionStore:
     # `self.root` and rebuilding a filename. A backend with no per-session file
     # answers all four; a backend with one answers them from the filesystem.
 
-    def exists(self, session_id: str) -> bool:
+    def exists(self, session_id: str, *, family: str | None = None) -> bool:
+        if family is not None:
+            return session_path(self.root, session_id, family).is_file()
         return locate_session(self.root, session_id) is not None
 
     def read(
@@ -974,8 +976,10 @@ def _unfinished_batch(events: Sequence[SessionEvent]) -> int:
     return events[-1].seq - ref.first + 1
 
 
-async def resume_session(ctx: Context, session_id: str) -> Session:
+async def resume_session(ctx: Context, session_id: str, *, family: str | None = None) -> Session:
     """Read a stored session, repair a crashed tail, and publish it.
+
+    `family` is `read`'s: where the log is filed, when the caller knows (`open_session`).
 
     The repair runs on the seed rather than after publication, so a resumed
     session is provider-valid the first time anything reads it — an open turn
@@ -988,8 +992,11 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     """
     # Through the Protocol, not through this backend's filename: a store that
     # keeps sessions in a database has no path to build, and `resume_session` is
-    # the one function every host calls to pick work back up.
-    header, events = ctx.require(SESSION_PERSISTENCE).read(session_id)
+    # the one function every host calls to pick work back up. Off the loop, as
+    # `stored_session` reads: a long log is a long read, and the loop is every root's.
+    header, events = await anyio.to_thread.run_sync(
+        partial(ctx.require(SESSION_PERSISTENCE).read, session_id, family=family)
+    )
     calls, intents = await _reconciled(ctx, session_id, header, events)
     closers = interrupted_turn_closers(events, calls, intents=intents)
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))

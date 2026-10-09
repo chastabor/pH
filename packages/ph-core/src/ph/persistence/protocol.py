@@ -324,8 +324,13 @@ class SessionPersistence(SessionArchive, Protocol):
         """Drop what this backend holds in memory for one session."""
         ...
 
-    def exists(self, session_id: str) -> bool:
-        """Whether this backend has a stored log under that id."""
+    def exists(self, session_id: str, *, family: str | None = None) -> bool:
+        """Whether this backend has a stored log under that id.
+
+        `family`, as `read_own` takes it, is where the log is filed, and the answer is
+        for there alone: one `stat`. Without it the log is searched for across the
+        store, so this blocks — call it off the event loop.
+        """
         ...
 
     def locate(self, session_id: str) -> Path | None:

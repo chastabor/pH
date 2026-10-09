@@ -270,7 +270,9 @@ class TursoSessionStore:
 
     # ------------------------------------------------------------- reading --
 
-    def exists(self, session_id: str) -> bool:
+    def exists(self, session_id: str, *, family: str | None = None) -> bool:
+        if family is not None:
+            return session_db(self.root, session_id, family).is_file()
         return locate_db(self.root, session_id) is not None
 
     def read(

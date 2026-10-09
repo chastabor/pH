@@ -1,7 +1,8 @@
 # `ctx.spill_store` — oversized content out of context, with a way back
 
 **Module:** `ph/seams/spill.py` · **Row:** `spill-local` · **Consumers:**
-`tool-result-offload`, `input-offload` (both in `ph-stabilize`)
+`tool-result-offload`, `input-offload` (both in `ph-stabilize`), compaction
+(`ph/seams/compaction.py`), and the kernel snapshot writer (`ph-rlm`)
 
 An offloaded tool result is not deleted, it is **relocated**: the model gets a
 preview and a locator, and the locator resolves to the full text.
@@ -17,8 +18,8 @@ await ctx.spill_store.try_save_text(text, ...)  # -> SpillRef | None
 await ctx.spill_store.save(planned, ...)        # a blob already planned
 await ctx.spill_store.try_save(planned, ...)    # -> SpillRef | None
 await ctx.spill_store.load_text(ref)            # -> str
+await ctx.spill_store.try_save_all(blobs)       # several, one directory sync
 ctx.spill_store.plan(...)                       # the name and the bytes, together
-ctx.spill_store.locator_for(...)                # the name, before the write
 ctx.spill_store.claim(...)
 ```
 
@@ -58,14 +59,11 @@ The blob is durable before any record names it, so the log never names bytes tha
 are not there, and a write that fails does so before anything is logged. A run that
 dies between the two leaves a file nothing names, which the next read collects.
 
-It used to take three steps — reserve the bytes out of the locator's reach, append,
-then commit them into place — because the sweep ran on another task at every open
-and collected a blob caught between its write and its append, often enough to fail
-a test under load. It runs only before a stored session is handed out now, so that
-window is no hazard.
+It used to take three steps — reserve, append, commit; `SpillStore.save` says why it
+no longer does.
 
-`plan` and `locator_for` derive the name a blob will have, for a caller that must
-put it in the wording or the record that points at it before the write.
+`plan` derives the name a blob will have, for a caller that must put it in the
+wording or the record that points at it before the write.
 
 ## Why this is not `ctx.attachments`
 

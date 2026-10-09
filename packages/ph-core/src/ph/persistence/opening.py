@@ -30,6 +30,7 @@ async def open_session(
     ctx: Context,
     session_id: str | None = None,
     *,
+    family: str | None = None,
     meta: Mapping[str, Any] | None = None,
 ) -> Session:
     """Claim a session against every other writer, then resume it or create it (I-5).
@@ -66,14 +67,26 @@ async def open_session(
     reads or a replay has to re-apply. `SessionHeader` validates that `cwd` is
     absolute, so a relative path is refused rather than resolved against this
     process's own working directory, which is not the caller's.
+
+    `family`, when the caller knows where the session is filed — a child's is its
+    parent's (`open_child_log`) — is where it is looked for and where it is created.
+    Exact, as `read` takes it: a child a restart reopens is one `stat` in its
+    parent's directory, where by id alone it was searched for across every family in
+    the store, once per child. A root has none to give, since a fork's family is not
+    in its id, so its log is searched for — off the loop.
     """
     resolved = session_id or new_session_id()
     store = await _claimed(ctx, resolved)
-    resumed = store is not None and store.exists(resolved)
+    resumed = store is not None and await anyio.to_thread.run_sync(
+        partial(store.exists, resolved, family=family)
+    )
     if resumed:
-        session = await resume_session(ctx, resolved)
+        session = await resume_session(ctx, resolved, family=family)
     else:
-        session = ctx.require(SESSIONS).create(resolved, meta=dict(meta) if meta else None)
+        fields = dict(meta or {})
+        if family is not None:
+            fields["family"] = family
+        session = ctx.require(SESSIONS).create(resolved, meta=fields or None)
     # Held from here to its return (`SessionStore.opening`), as `resume_session` held
     # it to here: a session whose children could not be read, or whose start was
     # refused, is let go rather than left in the store for a peer to run on.

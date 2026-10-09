@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ import anyio
 
 from ..cordis import Context, Disposer, plugin
 from ..keys import SPILL_STORE
-from ..paths import default_home_path, write_atomic
+from ..paths import default_home_path, write_atomic, write_atomic_all
 from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
@@ -48,7 +49,7 @@ class PlannedBlob:
     (`SpillStore.plan`), for a caller that must name a blob before storing it.
 
     One value rather than a locator and the bytes apart, for two reasons. The digest
-    is taken **once**: `locator_for` hashes the whole payload, and a caller that
+    is taken **once**: `plan` hashes the whole payload, and a caller that
     derived the locator for its record and then stored the bytes hashed them
     again — a second sha256 of a multi-megabyte tool result on the event loop. And
     the name cannot come apart from what it names: `save` writes *these* bytes at
@@ -133,15 +134,15 @@ class SpillStore:
     def owner_root(self, owner: str) -> Path:
         """Where one owner's blobs live. The other half of the naming rule.
 
-        `locator_for` derives a whole path; a caller that has to answer "is this
+        `plan` derives a whole path; a caller that has to answer "is this
         path one of yours" needs the directory, and reconstructing `root / owner`
         outside this class is how the two spellings drift. `permissions-fs` is
         that caller.
         """
         return self.root / owner
 
-    def locator_for(self, *, owner: str, suggested_name: str, content: bytes) -> Path:
-        """Where `content` will be written — derived, not written.
+    def plan(self, *, owner: str, suggested_name: str, content: bytes) -> PlannedBlob:
+        """Where `content` will go, held with it — `save` writes what this names.
 
         The one home of the naming rule (digest + sanitized name), so a caller
         that must name a blob's locator before storing it — in the wording that
@@ -151,14 +152,7 @@ class SpillStore:
         """
         digest = hashlib.sha256(content).hexdigest()[:16]
         safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
-        return self.owner_root(owner) / f"{digest}-{safe}"
-
-    def plan(self, *, owner: str, suggested_name: str, content: bytes) -> PlannedBlob:
-        """Where `content` will go, held with it — `save` writes what this names."""
-        return PlannedBlob(
-            self.locator_for(owner=owner, suggested_name=suggested_name, content=content),
-            content,
-        )
+        return PlannedBlob(self.owner_root(owner) / f"{digest}-{safe}", content)
 
     async def save(self, planned: PlannedBlob, *, source: str) -> SpillRef:
         """Write `planned` at its locator, durably, and return its reference.
@@ -180,11 +174,7 @@ class SpillStore:
         (`_write`).
         """
         await anyio.to_thread.run_sync(_write, planned.locator, planned.content)
-        return SpillRef(
-            locator=str(planned.locator),
-            bytes=len(planned.content),
-            retrieval_hint=f'read the file at "{planned.locator}" for the full {source}',
-        )
+        return _ref(planned, source)
 
     async def save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
@@ -216,6 +206,33 @@ class SpillStore:
             ),
             what=f"{owner}/{suggested_name}",
         )
+
+    async def try_save_all(self, blobs: Sequence[tuple[PlannedBlob, str]]) -> list[SpillRef | None]:
+        """`try_save` for several blobs one batch of records will name, in order.
+
+        For a producer that names more than one blob at once — a kernel cell's
+        variables, which all live under one owner. One thread hop writes them all,
+        each file synced as `save` syncs it, and their directory is synced **once**
+        rather than once per blob (`write_atomic_all`), so a cell that spills K
+        variables costs one directory sync rather than K. The records come after
+        this returns, so every blob is durable before anything names it.
+
+        A blob that could not be written answers `None`, for the producer to record as
+        it would a refused `try_save`.
+        """
+        failures = await anyio.to_thread.run_sync(
+            partial(
+                write_atomic_all,
+                [(planned.locator, planned.content) for planned, _ in blobs],
+                skip_if_present=True,
+            )
+        )
+        refs: list[SpillRef | None] = []
+        for (planned, source), failure in zip(blobs, failures, strict=True):
+            if failure is not None:
+                _refused(str(planned.locator), failure)
+            refs.append(_ref(planned, source) if failure is None else None)
+        return refs
 
     async def load_text(self, locator: str) -> str:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_text(encoding="utf-8"))
@@ -340,9 +357,23 @@ async def _fail_open(saving: Awaitable[SpillRef], *, what: str) -> SpillRef | No
     """`saving`'s ref, or `None` having said why — the `try_save*` rule, once."""
     try:
         return await saving
-    except Exception:
-        log.warning("ph.seams.spill: could not spill %s", what, exc_info=True)
+    except Exception as error:
+        _refused(what, error)
         return None
+
+
+def _refused(what: str, error: BaseException) -> None:
+    """Say why a blob was not spilled."""
+    log.warning("ph.seams.spill: could not spill %s", what, exc_info=error)
+
+
+def _ref(planned: PlannedBlob, source: str) -> SpillRef:
+    """The reference a written blob is named by in a record."""
+    return SpillRef(
+        locator=str(planned.locator),
+        bytes=len(planned.content),
+        retrieval_hint=f'read the file at "{planned.locator}" for the full {source}',
+    )
 
 
 def _write(path: Path, payload: bytes) -> None:

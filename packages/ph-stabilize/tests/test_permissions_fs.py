@@ -954,17 +954,17 @@ async def test_a_spilled_result_is_readable_but_not_writable(
     store = ctx.require(SPILL_STORE)
     session = agent.session
     assert session is not None
-    spilled = store.locator_for(
+    spilled = store.plan(
         owner=session.id, suggested_name="large_tool_results/call-7", content=b"x"
-    )
+    ).locator
 
     assert permissions.objection("read", spilled, agent=agent) is None
     assert permissions.objection("write", spilled, agent=agent) is not None
     # Another session's blob is not this agent's to follow — the exemption is the
     # paths it was handed, not the store.
-    other = store.locator_for(
+    other = store.plan(
         owner="s-someone-else", suggested_name="large_tool_results/call-7", content=b"x"
-    )
+    ).locator
     assert permissions.objection("read", other, agent=agent) is not None
     # And the rule still bites everywhere else, so this is an exemption rather
     # than the scope being switched off.
@@ -1012,9 +1012,9 @@ async def test_every_row_that_hands_the_model_a_path_is_exempt(
     session = agent.session
     assert session is not None
     store = ctx.require(SPILL_STORE)
-    history = store.locator_for(
+    history = store.plan(
         owner=session.id, suggested_name="conversation_history/1.md", content=b"x"
-    )
+    ).locator
 
     assert ctx.require(FS_PERMISSIONS).objection("read", history, agent=agent) is None
 

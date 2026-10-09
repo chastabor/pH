@@ -981,17 +981,19 @@ async def open_child_log(
     filed the way its parent finds it by (Phase 11).
 
     The id is its parent's with its run's after (`child_session_id`), and the header
-    names the parent and says it is a sub-agent, with its parent's family, since the
-    store files a child with its parent only while the parent is live in it. Every
+    names the parent and says it is a sub-agent. Its family is its parent's, given
+    rather than inherited, since the store files a child with its parent only while
+    the parent is live in it — and given to `open_session`, which looks for a log
+    that survived there rather than across the store. Every
     provider opens its children here, so none can name one a restart would not find;
     `meta` adds what a provider says of its own (`agentPreset`).
     """
     return await open_session(
         ctx,
         child_session_id(parent.id, run_id),
+        family=parent.header.family,
         meta={
             "parentSession": parent.id,
-            "family": parent.header.family,
             "origin": "subagent",
             "delegationDepth": (parent.header.delegation_depth or 0) + 1,
             **meta,
@@ -1586,7 +1588,9 @@ class SubagentService:
         store = self.ctx.get(SESSION_PERSISTENCE)
         state = self.state(session_id)
         family = state.family if state is not None else None
-        if store is None or (family is None and not store.exists(session_id)):
+        if store is None or (
+            family is None and not await anyio.to_thread.run_sync(store.exists, session_id)
+        ):
             return
         try:
             child = await stored_session(self.ctx, session_id, family=family)

@@ -1134,9 +1134,11 @@ async def test_a_read_given_its_family_does_not_search_for_the_log(
 ) -> None:
     """A listing row carries its family, and a read handed it reads a path. Without
     it the log was searched for across every family directory — per row, so a
-    listing's reads cost the size of the store times the rows it holds.
+    listing's reads cost the size of the store times the rows it holds. Asking
+    whether it is there is the same `stat`.
 
-    Sabotage: drop `family` from `materialize`'s first read, and the search runs.
+    Sabotage: drop `family` from `materialize`'s first read, or from `exists`, and the
+    search runs.
     """
     from ph.persistence import jsonl, turso
 
@@ -1151,6 +1153,8 @@ async def test_a_read_given_its_family_does_not_search_for_the_log(
     monkeypatch.setattr(jsonl, "locate_under", searched)
     monkeypatch.setattr(turso, "locate_under", searched)
 
+    assert store.exists("rooted", family=session.header.family)
+    assert not store.exists("rooted", family="elsewhere")
     _header, events = store.read("rooted", family=session.header.family)
 
     assert [event.type for event in events] == [event.type for event in session.events]

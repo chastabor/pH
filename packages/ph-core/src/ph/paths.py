@@ -40,6 +40,7 @@ import os
 import secrets
 import stat
 import sys
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +54,6 @@ __all__ = [
     "canonical",
     "default_cache_path",
     "default_home_path",
-    "holds",
     "is_under",
     "make_directories",
     "replace_durably",
@@ -61,6 +61,7 @@ __all__ = [
     "sync_directory",
     "write_all",
     "write_atomic",
+    "write_atomic_all",
     "write_text_under",
 ]
 
@@ -479,16 +480,66 @@ def write_atomic(
     `$PH_RUNTIME` at 0700 — is ensured by its owner first; `PathRoots.ensure()` is
     still the one place that happens.
     """
+    written = _write_file(
+        path, payload, skip_if_present=skip_if_present, durable=durable, preserve=preserve
+    )
+    if written is not None and durable:
+        sync_directory(written.parent)
+
+
+def write_atomic_all(
+    items: Iterable[tuple[Path, bytes]], *, skip_if_present: bool = False
+) -> list[OSError | None]:
+    """`write_atomic`, durable, for several files — **each directory synced once**.
+
+    For a producer that names several files in one batch of records: a kernel cell's
+    variables, all under one owner (`SpillStore.try_save_all`). Each file is synced
+    as `write_atomic` syncs it, and the directories they went into are synced after
+    the last of them, once each rather than once per file. None of the renames is
+    durable until this returns, so nothing may name a file before it does.
+
+    One file at a time, on the calling thread. A file that could not be written
+    answers its error in its place, and the rest are still written; every other
+    answers `None`. One `skip_if_present` left alone dirtied no directory, and costs
+    no sync.
+    """
+    failures: list[OSError | None] = []
+    directories: dict[Path, None] = {}
+    for path, payload in items:
+        try:
+            written = _write_file(path, payload, skip_if_present=skip_if_present)
+        except OSError as error:
+            failures.append(error)
+            continue
+        failures.append(None)
+        if written is not None:
+            directories[written.parent] = None
+    for directory in directories:
+        sync_directory(directory)
+    return failures
+
+
+def _write_file(
+    path: Path,
+    payload: bytes | str,
+    *,
+    skip_if_present: bool,
+    durable: bool = True,
+    preserve: bool = False,
+) -> Path | None:
+    """`write_atomic` up to its directory's sync, which is the caller's: the path it
+    wrote, through a link for `preserve`, or `None` when `skip_if_present` left the
+    file be."""
     data = payload.encode("utf-8") if isinstance(payload, str) else payload
     mode: int | None = None
     if preserve:
         path = canonical(path)
         with suppress(FileNotFoundError):
             mode = stat.S_IMODE(path.stat().st_mode)
-    if skip_if_present and holds(path, len(data)):
+    if skip_if_present and _holds(path, len(data)):
         with suppress(OSError):
             os.utime(path)
-        return
+        return None
     if durable:
         make_directories(path.parent)
     else:
@@ -508,8 +559,7 @@ def write_atomic(
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
-    if durable:
-        sync_directory(path.parent)
+    return path
 
 
 def replace_durably(source: Path, target: Path) -> None:
@@ -562,7 +612,7 @@ def make_directories(directory: Path) -> None:
         sync_directory(one.parent)
 
 
-def holds(path: Path, size: int) -> bool:
+def _holds(path: Path, size: int) -> bool:
     """Whether `path` is a regular file of exactly `size` bytes — for a
     content-addressed name, whether it already holds the bytes it names."""
     try:

@@ -136,7 +136,7 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 """What a session id may be (K9).
 
 **A session id becomes a directory name in several stores**, and none of them
-re-checks it: `SpillStore.locator_for` joins it onto the spill root — and
+re-checks it: `SpillStore.plan` joins it onto the spill root — and
 `sweep_session` unlinks unreferenced files under whatever that resolves to — the
 session archive names a file after it, and the workspace scratch root is
 `<scratch>/<session>/<agent>`. Every one of them sanitizes the *other* half of

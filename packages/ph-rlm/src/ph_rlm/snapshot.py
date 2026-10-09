@@ -43,13 +43,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeAlias
 
-import anyio
-
 from ph.cordis import Context, plugin
 from ph.json import as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.seams.compaction import CompactionNote
-from ph.seams.spill import PlannedBlob, SpillClaim, SpillStore
+from ph.seams.spill import PlannedBlob, SpillClaim
 from ph.session import Session
 from ph.session.writers import log_writer
 from ph.wire import WireModel
@@ -187,8 +185,9 @@ class KernelSnapshotPolicy:
 
         In the log, not yet on disk: the next request's barrier puts the records on
         disk before the model reads the cell's result, and a blob is durable before
-        any record naming it is. The blobs are written concurrently: each is a thread
-        hop and an `fsync` or two, and the guest's `done` waits on all of them.
+        any record naming it is. The blobs are written together (`try_save_all`):
+        one thread hop, each file synced, and their one directory synced once rather
+        than once per variable — the guest's `done` waits on all of it.
         """
         session = self._session(namespace)
         if session is None:
@@ -199,20 +198,16 @@ class KernelSnapshotPolicy:
         if not encoded:
             return
         spill = self.ctx.get(SPILL_STORE)
-        failed: set[int] = set()
-
-        async def save(store: SpillStore, index: int, var: str, blob: PlannedBlob) -> None:
-            if await store.try_save(blob, source=f"kernel variable {var}") is None:
-                failed.add(index)
-
-        async with anyio.create_task_group() as group:
-            for index, (record, blob) in enumerate(encoded):
-                # A blob comes back only when a store is mounted to take it.
-                if spill is not None and blob is not None:
-                    group.start_soon(save, spill, index, record.var, blob)
+        # A blob comes back only when a store is mounted to take it.
+        blobs = [
+            (blob, f"kernel variable {record.var}") for record, blob in encoded if blob is not None
+        ]
+        saved = iter(
+            await spill.try_save_all(blobs) if spill is not None and blobs else [None] * len(blobs)
+        )
         with session.batch() as batch:
-            for index, (record, _blob) in enumerate(encoded):
-                if index in failed:
+            for record, blob in encoded:
+                if blob is not None and next(saved) is None:
                     record = SnapshotRecord(
                         kind="clear",
                         var=record.var,
