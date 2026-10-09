@@ -68,28 +68,29 @@ async def open_session(
     """
     resolved = session_id or new_session_id()
     store = await _claimed(ctx, resolved)
-    if store is not None and store.exists(resolved):
+    resumed = store is not None and store.exists(resolved)
+    if resumed:
         session = await resume_session(ctx, resolved)
-        # Its children, from their own logs (Phase 11): a resumed session's family is
-        # on disk, not in its log, so it is read as the session opens — on every host,
-        # not only where a daemon's sweep would have read it.
-        subagents = ctx.get(SUBAGENTS)
-        if subagents is not None:
-            await subagents.load_children(session.id, session.header.family)
     else:
         session = ctx.require(SESSIONS).create(resolved, meta=dict(meta) if meta else None)
-    # The environment it starts in, before anything runs in it (S3): here, because
-    # this is the door every root comes through, and a root from before the record
-    # gets its first on the way in.
-    # Then this start's own options, logged where they differ, and the mount brought
-    # to what the log says (S4) — `opened` is the whole of it, in that order. A start
-    # it refuses lets the session go, and with it the records it refused to follow:
-    # left in the store, a peer that asked again ran on the start it was refused.
-    try:
+    # Held from here to its return (`SessionStore.opening`), as `resume_session` held
+    # it to here: a session whose children could not be read, or whose start was
+    # refused, is let go rather than left in the store for a peer to run on.
+    async with ctx.require(SESSIONS).opening(session):
+        if resumed:
+            # Its children, from their own logs (Phase 11): a resumed session's family
+            # is on disk, not in its log, so it is read as the session opens — on
+            # every host, not only where a daemon's sweep would have read it.
+            subagents = ctx.get(SUBAGENTS)
+            if subagents is not None:
+                await subagents.load_children(session.id, session.header.family)
+        # The environment it starts in, before anything runs in it (S3): here, because
+        # this is the door every root comes through, and a root from before the record
+        # gets its first on the way in. Then this start's own options, logged where
+        # they differ, and the mount brought to what the log says (S4) — `opened` is
+        # the whole of it, in that order. A start it refuses lets the session go, and
+        # with it the records it refused to follow.
         await opened(ctx, session)
-    except BaseException:
-        ctx.require(SESSIONS).dispose(session.id)
-        raise
     return session
 
 
@@ -118,8 +119,8 @@ async def stored_session(ctx: Context, session_id: str) -> Session:
     header, events = await anyio.to_thread.run_sync(store.read, session_id)
     stored = Session(session_id, seed=events, header=header, durable=len(events))
     sessions = ctx.require(SESSIONS)
-    session = sessions.adopt(stored)
-    await sessions.loaded(session)
+    async with sessions.opening(sessions.adopt(stored)) as session:
+        await sessions.loaded(session)
     return session
 
 

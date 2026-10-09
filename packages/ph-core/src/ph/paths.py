@@ -37,7 +37,6 @@ is the one place directories are created, with the mode each tier requires.
 from __future__ import annotations
 
 import os
-import re
 import secrets
 import stat
 import sys
@@ -55,7 +54,6 @@ __all__ = [
     "default_cache_path",
     "default_home_path",
     "holds",
-    "is_atomic_temp",
     "is_under",
     "make_directories",
     "replace_durably",
@@ -409,20 +407,6 @@ def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
 
 
 _TEMP_SUFFIX_BYTES = 4
-_ATOMIC_TEMP = re.compile(rf".+\.[0-9a-f]{{{_TEMP_SUFFIX_BYTES * 2}}}\.tmp")
-"""`write_atomic`'s temp name — `<name>.<hex>.tmp` — built from the same width."""
-
-
-def is_atomic_temp(path: Path) -> bool:
-    """Whether `path` is a `write_atomic` temp: a write in flight, or one a crash left.
-
-    The two cannot be told apart from the file, which is the point of asking. A
-    sweep that collects unreferenced files must pass these over, or it deletes
-    the temp of a write that is running *now* and the rename fails (D17) — the
-    same reason nothing in `spill`'s `.staging` is ever collected. The cost is
-    the same leak, one file per write a kill interrupted.
-    """
-    return _ATOMIC_TEMP.fullmatch(path.name) is not None
 
 
 def write_atomic(

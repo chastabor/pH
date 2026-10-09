@@ -1438,7 +1438,7 @@ class ToolRuntime:
                 replacement = None
             if replacement is not None:
                 result = replace(result, content=tuple(replacement))
-        self.ctx.emit("tools/result", run.execution, result, scope=run.scope, contained=True)
+        self.ctx.emit("tools/result", run.execution, result, scope=run.scope)
         return result
 
 

@@ -1826,28 +1826,27 @@ class Context:
         target = scope if scope is not None else self
         return [hook for hook in hooks if hook.global_ or hook.ctx.reaches(target)]
 
-    def emit(
-        self,
-        event: str,
-        *args: object,
-        scope: Context | None = None,
-        contained: bool = False,
-    ) -> None:
+    def emit(self, event: str, *args: object, scope: Context | None = None) -> None:
         """Dispatch synchronously, ignoring listener return values.
 
         A listener that returns a coroutine is scheduled and not awaited, which
-        is cordis's behavior. A listener that raises stops the dispatch unless
-        `contained=True`, which logs the failure and continues — the mode a
-        producer uses when the event records something that already happened
-        and no listener may un-happen it.
+        is cordis's behavior. **A listener that raises is logged, and the dispatch
+        goes on**: an emitted event records something that already happened, so no
+        listener may un-happen it, nor keep the listeners after it from hearing it.
+        A listener that must be able to refuse belongs on a `serial` or `waterfall`
+        event, which is where every refusal in the tree already lives.
+
+        **The mode's rule, not each producer's.** It was a `contained=True` each
+        producer passed, and about half of them never did: a raising listener on
+        `agent/created` left `AgentRegistry.create` raising over an agent it had
+        already registered, and one on `session/created` did the same to a
+        published session.
         """
         event_registry.check(event, "emit")
         for hook in self._hooks(event, scope=scope):
             try:
                 result = _invoke(hook, *args)
             except Exception:
-                if not contained:
-                    raise
                 log.exception("ph.cordis: %s listener failed", event)
                 continue
             if result is not None and inspect.isawaitable(result):

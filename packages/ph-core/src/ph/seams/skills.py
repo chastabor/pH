@@ -1101,11 +1101,9 @@ async def progressive(ctx: Context, config: Config) -> None:
         # belongs to `tool-todo` — which lives in ph-stabilize, a package this
         # seam cannot import and a row a deployment may not have mounted. The
         # event is how the declaration crosses that boundary without ph-core
-        # growing an opinion about plans (P7-18).
-        # `contained`, for the mode's own stated reason: the body is rendered and
-        # about to be returned, so no listener may un-read it — and without this a
-        # raise inside `skill-steps` turns a successful read into a failed tool
-        # call in every deployment that mounts both.
+        # growing an opinion about plans (P7-18). An `emit`, so a raise inside
+        # `skill-steps` is logged rather than un-reading a body that is rendered and
+        # about to be returned.
         ctx.emit(
             "skills/read",
             {
@@ -1114,7 +1112,6 @@ async def progressive(ctx: Context, config: Config) -> None:
                 "max_nudges": skill.max_nudges,
                 "session": run.session,
             },
-            contained=True,
         )
         return {
             "name": skill.name,

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from ph.json import JsonObject, JsonValue, as_obj, as_seq
-from ph.keys import SESSIONS
+from ph.keys import SESSIONS, SUBAGENTS
 from ph.session_profile import (
     ADOPTED,
     BASE,
@@ -42,7 +42,7 @@ from ph.session_profile import (
     saved_base,
     switch_base,
 )
-from ph.testing import MountProfile, log_event, not_none, stored_events, unwritten
+from ph.testing import MountProfile, log_event, not_none, raising, stored_events, unwritten
 
 pytestmark = pytest.mark.anyio
 
@@ -186,8 +186,8 @@ async def test_a_start_its_environment_refuses_leaves_no_session(
     follow with it. Left in the store, an rpc peer that asked again ran on the very
     start it had been refused.
 
-    Sabotage: drop the dispose from `open_session`, and the refused session is still
-    in the store.
+    Sabotage: drop the `opening` span from `open_session`, and the refused session is
+    still in the store.
     """
     from ph.persistence import open_session
 
@@ -200,6 +200,34 @@ async def test_a_start_its_environment_refuses_leaves_no_session(
     with pytest.raises(OverrideNotRecorded):
         await open_session(ctx, "refused")
     assert ctx.require(SESSIONS).get("refused") is None
+
+
+async def test_a_resume_whose_children_cannot_be_read_leaves_no_session(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same for the step before it. A resumed session reads its family from disk
+    once it is in the store, and that read sat outside the guard: one that raised left
+    the session published and nothing would ever let it go.
+
+    Sabotage: move `load_children` back out of the `opening` span in `open_session`,
+    and the session is still in the store.
+    """
+    from ph.persistence import open_session
+
+    ctx = await mount()
+    sessions = ctx.require(SESSIONS)
+    stored = sessions.create("resumed")
+    assert await sessions.written(stored)
+    sessions.dispose(stored.id)
+    monkeypatch.setattr(
+        type(ctx.require(SUBAGENTS)),
+        "load_children",
+        raising(OSError("the children's logs could not be read")),
+    )
+
+    with pytest.raises(OSError, match="could not be read"):
+        await open_session(ctx, "resumed")
+    assert sessions.get("resumed") is None
 
 
 def test_the_listing_says_each_setting_s_old_and_new_value_and_whose_it_is() -> None:

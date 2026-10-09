@@ -2494,32 +2494,24 @@ async def apply(ctx: Context, config: Config) -> None:
 async def reconcile(ctx: Context, config: None) -> None:
     """Run the seam's reconciliation whenever a stored session is read (F6).
 
-    **On `session/loaded`, which the reader awaits** (`SessionStore.loaded`), so a
-    session is handed out with its crash already settled. It was `session/created`,
-    an `emit`, and so detached: reconciliation runs `git` per leaked tree, and its
-    `workspace/disposed` records landed wherever it happened to finish — after the
-    session had been handed out and its agent had started — bounded only by
-    `ctx.drain()`.
+    **On `session/loaded`, which the reader awaits** (`SessionStore.loaded` says why
+    not `session/created`), so a session is handed out with its crash already settled
+    and its `workspace/disposed` records ahead of anything the new start writes.
 
-    **A reconciliation that raises refuses neither the open nor this row.** A tree git
-    cannot remove and a log that cannot be written are answered inside the seam
-    (`_reclaim`, `session_written`); what still raises is a bug, and a session nobody
-    can open because its last run's housekeeping hit one would be the worse failure.
-    Logged, as the detached task's failure was.
+    A tree git cannot remove and a log that cannot be written are answered inside the
+    seam (`_reclaim`, `session_written`), so what still raises is a bug — and the
+    reader logs it rather than refusing the open (`SessionStore.loaded`).
     """
     seam = ctx.require(WORKSPACE)
-
-    async def settle(session: Session) -> None:
+    # Catch-up, for the reason `session-persistence-jsonl` does the same: a row
+    # activated after sessions already exist owes them what a loaded one gets — and
+    # a failure is logged, as the reader would log it, rather than taking the row down.
+    for session in ctx.require(SESSIONS).list():
         try:
             await seam.reconcile(session)
         except Exception:
             log.exception("ph.seams.workspace: could not reconcile %s", session.id)
-
-    # Catch-up, for the reason `session-persistence-jsonl` does the same: a row
-    # activated after sessions already exist owes them what a loaded one gets.
-    for session in ctx.require(SESSIONS).list():
-        await settle(session)
-    ctx.on("session/loaded", settle)
+    ctx.on("session/loaded", seam.reconcile)
 
 
 @plugin("workspace-checkpoint", affects="environment", inject=[TOOLS, WORKSPACE])

@@ -514,14 +514,15 @@ def test_a_non_string_parameter_renders_as_its_value(tmp_path: Path) -> None:
 async def test_a_listener_that_fails_does_not_fail_the_read(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A skill read cannot be un-read, which is what `contained=` is for.
+    """A skill read cannot be un-read, which is why `skills/read` is an `emit`.
 
     The body is rendered and about to be returned by the time the event fires, so
     no listener may object to it — and without containment a raise inside
     `skill-steps` turns a successful `skill` call into a failed one in every
     deployment that mounts both.
 
-    Sabotage: drop `contained=True` and the tool call below is an error.
+    Sabotage: re-raise in `Context.emit`'s `except`, and the tool call below is an
+    error.
     """
 
     def unhappy(_payload: object) -> None:

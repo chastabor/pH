@@ -19,7 +19,6 @@ await ctx.spill_store.save_text(text, ...)         # -> SpillRef, unordered
 await ctx.spill_store.load_text(ref)               # -> str
 ctx.spill_store.locator_for(...)                   # the name, before the write
 ctx.spill_store.claim(...)
-await ctx.spill_store.sweep_session(session_id)
 ```
 
 A `SpillRef` is three fields, and the third is the interesting one:
@@ -44,9 +43,10 @@ when it answers `None` — nothing has been logged yet.
 A blob is garbage exactly when the log does not name it. That is what makes the
 sweep below safe, and it is a promise about **ordering** that only producers can
 keep: one that writes the file first and appends the locator second leaves its
-own blob indistinguishable from garbage for as long as that takes, and the sweep
-runs on another task. It collected a live history file often enough to fail a
-test under load.
+own blob indistinguishable from garbage for as long as that takes. While the sweep
+ran on another task at every open, it collected a live history file often enough
+to fail a test under load; it now runs only before a stored session is handed out,
+and the ordering is what lets a run that died midway be finished (below).
 
 So a producer that records a locator writes in two steps:
 
@@ -60,9 +60,9 @@ session.append("offload/spilled", {"callId": call_id, "locator": ref.locator})
 await ctx.spill_store.commit(ref)  # the blob appears, already named
 ```
 
-`reserve` stages the bytes where the sweep does not look; `commit` is a rename
-within the owner's directory, so the blob appears whole, at a locator the log
-already names, or not at all. `save_text` remains for a caller with no log entry
+`reserve` stages the bytes under the owner's `.staging`, where no locator reaches
+them; `commit` is a rename within the owner's directory, so the blob appears whole,
+at a locator the log already names, or not at all. `save_text` remains for a caller with no log entry
 to keep in step — a test planting a blob, or a producer that appends nothing.
 
 `locator_for` is the derivation underneath both, public for the same reason:
@@ -86,10 +86,16 @@ own seam and does **not** participate in this sweep.
 
 ## Collection
 
-`sweep_session(session_id)` runs at session open — the per-owner sweep F7
-describes. It is safe to be automatic *because* a spill has an owner: the session
-that produced it. That is exactly the property an attachment lacks, which is why
-its collection is a command a person runs.
+The sweep runs when a stored session is read, awaited before the session is handed
+out (`session/loaded`) — the per-owner sweep F7 describes. It is
+safe to be automatic *because* a spill has an owner: the session that produced it.
+That is exactly the property an attachment lacks, which is why its collection is a
+command a person runs.
+
+It is also the repair. A blob the log names that is still staged — a run that died
+between the append and `commit` — is published; a stage nothing names, or a
+`write_atomic` temp a kill left behind, is collected. Both rest on nothing writing
+the session while it runs, which is why it has one caller and a test that says so.
 
 ## The row
 

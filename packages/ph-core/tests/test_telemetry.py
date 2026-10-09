@@ -260,7 +260,7 @@ async def test_one_copy_of_a_log_cannot_release_another(mount: MountProfile) -> 
     new = sessions.adopt(Session("s", header=SessionHeader(id="s", created_at=1)))
     started = log_event(new, "turn/start", {"turn": 1})
 
-    ctx.emit("session/durable", old, new.seq, contained=True)
+    ctx.emit("session/durable", old, new.seq)
     await anyio.wait_all_tasks_blocked()
     assert _ledger(seen, "s") == []
 

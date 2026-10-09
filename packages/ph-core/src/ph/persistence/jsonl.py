@@ -999,26 +999,27 @@ async def resume_session(ctx: Context, session_id: str) -> Session:
     # exists" dropped them and left a gap in the seq space, which `_readmit`
     # refuses — so the session resumed once and never again. Said here because
     # this is the only place that knows the difference.
-    session = ctx.require(SESSIONS).adopt(revived)
-    # Recorded, not just returned. A resume is a fact about *provenance* — this
-    # process picked up work somebody else started — and it is not derivable
-    # from anything else in the log: a session that was reopened and one that
-    # ran straight through look identical afterwards. It matters most where
-    # nobody is watching, which is the daemon and a cron-started agent, and it
-    # is what lets `phern doctor`, a trajectory reader or a person scrolling back
-    # find the seam. One event per reopen, not per turn.
-    _LOG.append(
-        session,
-        "session/resumed",
-        {
-            "events": len(events),
-            "interrupted": bool(closers),
-            "closed": len(closers),
-        },
-    )
-    # After the resume is recorded and before anyone holds the session: what a log
-    # read off disk owes, a crash's leaked trees among it (`SessionStore.loaded`).
-    await ctx.require(SESSIONS).loaded(session)
+    sessions = ctx.require(SESSIONS)
+    async with sessions.opening(sessions.adopt(revived)) as session:
+        # Recorded, not just returned. A resume is a fact about *provenance* — this
+        # process picked up work somebody else started — and it is not derivable
+        # from anything else in the log: a session that was reopened and one that
+        # ran straight through look identical afterwards. It matters most where
+        # nobody is watching, which is the daemon and a cron-started agent, and it
+        # is what lets `phern doctor`, a trajectory reader or a person scrolling
+        # back find the seam. One event per reopen, not per turn.
+        _LOG.append(
+            session,
+            "session/resumed",
+            {
+                "events": len(events),
+                "interrupted": bool(closers),
+                "closed": len(closers),
+            },
+        )
+        # After the resume is recorded and before anyone holds the session: what a
+        # log read off disk owes, a crash's leaked trees among it.
+        await sessions.loaded(session)
     return session
 
 

@@ -174,7 +174,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # **The accounting and the replacement it describes, in one batch**
         # (S14), and both before the blob appears at `ref.locator` — the ordering
         # the open-time sweep depends on: a file on disk that the log does not
-        # name is garbage by definition, and the sweep runs on another task.
+        # name is garbage by definition.
         # Apart, a flush between them landed the record with no replacement, and
         # a resumed session never offloaded the paste again.
         with session.batch() as batch:

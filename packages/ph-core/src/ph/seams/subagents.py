@@ -115,6 +115,7 @@ __all__ = [
     "INTERRUPTED_DETAIL",
     "MAX_NAME_CHARS",
     "PARENT_TEARDOWN",
+    "REVOKING_AT_ONCE",
     "SETTLED_STATUSES",
     "STATUS",
     "SUSPENDED_DETAIL",
@@ -246,6 +247,16 @@ PARENT_TEARDOWN = "parent-teardown"
 unwound under it, or — found on a restart — its parent had ended and left it
 unfinished. One reason for both, because they are one event: the second is the first,
 completed by the next process where the crash cut it short."""
+
+
+REVOKING_AT_ONCE = 8
+"""How many descendants' logs `_revoke_beneath` opens at a time.
+
+Bounded because each holds its whole log in memory until its tombstone is written,
+and takes a worker thread to read it, sweep it and flush it — from the limiter
+every root in the process shares, so an unbounded family walk would queue other
+roots' file reads and flushes behind it. Eight overlaps the waits worth overlapping
+(a `git` reconcile, an `fsync`) without either."""
 
 
 SUSPENDED_DETAIL = (
@@ -2124,21 +2135,39 @@ class SubagentService:
         child's ending and its children's left behind. Left alone, such a descendant
         reads as working for good: nothing readmits a child beneath one that ended, so
         it held its root out of passivation and asked for a credential it would never
-        use. Every level in one walk (`family`), one log at a time, best effort.
+        use. Every level in one walk (`family`), best effort.
+
+        **The logs concurrently.** Each is opened through `stored_session`, which
+        settles what reading it owes before the write (`SessionStore.loaded`) — a
+        spill sweep and a workspace reconcile, `git` per leaked tree — and one at a
+        time a restart paid that back to back for every descendant. Nothing orders
+        one log's tombstone against another's, and a crash midway leaves each
+        revoked or not, for the next start to finish the same way.
         """
-        for state in self.family(session_id):
-            if not child_is_live(state) or state.run_id in self._runs:
-                continue
+        pending = [
+            state
+            for state in self.family(session_id)
+            if child_is_live(state) and state.run_id not in self._runs
+        ]
+
+        limiter = anyio.CapacityLimiter(REVOKING_AT_ONCE)
+
+        async def revoke(state: ChildState) -> None:
             try:
-                await self._write_child(
-                    state.session_id,
-                    lambda child: _tombstone(self.ctx, child, PARENT_TEARDOWN),
-                )
+                async with limiter:
+                    await self._write_child(
+                        state.session_id,
+                        lambda child: _tombstone(self.ctx, child, PARENT_TEARDOWN),
+                    )
             except Exception:
                 log.exception(
                     "ph.seams.subagents: %s could not be revoked beneath its ended parent",
                     state.session_id,
                 )
+
+        async with anyio.create_task_group() as group:
+            for state in pending:
+                group.start_soon(revoke, state)
 
     async def _sweep_readmitted(self, run: SubagentRun, *, retry_limit: int) -> None:
         """A readmitted child's own children, swept as its parent's were (L5b), and

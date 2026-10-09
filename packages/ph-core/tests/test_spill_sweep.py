@@ -29,18 +29,20 @@ dispatches by type in a single pass and runs the whole sweep on a worker thread:
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 from pathlib import Path
 
-import anyio.from_thread
 import pytest
+from workspace_layout import parsed_modules
 
 from ph.cordis import Context
+from ph.keys import SESSIONS, SPILL_STORE
 from ph.seams import spill as spill_module
 from ph.seams.spill import SpillClaim, SpillRef, SpillStore
 from ph.session import Session, SessionStore
-from ph.testing import log_event
+from ph.testing import MountProfile, log_event
 
 pytestmark = pytest.mark.anyio
 
@@ -152,106 +154,6 @@ async def test_a_fork_does_not_sweep_a_directory_it_only_inherited(tmp_path: Pat
     assert Path(later.locator).exists(), "the fork deleted its parent's blob"
 
 
-async def test_a_blob_committed_while_the_sweep_runs_is_kept(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """S7 — the log was folded once and the directory listed later.
-
-    The sweep runs off the loop while producers go on appending, so a blob reserved,
-    named and committed between the two was in the listing and not in the fold, and
-    was deleted under the record naming it. Reproduced exactly: the commit lands
-    after the fold and before the listing.
-
-    Sabotage: fold only the snapshot taken before the listing, and the blob is gone.
-    """
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(_claim("tool-result-offload", session.id, SPILLED))
-    late = store.locator_for(owner=session.id, suggested_name="late", content=b"late")
-    listing = spill_module._collectable
-
-    def committed_then_listed(directory: Path) -> list[Path]:
-        _named(session, SPILLED, str(late))
-        late.parent.mkdir(parents=True, exist_ok=True)
-        late.write_bytes(b"late")
-        return listing(directory)
-
-    monkeypatch.setattr(spill_module, "_collectable", committed_then_listed)
-
-    assert await store.sweep_session(session) == []
-    assert late.exists(), "the sweep deleted a blob the log named by the time it looked"
-
-
-async def test_a_directory_first_named_while_the_sweep_runs_is_left_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The tail read after the listing adds references, never owners.
-
-    A record appended while the sweep lists can name a directory the listing never
-    visited — a kernel's first snapshot in a new namespace — and there is nothing of
-    it to collect this time round. Adding it as an owner asked for a listing that
-    was never taken, and the sweep failed.
-
-    Sabotage: let the tail fold add owners, and the sweep raises `KeyError`.
-    """
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(
-        SpillClaim(
-            label="rlm-kernel-snapshot",
-            event_type=KERNEL,
-            owner=lambda data: str(data["namespace"]),
-            locator=lambda data: str(data["locator"]),
-        )
-    )
-    first = await store.save_text(owner="kernel/a", source="v", suggested_name="a", content="a")
-    log_event(session, KERNEL, {"namespace": "kernel/a", "locator": first.locator})
-    listing = spill_module._collectable
-
-    def named_a_new_owner_then_listed(directory: Path) -> list[Path]:
-        log_event(session, KERNEL, {"namespace": "kernel/b", "locator": "unwritten"})
-        return listing(directory)
-
-    monkeypatch.setattr(spill_module, "_collectable", named_a_new_owner_then_listed)
-
-    assert await store.sweep_session(session) == []
-
-
-async def test_a_write_in_flight_survives_a_sweep(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """D17 — a session opening mid-write deleted the write's temp.
-
-    `save_bytes` writes `<name>.<hex>.tmp` beside the locator and renames it into
-    place; the open-time sweep runs off-thread on every `session/created` and
-    collected every file the log did not name — the temp included — so the
-    rename failed with `FileNotFoundError`. `ph_rlm.snapshot` writes a kernel
-    variable's blob this way *after* its event is durable, which made the loss a
-    variable that would not restore. Reproduced here exactly: the sweep runs
-    between the temp's write and its rename.
-
-    Sabotage: drop the `is_atomic_temp` guard from `_collectable` and
-    the write raises.
-    """
-    store = _store(tmp_path)
-    session = Session("s1")
-    store.claim(_claim("ours", session.id))
-    rename = os.replace
-    swept: list[list[str]] = []
-
-    def sweep_then_rename(source: Path, target: Path) -> None:
-        if str(source).endswith(".tmp"):
-            swept.append(anyio.from_thread.run(store.sweep_session, session))
-        rename(source, target)
-
-    monkeypatch.setattr(os, "replace", sweep_then_rename)
-
-    ref = await store.save_text(owner=session.id, source="x", suggested_name="x", content="kept")
-
-    assert swept == [[]], "the sweep ran mid-write and collected nothing"
-    assert Path(ref.locator).read_text() == "kept"
-
-
 async def test_an_owner_no_claim_names_is_never_visited(tmp_path: Path) -> None:
     """A directory nobody claims is somebody else's, or nobody's yet — deleting in
     it on the strength of an empty reference set is the kernel sweep's old failure
@@ -333,30 +235,14 @@ async def test_a_withdrawn_claim_stops_contributing(tmp_path: Path) -> None:
 # ---------------------------------------------- the ordering the sweep needs --
 
 
-async def test_a_reserved_blob_is_not_collected_before_its_event_lands(
-    tmp_path: Path,
-) -> None:
-    """The window a producer used to leave open, and the sweep walked into.
-
-    A blob is garbage exactly when the log does not name it, so a producer that
-    writes first and appends second is indistinguishable from a leak for as long
-    as that takes — and the open-time sweep folds the log on another task. This
-    is not hypothetical: it deleted the input offload's own history file often
-    enough to fail its test under load, before `reserve` existed.
-
-    `reserve` is the write and `commit` is the rename, so the blob never exists
-    at its locator unreferenced: the sweep either finds nothing there, or finds
-    it already named.
-    """
+async def test_a_reserved_blob_appears_only_once_committed(tmp_path: Path) -> None:
+    """`reserve` is the write and `commit` is the rename, so the blob never sits at
+    its locator before the log names it — and a sweep keeps it once it does."""
     store = _store(tmp_path)
     session = Session("s1")
     store.claim(_claim("producer", session.id))
 
     ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
-
-    # The state a producer is in between the two calls: content on disk, log
-    # silent. The sweep must not read that as garbage.
-    assert await store.sweep_session(session) == []
     assert not Path(ref.locator).exists(), "reserved, not yet published"
 
     _named(session, SPILLED, ref.locator)
@@ -395,6 +281,36 @@ async def test_a_write_interrupted_before_its_rename_is_completed(
     assert "completed an interrupted write" in caplog.text
 
 
+async def test_a_stored_log_is_handed_out_with_its_interrupted_writes_finished(
+    mount: MountProfile,
+) -> None:
+    """The repair, before anything runs in the session — and the sweep's wiring.
+
+    The blob its log names is at its locator before anyone holds the session — not
+    still in `.staging` when a resumed model follows it, as it could be while the
+    sweep was detached (`SessionStore.loaded`).
+
+    Through the mounted row rather than `sweep_session`, because a fold that is
+    wrong and a fold nobody calls fail differently: the second deletes nothing and
+    looks exactly like a clean store, which is what P6-15 was.
+
+    Sabotage: put `spill-local`'s listener back on `session/created`, and the blob
+    is still staged when `loaded` returns.
+    """
+    ctx = await mount()
+    store = ctx.require(SPILL_STORE)
+    sessions = ctx.require(SESSIONS)
+    crashed = Session("s1")
+    store.claim(_claim("producer", crashed.id))
+    ref = await _reserve(store, b"x")
+    _named(crashed, SPILLED, ref.locator)  # the dead run got this far and no further
+
+    session = sessions.adopt(Session(crashed.id, seed=list(crashed.events)))
+    await sessions.loaded(session)
+
+    assert Path(ref.locator).read_text(encoding="utf-8") == "x", "handed out still staged"
+
+
 async def test_a_blob_the_log_names_and_nothing_holds_is_reported(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -421,28 +337,88 @@ async def test_a_blob_the_log_names_and_nothing_holds_is_reported(
     assert "never-written.md" in caplog.text
 
 
-async def test_a_staged_blob_no_run_will_commit_is_left_alone(
-    tmp_path: Path,
-) -> None:
-    """Nothing is deleted from staging, and the leak that leaves is the old one.
+async def test_a_staged_blob_no_run_will_commit_is_collected(tmp_path: Path) -> None:
+    """A dead run's reservation that never reached its append is collected.
 
-    A reservation in flight and one abandoned by a dead run look identical:
-    neither is referenced, which is the whole point of appending the locator
-    second. Collecting the second would therefore race the first, so the sweep
-    collects neither — and what is left behind is exactly the leak `SpillClaim`
-    already describes, one file per run that died between the write and the
-    append. Recovering the *referenced* ones is the case worth having, and it is
-    the test above.
+    It used to be left, one file per run that died between the write and the
+    append, because a reservation in flight looks the same — and the sweep ran
+    beside producers. It runs only where nothing writes now (`sweep_session`), so
+    a stage nothing names can only be a dead run's.
+
+    Sabotage: list only the owner directory and not its `.staging`, and the stage
+    is still there.
     """
     store = _store(tmp_path)
     session = Session("s1")
     store.claim(_claim("producer", session.id))
-    ref = await store.reserve_text(owner=session.id, source="a", suggested_name="a", content="x")
+    ref = await _reserve(store, b"x")
     staged = store._staging_for(ref.locator)
 
-    assert await store.sweep_session(session) == []
+    assert await store.sweep_session(session) == [str(staged)]
 
-    assert staged.exists(), "an unreferenced staged blob is nobody's to judge"
+    assert not staged.exists()
+
+
+async def test_a_temp_a_killed_write_left_is_collected(tmp_path: Path) -> None:
+    """D17's leftover, collected now that nothing writes beside the sweep.
+
+    A kill between `write_atomic`'s write and its rename leaves `<name>.<hex>.tmp`
+    beside the locator. It was passed over while the sweep could meet a write in
+    flight, and so leaked; the sweep's one caller runs before anything writes the
+    session, so a temp it finds is a dead run's.
+    """
+    store = _store(tmp_path)
+    session = Session("s1")
+    store.claim(_claim("producer", session.id))
+    temp = store.owner_root(session.id) / "0123abcd-a.0badf00d.tmp"
+    temp.parent.mkdir(parents=True)
+    temp.write_bytes(b"half a blo")
+
+    assert await store.sweep_session(session) == [str(temp)]
+
+
+def _called(attribute: str) -> list[str]:
+    """Every shipped module that calls a method named `attribute`, once per call —
+    or that hands the method on uncalled, the alias a text match would miss."""
+    return [
+        module
+        for module, parsed in parsed_modules().items()
+        for node in ast.walk(parsed.tree)
+        if isinstance(node, ast.Attribute) and node.attr == attribute
+    ]
+
+
+def _dispatches(event: str) -> list[str]:
+    """Every shipped module that dispatches `event` by name, once per call."""
+    return [
+        module
+        for module, parsed in parsed_modules().items()
+        for node in ast.walk(parsed.tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"emit", "serial", "parallel", "waterfall"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == event
+    ]
+
+
+def test_the_sweep_runs_only_where_a_stored_log_is_read() -> None:
+    """**The precondition the sweep's deletions rest on, held where it can fail.**
+
+    `sweep_session` collects everything a session's log does not name, which is
+    sound only where nothing is writing that session. That holds along one chain,
+    and each link is pinned: the spill row's listener is the sweep's one caller;
+    the listener hears only `session/loaded`; `SessionStore.loaded` is that event's
+    one dispatcher; and its callers are the two readers of a stored log, each before
+    the session is handed out. A new link anywhere — a catch-up over live sessions,
+    a `gc` command, a second dispatcher — would sweep beside producers and delete
+    what they have written and not yet named (S7, D17). Add one only with the guards
+    it would need.
+    """
+    assert _called("sweep_session") == ["ph.seams.spill"]
+    assert _dispatches("session/loaded") == ["ph.session.store"]
+    assert sorted(_called("loaded")) == ["ph.persistence.jsonl", "ph.persistence.opening"]
 
 
 # ------------------------------------------------------- planned once, linked --

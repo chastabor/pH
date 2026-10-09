@@ -304,9 +304,8 @@ async def spill_tool_result(
     # is the type's, not this call site's) — a reader that skips it loses the
     # forwarding address, not the conversation, because the replacement the model
     # saw is what `tool/result` carries.
-    # Before the blob appears at `ref.locator`. See `SpillStore.reserve`:
-    # a blob the log does not name is what the sweep collects, so writing first
-    # raced the sweep over this row's own output.
+    # Before the blob appears at `ref.locator` (`SpillStore.reserve`): a blob the
+    # log does not name is what the sweep collects.
     with session.batch() as batch:
         _LOG.append(
             batch,

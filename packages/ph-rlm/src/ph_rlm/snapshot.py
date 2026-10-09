@@ -13,10 +13,10 @@ append it again on every cell that touched anything at all, and the log would gr
 with the *size of the namespace* rather than the size of the change.
 
 **Staged, recorded, then published.** Write-ahead ordering (§4.9), through the spill
-store's `reserve`/`commit` pair (S11): a blob is durable, where the sweep does not
-look, before the event naming it is appended, and is renamed to where the event
+store's `reserve`/`commit` pair (S11): a blob is durable, under the store's
+`.staging`, before the event naming it is appended, and is renamed to where the event
 says only after. A death between the two leaves a staged blob the log names — which
-the open-time sweep publishes — or one it does not, which is one leaked file; a blob
+the next read publishes — or one it does not, which the next read collects; a blob
 that could not be staged is recorded as a `clear`, and one that cannot be read on
 restore is reported by `kernel/restored` as failed. Nothing is dropped in silence.
 
@@ -182,8 +182,8 @@ class KernelSnapshotPolicy:
         the records say they are.
 
         **Through the spill store's `reserve`/`commit` pair** (S11), the ordering every
-        other producer keeps: each blob is staged — durably, where the sweep does not
-        look — then the records are appended, **one batch for the cell**, then the
+        other producer keeps: each blob is staged — durably, under the store's
+        `.staging` — then the records are appended, **one batch for the cell**, then the
         blobs are published. Written after the records instead, a blob the store could
         not take was a `snap` naming nothing, dropped in silence on the next restore;
         now one that cannot be staged is recorded as a `clear` saying so, which is

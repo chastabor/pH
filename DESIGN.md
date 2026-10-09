@@ -373,7 +373,7 @@ Each mode is a method of the same name on `Context` (`cordis/context.py`).
 
 | Mode | Semantics |
 |---|---|
-| `emit` | Sync, return values ignored. A coroutine is scheduled, not awaited. `contained=True` logs a failing listener and continues |
+| `emit` | Sync, return values ignored. A coroutine is scheduled, not awaited. A listener that raises is logged and the dispatch continues: an emitted event is a fact, and a listener that must refuse belongs on `serial` or `waterfall` |
 | `serial` | Awaits listeners in registration order until one bails |
 | `parallel` | All listeners concurrently, all awaited; failures collected into an `ExceptionGroup` |
 | `waterfall` | Around-middleware. Listeners run outermost-first and receive `(*args, next)`; returning without calling `next()` vetoes the rest of the chain, `inner` included |
@@ -975,9 +975,11 @@ crashed" versus "this was reopened": a clean stop synthesizes no closers.
 Because `adopt` emits `session/created`, the resume path meets the **same**
 listeners a fresh session does. What a log read off disk owes before anything runs
 in it goes on `session/loaded` instead, which both ways a stored log is read
-(`resume_session`, `stored_session`) dispatch and await — workspace reconciliation is
-that work (`seams/workspace.py`), so a crash's leaked trees are reclaimed and their
-pairs closed before the session is handed out.
+(`resume_session`, `stored_session`) dispatch and await. Two rows do that work before
+the session is handed out: workspace reconciliation reclaims a crash's leaked trees
+and closes their pairs (`seams/workspace.py`), and the spill sweep publishes a blob a
+dead run staged but never renamed, so a locator the model follows in its first turn
+is there (`seams/spill.py`).
 
 **Seed acceptance is one gate for every path** (fork, resume, replay, import):
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown

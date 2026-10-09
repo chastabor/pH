@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import anyio
 import pytest
 
 from ph.agent.types import AgentDriver
@@ -354,6 +355,52 @@ async def test_what_an_ended_child_left_unfinished_is_revoked(
         PARENT_TEARDOWN,
     )
     assert stored_types(ctx, grandchild.id)[-2:] == [STATUS, DELETED]
+
+
+async def test_an_ended_childs_unfinished_children_are_revoked_together(
+    mount: MountProfile,
+) -> None:
+    """Each descendant's log is opened through `stored_session`, which settles what
+    reading it owes before the tombstone is written — a spill sweep, and a `git`
+    reconcile per leaked tree. Walked one log at a time, a restart paid that back to
+    back for every descendant; nothing orders one tombstone against another, so they
+    are written together.
+
+    Asserted as a rendezvous: each load waits for the other to begin. Sabotage: walk
+    the family one log at a time, and the first load never meets the second.
+    """
+    ctx = await mount()
+    ctx.require(SUBAGENTS).register_provider("stub", _Readmitting(StubSubagentProvider(root=ctx)))
+    parent = _parent(ctx)
+    assert parent.session is not None
+    child = admitted_child(ctx, parent.session, "r1", {"prompt": "look"})
+    log_event(child, STATUS, {"status": "done"})
+    beneath = [admitted_child(ctx, child, run, {"prompt": "dig"}) for run in ("r2", "r3")]
+    for one in beneath:
+        log_event(one, STATUS, {"status": "running"})
+    await _as_an_earlier_process_left_them(ctx, parent.session, child, *beneath)
+    waiting = {one.id for one in beneath}
+    entered: set[str] = set()
+    everyone = anyio.Event()
+    met: list[bool] = []
+
+    async def rendezvous(session: Session) -> None:
+        if session.id not in waiting:
+            return
+        entered.add(session.id)
+        if entered == waiting:
+            everyone.set()
+        with anyio.move_on_after(5):
+            await everyone.wait()
+        met.append(everyone.is_set())
+
+    ctx.on("session/loaded", rendezvous)
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    assert met == [True, True], "the descendants were revoked one log at a time"
+    for one in beneath:
+        assert not_none(ctx.require(SUBAGENTS).state(one.id)).deleted_reason == PARENT_TEARDOWN
 
 
 @pytest.mark.parametrize("door", ["ended", "deleted"])

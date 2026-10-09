@@ -33,7 +33,7 @@ from ph.session import (
 from ph.session import surface as surface_module
 from ph.session.json import InvalidJsonValueError
 from ph.session.store import SessionStore
-from ph.testing import check_fold_laws, log_event, prefix_of, user_payload
+from ph.testing import check_fold_laws, log_event, prefix_of, raising, user_payload
 
 
 def test_seq_always_equals_log_length() -> None:
@@ -149,16 +149,13 @@ def test_a_raising_listener_cannot_un_publish_a_session() -> None:
     and kept every listener after it from hearing of it — a backend's `track` among
     them — and did the same to `dispose` the other way round.
 
-    Sabotage: drop `contained=True` from either emit in `SessionStore`, and `create`
-    or `dispose` raises.
+    Sabotage: re-raise in `Context.emit`'s `except`, and `create` or `dispose` raises.
     """
     ctx = Context()
     store = SessionStore(ctx=ctx)
     heard: list[str] = []
 
-    def bad_listener(_session: Session) -> None:
-        raise RuntimeError("bad listener")
-
+    bad_listener = raising(RuntimeError("bad listener"))
     ctx.on("session/created", bad_listener)
     ctx.on("session/created", lambda session: heard.append(f"created {session.id}"))
     ctx.on("session/disposed", bad_listener)
@@ -169,6 +166,32 @@ def test_a_raising_listener_cannot_un_publish_a_session() -> None:
     store.dispose("s")
     assert store.get("s") is None
     assert heard == ["created s", "disposed s"]
+
+
+@pytest.mark.anyio
+async def test_a_raising_listener_cannot_refuse_a_stored_read() -> None:
+    """`session/loaded` is the last run's housekeeping, and the reader keeps the
+    session whatever it hits — so no row has to remember to guard itself, which is
+    the rule `emit` keeps for its own events. Every listener still runs.
+
+    Sabotage: drop the `except Exception` from `SessionStore.loaded`, and the read
+    raises.
+    """
+    ctx = Context()
+    store = SessionStore(ctx=ctx)
+    heard: list[str] = []
+
+    async def good_listener(session: Session) -> None:
+        heard.append(session.id)
+
+    ctx.on("session/loaded", raising(RuntimeError("bad listener")))
+    ctx.on("session/loaded", good_listener)
+
+    session = store.adopt(Session("s"))
+    await store.loaded(session)
+
+    assert store.get("s") is session
+    assert heard == ["s"]
 
 
 def test_reentrant_append_is_refused() -> None:

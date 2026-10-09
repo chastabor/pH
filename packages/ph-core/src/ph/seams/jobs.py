@@ -280,11 +280,11 @@ class JobService:
                     for queue in waits:
                         queue.limiter.release()
                 self._leave(waits)
-                self.ctx.emit("job/settled", job, contained=True)
+                self.ctx.emit("job/settled", job)
 
         try:
             job.release = await self.ctx.owner_for(scope).effect(enter, label=f"job({job.id})")
-            self.ctx.emit("job/started", job, contained=True)
+            self.ctx.emit("job/started", job)
             if self._scope is not None:
                 self._scope.start_soon(body)
             else:

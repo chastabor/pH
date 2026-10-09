@@ -20,7 +20,8 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -52,22 +53,14 @@ __all__ = [
 log = logging.getLogger("ph.session")
 
 events.declare(
-    "session/created",
-    "emit",
-    owner="ph.session",
-    doc="A session was published into the store; listener failures are contained per listener.",
+    "session/created", "emit", owner="ph.session", doc="A session was published into the store."
 )
-events.declare(
-    "session/disposed",
-    "emit",
-    owner="ph.session",
-    doc="A session left the store; listener failures are contained per listener.",
-)
+events.declare("session/disposed", "emit", owner="ph.session", doc="A session left the store.")
 events.declare(
     "session/event",
     "emit",
     owner="ph.session",
-    doc="Post-commit append feed; listener failures are contained per listener.",
+    doc="Post-commit append feed.",
 )
 events.declare(
     "session/flush",
@@ -269,16 +262,12 @@ class SessionStore:
 
     def _publish(self, session: Session) -> Session:
         def observer(source: Session, event: SessionEvent) -> None:
-            # Contained: one failing listener neither aborts the dispatch nor
+            # An `emit`, so one failing listener neither aborts the dispatch nor
             # un-appends a committed event (A1).
-            self.ctx.emit("session/event", source, event, contained=True)
+            self.ctx.emit("session/event", source, event)
 
         self._entries[session.id] = _Entry(session=session, unobserve=session.observe(observer))
-        # Contained, for `session/event`'s reason: the session is published, and a
-        # listener that raises can neither take it back nor stop the next listener
-        # hearing it. Uncontained, one did both — `create` raised over a session it
-        # had already published, and every listener after the raise never heard of it.
-        self.ctx.emit("session/created", session, contained=True)
+        self.ctx.emit("session/created", session)
         return session
 
     def get(self, session_id: str) -> Session | None:
@@ -299,8 +288,7 @@ class SessionStore:
         if entry is None:
             return
         entry.unobserve()
-        # Contained, as `session/created` is: the session has already left the store.
-        self.ctx.emit("session/disposed", entry.session, contained=True)
+        self.ctx.emit("session/disposed", entry.session)
 
     async def flush(self, session: Session) -> None:
         """Await every backend's drain for this session — **ancestors first**.
@@ -336,7 +324,7 @@ class SessionStore:
         for ancestor in self.lineage(session):
             through = ancestor.seq
             await self.ctx.parallel("session/flush", ancestor)
-            self.ctx.emit("session/durable", ancestor, through, contained=True)
+            self.ctx.emit("session/durable", ancestor, through)
 
     async def written(self, session: Session) -> bool:
         """`flush`, answering whether it worked rather than raising.
@@ -366,11 +354,37 @@ class SessionStore:
         them. Only for a log read off disk: a fresh session or a fork has no crash of
         its own to settle.
 
-        A listener that raises refuses the read, and the session is let go — left in
-        the store, it would be one that nothing settled.
+        **Why not `session/created`, where both of its listeners started.** That is an
+        `emit`, so they ran detached: a resumed session was handed out — its agent
+        started, its model took a first turn — while its crash's leaked trees were
+        still being reclaimed and a blob its log names was still staged, and their
+        records landed wherever they happened to finish. Only `drain()` bounded them.
+
+        **A listener cannot refuse the read.** What it owes is the last run's
+        housekeeping — reclaiming its trees, finishing its writes — and a session
+        nobody can open because that hit a bug would be the worse failure; what it
+        left undone is found again at the next read. So a failure is logged here, for
+        every listener at once, as `written` is the one spelling of a flush that may
+        fail. Cancellation propagates; the reader's `opening` lets the session go.
         """
         try:
             await self.ctx.parallel("session/loaded", session)
+        except Exception:
+            log.exception("ph.session: work owed by %s was left unsettled", session.id)
+
+    @asynccontextmanager
+    async def opening(self, session: Session) -> AsyncIterator[Session]:
+        """Let `session` go if anything stops the span before it is handed out.
+
+        **The one spelling of a guard every reader of a stored log needs**: from the
+        moment the store holds a session to the moment its caller does, a refusal, a
+        failed read of its children or a cancellation must not leave it published —
+        in the store, a session nothing finished opening is one a peer that asked
+        again would run on. `resume_session` and `stored_session` hold it from
+        `adopt` through `loaded`, and `open_session` from there to its return.
+        """
+        try:
+            yield session
         except BaseException:
             self.dispose(session.id)
             raise

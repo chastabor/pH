@@ -403,31 +403,6 @@ async def test_a_blob_whose_event_never_landed_is_swept_at_the_next_open(
     assert live.is_file(), "the offload the model was told to read back must survive"
 
 
-async def test_the_sweep_is_wired_to_session_open(mount: MountProfile) -> None:
-    """The seam mounts the listener, so it exists wherever the store does.
-
-    Asserted separately from the fold because they fail differently: a fold that
-    is wrong deletes the wrong files, and a fold nobody calls deletes nothing and
-    looks exactly like a clean store. The second is what P6-15 was — the sweep
-    was correct and its listener belonged to one producer.
-    """
-    ctx = await mount(profile=PROFILE)
-    session = ctx.require(SESSIONS).create("wired")
-    # `create` publishes the session, which is a `session/created` of its own:
-    # let that sweep finish first, so the orphan below can only be collected by
-    # the one this test emits (D17 — it used to run concurrently with the write
-    # and delete its temp, which failed the write rather than the assertion).
-    await ctx.drain()
-    orphan = await ctx.require(SPILL_STORE).save_text(
-        owner=session.id, source="a crash", suggested_name="orphan.md", content="lost"
-    )
-
-    ctx.emit("session/created", session)
-    await ctx.drain()
-
-    assert not Path(orphan.locator).exists(), "session open did not sweep"
-
-
 # ------------------------------------------------------ a value, not content --
 
 

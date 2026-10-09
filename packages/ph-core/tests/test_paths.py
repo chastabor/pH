@@ -36,7 +36,6 @@ from ph.paths import (
     _check_private_dir,
     canonical,
     default_home_path,
-    is_atomic_temp,
     resolve_roots,
     write_atomic,
 )
@@ -495,27 +494,3 @@ def test_a_durable_write_makes_its_directories_durably(
 
     made = [tmp_path, tmp_path / "owner", tmp_path / "owner" / "blobs"]
     assert synced == (made if durable else [])
-
-
-def test_a_write_atomic_temp_is_recognized_by_its_own_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """D17 — `is_atomic_temp` answers for the name `write_atomic` actually uses.
-
-    Asked of the real temp rather than a hand-built one, so the two cannot drift:
-    a sweep that failed to recognize it would delete a write in flight.
-    """
-    seen: list[Path] = []
-    rename = os.replace
-
-    def recording(source: Path, target: Path) -> None:
-        seen.append(Path(source))
-        rename(source, target)
-
-    monkeypatch.setattr(os, "replace", recording)
-    write_atomic(tmp_path / "blob.md", b"x")
-
-    (temporary,) = seen
-    assert is_atomic_temp(temporary)
-    assert not is_atomic_temp(tmp_path / "blob.md")
-    assert not is_atomic_temp(tmp_path / "notes.tmp"), "a file merely ending in .tmp is not one"

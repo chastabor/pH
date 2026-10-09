@@ -33,7 +33,15 @@ async def test_emit_runs_listeners_in_registration_order() -> None:
     assert seen == ["z1", "a1", "b1"]
 
 
-async def test_contained_emit_logs_and_continues() -> None:
+async def test_emit_logs_a_raising_listener_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every `emit` is contained: the record of something that already happened
+    reaches every listener even when one of them is broken, and the producer never
+    sees the raise. It was a flag each producer passed, and half of them did not.
+
+    Sabotage: re-raise in `Context.emit`'s `except`, and the emit below raises.
+    """
     root = Context()
     heard: list[int] = []
 
@@ -42,12 +50,11 @@ async def test_contained_emit_logs_and_continues() -> None:
 
     root.on("test/emit", boom)
     root.on("test/emit", lambda value: heard.append(value))
-    with pytest.raises(RuntimeError):
+    with caplog.at_level("ERROR", logger="ph.cordis"):
         root.emit("test/emit", 1)
-    # Contained: the record of something that already happened reaches every
-    # listener even when one of them is broken.
-    root.emit("test/emit", 2, contained=True)
-    assert heard == [2]
+
+    assert heard == [1]
+    assert "test/emit listener failed" in caplog.text
 
 
 async def test_waterfall_listeners_wrap_the_built_in() -> None:

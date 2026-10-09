@@ -843,7 +843,7 @@ class Profile:
         # The one moment a composed profile is whole and nothing has run yet, so
         # a row can refuse the deployment it finds itself in (E8). `serial`
         # rather than `emit`: a listener that raises must stop the process, and
-        # a contained emit would swallow exactly the refusal that matters. A row
+        # an `emit` contains what its listeners raise — exactly this refusal. A row
         # cannot check this in its own `apply` — a backend it depends on may be
         # layered after it, so a verdict computed then would be wrong for
         # precisely the profile that orders things that way.

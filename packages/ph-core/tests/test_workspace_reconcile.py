@@ -233,26 +233,6 @@ async def test_a_leak_whose_tree_is_already_gone_still_closes_its_pair(
 
 
 @pytest.mark.needs_git
-async def test_a_reconciled_close_is_on_disk_with_the_reclaim_it_records(
-    mount: MountProfile, tmp_path: Path
-) -> None:
-    """S12: the reclaim is the act, and its record now reaches disk with it.
-
-    A second open after a crash here would reclaim again, find the tree gone, and
-    close the pair a second time as `kept: false` — about a branch the first
-    reclaim had just committed the work to.
-    """
-    _ctx, session, _agent, _workspace = await worktree_agent(mount, tmp_path)
-
-    reopened, revived = await _reopen(mount, tmp_path / "repo", session)
-
-    closing = [
-        one.data for one in stored_events(reopened, revived.id) if one.type == "workspace/disposed"
-    ]
-    assert [one.get("reconciled") for one in closing] == [True]
-
-
-@pytest.mark.needs_git
 async def test_a_dirty_leak_reaches_the_branch_rather_than_being_discarded(
     mount: MountProfile, tmp_path: Path
 ) -> None:
@@ -566,11 +546,14 @@ async def test_a_door_hands_out_a_stored_session_with_its_crash_reconciled(
 ) -> None:
     """F6's ordering, through both doors that read a log off disk.
 
-    Reconciliation rode `session/created`, an `emit`, so it ran detached: the door
-    handed the session out while the reclaim was still deleting, and the closing
-    `workspace/disposed` landed after whatever the new start wrote first, bounded
-    only by `drain()`. A stored log awaits `session/loaded` now, so the session
-    arrives with its crash settled and the closing record on disk.
+    The session arrives with its crash settled and the closing record on disk — not
+    handed out mid-reclaim, as it was while reconciliation was detached
+    (`SessionStore.loaded`).
+
+    **On disk, not only in the log** (S12): the reclaim is the act, and its record
+    reaches disk with it. Left in memory, a second open after a crash would reclaim
+    again, find the tree gone, and close the pair a second time as `kept: false` —
+    about a branch the first reclaim had just committed the work to.
 
     Asserted as a wait: the reclaim is held open, and the door must not have
     answered. Sabotage: put `workspace-reconcile` back on `session/created`, and

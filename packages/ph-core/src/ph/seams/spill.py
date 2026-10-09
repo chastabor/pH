@@ -28,13 +28,12 @@ from ..keys import SPILL_STORE
 from ..paths import (
     default_home_path,
     holds,
-    is_atomic_temp,
     make_directories,
     replace_durably,
     sync_directory,
     write_atomic,
 )
-from ..session import Session, SessionEvent
+from ..session import Session
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -137,8 +136,8 @@ class SpillStore:
     def claims(self) -> tuple[SpillClaim, ...]:
         """What producers have contributed, for a caller that folds them.
 
-        A tuple rather than the list, for `sweep_session`'s reason one method
-        down: a claim registered while a fold is running must not change the
+        A tuple rather than the list: the sweep folds on a worker thread while the
+        event loop goes on, and a claim registered meanwhile must not change the
         fold under it."""
         return tuple(self._claims)
 
@@ -202,8 +201,9 @@ class SpillStore:
         """Where a reserved blob waits. Derived, so nothing has to remember it.
 
         Under the owner's own directory so the rename that publishes it cannot
-        cross a filesystem, and in a *subdirectory* so the sweep walks past it:
-        `_collectable` lists files, and this is a directory.
+        cross a filesystem, and in a *subdirectory* so no locator reaches it before
+        `commit`: the sweep lists it separately, finishing what the log names and
+        collecting what it does not.
         """
         final = Path(locator)
         return final.parent / STAGING / final.name
@@ -218,14 +218,14 @@ class SpillStore:
     async def reserve(self, planned: PlannedBlob, *, source: str) -> SpillRef:
         """Stage `planned` and return the reference it will have once committed.
 
-        **The write-ahead half of the ordering the sweep depends on** (§4.9). A
-        blob is garbage exactly when the log does not name it, so a producer that
-        writes first and appends second leaves a window in which its own blob is
-        indistinguishable from garbage — and the open-time sweep, which folds the
-        log on another task, deletes it. Reserving writes the bytes somewhere the
-        sweep does not look, so the producer can append the locator *before* the
-        file exists at it: from then on the blob is referenced from the moment it
-        appears.
+        **The write-ahead half of an ordering** (§4.9): the bytes are written somewhere
+        a locator does not reach, so the producer can append the locator *before* the
+        file exists at it, and the blob is referenced from the moment it appears. A
+        run that dies between the append and `commit` leaves the bytes one directory
+        down under the name the log already gives them, and the next read finishes the
+        rename (`_complete_staged`); one that dies before the append leaves a stage
+        nothing names, which the next read collects. It was written for a sweep that
+        ran beside producers, which no longer happens (`sweep_session`).
 
         Two calls rather than one because the failure has to stay on this side of
         the append. Writing is what can fail, so it happens first and a caller
@@ -322,8 +322,8 @@ class SpillStore:
         does not skip work — it deletes live blobs.
 
         One pass over the log and one thread hop for the whole thing: this runs
-        on every session open, resume and fork, and a fold of a long log belongs
-        off the event loop.
+        whenever a stored log is read, before the session is handed out, and a
+        fold of a long log belongs off the event loop.
 
         **It also finishes what a dead run started, and says what it cannot.**
         The fold holds both halves of the comparison, so having used one of them
@@ -334,14 +334,13 @@ class SpillStore:
         that is nowhere is reported, because the alternative is the model being
         handed a path that fails when it follows it.
 
-        Nothing *unreferenced* is deleted from `.staging`. A reservation in flight
-        is indistinguishable from an abandoned one — neither is referenced yet,
-        that being the whole point of write-ahead — so collecting the second would
-        race the first, and the bookkeeping that told them apart bought less than
-        it cost. What is left behind instead is the leak this module's
-        `SpillClaim` already describes, one file per run that died mid-write. A
-        referenced stage is published through `_publish`, which leaves nothing in
-        `.staging` behind — including a stage whose blob is already there.
+        **Only where nothing writes the session.** Its one caller is the reader's
+        `session/loaded`, before anyone holds the session — a test pins that it stays
+        the only one — and that is what lets it collect everything the log does not name —
+        a dead run's leftovers included: a stage that never reached its append, a
+        `write_atomic` temp a kill interrupted. Beside a producer it would delete what
+        that producer had written and not yet named, which is what it did while it
+        rode `session/created` (S7, D17), and why the leftovers used to be kept.
         """
         claims = self.claims
         seed = session.header.first_own_seq
@@ -357,52 +356,38 @@ class SpillStore:
                     return _abort(claim, session)
                 by_type.setdefault(claim.event_type, []).append(claim)
 
-            def fold(events: Iterable[SessionEvent], *, owning: bool) -> bool:
-                """Fold `events` into the references — and, `owning`, the owners too.
-                `False` when a claim raised, which has already aborted the sweep."""
-                for event in events:
-                    # **The seam's own convention names a blob whoever wrote it**
-                    # (S7): a producer this profile does not mount has no claim, so
-                    # its blobs were unreferenced to a sweep of the directory it
-                    # shares with one that is — and deleted, while the log still
-                    # pointed the model at them.
-                    plain = _plain_locator(event.data)
-                    if plain is not None:
-                        referenced.add(plain)
-                    for claim in by_type.get(event.type, ()):
-                        try:
-                            locator = claim.locator(event.data)
-                            owner = claim.owner(event.data)
-                        except Exception:
-                            _abort(claim, session)
-                            return False
-                        if locator is not None:
-                            referenced.add(locator)
-                        # **Only the session's own records own a directory** (S7): a
-                        # fork's seeded prefix names its parent's, where the parent
-                        # went on writing blobs this log never saw.
-                        if owning and owner is not None and event.seq >= seed:
-                            owners.add(owner)
-                return True
-
-            events = session.events
-            if not fold(events, owning=True):
-                return []
-            listed = {owner: _collectable(self.owner_root(owner)) for owner in owners}
-            # **The log again, from where the fold stopped, after the listing** (S7).
-            # This runs off the loop while producers go on appending, and a blob is
-            # referenced before it appears (write-ahead); so a file the listing found
-            # was named by the log by then, and a fold of the tail read now includes
-            # it. Folded once and listed later, a blob committed in between was
-            # deleted under the record naming it. References only: a directory the
-            # tail names was not listed, so there is nothing of it to collect.
-            if not fold(session.events_from(len(events)), owning=False):
-                return []
+            for event in session.events:
+                # **The seam's own convention names a blob whoever wrote it** (S7): a
+                # producer this profile does not mount has no claim, so its blobs were
+                # unreferenced to a sweep of the directory it shares with one that is —
+                # and deleted, while the log still pointed the model at them.
+                plain = _plain_locator(event.data)
+                if plain is not None:
+                    referenced.add(plain)
+                for claim in by_type.get(event.type, ()):
+                    try:
+                        locator = claim.locator(event.data)
+                        owner = claim.owner(event.data)
+                    except Exception:
+                        return _abort(claim, session)
+                    if locator is not None:
+                        referenced.add(locator)
+                    # **Only the session's own records own a directory** (S7): a fork's
+                    # seeded prefix names its parent's, where the parent went on writing
+                    # blobs this log never saw.
+                    if owner is not None and event.seq >= seed:
+                        owners.add(owner)
             removed: list[str] = []
-            for owner, files in sorted(listed.items()):
-                for completed in _complete_staged(self.owner_root(owner), referenced):
+            for owner in sorted(owners):
+                directory = self.owner_root(owner)
+                staged = _collectable(directory / STAGING)
+                for completed in _complete_staged(directory, staged, referenced):
                     log.info("ph.seams.spill: completed an interrupted write of %s", completed)
-                removed.extend(_remove_unreferenced(files, referenced))
+                # A stage the log does not name is a reservation that never reached its
+                # append: every one that did is named, and was just finished above.
+                abandoned = [one for one in staged if str(directory / one.name) not in referenced]
+                listed = [*_collectable(directory), *abandoned]
+                removed.extend(_remove_unreferenced(listed, referenced))
             for absent in sorted(one for one in referenced if not Path(one).exists()):
                 log.warning(
                     "ph.seams.spill: session %s names a blob that is not there: %s",
@@ -425,8 +410,8 @@ def _abort(claim: SpillClaim, session: Session) -> list[str]:
     return []
 
 
-def _complete_staged(directory: Path, referenced: set[str]) -> list[str]:
-    """Publish staged blobs the log already names. Returns what it finished.
+def _complete_staged(directory: Path, staged: Iterable[Path], referenced: set[str]) -> list[str]:
+    """Publish the `staged` blobs the log already names. Returns what it finished.
 
     The recovery half of write-ahead ordering. A run that died between appending
     a locator and renaming the bytes into place leaves the log naming a blob that
@@ -434,19 +419,14 @@ def _complete_staged(directory: Path, referenced: set[str]) -> list[str]:
     name they were always going to take. Finishing that rename is the whole
     repair, and it needs no record of what was in flight: the log is the record.
     """
-    waiting = directory / STAGING
-    if not waiting.is_dir():
-        return []
     completed: list[str] = []
-    for path in sorted(waiting.iterdir()):
+    for path in staged:
         final = directory / path.name
-        if not path.is_file() or str(final) not in referenced:
+        if str(final) not in referenced:
             continue
         # Through `commit`'s own rule, so a stage whose blob is already published —
         # a link a dead run never dropped, or a second reservation of the same
-        # bytes — is dropped rather than kept to pin the bytes past the blob. A
-        # reservation still in flight then finds its bytes published at `commit`,
-        # which is success.
+        # bytes — is dropped rather than kept to pin the bytes past the blob.
         existed = final.exists()
         _publish(path, final, path.stat().st_size)
         if not existed:
@@ -455,23 +435,14 @@ def _complete_staged(directory: Path, referenced: set[str]) -> list[str]:
 
 
 def _collectable(directory: Path) -> list[Path]:
-    """The files in one owner directory a sweep may collect, if nothing names them.
+    """The files in one directory a sweep may collect, if nothing names them.
 
-    `.staging` is passed over because it is a directory and this lists files.
-    Nothing in it is collected; `sweep_session` says why.
-
-    **Nor is a `write_atomic` temp** (D17), for `.staging`'s reason one level up.
-    `save_bytes` writes its temp beside the locator, and the sweep runs on every
-    session open — off-thread, concurrently with whatever else is writing — so
-    collecting it deleted the temp of a write in flight and failed its rename. A
-    kernel snapshot's blob is written that way *after* its event is durable, so
-    the loss was a variable that would not restore.
+    Files only, so an owner directory's `.staging` is passed over here and listed in
+    its own right (`sweep_session`).
     """
     if not directory.is_dir():
         return []
-    return [
-        path for path in sorted(directory.iterdir()) if path.is_file() and not is_atomic_temp(path)
-    ]
+    return [path for path in sorted(directory.iterdir()) if path.is_file()]
 
 
 def _remove_unreferenced(files: Iterable[Path], referenced: set[str]) -> list[str]:
@@ -500,9 +471,6 @@ def _stage(final: Path, staged: Path, payload: bytes) -> None:
     carries their digest, so the file there *is* the write this would make — a
     kernel variable returning to earlier bytes, a tool repeating its output — and a
     link stages it for a directory entry instead of the whole blob and its `fsync`.
-    Linked rather than skipped: a skipped stage leaves `commit` nothing of its own,
-    and the open-time sweep may delete `final` before the record naming it lands;
-    the link keeps the bytes under a name the sweep never touches.
 
     Any failure to link — a filesystem without hard links, a stage already there,
     `final` gone since — falls through to the write, which is always correct.
@@ -557,7 +525,7 @@ def _write(path: Path, payload: bytes) -> None:
     locator the log names, so a torn reservation used to be renamed into the
     locator as a complete blob. Through the temp there is no torn file to
     publish — only, after a kill the `except` cannot reach, a `<name>.<hex>.tmp`
-    that the recovery sweep passes over because no locator matches it.
+    that no locator names, which the next sweep collects.
     """
     write_atomic(path, payload, skip_if_present=True)
 
@@ -614,9 +582,21 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.provide(SPILL_STORE, store)
 
     async def sweep_on_open(session: Session) -> None:
-        """The one open-time sweep, owned by the store rather than by a producer."""
+        """The one open-time sweep, owned by the store rather than by a producer.
+
+        **On `session/loaded`, which the reader awaits** (`SessionStore.loaded` says
+        why not `session/created`): the sweep is also the repair, and a resumed model
+        may follow a locator in its first turn. A fresh session or a fork, with no
+        crash to repair and no directory of its own to collect, is not asked.
+
+        **No catch-up**, unlike `workspace-reconcile`. When this row activates no
+        producer has contributed a claim yet — they inject the store this provides,
+        and come up after it — so a sweep then would visit nothing; a session already
+        live was swept when it was read; and a sweep beside a live session's producers
+        is the one thing `sweep_session` must never be.
+        """
         removed = await store.sweep_session(session)
         if removed:
             log.info("ph.seams.spill: swept %d unreferenced blob(s)", len(removed))
 
-    ctx.on("session/created", sweep_on_open)
+    ctx.on("session/loaded", sweep_on_open)

@@ -768,7 +768,7 @@ class FsService:
         await self._gate("fs/write-intent", intent)
         written = await anyio.to_thread.run_sync(_write_text, target, content)
         self._observe(target, session, agent)
-        self.ctx.emit("fs/changed", target, contained=True)
+        self.ctx.emit("fs/changed", target)
         return Written(path=target, created=intent.creating, bytes=written)
 
     async def edit(
@@ -825,7 +825,7 @@ class FsService:
         updated = original.replace(old_text, new_text, -1 if replace_all else 1)
         await anyio.to_thread.run_sync(_write_text, target, updated)
         self._observe(target, session, agent)
-        self.ctx.emit("fs/changed", target, contained=True)
+        self.ctx.emit("fs/changed", target)
         return count if replace_all else 1
 
     async def _gate(self, event: str, intent: FsIntent) -> None:

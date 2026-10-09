@@ -1346,9 +1346,7 @@ class SummarizeEngine:
                 ),
             )
         # After both appends, and outside the adjacency they require: the blob
-        # appears at a locator the log already names, which is what keeps the
-        # open-time sweep from reading this row's own history file as garbage
-        # (`SpillStore.reserve`).
+        # appears at a locator the log already names (`SpillStore.reserve`).
         if ref is not None:
             await store.commit(ref)
         return CompactionResult(
