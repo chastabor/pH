@@ -38,6 +38,7 @@ from ..llm.types import (
 )
 from ..locks import file_lock
 from ..paths import resolve_roots
+from ..persistence.families import locate_under
 from ..persistence.jsonl import (
     HEADER_LINE_TYPE,
     JsonlSessionStore,
@@ -407,6 +408,16 @@ def raising(error: BaseException) -> Callable[..., NoReturn]:
         raise error
 
     return body
+
+
+def searches_into(bucket: list[str]) -> Callable[[Path, str, str], Path | None]:
+    """`locate_under`, noting each id the store is searched for into `bucket` — patched
+    where a backend holds it (`ph.persistence.jsonl`), for a test that counts searches."""
+
+    def search(root: Path, name: str, suffix: str) -> Path | None:
+        return noted(bucket, name, locate_under(root, name, suffix))
+
+    return search
 
 
 def skill_service() -> tuple[Context, SkillService]:

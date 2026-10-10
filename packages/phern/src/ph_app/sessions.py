@@ -298,8 +298,14 @@ class RecordedStart:
     """What a stored session's log says before anything is mounted for it: where it
     was worked in, and the environment it runs in (S5, S6)."""
 
+    session_id: str | None = None
+    """The session this is the start of; `None` for one about to be made."""
     cwd: str = ""
     environment: LoggedEnvironment = field(default_factory=LoggedEnvironment)
+    family: str | None = None
+    """The family directory its log was found in — where it is opened by path
+    (`runtime.open_root`) rather than searched for again; `None` when there is no log
+    here."""
     owner: str | None = None
     """The root whose mount writes this log, when it is a sub-agent's (P11-08), and
     `None` for a session of its own: a root, a fork or a segment. `""` for a child
@@ -338,12 +344,14 @@ def recorded_start(sessions_dir: Path, session_id: str) -> RecordedStart:
     it opens (`opened`).
     """
     path = locate_session(sessions_dir, session_id)
-    if path is None or not path.is_file():
-        return RecordedStart()
+    if path is None:
+        return RecordedStart(session_id=session_id)
     header = _header_line(path)
     return RecordedStart(
+        session_id=session_id,
         cwd=(header.cwd or "") if header is not None else "",
         environment=_environment_at(sessions_dir, path, header),
+        family=path.parent.name,
         owner=(
             _owning_root(sessions_dir, header)
             if header is not None and header.is_subagent
@@ -387,14 +395,17 @@ def _environment_at(
     because the resume that follows parses every envelope anyway — for a log that
     holds its own history, which is every root. A fork's file continues its root's
     from `seed_length`, and the base is in that prefix, so a fork is read through
-    the store's own lineage walk (`materialize`). An unfinished last line is
-    skipped, as the reader does; a torn last batch costs nothing here, since the
-    only batch of these records is a base with the clears of overrides that no
-    longer change anything.
+    the store's own lineage walk (`materialize`) — given the directory it was found
+    in, so the walk opens the file rather than searching for it again. An unfinished
+    last line is skipped, as the reader does; a torn last batch costs nothing here,
+    since the only batch of these records is a base with the clears of overrides
+    that no longer change anything.
     """
     if header is not None and header.seed_length:
         try:
-            _header, events = materialize(partial(read_stored, sessions_dir), header.id)
+            _header, events = materialize(
+                partial(read_stored, sessions_dir), header.id, family=path.parent.name
+            )
         except (LineageError, OSError, ValueError):
             return LoggedEnvironment()
         return fold_environment((event.seq, event.type, event.data) for event in events)

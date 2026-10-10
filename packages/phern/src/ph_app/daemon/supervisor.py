@@ -56,7 +56,7 @@ from ph.keys import (
 )
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
-from ph.persistence import open_session, resumption_of
+from ph.persistence import resumption_of
 from ph.persistence.jsonl import logs_holding
 from ph.persistence.protocol import SessionPersistence
 from ph.seams.credentials import hold_for_credential, waiting_for
@@ -126,8 +126,8 @@ from ..profiles import (
     kept_note,
 )
 from ..protocol import Refusal, cursor_of
-from ..runtime import mount_session
-from ..sessions import not_a_root, recorded_start
+from ..runtime import mount_session, open_root, read_start
+from ..sessions import RecordedStart, not_a_root
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk
@@ -1227,20 +1227,19 @@ class Supervisor:
             # from the wrong tree. A new session's directory is the client's; a
             # resumed one's is what its own header recorded, read off disk
             # because there is no store to ask until this mount exists.
-            recorded = recorded_start(resolve_roots().sessions_dir(), root_id)
-            if recorded.owner is not None:
+            start = await read_start(root_id)
+            if start.owner is not None:
                 # Before the mount and the claim, so the refusal leaves the child's
                 # file exactly as its root left it.
-                raise NotARoot(not_a_root(root_id, recorded.owner))
-            where = cwd or recorded.cwd
+                raise NotARoot(not_a_root(root_id, start.owner))
+            where = cwd or start.cwd
             ctx, starting = await mount_session(
                 exits,
-                root_id,
-                self._requested(profile),
-                recorded=recorded.environment,
+                start,
+                await anyio.to_thread.run_sync(self._requested, profile),
                 project=Path(where) if where else None,
             )
-            session = await self._session_for(ctx, root_id, cwd=cwd)
+            session = await self._session_for(ctx, start, cwd=cwd)
             # The session's own model first — the base, and any `/model` it logged,
             # which opening it put back — then this start's choice, an override
             # where it differs (S4).
@@ -1503,10 +1502,13 @@ class Supervisor:
             root.exits = exits.pop_all()
             return root
 
-    async def _session_for(self, ctx: Context, root_id: str, *, cwd: str | None = None) -> Session:
+    async def _session_for(
+        self, ctx: Context, start: RecordedStart, *, cwd: str | None = None
+    ) -> Session:
         """The root's session — claimed, then resumed from disk when there is one to resume.
 
-        One call into `open_session`, which is what every host opens a session through:
+        One call into `open_session` (through `open_root`, with the family the root's
+        start found its log in), which is what every host opens a session through:
         the I-5 claim, the resume-or-create decision and the `session/resumed` record
         live there, so a root cannot drift from what `phern -p --session x` does to the same
         file (P5-03). The claim is the store's, taken on this root's own context so that
@@ -1524,12 +1526,12 @@ class Supervisor:
         previous run crashed. The durable record is the `session/resumed` event, so a
         cron job leaves the fact in the trace whether or not anyone reads stderr.
         """
-        session = await open_session(ctx, root_id, meta={"cwd": cwd} if cwd else None)
+        session = await open_root(ctx, start, meta={"cwd": cwd} if cwd else None)
         resumed = resumption_of(session)
         if resumed is not None:
             log.warning(
                 "ph_app.daemon: resumed root %s from %s existing events%s",
-                root_id,
+                session.id,
                 resumed.events,
                 " — the previous run was interrupted" if resumed.interrupted else "",
             )

@@ -61,6 +61,7 @@ from ph.testing import (
     log_event,
     noted,
     raising,
+    searches_into,
     stored_log,
     user_payload,
     write_reference_fork,
@@ -1248,12 +1249,9 @@ async def test_a_resumed_root_is_looked_for_once(
     assert await sessions.written(stored)
     sessions.dispose(stored.id)
     searched: list[str] = []
-    real = families.locate_under
-    monkeypatch.setattr(
-        jsonl,
-        "locate_under",
-        lambda root, name, suffix: noted(searched, name, real(root, name, suffix)),
-    )
+    # Both doors a search goes through: a read's (`jsonl`) and `exists`' (`families`).
+    monkeypatch.setattr(jsonl, "locate_under", searches_into(searched))
+    monkeypatch.setattr(families, "locate_under", searches_into(searched))
     resumed = await open_session(ctx, "lead")
 
     assert searched.count("lead") == 1, searched

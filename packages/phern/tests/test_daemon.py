@@ -136,6 +136,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -182,6 +183,7 @@ from ph.testing import (
     noted,
     noting,
     raising,
+    searches_into,
     stored_log,
     stored_types,
 )
@@ -530,17 +532,42 @@ async def test_a_restarted_daemon_continues_the_log_rather_than_appending_to_it(
         await client.notify("shutdown")
 
 
-async def test_a_resumed_root_says_so_in_its_own_log(tmp_path: Path) -> None:
+async def test_a_resumed_root_says_so_in_its_own_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The durable half of the notice. stderr is for whoever is watching; a
     cron-started agent has nobody watching, and "this picked up somebody else's
-    work" is a fact about provenance that belongs in the trace."""
-    async with running(tmp_path) as daemon:
+    work" is a fact about provenance that belongs in the trace.
+
+    And how the root was found. Its start is read from disk before its mount, a
+    search of the store (and the whole lineage for a fork) that ran on the event loop
+    every other root shares, and the resume then searched for the same log again. Now
+    the read runs on a worker thread, and the open reads the log where it found it.
+
+    Sabotage: read the start on the loop in `read_start`, or drop the family from
+    `_session_for`'s open, and this fails.
+    """
+    from ph.persistence import jsonl
+    from ph_app import sessions
+
+    async with running(tmp_path, name="first") as daemon:
         client = await daemon.client()
         await client.call("session/prompt", sessionId="epsilon", prompt="first")
         await _settled(client, "epsilon", events=1)
         await client.notify("shutdown")
 
-    async with running(tmp_path) as daemon:
+    loop = threading.get_ident()
+    read_on: list[int] = []
+    searched: list[str] = []
+    real_start = sessions.recorded_start
+    monkeypatch.setattr(
+        runtime_module,
+        "recorded_start",
+        lambda directory, root: noted(read_on, threading.get_ident(), real_start(directory, root)),
+    )
+    monkeypatch.setattr(jsonl, "locate_under", searches_into(searched))
+
+    async with running(tmp_path, name="second") as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="epsilon")
 
@@ -548,6 +575,9 @@ async def test_a_resumed_root_says_so_in_its_own_log(tmp_path: Path) -> None:
 
         assert any(one["type"] == "session/resumed" for one in history)
         await client.notify("shutdown")
+
+    assert read_on and loop not in read_on, "the start was read on the event loop"
+    assert searched.count("epsilon") == 1, searched
 
 
 # --------------------------------------------------------------- P5-02 gate --

@@ -62,7 +62,6 @@ from ph.text import count_of
 
 from .console import detail, fail
 from .named_profiles import NamedProfile, parse_named_profile, render_named_profile
-from .sessions import recorded_environment
 
 __all__ = [
     "DEFAULT_PROFILE",
@@ -688,9 +687,7 @@ class StartingProfile:
     the version it was to apply; `""` otherwise."""
 
 
-def session_profile(
-    session_id: str | None, requested: Profile, *, recorded: LoggedEnvironment | None = None
-) -> StartingProfile:
+def session_profile(requested: Profile, environment: LoggedEnvironment) -> StartingProfile:
     """The profile a session mounts in (S5): its own log's environment when it has one.
 
     A session whose log records a base is mounted from it — that base, or a version
@@ -702,35 +699,28 @@ def session_profile(
     it has moved (`change`); when it no longer composes — renamed, removed —
     `requested`'s rows serve instead: the environment is the log's either way.
 
-    A session with no base — new, or from before S3 — mounts `requested`, and
-    records its base from it as it opens. So does one whose store is not a file this
-    can read before mounting (`recorded_environment`). `recorded` is that reading,
-    for a caller that already has it (the supervisor, with the cwd beside it).
+    `environment` is what the session's log says (`RecordedStart.environment`), and
+    empty for a new session or one whose store its host cannot read before mounting:
+    a session with no base — new, or from before S3 — mounts `requested`, and records
+    its base from it as it opens.
     """
-    if not session_id:
-        return StartingProfile(requested)
-    env = (
-        recorded
-        if recorded is not None
-        else recorded_environment(resolve_roots().sessions_dir(), session_id)
-    )
-    starts_on = env.starts_on
-    if env.base is None or starts_on is None:
+    starts_on = environment.starts_on
+    if environment.base is None or starts_on is None:
         return StartingProfile(requested)
     named: Profile | None = None
-    if env.base.name:
+    if environment.base.name:
         try:
-            named = composed_like(env.base.name, requested)
+            named = composed_like(environment.base.name, requested)
         except (LoaderError, OSError, ValueError):
             named = None
     start = start_documents(requested)
     # An adoption that clears the overrides (`/profile use --clear`) mounts without
     # them: the start that applies it logs the clears, and a mount composed with them
     # would run with settings the log is about to say it dropped.
-    kept = () if env.adopted_clears else env.overrides
+    kept = () if environment.adopted_clears else environment.overrides
     profile = rebuilt(starts_on, named or requested, kept, then=start)
-    change = profile_change(env, base_of(named)) if named is not None else None
-    return StartingProfile(profile, change, adopting=env.adopted)
+    change = profile_change(environment, base_of(named)) if named is not None else None
+    return StartingProfile(profile, change, adopting=environment.adopted)
 
 
 NoteDoor: TypeAlias = Literal["cli", "session"]

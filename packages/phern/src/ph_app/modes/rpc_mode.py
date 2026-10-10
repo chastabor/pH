@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sys
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TextIO
 
 import anyio
@@ -25,9 +25,8 @@ from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
-from ph.persistence import open_session
 from ph.seams.models import ModelChoice, start_on
-from ph.session import Session, SessionEvent, SessionForkError, new_session_id
+from ph.session import Session, SessionEvent, SessionForkError
 from ph.wire import WireModel
 
 from .. import verbs
@@ -48,7 +47,8 @@ from ..protocol import (
     parse_params,
     respond,
 )
-from ..runtime import mount_session, mounted
+from ..runtime import mount_session, mounted, open_root, read_start
+from ..sessions import RecordedStart
 
 __all__ = ["RpcServer", "run_rpc"]
 
@@ -82,6 +82,9 @@ class _Served:
     """One session this server serves: its own mount, and its agent once prompted."""
 
     ctx: Context
+    start: RecordedStart
+    """What it is opened with (`open_root`): its start as read before the mount, and
+    once it is open, its own id and family."""
     agent: AgentDriver | None = None
 
 
@@ -104,16 +107,30 @@ class RpcServer:
     _served: dict[str, _Served] = field(default_factory=dict)
     _deployment: Context | None = None
 
-    async def _mount(self, session_id: str, *, fresh: bool = False) -> _Served:
-        """The session's own mount, mounted the first time it is asked for. `fresh` is
-        an id this server just made, which has no log to read an environment from."""
-        served = self._served.get(session_id)
+    async def _mount(self, session_id: str | None) -> _Served:
+        """The session's own mount, mounted the first time it is asked for. `None` is a
+        session about to be made, which has no log to read an environment from and is
+        filed under its id once it opens (`_open`)."""
+        served = self._served.get(session_id) if session_id else None
         if served is None:
+            start = await read_start(session_id)
             # An adopted version the loader refuses is taken back there, as the
             # daemon's roots and `phern -p` do; its log says why.
-            ctx, _ = await mount_session(self.exits, None if fresh else session_id, self.profile)
-            served = self._served[session_id] = _Served(ctx)
+            ctx, _ = await mount_session(self.exits, start, self.profile)
+            served = _Served(ctx, start)
+            if session_id:
+                self._served[session_id] = served
         return served
+
+    async def _open(self, served: _Served) -> Session:
+        """Open a session on its mount, and file the mount under its id. A session about
+        to be made gets its id from `open_session`, which does not search the store for
+        an id it made, as `phern -p`'s does."""
+        session = await open_root(served.ctx, served.start)
+        served.start = replace(served.start, session_id=session.id, family=session.header.family)
+        self._served[session.id] = served
+        self._attach(served.ctx, session)
+        return session
 
     async def _listing(self) -> Context:
         """The profile itself, mounted once, for what the deployment offers before any
@@ -163,10 +180,7 @@ class RpcServer:
             # Open, not create: a peer naming a stored id resumes it, and one
             # another process holds is refused by name (P5-03).
             opened = parse_params(method, _NewParams, params)
-            session_id = opened.session_id or new_session_id()
-            ctx = (await self._mount(session_id, fresh=not opened.session_id)).ctx
-            session = await open_session(ctx, session_id)
-            self._attach(ctx, session)
+            session = await self._open(await self._mount(opened.session_id))
             return {"sessionId": session.id}
         if method == "session/prompt":
             return await self._prompt(parse_params(method, _PromptParams, params))
@@ -205,13 +219,11 @@ class RpcServer:
         ctx.on("session/event", emit)
 
     async def _prompt(self, params: _PromptParams) -> dict[str, Any]:
-        session_id = params.session_id or new_session_id()
-        served = await self._mount(session_id, fresh=not params.session_id)
+        served = await self._mount(params.session_id)
         ctx = served.ctx
-        session = ctx.require(SESSIONS).get(session_id)
+        session = ctx.require(SESSIONS).get(params.session_id) if params.session_id else None
         if session is None:
-            session = await open_session(ctx, session_id)
-            self._attach(ctx, session)
+            session = await self._open(served)
         agent = served.agent
         if agent is None:
             # A prompt that names a route asks for it the way the flags do, and

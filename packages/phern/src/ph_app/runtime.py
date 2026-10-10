@@ -10,11 +10,13 @@ profile semantics.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
+import anyio
 from pydantic import ValidationError
 
 from ph.cordis import Context, LoaderError, MountRefusal, Profile
@@ -24,7 +26,6 @@ from ph.persistence import open_session, stored_session
 from ph.seams.models import ModelChoice, choose, start_on
 from ph.session import Session, SessionForkError
 from ph.session_profile import (
-    LoggedEnvironment,
     logged_environment,
     withdraw_adoption,
     withdrawn_note,
@@ -35,9 +36,9 @@ from .attach import ingest, prompt_message
 from .console import err
 from .daemon.recovery import resume_children
 from .profiles import NAMED, StartingProfile, host_rows, kept_note, session_profile
-from .sessions import not_a_root, recorded_start
+from .sessions import RecordedStart, not_a_root, recorded_start
 
-__all__ = ["mount_session", "mounted", "prompted"]
+__all__ = ["mount_session", "mounted", "open_root", "prompted", "read_start"]
 
 log = logging.getLogger(__name__)
 
@@ -82,12 +83,38 @@ async def mounted(profile: Profile, *, project: Path | None = None) -> AsyncIter
         await ctx.dispose()
 
 
+async def read_start(session_id: str | None) -> RecordedStart:
+    """What a session's log says before anything is mounted for it (`recorded_start`),
+    read off the event loop, and nothing for a session about to be made.
+
+    Off the loop because it is a search of the store, and for a fork or a segment a
+    read of its whole lineage: on the daemon, every root it serves would wait behind
+    one root's start. Read once by each host and handed on: to `mount_session` for the
+    environment and the owner, and to `open_root` for the family, so the resume reads
+    the log by path instead of searching for it a second time.
+    """
+    if not session_id:
+        return RecordedStart()
+    return await anyio.to_thread.run_sync(
+        recorded_start, resolve_roots().sessions_dir(), session_id
+    )
+
+
+async def open_root(
+    ctx: Context, start: RecordedStart, *, meta: Mapping[str, Any] | None = None
+) -> Session:
+    """`open_session` for the session `start` is the start of: its id and the family
+    its log was found in, from one reading, so no host opens a stored root by id alone
+    or pairs a family with another session's id. A session about to be made has
+    neither, and `open_session` mints its id."""
+    return await open_session(ctx, start.session_id, family=start.family, meta=meta)
+
+
 async def mount_session(
     exits: AsyncExitStack,
-    session_id: str | None,
+    start: RecordedStart,
     requested: Profile,
     *,
-    recorded: LoggedEnvironment | None = None,
     project: Path | None = None,
 ) -> tuple[Context, StartingProfile]:
     """A session mounted on `exits` in its own log's environment (`session_profile`),
@@ -107,12 +134,15 @@ async def mount_session(
     writer is the mount of the root that spawned it, and it is that child's only
     record. The daemon refuses first, with its own code (`NotARoot`); this is the same
     refusal for `phern -p --session <child>` and an rpc peer, which open through here.
+
+    `start` is the session's start as its host read it (`read_start`): its id, the
+    environment it mounts from, and the owner it is refused on. Composing the profile
+    reads the named profiles' YAML, so it runs off the loop as the read did.
     """
-    if session_id and recorded is None:
-        owner = recorded_start(resolve_roots().sessions_dir(), session_id).owner
-        if owner is not None:
-            raise SessionForkError(not_a_root(session_id, owner), "SESSION_IS_SUBAGENT")
-    starting = session_profile(session_id, requested, recorded=recorded)
+    session_id = start.session_id
+    if session_id and start.owner is not None:
+        raise SessionForkError(not_a_root(session_id, start.owner), "SESSION_IS_SUBAGENT")
+    starting = await anyio.to_thread.run_sync(session_profile, requested, start.environment)
     try:
         ctx = await exits.enter_async_context(mounted(starting.profile, project=project))
     except _REFUSED as error:
@@ -128,13 +158,13 @@ async def mount_session(
             reason,
         )
         async with mounted(host_rows(requested)) as host:
-            session = await stored_session(host, session_id)
+            session = await stored_session(host, session_id, family=start.family)
             await withdraw_adoption(host, session, reason=reason)
             # Read from the session just written, which now says the version was
             # taken back — one store for the write and the read.
-            recorded = logged_environment(session)
+            environment = logged_environment(session)
         starting = replace(
-            session_profile(session_id, requested, recorded=recorded),
+            await anyio.to_thread.run_sync(session_profile, requested, environment),
             withdrawn=withdrawn_note(adopting.name, reason),
         )
         ctx = await exits.enter_async_context(mounted(starting.profile, project=project))
@@ -179,7 +209,8 @@ async def prompted(
     adopted version the loader refused, which this start took back.
     """
     async with AsyncExitStack() as exits:
-        ctx, starting = await mount_session(exits, session_id, profile)
+        start = await read_start(session_id)
+        ctx, starting = await mount_session(exits, start, profile)
         if starting.withdrawn:
             err.print(starting.withdrawn, style="yellow", markup=False)
         elif starting.change is not None and session_id:
@@ -188,7 +219,7 @@ async def prompted(
         # providers an adapter serves — and before the session opens, so a route
         # nothing can run leaves the command as its refusal with nothing on disk.
         choose(ctx, choice)
-        session = await open_session(ctx, session_id)
+        session = await open_root(ctx, start)
         if before is not None:
             before(ctx, session)
         # This start's choice is an override of the session's model where it

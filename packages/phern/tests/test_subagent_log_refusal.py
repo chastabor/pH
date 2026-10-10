@@ -20,7 +20,7 @@ from ph.persistence.jsonl import session_path
 from ph.session import Session, SessionForkError, SessionHeader
 from ph.testing import log_event
 from ph_app.profiles import compose_profile
-from ph_app.runtime import mount_session
+from ph_app.runtime import mount_session, read_start
 
 pytestmark = pytest.mark.anyio
 
@@ -60,9 +60,10 @@ async def test_a_one_shot_run_on_a_subagents_log_is_refused(
     _stored("lead", parent=None)
     before = _stored("lead-child-1", parent="lead")
 
+    start = await read_start("lead-child-1")
     async with AsyncExitStack() as exits:
         with pytest.raises(SessionForkError, match=r"sub-agent's log.*root lead;") as refused:
-            await mount_session(exits, "lead-child-1", compose_profile("headless"))
+            await mount_session(exits, start, compose_profile("headless"))
 
     assert refused.value.code == "SESSION_IS_SUBAGENT"
     family = SessionHeader(id="lead", created_at=1).family

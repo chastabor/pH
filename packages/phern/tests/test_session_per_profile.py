@@ -23,12 +23,12 @@ from ph.json import as_obj, as_seq
 from ph.keys import SESSIONS
 from ph.paths import resolve_roots
 from ph.session import now_ms
-from ph.testing import logged_events, not_none, write_profile
+from ph.testing import logged_events, not_none, searches_into, write_profile
 from ph_app.cli import app
 from ph_app.modes import run_rpc
 from ph_app.profiles import compose_profile
 from ph_app.protocol import DaemonError
-from ph_app.sessions import recorded_environment, stored_on
+from ph_app.sessions import recorded_start, stored_on
 
 pytestmark = pytest.mark.anyio
 
@@ -89,22 +89,35 @@ async def test_a_session_whose_profile_went_away_still_runs_on_its_log(tmp_path:
         assert row_disabled(back, "tool-bash"), "from the log's base"
 
 
-async def test_a_fork_is_mounted_from_the_base_its_prefix_holds(tmp_path: Path) -> None:
+async def test_a_fork_is_mounted_from_the_base_its_prefix_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A fork's file continues its root's from `seed_length`, and the base is in that
     prefix, so reading the fork's own file alone found no base and it mounted what
     was asked. Read through the lineage, it is its root's environment — and a
-    session on the profile, for `phern profiles adopt`. Sabotage: drop the lineage
-    read in `_environment_at`, and the fork has no base."""
+    session on the profile, for `phern profiles adopt`. The lineage is read from the
+    directory the fork was found in: given only the id, the walk searched the store
+    for the fork's own file a second time.
+
+    Sabotage: drop the lineage read in `_environment_at`, and the fork has no base;
+    drop its `family`, and the fork is searched for twice.
+    """
+    from ph.persistence import jsonl
+
     async with running(tmp_path) as daemon:
         client = await daemon.client()
         await client.call("session/new", sessionId="trunk", profile="tui")
         trunk = daemon.held("trunk")
         fork = trunk.ctx.require(SESSIONS).fork(trunk.session, child_session_id="branch")
         await trunk.ctx.require(SESSIONS).flush(fork)
+        searched: list[str] = []
+        monkeypatch.setattr(jsonl, "locate_under", searches_into(searched))
 
-        env = recorded_environment(resolve_roots().sessions_dir(), "branch")
+        start = recorded_start(resolve_roots().sessions_dir(), "branch")
 
-        assert not_none(env.base).name == "tui"
+        assert not_none(start.environment.base).name == "tui"
+        assert start.family == fork.header.family
+        assert searched == ["branch"]
         assert "branch" in [one for one, _ in stored_on(resolve_roots().sessions_dir(), "tui")]
 
 

@@ -75,14 +75,13 @@ async def open_session(
     absolute, so a relative path is refused rather than resolved against this
     process's own working directory, which is not the caller's.
 
-    `family`, when the caller knows where the session is filed — a child's is its
-    parent's (`open_child_log`) — is where it is looked for and where it is created.
-    Exact, as `read` takes it: a child a restart reopens is one `stat` in its
-    parent's directory, where by id alone it was searched for across every family in
-    the store, once per child. A root has none to give, since a fork's family is not
-    in its id, so its log is searched for — off the loop, and **once**: the read
-    that finds it is the resume's (`read_if_stored`), where asking `exists` and
-    then reading looked it up twice.
+    `family`, when the caller knows where the session is filed, is where it is looked
+    for and where it is created. Exact, as `read` takes it: one `stat`, where by id
+    alone it was searched for across every family in the store. A child's is its
+    parent's (`open_child_log`). A root's is not in its id — a fork is filed in its
+    source's family — so it comes from a host that has already found the log. Without
+    one, the log is searched for off the loop, once: the read that finds it is the
+    resume's (`read_if_stored`).
     """
     resolved = session_id or new_session_id()
     store = await _claimed(ctx, resolved)

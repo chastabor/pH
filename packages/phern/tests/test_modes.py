@@ -37,6 +37,7 @@ import os
 import signal
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -72,11 +73,19 @@ from ph.seams.subagents import (
     child_state_of,
 )
 from ph.session import child_session_id
-from ph.testing import admitted_child, hold_session, log_event, stored_log
+from ph.testing import (
+    admitted_child,
+    hold_session,
+    log_event,
+    noted,
+    raising,
+    searches_into,
+    stored_log,
+)
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_transcript
 from ph_app.profiles import compose_profile
-from ph_app.protocol import PROTOCOL_VERSION, request
+from ph_app.protocol import PROTOCOL_VERSION, request, result_of
 from ph_app.runtime import mounted
 from ph_rlm.presentation import IPYTHON
 
@@ -550,6 +559,98 @@ async def test_a_second_one_shot_run_on_one_session_resumes_it(
     assert [event.seq for event in events] == list(range(len(events)))
     assert sum(event.type == "turn/start" for event in events) == 2
     assert any(event.type == "session/resumed" for event in events), "resumed, not recreated"
+
+
+async def test_a_one_shot_run_reads_a_stored_session_once(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed one-shot run reads its session's start once, before mounting: the
+    environment and the owner for the mount, and the family the log was found in for
+    the open. It read the start twice — once for the owner, once inside
+    `session_profile` — and the open searched the store a third time.
+
+    Sabotage: drop `family` from `prompted`'s open, and the store is searched twice.
+    """
+    from ph.persistence import jsonl
+    from ph_app import runtime, sessions
+
+    await run_json(profile, "hello", session_id="demo", out=io.StringIO())
+    starts: list[str] = []
+    searched: list[str] = []
+    real_start = sessions.recorded_start
+    monkeypatch.setattr(
+        runtime,
+        "recorded_start",
+        lambda directory, session_id: noted(starts, session_id, real_start(directory, session_id)),
+    )
+    monkeypatch.setattr(jsonl, "locate_under", searches_into(searched))
+
+    await run_json(profile, "and again", session_id="demo", out=io.StringIO())
+
+    assert starts == ["demo"]
+    assert searched.count("demo") == 1, searched
+
+
+async def test_an_rpc_session_made_without_an_id_is_not_searched_for(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`session/new` with no id leaves the id to `open_session`, which knows an id it
+    makes is new and does not look for it. rpc minted its own and passed it in, so
+    every new session searched the whole store for a log made a moment before. A
+    prompt naming the id it got back is served on the same mount.
+
+    Sabotage: mint the id in `RpcServer` and pass it to `open_session`, and the store
+    is searched.
+    """
+    from ph.persistence import jsonl
+    from ph_app.modes.rpc_mode import RpcServer
+
+    monkeypatch.setattr(
+        jsonl, "locate_under", raising(AssertionError("searched for a session rpc had just made"))
+    )
+    out = io.StringIO()
+    async with AsyncExitStack() as exits:
+        server = RpcServer(profile=profile, exits=exits, out=out)
+        await server.handle({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {}})
+        made = result_of(_rpc_replies(out)[1])["sessionId"]
+        prompt = {"sessionId": made, "prompt": "hello"}
+        await server.handle(
+            {"jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": prompt}
+        )
+
+        assert result_of(_rpc_replies(out)[2])["sessionId"] == made
+        assert list(server._served) == [made]
+
+
+async def test_an_rpc_session_named_by_a_stored_id_is_searched_for_once(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer naming a stored session: rpc reads its start before the mount and opens
+    it where that read found the log — one search of the store, not one for the start
+    and another for the resume.
+
+    Sabotage: open by id alone in `RpcServer._open`, and the store is searched twice.
+    """
+    from ph.persistence import jsonl
+    from ph_app.modes.rpc_mode import RpcServer
+
+    await _rpc_prompt(profile, "stored")
+    searched: list[str] = []
+    monkeypatch.setattr(jsonl, "locate_under", searches_into(searched))
+    out = io.StringIO()
+    async with AsyncExitStack() as exits:
+        server = RpcServer(profile=profile, exits=exits, out=out)
+        new = {"sessionId": "stored"}
+        await server.handle({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": new})
+
+        assert result_of(_rpc_replies(out)[1])["sessionId"] == "stored"
+    assert searched.count("stored") == 1, searched
+
+
+def _rpc_replies(out: io.StringIO) -> dict[int, Any]:
+    """The replies an rpc server has written so far, by request id."""
+    frames = [json.loads(line) for line in out.getvalue().splitlines()]
+    return {frame["id"]: frame for frame in frames if "id" in frame}
 
 
 async def test_a_one_shot_run_is_refused_a_session_another_process_holds(
