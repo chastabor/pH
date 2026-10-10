@@ -1295,3 +1295,31 @@ def test_a_log_not_on_record_stats_each_family_once(
 
     assert locate_under(tmp_path, "lead", ".jsonl") is None
     assert len(probed) == len(set(probed)) == 3, probed
+
+
+def test_a_skim_stops_at_its_bound_without_parsing_to_it(tmp_path: Path) -> None:
+    """A skim passes the lines of other types unparsed, so it cannot read their seqs;
+    but a log's seqs run one per line from its first, so it knows the line that
+    reaches its bound and stops there. It read an ancestor that kept working past its
+    child's cut to the end — which a damaged last line, the one a skim does parse,
+    now proves.
+
+    Sabotage: drop the bound from `_read`'s skip, and the skim reaches the damaged
+    line and refuses it.
+    """
+    from ph.persistence.jsonl import skim_stored
+    from ph.session import SessionEvent, SessionHeader
+    from ph.testing import write_stored_log
+
+    events = [
+        SessionEvent(type="turn/end" if seq == 2 else "turn/start", seq=seq, time=1, data={})
+        for seq in range(40)
+    ]
+    path = write_stored_log(tmp_path, SessionHeader(id="lead", created_at=1), events)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"type":"turn/start","seq":40,"time":1,"data":{"turn":\n')
+
+    header, first, kept = skim_stored(tmp_path, "lead", 5, "lead", kinds="turn/end")
+
+    assert (header.id, first) == ("lead", 0)
+    assert [event.seq for event in kept] == [2]

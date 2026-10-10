@@ -38,7 +38,7 @@ from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
-from ph.testing import StubAgent
+from ph.testing import StubAgent, raising
 from ph_app import verbs
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.follow import Followed
@@ -56,7 +56,7 @@ pytestmark = pytest.mark.anyio
 
 async def _front(
     daemon: Daemon,
-    session_id: str = "remote",
+    session_id: str | None = "remote",
     *,
     host: StubHost | None = None,
     **options: Any,  # noqa: ANN401
@@ -112,6 +112,31 @@ async def test_a_turn_reaches_the_transcript_over_the_socket(tmp_path: Path) -> 
         assert [item.role for item in front.state.items][:1] == ["user"]
         assert any(item.role == "assistant" for item in front.state.items)
         assert host.redraws > 0, "the screen was told to redraw"
+
+
+async def test_a_fresh_session_is_named_by_the_daemon_and_never_searched_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A front end opening a fresh session sends no id, and the daemon names it as it
+    opens (protocol 8), so neither the start's read nor the open searches the store
+    for a log that cannot exist. The TUI minted one and sent it, which the daemon
+    could not tell from a stored id, and searched for twice. Every call after uses
+    the id the reply carried.
+
+    Sabotage: mint the id in `_new_session` and pass it on, and the store is searched.
+    """
+    from ph.persistence import families, jsonl
+
+    searched = raising(AssertionError("searched the store for a session the daemon made"))
+    monkeypatch.setattr(jsonl, "locate_under", searched)
+    monkeypatch.setattr(families, "locate_under", searched)
+    async with running(tmp_path) as daemon:
+        front, _host = await _front(daemon, None)
+
+        await front.submit("hello")
+
+        assert front.session_id in daemon.running.supervisor.roots
+        assert any(item.role == "assistant" for item in front.state.items)
 
 
 async def test_a_front_end_attaching_to_a_finished_turn_rebuilds_it_exactly(

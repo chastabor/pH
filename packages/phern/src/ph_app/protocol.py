@@ -33,9 +33,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypeAlias, TypedDict
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import AfterValidator, Field, ValidationError
 
 from ph.json import as_str
 from ph.persistence import resumption_of, resumptions
@@ -63,6 +63,7 @@ __all__ = [
     "RequestFrame",
     "ResultFrame",
     "SeamAbsent",
+    "SessionId",
     "SessionParams",
     "UnknownMethod",
     "Verb",
@@ -80,7 +81,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -186,6 +187,15 @@ becomes `checkInvariants`, a flag. The socket is watched by the kernel (P12-05):
 `watchEvery` becomes `socketWatch`, how (`inotify`, `kqueue`, `off`, or
 `unavailable: <why>`). That is the whole of Phase 12's change to this reply; the
 guest's parent watch (P12-07) moved to kqueue without touching the wire.
+
+**8 (unreleased): `session/new` may omit `sessionId`, and the daemon names the
+session.** The reply carries the id, as it always has. An id the daemon makes is
+new, so its store is not searched for it; one a client made and sent was searched
+for twice, once for its start and once by the open, for a log that could not be
+there. Every other method about a root still requires its id (decision 55): only a
+session that does not exist yet has none to give. A 0.7 client always sends one and
+is unaffected; a client that omits it against a 0.7 daemon is refused
+`invalid_params`, and restarting the daemon on the same release fixes that.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by
@@ -736,33 +746,34 @@ class NoParams(WireModel):
     """
 
 
+def _usable_as_a_path_component(value: str) -> str:
+    if not valid_session_id(value):
+        raise ValueError(
+            "sessionId must be alphanumerics, dots, dashes and underscores, "
+            "starting with a letter or a digit"
+        )
+    return value
+
+
+SessionId = Annotated[str, AfterValidator(_usable_as_a_path_component)]
+"""A session id on the wire, **checked here** (K9): an id becomes a directory name in
+the spill store, the archive and the workspace scratch root, and several of the
+daemon's own reads — `recorded_start`, the lease, `locate_session` — build a path
+from it before any `Session` exists to refuse it. A type rather than a validator on
+one model, so a method whose id may be absent (`session/new`) is checked the same."""
+
+
 class SessionParams(WireModel):
     """Every method about one session starts here.
 
     The protocol's, for the same reason: `sessionId` is what a method about a
     session is *about*, on either transport. What each server adds to it is its
     own — the daemon's idempotence key, stdio's optional id — which is where
-    the two vocabularies genuinely differ.
-
-    **The id is validated here** (K9), because this one model is what every
-    `session/*` method on both transports takes: a handler cannot forget a check
-    the wire type already made. An id becomes a directory name in the spill
-    store, the archive and the workspace scratch root, and several of the
-    daemon's own reads — `recorded_start`, the lease, `locate_session` — build a
-    path from it before any `Session` exists to refuse it.
+    the two vocabularies genuinely differ. Its id is a `SessionId`, so a handler
+    cannot forget a check the wire type already made.
     """
 
-    session_id: str
-
-    @field_validator("session_id")
-    @classmethod
-    def _usable_as_a_path_component(cls, value: str) -> str:
-        if not valid_session_id(value):
-            raise ValueError(
-                "sessionId must be alphanumerics, dots, dashes and underscores, "
-                "starting with a letter or a digit"
-            )
-        return value
+    session_id: SessionId
 
 
 async def respond(request_frame: dict[str, Any], dispatch: Dispatch) -> ReplyFrame | None:

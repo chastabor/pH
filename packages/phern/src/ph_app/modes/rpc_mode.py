@@ -40,6 +40,7 @@ from ..protocol import (
     Frame,
     MethodResult,
     NoParams,
+    SessionId,
     SessionParams,
     UnknownMethod,
     capabilities,
@@ -53,12 +54,13 @@ from ..sessions import RecordedStart
 __all__ = ["RpcServer", "run_rpc"]
 
 
-# The stdio transport's own params (P8-07) — the two, and only the two, whose
-# contract genuinely differs from the daemon's: here `session/new` may omit the
-# id (one process, one peer, so "a fresh session" needs no name) and
-# `session/prompt` names the route, because there is no supervisor holding one.
-# A shared model would have to make both optional for the daemon too, which is
-# the daemon's `invalid_params` refusal quietly given away.
+# The stdio transport's own params (P8-07) — the two whose contract differs from
+# the daemon's: here `session/prompt` may omit the id and names the route, because
+# there is no supervisor holding one. A shared model would have to make that
+# optional for the daemon too, which is the daemon's `invalid_params` refusal
+# quietly given away. `session/new` may omit the id on both since protocol 8 — the
+# door names a new session, on either transport — but the daemon's also carries the
+# client's directory and trust, which stdio has no use for.
 #
 # The shapes both transports need are the protocol's, not a copy here:
 # `NoParams` and `SessionParams` come from `..protocol` beside `Cursor`, for
@@ -67,11 +69,11 @@ __all__ = ["RpcServer", "run_rpc"]
 
 
 class _NewParams(WireModel):
-    session_id: str | None = None
+    session_id: SessionId | None = None
 
 
 class _PromptParams(WireModel):
-    session_id: str | None = None
+    session_id: SessionId | None = None
     prompt: str = ""
     provider: str | None = None
     model: str | None = None

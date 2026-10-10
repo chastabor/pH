@@ -11,7 +11,15 @@ from .jsonl import (
     session_path,
 )
 from .lease import SessionBusy, claim_session
-from .lineage import MAX_DEPTH, LineageError, ReadOne, lineage_faults, materialize
+from .lineage import (
+    MAX_DEPTH,
+    LineageError,
+    ReadOne,
+    ReadSome,
+    lineage_faults,
+    materialize,
+    materialize_some,
+)
 from .opening import open_session, stored_session
 from .protocol import ClaimingStore, NoStoredSession, read_if_stored
 from .repair import (
@@ -32,6 +40,7 @@ __all__ = [
     "LineageError",
     "NoStoredSession",
     "ReadOne",
+    "ReadSome",
     "Resumption",
     "SessionBusy",
     "UndeclaredIntentError",
@@ -40,6 +49,7 @@ __all__ = [
     "interrupted_turn_closers",
     "lineage_faults",
     "materialize",
+    "materialize_some",
     "open_session",
     "read_if_stored",
     "read_records",

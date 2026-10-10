@@ -39,7 +39,15 @@ from typing import TypeAlias
 
 from ..session import SessionEvent, SessionHeader
 
-__all__ = ["MAX_DEPTH", "LineageError", "ReadOne", "lineage_faults", "materialize"]
+__all__ = [
+    "MAX_DEPTH",
+    "LineageError",
+    "ReadOne",
+    "ReadSome",
+    "lineage_faults",
+    "materialize",
+    "materialize_some",
+]
 
 ReadOne: TypeAlias = Callable[
     [str, int | None, str | None], tuple[SessionHeader, list[SessionEvent]]
@@ -62,6 +70,14 @@ load-bearing would mean a backend that quietly ignored it produced a *wrong* log
 which is exactly how reference-forking came to be a silent no-op on Turso once
 already.
 """
+
+ReadSome: TypeAlias = Callable[
+    [str, int | None, str | None], tuple[SessionHeader, int | None, list[SessionEvent]]
+]
+"""`ReadOne` for a reader that keeps only some of a file's events (`materialize_some`):
+it answers the seq of the file's first event beside them, since the first kept one
+cannot say whether the file holds its own history or where its inheritance ends.
+`upto` binds here: what it keeps lies below it."""
 
 MAX_DEPTH = 64
 """How many ancestors one materialization may walk.
@@ -139,32 +155,87 @@ def materialize(
             code="TRUNCATED",
             session_id=session_id,
         )
-    if events and events[0].seq == 0:
-        return header, events
-    if not events and not (header.parent_session and inherited):
-        # A root with nothing in it. A *fork* with nothing in it is the case
-        # below, and telling them apart is the header's job rather than the
-        # file's, because an empty file says the same thing either way.
-        return header, events
+    assembled, chain = _inherited(
+        _with_first(read_one), session_id, header, _first_of(events), events
+    )
+    if len(chain) > 1:
+        _assert_contiguous(assembled, session_id, chain)
+    return header, assembled
 
+
+def materialize_some(
+    read: ReadSome, session_id: str, *, family: str | None = None
+) -> tuple[SessionHeader, list[SessionEvent]]:
+    """`materialize` for a reader that keeps only some of each file's events — what a
+    host folds out of a lineage before anything is mounted, its profile records —
+    without parsing the rest.
+
+    The same walk (`_inherited`), so a broken chain raises the same `LineageError`.
+    What it cannot check is that the assembled log is dense, which takes every
+    event: the strict read that follows (the open's `materialize`) refuses a gap.
+    """
+    header, first, events = read(session_id, None, family)
+    assembled, _chain = _inherited(read, session_id, header, first, events)
+    return header, assembled
+
+
+def _first_of(events: list[SessionEvent]) -> int | None:
+    """The seq of an unfiltered read's first event: its file's, which is what says
+    what the file inherits."""
+    return events[0].seq if events else None
+
+
+def _with_first(read_one: ReadOne) -> ReadSome:
+    """A `ReadOne` as a `ReadSome`: an unfiltered read's first event is its file's."""
+
+    def read(
+        session_id: str, upto: int | None, family: str | None
+    ) -> tuple[SessionHeader, int | None, list[SessionEvent]]:
+        header, events = read_one(session_id, upto, family)
+        return header, _first_of(events), events
+
+    return read
+
+
+def _owed(header: SessionHeader, first: int | None) -> int:
+    """How many leading events a file is owed by its lineage: its first seq, or with
+    no event to read one off, its `seed_length` when it names a parent.
+
+    **A child that owns nothing still inherits everything**, and reading that as a
+    complete empty log is how a fork lost its history. Such files exist: a fork taken
+    at an end-seed was stored with a header and no events while the constructor laid
+    the marker and skipped it for a seed already ending in one. With no first event,
+    `seed_length` is the boundary — which is what it means. A root with nothing in it
+    names no parent, and is owed nothing.
+    """
+    if first is not None:
+        return first
+    return header.first_own_seq if header.parent_session else 0
+
+
+def _inherited(
+    read: ReadSome,
+    session_id: str,
+    header: SessionHeader,
+    first: int | None,
+    own: list[SessionEvent],
+) -> tuple[list[SessionEvent], list[str]]:
+    """`own`, with everything its lineage supplies below it, oldest first, and the
+    chain it came from — the walk `materialize` and `materialize_some` share, so its
+    rules are kept once. A file that starts at 0 holds its own history and is
+    returned as it is.
+    """
     # Collect ancestors newest-first, taking from each only what the generation
     # below it still lacks. `owed` is always the next file's first seq, which is
     # both the count to take and the boundary the fork was made at.
-    #
-    # **A child that owns nothing still inherits everything**, and reading that
-    # as a complete empty log is how a fork lost its history. Such files exist: a
-    # fork taken at an end-seed was stored with a header and no events while the
-    # constructor laid the marker and skipped it for a seed already ending in
-    # one. With no first event to read a boundary off, `seed_length` is the
-    # boundary — which is what it means.
+    owed = _owed(header, first)
     chain = [session_id]
-    pieces = [events]
-    owed = events[0].seq if events else inherited
+    pieces = [own]
     parent = header.parent_session
     while owed > 0:
         if parent is None:
             raise LineageError(
-                f"session {session_id!r} begins at seq {events[0].seq} and names no parent; "
+                f"session {session_id!r} begins at seq {owed} and names no parent; "
                 "a log that does not start at 0 must say where its history came from",
                 code="NO_PARENT",
                 session_id=session_id,
@@ -184,7 +255,7 @@ def materialize(
                 session_id=session_id,
             )
         try:
-            ancestor_header, ancestor_events = read_one(parent, owed, header.family)
+            ancestor, starts, events = read(parent, owed, header.family)
         except Exception as error:
             raise LineageError(
                 f"session {session_id!r} inherits {owed} event(s) from {parent!r}, "
@@ -196,21 +267,17 @@ def materialize(
         # Only the part below `owed`; an ancestor that kept working past the
         # boundary contributes nothing above it. The prefix is immutable, so
         # this is stable however far the ancestor has since grown.
-        taken = [event for event in ancestor_events if event.seq < owed]
-        pieces.append(taken)
-        if taken:
-            owed = taken[0].seq
+        pieces.append([event for event in events if event.seq < owed])
+        if starts is not None and starts < owed:
+            owed = starts
         # An ancestor that supplied **nothing** does not end the search: it is
         # itself a reference-fork at or above this boundary, so what is owed is
         # unchanged and the prefix lies further up. Zeroing `owed` here instead
         # stopped the walk at the first such link, which turned every cycle and
         # every over-deep chain into a "gap" report — the guards below were
         # unreachable, and the tests for them are what found it.
-        parent = ancestor_header.parent_session
-
-    assembled = [event for piece in reversed(pieces) for event in piece]
-    _assert_contiguous(assembled, session_id, chain)
-    return header, assembled
+        parent = ancestor.parent_session
+    return [event for piece in reversed(pieces) for event in piece], chain
 
 
 def _assert_contiguous(events: list[SessionEvent], session_id: str, chain: list[str]) -> None:

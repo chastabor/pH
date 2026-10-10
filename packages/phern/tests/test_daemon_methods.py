@@ -187,13 +187,19 @@ def test_the_two_tuples_partition_the_vocabulary_the_way_the_tables_do() -> None
 
 def test_every_method_about_one_root_requires_its_id() -> None:
     """The `str(params["sessionId"])` the row replaced was a `KeyError` waiting
-    at twenty-one sites; the model makes the requirement one declaration."""
+    at twenty-one sites; the model makes the requirement one declaration.
+
+    One exception, by name: `session/new`, whose root may not exist yet, and which
+    with no id is a new session the daemon names (protocol 8)."""
     daemon_level = {"initialize", "daemon/hello", "daemon/config", "shutdown"}
     daemon_level |= {"daemon/status", "daemon/lifetime"}
     daemon_level |= {"sessions/list", "sessions/browse"}
     for method, row in {**METHODS, **MUTATIONS}.items():
         if method in daemon_level:
             assert not issubclass(row.verb.params, SessionParams), method
+            continue
+        if method == "session/new":
+            assert not row.verb.params.model_fields["session_id"].is_required()
             continue
         assert issubclass(row.verb.params, SessionParams), method
         assert row.verb.params.model_fields["session_id"].is_required(), method

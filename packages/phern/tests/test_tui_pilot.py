@@ -36,7 +36,7 @@ from ph.seams.commands import CommandDefinition
 from ph.seams.models import ModelChoice
 from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
-from ph.testing import StubAgent, not_none, simple_tool
+from ph.testing import StubAgent, not_none, raising, simple_tool
 from ph_app.daemon.supervisor import Root
 from ph_app.payloads import AskKey
 from ph_app.trust import TrustStore
@@ -81,6 +81,26 @@ async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp, tui_daem
         roles = [(item.role, item.text) for item in app.front.state.items]
         assert ("user", "hello") in roles
         assert any(role == "assistant" for role, _ in roles)
+
+
+async def test_a_fresh_tui_session_takes_the_id_the_daemon_gives_it(
+    make_tui_app: MakeApp, tui_daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A TUI opening a new session sends no id, and works on the one `session/new`
+    replied with. It minted one and sent it, which the daemon could not tell from a
+    stored id, and searched its store for twice.
+
+    Sabotage: mint the id in `PHTuiApp._open` again, and the store is searched.
+    """
+    from ph.persistence import families, jsonl
+
+    searched = raising(AssertionError("searched the store for a session the daemon made"))
+    monkeypatch.setattr(jsonl, "locate_under", searched)
+    monkeypatch.setattr(families, "locate_under", searched)
+    async with running(make_tui_app(session_id=None, offer_sessions=False)) as (app, pilot):
+        await until(pilot, lambda: app.front is not None)
+
+        assert tui_daemon.held(not_none(app.front).session_id).session is not None
 
 
 async def test_bracketed_text_reaches_the_log_verbatim(make_tui_app: MakeApp) -> None:

@@ -22,8 +22,17 @@ from typer.testing import CliRunner
 from ph.json import as_obj, as_seq
 from ph.keys import SESSIONS
 from ph.paths import resolve_roots
-from ph.session import now_ms
-from ph.testing import logged_events, not_none, searches_into, write_profile
+from ph.session import SessionEvent, SessionHeader, now_ms
+from ph.session_profile import BASE, ProfileBase
+from ph.testing import (
+    logged_events,
+    not_none,
+    reference_fork,
+    searches_into,
+    write_profile,
+    write_reference_fork,
+    write_stored_log,
+)
 from ph_app.cli import app
 from ph_app.modes import run_rpc
 from ph_app.profiles import compose_profile
@@ -119,6 +128,48 @@ async def test_a_fork_is_mounted_from_the_base_its_prefix_holds(
         assert start.family == fork.header.family
         assert searched == ["branch"]
         assert "branch" in [one for one, _ in stored_on(resolve_roots().sessions_dir(), "tui")]
+
+
+def test_a_forks_start_skims_only_what_it_inherits(tmp_path: Path) -> None:
+    """A fork's start walks its lineage reading only its profile records, as a root's
+    own file is read: each ancestor gives only what it logged below the point its
+    child was cut, and the lines of other types are passed unparsed. Read through
+    `materialize`, every envelope of the lineage was validated to keep a few profile
+    records, and then again by the open.
+
+    Sabotage: fold through `materialize` again, and the damaged line refuses the
+    lineage.
+    """
+    root = tmp_path / "sessions"
+
+    def base(name: str, seq: int) -> SessionEvent:
+        return SessionEvent(
+            type=BASE, seq=seq, time=1, data=ProfileBase(name, (), (), "0.7.0").to_wire()
+        )
+
+    def turn(kind: str, seq: int) -> SessionEvent:
+        return SessionEvent(type=kind, seq=seq, time=1, data={"turn": seq})
+
+    lead = write_stored_log(
+        root,
+        SessionHeader(id="p", created_at=1),
+        [base("work", 0), turn("turn/start", 1), turn("turn/end", 2)],
+    )
+    # A line of another type, damaged where a skim passes it and a strict read does not.
+    lines = lead.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines[2] = '{"type":"turn/start","seq":1,"time":1,"data":{"turn":\n'
+    lead.write_text("".join(lines), encoding="utf-8")
+    write_stored_log(
+        root,
+        reference_fork("c", "p", boundary=3)[0],
+        [turn("turn/start", 3), base("tui", 4), turn("turn/end", 5)],
+    )
+    write_reference_fork(root, "g", "c", boundary=4, family="p")
+
+    start = recorded_start(root, "g")
+
+    assert not_none(start.environment.base).name == "work"
+    assert start.family == "p"
 
 
 def test_a_resumed_one_shot_session_runs_on_its_own_profile() -> None:

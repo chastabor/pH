@@ -2394,8 +2394,9 @@ async def test_a_mount_that_fails_leaves_no_root_behind(
         assert root.ctx.active
 
 
+@pytest.mark.parametrize("asked", ["in-flight", None], ids=["named", "new"])
 async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asked: str | None
 ) -> None:
     """`aclose` releases `self.roots`, and a mount is by definition not in it yet.
 
@@ -2404,7 +2405,8 @@ async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
     nothing flushes and a worktree nothing reclaims (F6) — the things teardown
     exists for. And a handler outlives the start of teardown, so a client can ask
     for a root while the ones already built are being unwound, which is work
-    nothing would ever release.
+    nothing would ever release. A new root's mount is waited for too, though it has
+    no id to be found by until it opens.
     """
     entered, release = anyio.Event(), anyio.Event()
 
@@ -2422,7 +2424,7 @@ async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
         supervisor = Supervisor(profile=PROFILE, tasks=tasks)
         monkeypatch.setattr(runtime_module, "mounted", slow_mount)
         async with anyio.create_task_group() as client:
-            client.start_soon(supervisor.start, "in-flight")
+            client.start_soon(supervisor.start, asked)
             await entered.wait()
             client.cancel_scope.cancel()
 
@@ -2435,7 +2437,7 @@ async def test_shutdown_waits_for_a_mount_in_flight_and_admits_no_more(
             release.set()
 
         assert supervisor.roots == {}, "the mount that finished under aclose was released"
-        assert "in-flight" not in supervisor._mounting
+        assert not supervisor._mounting and not supervisor._in_flight
         tasks.cancel_scope.cancel()
 
 

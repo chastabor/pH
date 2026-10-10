@@ -357,6 +357,14 @@ attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` â€
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Upgrading from 0.7
+
+- **Restart the daemon.** It speaks protocol 8: `session/new` may omit `sessionId`,
+  and the daemon names the new session in its reply, so a new session is no longer
+  searched for across every stored log. A 0.7 client always sends an id and is
+  unaffected; the new TUI omits it for a fresh session, which a 0.7 daemon refuses
+  as `invalid_params` until it is restarted.
+
 ## Upgrading from 0.6
 
 0.7 takes the daemon off the clock â€” nothing wakes up to ask whether something

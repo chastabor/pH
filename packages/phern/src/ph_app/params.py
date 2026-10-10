@@ -59,7 +59,7 @@ from ph.seams.permission_presets import PresetName
 from ph.seams.schedule import Schedule, ScheduleKind
 from ph.wire import WireModel
 
-from .protocol import Cursor, SessionParams
+from .protocol import Cursor, SessionId, SessionParams
 
 __all__ = [
     "AdoptParams",
@@ -115,9 +115,13 @@ class BrowseParams(WireModel):
     cwd: str = ""
 
 
-class NewSessionParams(SessionParams):
-    """`session/new`. `cwd` is the client's directory, because the daemon mounts."""
+class NewSessionParams(WireModel):
+    """`session/new`. `cwd` is the client's directory, because the daemon mounts.
 
+    Not a `SessionParams`: the one method about a root whose root may not exist yet,
+    so its id may be absent — a new session the daemon names (protocol 8)."""
+
+    session_id: SessionId | None = None
     cwd: str | None = None
     trust: TrustAnswer = ""
     choice: ModelChoice = Field(default_factory=ModelChoice)

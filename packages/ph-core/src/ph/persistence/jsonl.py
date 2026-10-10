@@ -75,6 +75,7 @@ __all__ = [
     "session_logs",
     "session_path",
     "skim_session",
+    "skim_stored",
 ]
 
 
@@ -123,6 +124,35 @@ def read_stored(
     if path is not None:
         with suppress(FileNotFoundError):
             return read_session(path, upto=upto, types=types)
+    raise NoStoredSession(f"no stored session {session_id!r}")
+
+
+def skim_stored(
+    root: Path,
+    session_id: str,
+    upto: int | None = None,
+    family: str | None = None,
+    *,
+    kinds: str,
+) -> tuple[SessionHeader, int | None, list[SessionEvent]]:
+    """One stored log's own file, keeping only the events whose type begins with
+    `kinds` and the seq of its first event — `ReadSome` for `materialize_some`, as
+    `read_stored` is `ReadOne`: what a host folds out of a lineage before anything is
+    mounted (its profile records), with no store behind it.
+
+    Skimmed: the lines of other types are passed unparsed, as `skim_session` passes
+    them, and read only to `upto`. So a damaged line among them goes unseen, which is
+    right for a fold a strict read follows (the open's `materialize`).
+    """
+    path = (
+        session_path(root, session_id, family)
+        if family is not None
+        else locate_session(root, session_id)
+    )
+    if path is not None:
+        with suppress(FileNotFoundError):
+            header, first, events = _read(path, upto, None, (f"{_TYPED}{kinds}",))
+            return header, first, [event for event in events if event.type.startswith(kinds)]
     raise NoStoredSession(f"no stored session {session_id!r}")
 
 
@@ -805,7 +835,8 @@ def read_session(
     record of any type is kept aside, so the torn-batch rule below still judges the
     tail by what was written rather than by what was kept.
     """
-    return _read(path, upto, types, None)
+    header, _first, events = _read(path, upto, types, None)
+    return header, events
 
 
 def skim_session(path: Path, types: frozenset[str]) -> tuple[SessionHeader, list[SessionEvent]]:
@@ -819,7 +850,8 @@ def skim_session(path: Path, types: frozenset[str]) -> tuple[SessionHeader, list
     reads as another type. The last line is parsed whatever it names, so the
     torn-tail and torn-batch rules judge the tail as a strict read does.
     """
-    return _read(path, None, types, tuple(f'{_TYPED}{one}"' for one in types))
+    header, _first, events = _read(path, None, types, tuple(f'{_TYPED}{one}"' for one in types))
+    return header, events
 
 
 def _read(
@@ -827,10 +859,20 @@ def _read(
     upto: int | None,
     types: frozenset[str] | None,
     wanted: tuple[str, ...] | None,
-) -> tuple[SessionHeader, list[SessionEvent]]:
+) -> tuple[SessionHeader, int | None, list[SessionEvent]]:
     """`read_session`'s loop, and `skim_session`'s when `wanted` holds the line
-    prefixes of the types to keep."""
+    prefixes of the types to keep — with the seq of the file's first event, which
+    says whether it holds its own history (`lineage`).
+
+    **A skim stops at `upto` without parsing to it.** The lines it passes are not
+    parsed, so their seqs are not read; but a log's seqs run one per line from its
+    first, so the line that should reach `upto` is known, and from there each line
+    is parsed until one does. A file whose seqs do not run so is only read further
+    than it needed, never short.
+    """
     header: SessionHeader | None = None
+    first: int | None = None
+    lines = 0  # event lines so far: the next one's seq is `first + lines` as written
     events: list[SessionEvent] = []
     tail: dict[str, Any] | None = None
     passed: tuple[int, str] | None = None
@@ -839,12 +881,15 @@ def _read(
             if (
                 wanted is not None
                 and header is not None
+                and first is not None
+                and (upto is None or first + lines < upto)
                 and line.startswith(_TYPED)
                 and not line.startswith(wanted)
                 and line.endswith("\n")
             ):
                 # The last line passed while none parsed after it is the tail.
                 passed = (number, line)
+                lines += 1
                 continue
             if not line.strip():
                 continue
@@ -854,6 +899,9 @@ def _read(
             if record.get("type") == HEADER_LINE_TYPE:
                 header = SessionHeader.model_validate(record["header"])
                 continue
+            if first is None and isinstance(seq := record.get("seq"), int):
+                first = seq
+            lines += 1
             if header is not None and upto is not None and record.get("seq", -1) >= upto:
                 # Read off the **raw** record, before `from_wire`: skipping the
                 # validate-and-freeze of the tail is the entire saving, and a
@@ -880,7 +928,7 @@ def _read(
                 dropped,
             )
             events = [event for event in events if event.seq <= last.seq - dropped]
-    return header, events
+    return header, first, events
 
 
 def _parse(path: Path, number: int, line: str) -> dict[str, Any] | None:

@@ -36,14 +36,14 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from ph.json import JsonObject, as_int, as_obj
-from ph.persistence import MAX_DEPTH, LineageError, materialize
+from ph.json import as_obj
+from ph.persistence import MAX_DEPTH, LineageError, materialize_some
 from ph.persistence.jsonl import (
     HEADER_LINE_TYPE,
     family_log,
     locate_session,
-    read_stored,
     session_logs,
+    skim_stored,
 )
 from ph.session import SessionHeader, cwd_tag
 from ph.session_profile import LoggedEnvironment, fold_environment
@@ -346,11 +346,11 @@ def recorded_start(sessions_dir: Path, session_id: str) -> RecordedStart:
     path = locate_session(sessions_dir, session_id)
     if path is None:
         return RecordedStart(session_id=session_id)
-    header = _header_line(path)
+    header, environment = _started(sessions_dir, path)
     return RecordedStart(
         session_id=session_id,
         cwd=(header.cwd or "") if header is not None else "",
-        environment=_environment_at(sessions_dir, path, header),
+        environment=environment,
         family=path.parent.name,
         owner=(
             _owning_root(sessions_dir, header)
@@ -386,45 +386,27 @@ def recorded_environment(sessions_dir: Path, session_id: str) -> LoggedEnvironme
     return recorded_start(sessions_dir, session_id).environment
 
 
-def _environment_at(
-    sessions_dir: Path, path: Path, header: SessionHeader | None
-) -> LoggedEnvironment:
-    """The log at `path`, folded by `ph.session_profile`'s own rule.
+_PROFILE = "profile/"
+"""The prefix of every record a session's environment is folded from."""
 
-    A line scan of the one file, decoding only the lines that name a profile record,
-    because the resume that follows parses every envelope anyway — for a log that
-    holds its own history, which is every root. A fork's file continues its root's
-    from `seed_length`, and the base is in that prefix, so a fork is read through
-    the store's own lineage walk (`materialize`) — given the directory it was found
-    in, so the walk opens the file rather than searching for it again. An unfinished
-    last line is skipped, as the reader does; a torn last batch costs nothing here,
-    since the only batch of these records is a base with the clears of overrides
-    that no longer change anything.
+
+def _started(sessions_dir: Path, path: Path) -> tuple[SessionHeader | None, LoggedEnvironment]:
+    """A stored log's header and the environment its lineage records, folded by
+    `ph.session_profile`'s own rule — or, when the lineage will not read, its header
+    alone and no environment; the open's strict read is what refuses it.
+
+    Through the lineage walk for every log (`materialize_some`), a root's being a
+    walk of one file: a fork's file continues its root's from `seed_length`, and the
+    base is in that prefix. Each file is skimmed (`skim_stored`): only its profile
+    lines are parsed, and an ancestor is read only to where its child was cut.
     """
-    if header is not None and header.seed_length:
-        try:
-            _header, events = materialize(
-                partial(read_stored, sessions_dir), header.id, family=path.parent.name
-            )
-        except (LineageError, OSError, ValueError):
-            return LoggedEnvironment()
-        return fold_environment((event.seq, event.type, event.data) for event in events)
-    records: list[tuple[int, str, JsonObject]] = []
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if '"profile/' not in line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                kind, data = record.get("type"), record.get("data")
-                if isinstance(kind, str) and isinstance(data, dict):
-                    records.append((as_int(record.get("seq")), kind, data))
-    except OSError:
-        return LoggedEnvironment()
-    return fold_environment(records)
+        header, events = materialize_some(
+            partial(skim_stored, sessions_dir, kinds=_PROFILE), path.stem, family=path.parent.name
+        )
+    except (LineageError, OSError, ValueError):
+        return _header_line(path), LoggedEnvironment()
+    return header, fold_environment((event.seq, event.type, event.data) for event in events)
 
 
 def stored_on(sessions_dir: Path, name: str) -> list[tuple[str, LoggedEnvironment]]:
@@ -439,7 +421,7 @@ def stored_on(sessions_dir: Path, name: str) -> list[tuple[str, LoggedEnvironmen
         header = _header_line(path)
         if header is None or header.is_subagent:
             continue
-        env = _environment_at(sessions_dir, path, header)
+        _header, env = _started(sessions_dir, path)
         if env.base is not None and env.base.name == name:
             found.append((header.id, env))
     return found

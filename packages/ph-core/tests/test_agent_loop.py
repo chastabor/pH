@@ -1105,3 +1105,24 @@ async def test_a_retried_step_records_which_attempt_each_chunk_belongs_to(
         if isinstance(block, ToolCallBlock)
     ]
     assert assembled == ["call-1-1-1-0"], "the retry re-used the first attempt's id"
+
+
+async def test_a_disposed_agent_is_announced_once_and_already_off_the_roster(
+    mount: MountProfile,
+) -> None:
+    """`_forget` pops before it emits: the pop is what makes the announcement happen
+    once, whether the explicit `dispose` or its scope's teardown gets there first,
+    and whatever a listener does on hearing it. Its docstring said the opposite
+    order, which no code had.
+
+    Sabotage: emit before the pop, and the listener finds the agent still listed.
+    """
+    ctx = await mount()
+    agents = ctx.require(AGENTS)
+    agent = agents.create(ctx.require(SESSIONS).create("s"), FAKE)
+    heard: list[object] = []
+    ctx.on("agent/disposed", lambda gone: heard.append(agents.get(gone.id)))
+
+    await agents.dispose(agent.id)
+
+    assert heard == [None]

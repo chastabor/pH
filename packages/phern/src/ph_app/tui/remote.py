@@ -696,7 +696,7 @@ async def browse_on(client: DaemonClient, *, cwd: str = "") -> list[SessionSumma
 
 async def attach_session(
     client: DaemonClient,
-    session_id: str,
+    session_id: str | None,
     *,
     host: ModalHost,
     cwd: Path | None = None,
@@ -719,6 +719,9 @@ async def attach_session(
     time a picker drew it. The login screen asks when it opens, which is where
     the answer is read — and it asks for *all* of them at once, because the
     daemon composes the profile and so knows which this deployment names.
+
+    `None` is a new session, which the daemon names (protocol 8): every call after
+    `session/new` uses the id its reply carries.
     """
     state = TuiState()
     client.handlers[ApprovalAsk.METHOD] = answering(ApprovalAsk, _asking_approval(host))
@@ -742,6 +745,7 @@ async def attach_session(
             profile=profile,
         ),
     )
+    session_id = created.session_id
 
     # Three startup reads at once, each through the one typed door and each
     # landing in a slot of its own reply's type. The first draft kept a

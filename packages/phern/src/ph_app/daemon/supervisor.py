@@ -193,7 +193,7 @@ class NotARoot(Refusal):
     code = "not_a_root"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class _Mounting:
     """One mount in flight, and the answer it will leave behind.
 
@@ -1008,7 +1008,11 @@ class Supervisor:
     terms and their events (§5 rule 6)."""
     _starting: anyio.Lock = field(default_factory=anyio.Lock)
     _mounting: dict[str, _Mounting] = field(default_factory=dict)
-    """Mounts in flight, by root id. See `_Mounting` and `start`."""
+    """Mounts in flight, by the root id they were asked for — what makes two callers
+    of one id one mount. See `_Mounting` and `start`."""
+    _in_flight: set[_Mounting] = field(default_factory=set)
+    """Every mount in flight, a new root's among them, which has no id to be found
+    by until it opens: what `aclose` waits on."""
     _closing: bool = False
     """Whether `aclose` has begun. Set before it waits, so the set it waits on
     cannot grow behind it."""
@@ -1080,14 +1084,15 @@ class Supervisor:
 
     async def start(
         self,
-        root_id: str,
+        root_id: str | None,
         *,
         cwd: str | None = None,
         choice: ModelChoice = ModelChoice(),
         profile: str = "",
         asks: bool = False,
     ) -> Root:
-        """Take the lease for this root, then mount it (I-5).
+        """This root, mounted if it is not already — or, for `None`, a new one, named
+        as it opens (I-5).
 
         **The mount is the supervisor's work, not the caller's**, so it runs as a
         task of `self.tasks` and this only waits for it. `Peer.serve` cancels
@@ -1131,21 +1136,29 @@ class Supervisor:
         `asks` says a front end that can answer for a person asked for this start
         (S6): a root whose person's own named profile moved since it began is held
         for them to decide, where one started for a schedule keeps its version.
+
+        **`None` is a session the daemon names** (protocol 8): `open_session` mints
+        its id as it opens. Nobody can ask for that root before this returns, so it
+        takes neither the fast path nor `_mounting`; `_in_flight` still holds it for
+        `aclose`.
         """
-        root = self.roots.get(root_id)
-        if root is not None:
+        if root_id is not None and (root := self.roots.get(root_id)) is not None:
             return root
+        asked = root_id or "a new root"
         if self._closing:
             # Handlers outlive the start of teardown, so a client can still ask
             # for a root while `aclose` is unwinding the ones it has. Building
             # one now is work nothing would ever release.
-            raise RootStartAbandoned(f"the daemon is shutting down and will not mount {root_id}")
+            raise RootStartAbandoned(f"the daemon is shutting down and will not mount {asked}")
         # Registered and spawned without awaiting, which is what lets two callers
         # share one mount: nothing can interleave between the lookup and the
         # assignment, so the loser of the race finds the winner's record.
-        pending = self._mounting.get(root_id)
+        pending = self._mounting.get(root_id) if root_id is not None else None
         if pending is None:
-            pending = self._mounting[root_id] = _Mounting()
+            pending = _Mounting()
+            self._in_flight.add(pending)
+            if root_id is not None:
+                self._mounting[root_id] = pending
             wanted = self.choice if choice.is_default else choice
             self.tasks.start_soon(self._mount, root_id, cwd, wanted, profile, asks, pending)
         await pending.done.wait()
@@ -1153,14 +1166,14 @@ class Supervisor:
             raise pending.error
         if pending.root is None:
             raise RootStartAbandoned(
-                f"the daemon stopped before it finished mounting {root_id}; "
+                f"the daemon stopped before it finished mounting {asked}; "
                 "nothing was left holding its session"
             )
         return pending.root
 
     async def _mount(
         self,
-        root_id: str,
+        root_id: str | None,
         cwd: str | None,
         choice: ModelChoice,
         profile: str,
@@ -1186,12 +1199,14 @@ class Supervisor:
         except Exception as error:
             pending.error = error
         finally:
-            self._mounting.pop(root_id, None)
+            if root_id is not None:
+                self._mounting.pop(root_id, None)
+            self._in_flight.discard(pending)
             pending.done.set()
 
     async def _start(
         self,
-        root_id: str,
+        root_id: str | None,
         *,
         cwd: str | None,
         choice: ModelChoice,
@@ -1228,7 +1243,7 @@ class Supervisor:
             # resumed one's is what its own header recorded, read off disk
             # because there is no store to ask until this mount exists.
             start = await read_start(root_id)
-            if start.owner is not None:
+            if root_id is not None and start.owner is not None:
                 # Before the mount and the claim, so the refusal leaves the child's
                 # file exactly as its root left it.
                 raise NotARoot(not_a_root(root_id, start.owner))
@@ -1250,7 +1265,7 @@ class Supervisor:
             agent = ctx.require(AGENTS).create(session, entry.options())
             wake, waiting = anyio.create_memory_object_stream[None](max_buffer_size=WAKE_SLOTS)
             root = Root(
-                id=root_id,
+                id=session.id,
                 ctx=ctx,
                 session=session,
                 agent=agent,
@@ -1293,11 +1308,11 @@ class Supervisor:
             # then releases it can overlap a fresh `start` of the same id, where
             # a bare delete would evict the live replacement.
             def forget() -> None:
-                if self.roots.get(root_id) is root:
-                    del self.roots[root_id]
+                if self.roots.get(root.id) is root:
+                    del self.roots[root.id]
 
             exits.callback(forget)
-            self.roots[root_id] = root
+            self.roots[root.id] = root
             # A root brings its store, which a rebuild in doubt can read through, and
             # its own quiet window, which may be the soonest to end.
             self.scheduler.notice()
@@ -2711,11 +2726,11 @@ class Supervisor:
         that never existed rather than one left half-built.
         """
         self._closing = True
-        if self._mounting:
-            log.info("ph_app.daemon: waiting for %d mount(s) in flight", len(self._mounting))
+        if self._in_flight:
+            log.info("ph_app.daemon: waiting for %d mount(s) in flight", len(self._in_flight))
             bound = math.inf if deadline is None else deadline
             with anyio.CancelScope(deadline=bound, shield=True):
-                for pending in list(self._mounting.values()):
+                for pending in list(self._in_flight):
                     await pending.done.wait()
         for root in self.roots.values():
             await root.wake.aclose()

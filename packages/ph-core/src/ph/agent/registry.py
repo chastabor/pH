@@ -179,10 +179,13 @@ class AgentRegistry:
         """Drop the roster entry and announce it, once, whoever unwound the scope.
 
         Both doors reach here: `dispose(agent_id)` below, and a parent scope
-        cascading into this one. `emit` before the pop is deliberate — a listener
-        asking `agents.get` about the agent it is being told about should still
-        find it — and the pop is idempotent, so the explicit path calling
-        `scope.dispose()` afterwards runs this a second time and does nothing.
+        cascading into this one. **The pop comes first, and it is the guard**: the
+        explicit path calling `scope.dispose()` afterwards runs this a second time and
+        finds nothing, so the agent is announced once whichever door got here first,
+        and a listener that disposes again cannot announce it twice. A listener is
+        handed the agent, so it has no need to look it up in the roster it has left —
+        and an async one runs after this returns either way, since `emit` schedules it
+        without awaiting it.
         """
         if self._agents.pop(agent.id, None) is None:
             return

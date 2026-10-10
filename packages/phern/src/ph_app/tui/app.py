@@ -55,7 +55,6 @@ from ph.seams.permission_presets import PRESET_NAMES
 from ph.seams.tui_screens import ScreenDefinition
 from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
-from ph.session import new_session_id
 
 from ..daemon.client import DaemonClient
 from ..daemon.launch import ensure_daemon
@@ -395,7 +394,7 @@ class PHTuiApp(App[str | None]):
             chosen = await self._offer_sessions(client)
             self.front = await attach_session(
                 client,
-                self.session_id or chosen or new_session_id(),
+                self.session_id or chosen,
                 host=self,
                 cwd=self.project,
                 trust=trust,

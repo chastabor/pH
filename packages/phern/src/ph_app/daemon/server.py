@@ -568,12 +568,13 @@ class _Connection:
         # and both mean the same thing.
         cwd = params.cwd or None
         # The daemon mounts, so the daemon enforces — `ph_app.trust` says
-        # why. Only for a session created here: resuming one that exists is
-        # not a new decision about a new directory.
+        # why. On every `session/new`: named by id, a session the daemon would
+        # create and one it would resume look the same until it is open.
         self._check_trust(cwd, params.trust)
         supervisor = self.server.supervisor
         # `asks`: a front end that can answer for a person asked for this start, so a
-        # root whose person's own named profile moved is held for them (S6).
+        # root whose person's own named profile moved is held for them (S6). No id
+        # is a new session, which the supervisor names as it opens (protocol 8).
         root = await supervisor.start(
             params.session_id,
             cwd=cwd,

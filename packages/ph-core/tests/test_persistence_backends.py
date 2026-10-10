@@ -549,6 +549,41 @@ async def test_a_child_holding_only_its_own_events_materializes_its_lineage(
     assert [event.type for event in events[:4]] == [event.type for event in parent.events[:4]]
 
 
+async def test_a_partial_read_walks_the_lineage_materialize_assembles(
+    store: SessionPersistence,
+) -> None:
+    """`materialize_some` is the same walk with a reader that keeps only some records:
+    across three generations it keeps exactly what the materialized log holds of
+    them, in order, each ancestor giving only what lies below the point its child
+    was cut.
+
+    Sabotage: stop moving the boundary to each ancestor's first seq in
+    `_inherited`, and the grandparent's event at the child's cut is kept twice.
+    """
+    from ph.persistence import materialize_some
+
+    parent = _session(store, "p")
+    for turn in range(3):
+        _append(store, parent, "turn/start", {"turn": turn})
+        _append(store, parent, "turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+    await store.flush(parent)
+    await store.flush(_reference_fork(store, "c", "p", boundary=4))
+    await store.flush(_reference_fork(store, "g", "c", boundary=5, family="p"))
+
+    def ends(
+        session_id: str, upto: int | None, family: str | None
+    ) -> tuple[SessionHeader, int | None, list[SessionEvent]]:
+        header, events = store.read_own(session_id, upto, family)
+        kept = [one for one in events if one.type == "turn/start"]
+        return header, events[0].seq if events else None, kept
+
+    header, walked = materialize_some(ends, "g", family="p")
+
+    assert header.id == "g"
+    assert walked == [one for one in store.read("g")[1] if one.type == "turn/start"]
+    assert [one.seq for one in walked] == [0, 2, 4, 5]
+
+
 async def test_a_fork_at_an_end_seed_still_reads_its_history(
     store: SessionPersistence,
 ) -> None:

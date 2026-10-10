@@ -5,9 +5,11 @@ doors and the resume code skipped some findings as outside their diffs, and deci
 others. This document turns the ones worth doing into an ordered todo list, and records why
 the rest are closed.*
 
-**Status, 2026-10-09.** R1–R4 have landed (uncommitted), each with a sabotage-checked
-gate, and the `/simplify` pass over them put the root's open behind one door
-(`runtime.open_root`). R5, R6, R7 and R8 (found by that pass) are open.
+**Status, 2026-10-09.** R1–R4 have landed and are committed (`2979434` and the
+`/simplify` pass after it, which put the root's open behind one door,
+`runtime.open_root`). R6, R8 and R5 have landed (uncommitted), each with a
+sabotage-checked gate; R5 took the "daemon names the session" shape (protocol 8).
+R7 is open and optional.
 
 ## The goal every item is weighed against
 
@@ -153,8 +155,9 @@ a time (`_starting`), so on a mass restart this adds straight to the wall time.
 `header.family`, keeping records below the boundary each child inherits at). A prototype
 measured 2.97 ms at 20,000 events, about 60 times faster. `materialize` cannot be reused
 with `types=` as it stands: it takes the boundary from a file's first event, which a
-filtered read does not have, so the walk takes it from each header's `seed_length`
-instead. It belongs beside `materialize` in `ph/persistence/lineage.py`, so the chain's
+filtered read does not have, so the reader answers that first seq beside what it keeps.
+(Not each header's `seed_length`: a copy-forked log starts at 0 with `seed_length`
+set, and a walk on the header would read a parent the log does not need.) It belongs beside `materialize` in `ph/persistence/lineage.py`, so the chain's
 rules (depth bound, cycles) are kept in one place. The open's `materialize` stays the
 one strict read, and still refuses a broken lineage.
 
@@ -235,9 +238,49 @@ gate fails), `./test.sh` green outside the sandbox, nothing committed by Claude.
   - *Sabotaged two ways*, and each failed its gate: the id minted in `RpcServer` and
     passed in (the store searched), and a stored id opened by id alone (searched
     twice).
-- [ ] **R6** — `AgentRegistry._forget`: audit the `agent/disposed` listeners, then fix
+- [x] **R6** — `AgentRegistry._forget`: audit the `agent/disposed` listeners, then fix
   the code or the docstring.
-- [ ] **R8** — a filtered lineage walk beside `materialize`, for a fork's start.
-- [ ] **R5** — TUI/web ids: decide the attach-protocol shape (needs a protocol bump).
+  - *Landed: the docstring was wrong.* Nothing listens to `agent/disposed`, and the
+    docstring and the pop-first code arrived together in `73012be`. The code's order is
+    the sound one: the pop is the guard that announces the agent once whichever door
+    gets there first, a listener is handed the agent, and `emit` runs an async
+    listener after `_forget` returns anyway. The docstring now says so.
+  - *Gate:* ph-core `test_agent_loop.py::test_a_disposed_agent_is_announced_once_and_already_off_the_roster`.
+  - *Sabotaged:* emit before the pop, and the listener found the agent still listed.
+- [x] **R8** — a filtered lineage walk beside `materialize`, for a fork's start.
+  - *Landed.* `materialize`'s chain walk is `_inherited` in `ph/persistence/lineage.py`
+    (the start rule, the boundary and the flatten included), shared with the new
+    `materialize_some(read, session_id, *, family)`, whose `ReadSome` reader answers a
+    file's header, its first event's seq and the events it keeps. The reader is the
+    JSONL store's `skim_stored`, beside `read_stored`: the skim loop parses only the
+    kept types' lines and stops at its bound, from the first seq, without parsing to
+    it. `ph_app.sessions._started` folds every log's environment through it, a root's
+    being a walk of one file; the open's `materialize` stays the one strict read.
+  - *Gates:* ph-core `test_persistence_backends.py::test_a_partial_read_walks_the_lineage_materialize_assembles`
+    (both backends, three generations, against `materialize`), ph-core
+    `test_persistence.py::test_a_skim_stops_at_its_bound_without_parsing_to_it`, and
+    phern `test_session_per_profile.py::test_a_forks_start_skims_only_what_it_inherits`
+    (a base the parent switched to after the cut stays out, and a damaged line of
+    another type in the inherited range is passed unparsed).
+  - *Sabotaged three ways*, and each failed its gate: the walk not moving its
+    boundary to each ancestor's first seq, the skim ignoring its bound, and the fold
+    through `materialize` again.
+- [x] **R5** — TUI/web ids: decide the attach-protocol shape (needs a protocol bump).
+  - *Decided:* the daemon names a new session. *Landed:* protocol 8. `session/new` may
+    omit `sessionId`: `NewSessionParams` is its own model, with `session_id: SessionId |
+    None`, the one exception to decision 55, by name in
+    `test_every_method_about_one_root_requires_its_id`. `SessionId` is the K9 check as a
+    type, which rpc's own params now carry too. The supervisor starts a root with no id
+    (`_in_flight` holds every mount for `aclose`, `_mounting` only the named ones),
+    `open_session` mints it as it opens, and the root is filed under it. The TUI sends
+    no id for a fresh session and works on the one `session/new` replied with. README
+    has an "Upgrading from 0.7" note.
+  - *Left as it was:* the web launcher still mints its shared tab id, because every
+    tab must name it before any attaches, so a launch still pays two off-loop misses
+    once.
+  - *Gates:* phern `test_tui_remote.py::test_a_fresh_session_is_named_by_the_daemon_and_never_searched_for`
+    and `test_tui_pilot.py::test_a_fresh_tui_session_takes_the_id_the_daemon_gives_it`.
+  - *Sabotaged two ways*, and each failed its gate: the daemon minting the id and
+    passing it on, and the TUI minting it again.
 - [ ] **R7** — optional: measure `write_atomic_all` against concurrent writes for large
   snapshots.
