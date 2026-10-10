@@ -497,7 +497,7 @@ there:
 |---|---|---|
 | [`ph-code-graph`](packages/ph-code-graph/) | `code-graph` | `code_index` / `code_graph` — a tree-sitter code graph: search by prose, find definitions, callers, callees, transitive impact, biggest symbols. Every answer is a `path:start-end`. |
 | [`ph-text-index`](packages/ph-text-index/) | `text-index`, `text-index-local` | `text_index` / `text_search` — semantic retrieval over documents on a local turbovec index, answering with the passage **and** its `path:start-end`. |
-| [`ph-clm`](packages/ph-clm/) | `clm-context` | `context_sections` / `context_tombstone` / `context_replace` / `context_rewrite` / `context_recall` / `context_diff` — the model edits its own context, section by section. Every edit is a surface replace, so the log keeps the originals. |
+| [`ph-clm`](packages/ph-clm/) | `clm-context`, `clm-mirror` | `context_sections` / `context_tombstone` / `context_replace` / `context_rewrite` / `context_recall` / `context_diff` — the model edits its own context, section by section, with these tools or by editing a file of its context with the tools it already has. Every edit is a surface replace, so the log keeps the originals. |
 
 Each registers a **bundle**, so `--profile rlm-indexed` is `rlm-stable` plus
 the first two — the RLM asking a codebase and a corpus about themselves instead

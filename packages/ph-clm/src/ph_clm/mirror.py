@@ -1,0 +1,534 @@
+"""`clm-mirror` — the model's context as a file it edits with its ordinary tools.
+
+Before each request the surface is written to a file in the agent's workspace
+scratch, one `[[SECTION S<id>]]` block per section and one `[[RESULT S<id>]]` block
+per tool result inside a step. The model edits it with whatever it already has —
+`edit`, `sed`, Python in a cell — and when the tool call that touched the file
+finishes, its changes are compiled into the editor's verbs and landed in one batch:
+
+| what changed in a section | becomes |
+|---|---|
+| its block is gone, or its body emptied | a tombstone (consecutive ones, one marker) |
+| a `RESULT` body, headers unchanged | that result rewritten in place |
+| the reply text above the results | the reply rewritten in place, its calls kept |
+| the `RESULT` headers themselves | the whole step replaced by the text left |
+| a user message's or a revision's text | a replacement standing for it |
+| no `SECTION` lines at all | one replacement for everything editable |
+
+**Read back in `tools/post-execute`, before the call's result is logged**, so the
+edit lands before the result that reports it: a crash between the two leaves an
+edit that landed beside a call that did not finish, which is what happened. Read
+back on the next step instead, the log could say a write succeeded whose edit a
+restart then lost. The receipt rides on that result, so nothing else is added to
+the context to say what changed.
+
+**Each node's text is folded once** (`MirrorService`'s `SessionFoldCache`): what a
+node shows in the file depends only on its event, so a render derives nothing it has
+seen before and costs the new nodes plus a join.
+
+**The file is a cache of the log, never a source.** Its first line names the session,
+the surface's `replace_generation` and the last section it holds. While the
+generation stands, the sections up to that one are exactly what the log folds to
+now, so read-back rebuilds the file's base from the log rather than remembering a
+render — which is also what makes it right after a restart. A file written against
+an older generation is refused, and every refusal is rewritten from the log.
+
+**A harness-owned file, written directly** like the spill store's, not through
+`ctx.fs`: that seam gates what the *model* may touch, and routing the harness's own
+render through it would ask the person's permission rules about a file the model
+never chose to write, on every step.
+
+@module ph_clm.mirror
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from functools import partial
+from pathlib import Path
+
+import anyio
+
+from ph.agent.types import AgentHandle, RequestProposal
+from ph.cordis import Context, Next, plugin
+from ph.keys import SYSTEM_PROMPT, TOOLS
+from ph.llm.types import LlmCallConfig, TextBlock, ToolCallBlock, ToolResultBlock
+from ph.paths import write_atomic
+from ph.seams.invariants import contribute_fold_cache
+from ph.seams.workspace import scratch_of
+from ph.session import Session, SessionFoldCache, derive_event_message
+from ph.session.writers import log_writer
+from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
+from ph.text import thousands
+from ph.tools.definition import Accept, PostToolDecision, ToolExecution, ToolExecutionResult
+
+from .edits import Editor, Pending, Revision, node_text, receipt
+from .keys import CLM, CLM_MIRROR
+from .sections import EditRefused, Section, label
+
+_LOG = log_writer(__name__)
+
+__all__ = ["DECLINED", "Block", "MirrorService", "apply", "parse", "render"]
+
+DECLINED = "clm/declined"
+"""A context-file edit refused: why, and for which call. Its receipt is in the call's
+result; this is the auditor's copy."""
+
+REMOVED_IN_FILE = "removed in the context file"
+"""The reason a tombstone made by deleting a section from the file gives."""
+
+_HEADER = re.compile(r"^\[\[(LIVE_CONTEXT|SECTION|RESULT)(?:\s+(.*?))?\]\]\s*$")
+_ESCAPED = re.compile(r"^(\\*)(\[\[(?:LIVE_CONTEXT|SECTION|RESULT)\b)")
+_ID = re.compile(r"^S(\d+)$")
+
+
+# ------------------------------------------------------------------ the file --
+
+
+@dataclass(frozen=True, slots=True)
+class Shown:
+    """What one node shows in the file — a function of its event, so folded once."""
+
+    text: str
+    result: bool
+    answers: str
+    """The call a result answers; `""` for anything else."""
+    calls: tuple[tuple[str, str], ...]
+    """The `(call id, tool name)` pairs a reply made."""
+
+
+@dataclass(frozen=True, slots=True)
+class Block:
+    """One section as the file holds it: the text, then each result by its id."""
+
+    id: int
+    text: str
+    results: tuple[tuple[int, str], ...] = ()
+
+    def flattened(self) -> str:
+        return "\n\n".join(part for part in (self.text, *(t for _, t in self.results)) if part)
+
+
+def block_of(section: Section, shown: Mapping[int, Shown]) -> Block:
+    """What a section looks like in the file: its text, and its results if a step."""
+    texts: list[str] = []
+    results: list[tuple[int, str]] = []
+    for seq, origin in zip(section.nodes, section.origins, strict=True):
+        facts = shown.get(seq)
+        if facts is None:
+            continue
+        if facts.result:
+            results.append((origin, facts.text))
+        elif facts.text:
+            texts.append(facts.text)
+    return Block(section.id, "\n\n".join(texts), tuple(results))
+
+
+def render(session: Session, sections: Sequence[Section], shown: Mapping[int, Shown]) -> str:
+    """The file for these sections — deterministic, so read-back can rebuild it."""
+    through = sections[-1].name if sections else "none"
+    generation = session.surface.replace_generation
+    lines = [f"[[LIVE_CONTEXT session={session.id} generation={generation} through={through}]]"]
+    for section in sections:
+        facts = [section.kind, ",".join(section.calls), f"~{thousands(section.tokens)}"]
+        facts += [f"after=~{thousands(section.after)}", "protected" if section.protected else ""]
+        lines += ["", f"[[SECTION {section.name} {' '.join(part for part in facts if part)}]]"]
+        block = block_of(section, shown)
+        lines += _escaped(block.text)
+        names = _result_names(section, shown)
+        for result_id, text in block.results:
+            name = names.get(result_id, "")
+            lines += [f"[[RESULT {' '.join(part for part in (label(result_id), name) if part)}]]"]
+            lines += _escaped(text)
+    return "\n".join(lines) + "\n"
+
+
+@dataclass(frozen=True, slots=True)
+class Parsed:
+    header: dict[str, str]
+    lead: str
+    blocks: tuple[Block, ...]
+
+
+def parse(text: str) -> Parsed:
+    """A context file read back, or a refusal naming the first line that cannot be read."""
+    lines = text.lstrip("\n").splitlines()
+    first = _HEADER.match(lines[0]) if lines else None
+    if first is None or first.group(1) != "LIVE_CONTEXT":
+        raise EditRefused(
+            "the context file's first line must stay the [[LIVE_CONTEXT …]] line it was "
+            "written with"
+        )
+    header = dict(part.split("=", 1) for part in (first.group(2) or "").split() if "=" in part)
+    lead: list[str] = []
+    body = lead
+    sections: list[tuple[int, list[str], list[tuple[int, list[str]]]]] = []
+    for line in lines[1:]:
+        found = _HEADER.match(line)
+        if found is None:
+            body.append(_unescaped(line))
+            continue
+        kind, rest = found.group(1), (found.group(2) or "").split()
+        ident = _ID.match(rest[0]) if rest else None
+        if kind == "LIVE_CONTEXT" or ident is None:
+            raise EditRefused(f"the context file has a damaged header: {line.strip()}")
+        number = int(ident.group(1))
+        if kind == "SECTION":
+            if any(number == seen for seen, _, _ in sections):
+                raise EditRefused(f"{label(number)} appears twice in the context file")
+            body = []
+            sections.append((number, body, []))
+        elif not sections:
+            raise EditRefused(f"a [[RESULT]] line sits outside any section: {line.strip()}")
+        else:
+            body = []
+            sections[-1][2].append((number, body))
+    return Parsed(
+        header=header,
+        lead=_joined(lead),
+        blocks=tuple(
+            Block(number, _joined(text), tuple((rid, _joined(rtext)) for rid, rtext in results))
+            for number, text, results in sections
+        ),
+    )
+
+
+# --------------------------------------------------------------- the compile --
+
+
+def compile_drafts(
+    editor: Editor,
+    session: Session,
+    sections: Sequence[Section],
+    shown: Mapping[int, Shown],
+    parsed: Parsed,
+) -> list[Pending]:
+    """The drafts a file asks for, against the base it was written from.
+
+    Refuses a file written against another session or an older generation, a reorder,
+    a section that is not in the base, a change to a protected section, and text that
+    belongs to no section.
+    """
+    if parsed.header.get("session") != session.id:
+        raise EditRefused("this context file belongs to another session")
+    if parsed.header.get("generation") != str(session.surface.replace_generation):
+        raise EditRefused(
+            "the context was revised after this file was written, so its sections may "
+            "not be the ones you see now"
+        )
+    base = _base(sections, parsed.header.get("through", ""))
+    if not parsed.blocks:
+        return _whole(editor, session, base, parsed.lead)
+    if parsed.lead:
+        raise EditRefused("text before the first [[SECTION]] line belongs to no section")
+    order = {section.id: position for position, section in enumerate(base)}
+    positions = []
+    for written in parsed.blocks:
+        if written.id not in order:
+            raise EditRefused(
+                f"{label(written.id)} is not a section of the context this file holds"
+            )
+        positions.append(order[written.id])
+    if positions != sorted(positions):
+        raise EditRefused("sections cannot be reordered; a revision lands where it stood")
+    blocks = {block.id: block for block in parsed.blocks}
+    drafts: list[Pending] = []
+    edited: set[int] = set()
+    gone: list[int] = []
+    for position, section in enumerate(base):
+        block = blocks.get(section.id)
+        was = block_of(section, shown)
+        if block == was:
+            continue
+        if section.protected is not None:
+            raise EditRefused(f"{section.name} cannot be edited: {section.protected}")
+        if block is None or not block.flattened():
+            gone.append(position)
+            continue
+        edited.add(section.id)
+        drafts += _changed(editor, session, base, position, shown, was, block)
+    drafts += editor.tombstoning_runs(session, base, gone, REMOVED_IN_FILE, keep=frozenset(edited))
+    return drafts
+
+
+def _base(sections: Sequence[Section], through: str) -> list[Section]:
+    """The sections up to the one the file names last — what it was written against."""
+    if through == "none":
+        return []
+    for position, section in enumerate(sections):
+        if section.name == through:
+            return list(sections[: position + 1])
+    raise EditRefused(f"the context file names {through!r} as its last section, which is not one")
+
+
+def _whole(editor: Editor, session: Session, base: Sequence[Section], text: str) -> list[Pending]:
+    """A file with no sections left: one revision for every editable section."""
+    editable = [position for position, section in enumerate(base) if section.protected is None]
+    if not editable:
+        raise EditRefused("there is nothing in this context file you may edit")
+    start, stop = editable[0], editable[-1] + 1
+    if editable != list(range(start, stop)):
+        raise EditRefused(
+            "protected sections sit between the ones you may edit, so the file cannot be "
+            "replaced whole; edit it section by section"
+        )
+    if text:
+        return [editor.replacing(base, start, stop, text)]
+    return [editor.tombstoning(session, base, start, stop, REMOVED_IN_FILE)]
+
+
+def _changed(
+    editor: Editor,
+    session: Session,
+    base: Sequence[Section],
+    position: int,
+    shown: Mapping[int, Shown],
+    was: Block,
+    block: Block,
+) -> list[Pending]:
+    """The drafts for one section whose body changed: its reply and results rewritten in
+    place while their structure stands, a replacement holding the text once it does not."""
+    section = base[position]
+    reply = next((seq for seq in section.nodes if seq in shown and not shown[seq].result), None)
+    if (
+        section.kind in ("step", "assistant")
+        and reply is not None
+        and [rid for rid, _ in block.results] == [rid for rid, _ in was.results]
+    ):
+        nodes = dict(zip(section.origins, section.nodes, strict=True))
+        changes = [(reply, block.text)] if block.text != was.text else []
+        changes += [
+            (nodes[rid], text)
+            for (rid, text), (_, before) in zip(block.results, was.results, strict=True)
+            if text != before
+        ]
+        return [editor.rewriting_text(session, base, section, seq, text) for seq, text in changes]
+    return [editor.replacing(base, position, position + 1, block.flattened())]
+
+
+# --------------------------------------------------------------- the service --
+
+
+@dataclass(slots=True)
+class MirrorService:
+    """Renders the context file before each request and reads it back after each call."""
+
+    ctx: Context
+    editor: Editor
+    _shown: SessionFoldCache[dict[int, Shown]] = field(init=False)
+    _written: dict[Path, tuple[int, int]] = field(default_factory=dict)
+    """Each file's `(mtime_ns, size)` as this process last wrote it — a call that left
+    it alone costs a `stat`, not a parse."""
+    _locks: dict[Path, anyio.Lock] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._shown = SessionFoldCache(self.fold, extend=self.extend)
+
+    def fold(self, session: Session) -> dict[int, Shown]:
+        return self.extend({}, session, 0)
+
+    def extend(self, known: dict[int, Shown], session: Session, start: int) -> dict[int, Shown]:
+        """`known`, with what every surface event from `start` on shows — in place."""
+        for event in session.events_from(start):
+            message = None if event.surface_op is None else derive_event_message(event)
+            if message is None:
+                continue
+            answers = next(
+                (b.tool_call_id for b in message.content if isinstance(b, ToolResultBlock)), ""
+            )
+            known[event.seq] = Shown(
+                text=_normal(node_text(message)),
+                result=event.type == "tool/result",
+                answers=answers,
+                calls=tuple(
+                    (b.id, b.name) for b in message.content if isinstance(b, ToolCallBlock)
+                ),
+            )
+        return known
+
+    def stale(self, sessions: Iterable[Session]) -> list[str]:
+        """The fold cache's own drift check, for its invariant row."""
+        return self._shown.stale(sessions)
+
+    def blocks(self, session: Session) -> list[Block]:
+        """Every section as the file shows it now."""
+        shown = self._shown.read(session)
+        return [block_of(section, shown) for section in self.editor.sections(session)]
+
+    def path(self, session: Session, agent: AgentHandle) -> Path:
+        """Where this agent's context file lives: its workspace scratch, which every
+        tier keeps writable and outside the tree a repository tracks."""
+        return scratch_of(self.ctx, session.id, agent) / "clm" / "context.md"
+
+    async def render(self, session: Session, agent: AgentHandle) -> Path:
+        """Write the file for the surface as it stands."""
+        path = self.path(session, agent)
+        text = render(session, self.editor.sections(session), self._shown.read(session))
+        stat = await anyio.to_thread.run_sync(partial(_write, path, text))
+        self._written[path] = (stat.st_mtime_ns, stat.st_size)
+        return path
+
+    async def read_back(
+        self, session: Session, agent: AgentHandle, *, call_id: str | None
+    ) -> str | None:
+        """Land whatever the model changed in the file, and say what happened — `None`
+        when it changed nothing."""
+        path = self.path(session, agent)
+        lock = self._locks.get(path) or self._locks.setdefault(path, anyio.Lock())
+        async with lock:
+            try:
+                # Inline: a local `stat` is a microsecond, and every tool call asks.
+                stat = os.stat(path)
+            except FileNotFoundError:
+                return None
+            if self._written.get(path) == (stat.st_mtime_ns, stat.st_size):
+                return None
+            text = await anyio.to_thread.run_sync(partial(path.read_text, encoding="utf-8"))
+            try:
+                revisions = self._apply(session, text, call_id)
+            except EditRefused as refusal:
+                _LOG.append(
+                    session, DECLINED, {"via": "mirror", "callId": call_id, "reason": str(refusal)}
+                )
+                await self.render(session, agent)
+                return (
+                    f"[context file not applied: {refusal}. It has been rewritten from your "
+                    "context as it stands; edit it again.]"
+                )
+            if not revisions:
+                self._written[path] = (stat.st_mtime_ns, stat.st_size)
+                return None
+            await self.render(session, agent)
+            return f"[context file applied. {receipt(revisions)}]"
+
+    def _apply(self, session: Session, text: str, call_id: str | None) -> list[Revision]:
+        drafts = compile_drafts(
+            self.editor,
+            session,
+            self.editor.sections(session),
+            self._shown.read(session),
+            parse(text),
+        )
+        return self.editor.land(session, drafts, call_id=call_id, via="mirror") if drafts else []
+
+
+# ------------------------------------------------------------------- the row --
+
+
+def protocol(path: Path) -> str:
+    """The prompt section that tells the model the file exists and how it reads."""
+    return f"""## Your context, as a file
+
+Before each request, the conversation you can see is written to `{path}`. Edit that
+file with your ordinary tools to change your own context: the edit is applied when
+the tool call that made it finishes, and that call's result says what changed.
+
+- Keep the first line, `[[LIVE_CONTEXT …]]`, exactly as it is.
+- Each section starts with a `[[SECTION S<id> …]]` line. Ids never change.
+- Delete a section (its line and its text) to remove it; a one-line marker stays.
+- Change the text under a line to rewrite it. Inside a step, change a `[[RESULT …]]`
+  body, or the reply above the results; or delete the step's `[[RESULT]]` lines and
+  write a summary in their place.
+- Leave no `[[SECTION]]` lines after the first line to replace everything you may
+  edit with the text you wrote.
+- Sections marked `protected` cannot change, and sections cannot be reordered.
+- Everything after an edit is read again on the next request: one batched edit near
+  the end costs less than several small early ones, and a detailed summary costs
+  little.
+- The session log keeps every original; `context_recall` and `context_diff` read
+  them back."""
+
+
+@plugin("clm-mirror", affects="environment", inject=[CLM, TOOLS, SYSTEM_PROMPT])
+async def apply(ctx: Context, config: None) -> None:
+    """Render the context file before each request and read it back after each call."""
+    service = MirrorService(ctx=ctx, editor=ctx.require(CLM))
+    ctx.provide(CLM_MIRROR, service)
+    contribute_fold_cache(
+        ctx, id="clm-mirror-text", subject="context file text", stale=service.stale
+    )
+
+    async def before_request(
+        proposal: RequestProposal, next_: Next[LlmCallConfig]
+    ) -> LlmCallConfig:
+        # After the rest of the chain, so a listener that revises the surface on the
+        # way to the request (a paste offloaded) is in the file the model edits.
+        config = await next_(proposal)
+        await service.render(proposal.session, proposal.agent)
+        return config
+
+    async def after_call(
+        execution: ToolExecution, result: ToolExecutionResult, next_: Next[PostToolDecision]
+    ) -> PostToolDecision:
+        decision = await next_(execution, result)
+        # The call the model made, not a dispatch inside a Code Mode cell: the cell's
+        # own call ends after every write the cell made, its Python's included.
+        if execution.parent is not None or execution.session is None or execution.agent is None:
+            return decision
+        said = await service.read_back(
+            execution.session, execution.agent, call_id=execution.call_id
+        )
+        if said is None or not isinstance(decision, Accept):
+            return decision
+        content = ctx.require(TOOLS).projected_content(execution, decision, result)
+        if content is None:
+            return decision
+        return replace(decision, content=[*content, TextBlock(text=said)])
+
+    ctx.on("agent/request", before_request)
+    ctx.on("tools/post-execute", after_call)
+
+    def section(request: AssembleContext) -> str:
+        agent, session = request.agent, request.session
+        if agent is None or session is None:
+            return ""
+        return protocol(service.path(session, agent))
+
+    ctx.require(SYSTEM_PROMPT).section(
+        PromptSection(name="clm:mirror", order=ORDER_TOOL_GUIDANCE + 10, text=section)
+    )
+
+
+# ------------------------------------------------------------------ helpers --
+
+
+def _write(path: Path, text: str) -> os.stat_result:
+    """Write and `stat` in one thread hop. Not durable: the file is rebuilt from the log
+    on the next request, and syncing it before every model call would be a disk
+    barrier spent on a cache."""
+    write_atomic(path, text, durable=False)
+    return os.stat(path)
+
+
+def _result_names(section: Section, shown: Mapping[int, Shown]) -> dict[int, str]:
+    """Each result's tool name, by the result's id: the call it answers, as its reply
+    named it."""
+    facts = [
+        (origin, shown[seq])
+        for seq, origin in zip(section.nodes, section.origins, strict=True)
+        if seq in shown
+    ]
+    names = dict(call for _, one in facts for call in one.calls)
+    return {origin: names.get(one.answers, "") for origin, one in facts if one.result}
+
+
+def _escaped(text: str) -> list[str]:
+    """A body's lines, any that would read as a header given one more backslash."""
+    return [_ESCAPED.sub(r"\\\1\2", line) for line in text.splitlines()] if text else []
+
+
+def _unescaped(line: str) -> str:
+    match = _ESCAPED.match(line)
+    return line[1:] if match is not None and match.group(1) else line
+
+
+def _joined(lines: Sequence[str]) -> str:
+    return "\n".join(lines).strip("\n")
+
+
+def _normal(text: str) -> str:
+    """Text as the file round-trips it: lines rejoined with `\n`, edges trimmed."""
+    return _joined(text.splitlines())

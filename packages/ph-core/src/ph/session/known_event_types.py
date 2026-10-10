@@ -390,6 +390,9 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # edit itself is the surface `replace` beside it, a core event any build
         # folds, so a reader that skips this loses the account and not the context.
         "clm/revised",
+        # A context-file edit ph-clm refused, and why. Ignorable: nothing changed, and
+        # the call's own result already told the model so.
+        "clm/declined",
     }
 )
 
@@ -403,6 +406,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "harness/probe",
         "harness/probed",
         "context/loaded",
+        "clm/declined",
         "clm/revised",
         "offload/spilled",
         "offload/input-spilled",
@@ -628,6 +632,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         # A model's context edits, written through `ph.session.revise`; the record of
         # each is ph-clm's own.
         "ph_clm.edits": frozenset({"clm/revised"}),
+        "ph_clm.mirror": frozenset({"clm/declined"}),
         "ph_rlm.context_loader": frozenset({"context/loaded"}),
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
         "ph_rlm.harness.service": frozenset({"harness/refined"}),

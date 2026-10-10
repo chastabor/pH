@@ -209,7 +209,7 @@ diff into the verbs above**.
 `[[` are escaped, as pi-clm does.
 
 **Read-back happens in `tools/post-execute` of the top-level call that wrote the
-file**, before that call's result is logged. ph-clm hashes the file after every
+file** (as built in Phase 2; see "Phase 2 as built" for the file's location and grammar), before that call's result is logged. ph-clm hashes the file after every
 top-level call and compares it with the render it wrote. Shell writes and kernel-side
 Python writes are caught the same way: a Code Mode cell's call is the `ipython` call.
 
@@ -509,10 +509,85 @@ a second map with its own cache and settings.
 | **0. Core prep** ✅ | Move `cuts_over`/`balanced_cuts`/`safe_cutoff` to ph-core (`ph.session.balance`), with compaction importing them. | compaction tests unchanged; the three balance tests moved to `packages/ph-core/tests/test_session_balance.py` |
 | **1. Sections and the door** ✅ | `sections.py`, `edits.py`, the six tools; `clm/revised` and the `ph_clm.edits` writers row | Each verb lands as a surface replace; `derive_messages` shows the replacement and `transcript` the original; a resumed session derives the same messages; refusals for an unbalanced or non-contiguous set, a stale seq, a protected section, or a result rewrite that touches more than content; `clm/revised` is in the same batch; the agent-loop invariant holds. Sabotage-check each refusal. |
 | **1b. One revision door** ✅ | `ph.session.revise`; `is_in_place_rewrite` by message identity; lineage in `ph.session.surface`; `one_line` in `ph.text`; compaction, input-offload and ph-clm moved onto the door; `ph_clm/keys.py`; the fold-cache invariant row | the door's own suite, sabotage-checked; the static walk shows no `SurfaceReplace` outside the door; compaction, input-offload and ph-clm suites green without asserting payload mechanics; `VerifyingFoldCache` over the section map |
-| **2. The mirror** | render through `ctx.fs`; read back in `tools/post-execute` of the writing call, with the receipt on its result; the diff compiler; `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and result; a crash between an edit and its result resumes with the edit landed and the call interrupted |
+| **2. The mirror** ✅ | render through `ctx.fs`; read back in `tools/post-execute` of the writing call, with the receipt on its result; the diff compiler; `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and result; a crash between an edit and its result resumes with the edit landed and the call interrupted |
 | **3. Budget and prompt** | budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
 | **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
 | **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+
+### Phase 2 as built
+
+- **The file lives in the agent's workspace scratch** (`<scratch>/clm/context.md`).
+  `scratch` is always present and always writable on every tier, the sandbox keeps
+  it writable, and it sits outside any tree a repository tracks. The path comes
+  from `ph.seams.workspace.scratch_of`, a new public helper: it answers with the
+  agent's held workspace, or with where the seam would put it under its configured
+  root, or under the default root. The scratch layout is written once, and
+  `_scratch_for` uses it too.
+- **The harness writes it directly**, like the spill store, not through `ctx.fs`. That
+  seam gates what the model may touch. Routing the harness's own render through it
+  would run the person's permission rules, and fire `fs/changed`, on every step.
+- **Read-back keeps no state.** The first line,
+  `[[LIVE_CONTEXT session=… generation=… through=S…]]`, carries everything needed.
+  While the surface's `replace_generation` stands, the sections up to `through` are
+  exactly what the log folds to now. So the base is rebuilt from the log on each
+  read-back, a render is never remembered, and read-back is right after a restart.
+  The only state kept is a `(mtime, size)` per file, so a call that left the file
+  alone costs a `stat`.
+- **The render runs on `agent/request`**, after the rest of the chain, so a paste
+  input-offload replaced on the way to the request is already in the file.
+- **Read-back runs in `tools/post-execute` of every top-level call.** A dispatch
+  inside a Code Mode cell is skipped; the cell's own call reads back once the cell
+  is done, so writes the cell's Python made count too. The receipt is appended to
+  that call's content, read through `ToolRuntime.projected_content`. That method
+  is new in core; tool-result offload uses it too, so the rule for "what an
+  `Accept` puts in front of the model" exists once.
+- **Each node's text is folded once** (`MirrorService`'s `SessionFoldCache`, with
+  its own invariant row, `clm-mirror-text`). So a render derives no message it has
+  seen before. What a node shows is `edits.node_text`, which sits beside
+  `_with_text`, the write half of the same rule.
+- **One write lands all its edits in one batch.** `Editor` splits each verb into a
+  draft (`tombstoning`, `tombstoning_runs`, `replacing`, `rewriting_text`) and
+  `land(session, drafts, *, call_id, via)`. The tools land one draft per call.
+  `tombstoning_runs` owns the run rules: building runs, bridging two runs across an
+  untouched earlier marker, and absorbing neighbors. A marker describes every
+  earlier marker it takes in (`_removals`), and a section another draft is already
+  changing is never absorbed (`keep`).
+- **One receipt wording** (`edits.receipt`) serves a tool call's result and a file
+  write's alike, the "GREW the context" warning included.
+- **How a change compiles:**
+  - a deleted or emptied section becomes a tombstone, and deletion runs either side
+    of an untouched marker merge into one;
+  - a changed `RESULT` body, or the reply above the results, is rewritten in place,
+    with the calls kept;
+  - changed `RESULT` lines make the step a replacement holding the remaining text;
+  - an assistant-only section's text is rewritten in place;
+  - any other section's text becomes a replacement;
+  - a file with no `SECTION` lines replaces the editable run.
+- **What is refused:**
+  - a missing or altered first line;
+  - another session's file;
+  - an older generation;
+  - an unknown or duplicated section;
+  - a reorder;
+  - a damaged header;
+  - text outside any section;
+  - a change to a protected section.
+
+  Each refusal is recorded as `clm/declined`, its reason goes in the call's result,
+  and the file is rewritten from the log.
+- **A replacement says what it stands for once.** Its first line,
+  `[revised context, standing for …]`, is not repeated when a revision is revised
+  again.
+- **The prompt section that names the file** (`clm:mirror`) ships here rather than
+  in Phase 3: a mirror the model is never told about is not usable. Phase 3 refines
+  it alongside the budget readouts.
+- **A `CLM_MIRROR` service key** exposes the file's path, render and read-back. The
+  tests use it, and Phase 3's readouts will too.
+- **Tests:**
+  - 18 tests for the mirror;
+  - the suite's fixtures moved to `clm_helpers.py`, now on `pythonpath` and
+    `mypy_path`;
+  - sabotage checks: 10 against the mirror, and both earlier passes still all caught.
 
 ### Phase 1b as built
 

@@ -46,7 +46,7 @@ from ph.tools.definition import (
 from ph.tools.presentation import simple_views
 from ph.wire import WireModel
 
-from .edits import Editor, Gate, Revision, revision_of
+from .edits import Editor, Gate, Revision, receipt, revision_of
 from .keys import CLM
 from .sections import (
     EditRefused,
@@ -147,6 +147,8 @@ class EditValue(ToolModel):
     context_before: int
     context_after: int
     """`context_before - tokens_before + tokens_after`, given so a cell need not."""
+    receipt: str
+    """What the model reads: what changed and what it cost (`edits.receipt`)."""
 
 
 class RecallValue(ToolModel):
@@ -418,7 +420,8 @@ def _edit_value(revision: Revision) -> JsonObject:
         tokens_after=revision.tokens_after,
         reread=revision.reread,
         context_before=revision.context_before,
-        context_after=revision.context_before - revision.tokens_before + revision.tokens_after,
+        context_after=revision.context_after,
+        receipt=receipt([revision]),
     ).model_dump()
 
 
@@ -445,27 +448,7 @@ def _render_map(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: A
 
 
 def _render_edit(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
-    """The receipt the model reads: what changed, and what it cost."""
-    match value["verb"]:
-        case "tombstone":
-            done = f"Removed {value['sections']}, now {value['replacement']}"
-        case "replace":
-            done = f"Replaced {value['sections']}, now {value['replacement']}"
-        case _:
-            done = f"Rewrote a passage in {value['sections']}"
-    lines = [
-        f"{done} (~{thousands(value['tokens_before'])} → ~{thousands(value['tokens_after'])} "
-        f"tokens). Context ~{thousands(value['context_before'])} → "
-        f"~{thousands(value['context_after'])}.",
-        f"The ~{thousands(value['reread'])} tokens after it are read once more on the next "
-        "request: a prefix cache cannot serve past an edit.",
-    ]
-    if value["tokens_after"] > value["tokens_before"]:
-        lines.append(
-            "This edit GREW the context. If you meant to condense, you may have kept the "
-            "old text as well as the new."
-        )
-    return text_content("\n".join(lines))
+    return text_content(value["receipt"])
 
 
 def _render_recall(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401

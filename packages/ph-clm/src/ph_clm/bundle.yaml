@@ -1,9 +1,14 @@
 # ph-clm: the model edits its own context, over any profile.
 #
-# One row today: the section map and the five context tools. Every edit is a
+# Two rows: the section map with its tools, and the context file. Every edit is a
 # surface `replace`, so compaction keeps working beside it — it summarizes the
 # surface, revisions included — and stays the backstop when a session outgrows
 # its window anyway.
 
 - id: clm-context
   name: clm-context
+
+# The context as a file the model edits with its ordinary tools, read back after
+# each call and landed through the same editor the tools use (`CLM`).
+- id: clm-mirror
+  name: clm-mirror

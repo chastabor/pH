@@ -979,6 +979,28 @@ class ToolRuntime:
         run = self._projecting.get(execution.call_id)
         return None if run is None else self._render(run, value)
 
+    def projected_content(
+        self, execution: ToolExecution, decision: Accept, result: ToolExecutionResult
+    ) -> Sequence[ContentBlock] | None:
+        """The content an `Accept` in `tools/post-execute` will put in front of the model.
+
+        Three cases, and the middle one is D10. A decision that replaced the *content*
+        states it outright; one that replaced neither leaves the body's own. One that
+        replaced the **value** states neither — `_post_execute` re-renders from the
+        value after the waterfall — so the content that will be sent does not exist
+        yet, and is asked of `projected`. `None` is that method's: no live run to
+        render against, where guessing would be worse than declining.
+
+        For a row that measures or extends what the model will read — offload sizing
+        a result, ph-clm appending its receipt. It stays an approximation of the last
+        word, as `projected` is: `finish` runs a definition's `finalize_content` after.
+        """
+        if decision.content is not None:
+            return decision.content
+        if decision.has_value:
+            return self.projected(execution, decision.value)
+        return result.content
+
     async def prepare(
         self,
         call: ToolExecutionInput,

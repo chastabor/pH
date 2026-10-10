@@ -1261,6 +1261,8 @@ RECORDLESS: frozenset[str] = frozenset(
         # as the revision row, as a compaction summary does; the account is the
         # trajectory's.
         "clm/revised",
+        # Its refusals: the call's own result already says why.
+        "clm/declined",
         # A skill's nudge budget (D16). The nudges it bounds each render as
         # their own row; the number behind them is the auditor's.
         "skill-steps/budget",

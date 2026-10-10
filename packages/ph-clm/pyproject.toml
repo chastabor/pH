@@ -40,6 +40,7 @@ clm = "ph_clm:BUNDLE"
 
 [project.entry-points."ph.plugins"]
 clm-context = "ph_clm.tools:apply"
+clm-mirror = "ph_clm.mirror:apply"
 
 [tool.uv.sources]
 ph-core = { workspace = true }

@@ -117,6 +117,7 @@ __all__ = [
     "project_access",
     "redirection_env",
     "sanitize_ref",
+    "scratch_of",
     "stored_survivors",
     "tree_path",
     "workspace_leaks",
@@ -283,6 +284,30 @@ def workspace_policy(workspace: Workspace) -> SandboxPolicy:
         workspace_root=str(first),
         writable_extra=[str(path) for path in extra],
     )
+
+
+def scratch_of(ctx: Context, session_id: str, agent: AgentHandle | str) -> Path:
+    """Where this agent's scratch is — the one it holds, or where the seam would put it.
+
+    For a row that keeps a per-agent artifact the agent's own tools must reach and
+    write, under every tier (ph-clm's context file): `scratch` is that place. Asked
+    before a workspace is acquired — or with no workspace row mounted at all — the
+    answer is the seam's own layout under its configured root, or under the default
+    one, so a reader never spells the layout a second time.
+    """
+    held = workspace_of(ctx, agent)
+    if held is not None:
+        return held.scratch
+    seam = ctx.get(WORKSPACE)
+    root = seam.scratch_root if seam is not None else default_home_path(None, "scratch")
+    agent_id = agent if isinstance(agent, str) else agent.id
+    return _scratch_layout(root, session_id, agent_id)
+
+
+def _scratch_layout(root: Path, session_id: str, agent_id: str) -> Path:
+    """Per session *and* per agent: two children of one session writing notes into one
+    directory is the collision this avoids. Canonical, for `_scratch_for`'s reason."""
+    return canonical(root / session_id / agent_id)
 
 
 def workspace_of(ctx: Context, agent: AgentHandle | str | None) -> Workspace | None:
@@ -1328,7 +1353,7 @@ class WorkspaceSeam:
         it from `default_home_path`, which already is, but the guarantee `acquire`
         makes is the seam's, so it does not depend on how the seam was built.
         """
-        scratch = canonical(self.scratch_root / session_id / agent_id)
+        scratch = _scratch_layout(self.scratch_root, session_id, agent_id)
         await anyio.to_thread.run_sync(lambda: scratch.mkdir(parents=True, exist_ok=True))
         return scratch
 

@@ -47,12 +47,12 @@ caps are per stream, so one cell can still emit twice the threshold.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ph.cordis import DEPLOYMENT, Boundary, Context, Next, plugin
 from ph.keys import SPILL_STORE, TOOLS
-from ph.llm.types import ContentBlock, text_of
+from ph.llm.types import text_of
 from ph.seams.spill import PlannedBlob, SpillClaim
 from ph.session import Session, SessionBatch
 from ph.session.writers import log_writer
@@ -369,7 +369,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # listener's if one rewrote it. Measuring the body's own content instead
         # would let any future post-execute row — a redactor, a truncator —
         # switch this guard rail off by touching the result at all.
-        content = _projection(execution, decision, result)
+        content = ctx.require(TOOLS).projected_content(execution, decision, result)
         if content is None:
             return decision
         text = text_of(content)
@@ -401,37 +401,6 @@ async def apply(ctx: Context, config: Config) -> None:
         # on costs nothing either. One rule for both transports: spill the
         # render, leave the value alone.
         return replace(decision, content=text_content(planned.replacement))
-
-    def _projection(
-        execution: ToolExecution, decision: Accept, result: ToolExecutionResult
-    ) -> Sequence[ContentBlock] | None:
-        """The content this decision will put in front of the model, or `None`.
-
-        Three cases, and the middle one is D10. A decision that replaced the
-        *content* states it outright; one that replaced neither leaves the
-        body's own. One that replaced the **value** states neither — the
-        registry re-renders from the value after this waterfall — so the content
-        that will be sent does not exist yet, and `offload` used to return early
-        rather than measure something that was not there. A structured result
-        was therefore never offloaded however large it was.
-
-        Asked of the registry rather than rendered here, because a renderer is
-        the *tool's* row code (P6-26) and `ToolRuntime.projected` is where that
-        binding lives. It is not paid twice: both callers hand the render back,
-        so the registry renders nothing after this. `None` is the one case that
-        stays unmeasurable — a call with no live run to render against, where
-        guessing at a projection would be worse than declining.
-
-        It is still an approximation of the last word, and deliberately: `finish`
-        runs `finalize_content` after this waterfall and may replace content
-        wholesale. Nothing shipped sets it; a definition that grew content there
-        would pass this guard rail, and the guard would then belong in `finish`.
-        """
-        if decision.content is not None:
-            return decision.content
-        if decision.has_value:
-            return ctx.require(TOOLS).projected(execution, decision.value)
-        return result.content
 
     def _self_limiting(execution: ToolExecution) -> bool:
         """Whether this tool bounds its own output and can page.

@@ -139,6 +139,7 @@ def test_the_auditor_renders_what_the_transcript_does_not() -> None:
         # ph-clm's account of a model's own edit, for compaction's reason: the
         # transcript draws the revision, the auditor wants why and what it cost.
         "clm/revised",
+        "clm/declined",
         "workspace/acquiring",
         "workspace/acquired",
         "workspace/disposed",

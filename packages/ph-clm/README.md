@@ -30,6 +30,26 @@ changes, so an id read on one call is good on the next.
 Every edit reports what it costs: a provider's prefix cache cannot serve anything
 after the first change, so the sections *after* an edit are read again once.
 
+## The context file
+
+The `clm-mirror` row writes the model's context to a file in the agent's workspace
+scratch before each request, one `[[SECTION S<id>]]` block per section. The model
+edits it with whatever it already uses: `edit`, `sed`, Python in a cell. When the call
+that touched the file finishes, its changes land through the same editor the tools
+use, in one batch, before the call's result. The result carries the receipt.
+
+| in the file | becomes |
+|---|---|
+| a section deleted | a tombstone |
+| a tool result's text changed | that result rewritten in place |
+| a step's result lines removed | the step replaced by the text left |
+| a message's text changed | a replacement (a reply is rewritten in place) |
+| no section lines left | one replacement for everything editable |
+
+A reorder, a damaged header, an edit to a protected section, or a file written before
+the context was last revised is refused. The call's result says why, and the file is
+rewritten.
+
 ```bash
 phern --profile rlm --patch '{insert: [{id: clm-context, name: clm-context}]}'
 ```

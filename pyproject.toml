@@ -149,7 +149,7 @@ strict = true
 # does below: `daemon_helpers`, `tui_helpers`, `rlm_fixtures` and friends are
 # top-level modules that tests import by name, and both tools have to find them
 # in the same place.
-mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-clm/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:tests"
+mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-clm/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:packages/ph-clm/tests:tests"
 # One list, because mypy takes `packages` or `files` and not both. The `src`
 # entries are the eight shipped packages, reached by path so `mypy_path` above
 # supplies the base that makes their module names come out as `ph`, `ph_app`
@@ -192,6 +192,7 @@ pythonpath = [
     "packages/ph-rlm/tests",
     "packages/ph-stabilize/tests",
     "packages/ph-core/tests",
+    "packages/ph-clm/tests",
 ]
 
 testpaths = [
