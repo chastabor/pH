@@ -7,9 +7,10 @@ the rest are closed.*
 
 **Status, 2026-10-09.** R1–R4 have landed and are committed (`2979434` and the
 `/simplify` pass after it, which put the root's open behind one door,
-`runtime.open_root`). R6, R8 and R5 have landed (uncommitted), each with a
-sabotage-checked gate; R5 took the "daemon names the session" shape (protocol 8).
-R7 is open and optional.
+`runtime.open_root`). R6, R8 and R5 have landed and are committed (`1094f8f`),
+each with a sabotage-checked gate; R5 took the "daemon names the session" shape (protocol 8).
+R7 is measured and its cheap fix has landed (uncommitted): a per-call pool inside
+`write_atomic_all`.
 
 ## The goal every item is weighed against
 
@@ -136,11 +137,51 @@ finds the agent, on both the explicit `dispose` path and a parent scope's cascad
 
 **Today.** `write_atomic_all` (`ph/paths.py`) writes a batch's files one after another on
 one thread, then syncs each directory once. Before `4461585`, the kernel snapshot wrote its
-blobs concurrently, which can share a journal commit on ext4.
+blobs concurrently, which can share a journal commit.
 
-**Do it only if** snapshots of many large variables turn out slow. Measure a cell spilling
-K variables at K = 1, 5 and 20, before and after. Most cells spill none or one, and for one
-blob the batch is one thread hop, as `try_save` was.
+**Measured, 2026-10-09** (NVMe, ZFS with `sync=standard` and no separate log device, the
+`/home` pool; fresh random bytes per run so nothing is skipped; median ms of 6–30 runs,
+two runs agreeing; only variables over `INLINE_BLOB_MAX`, 64 KB, are spilled):
+
+| K blobs × size | A: sequential (now) | B: concurrent `try_save` (before) | C: concurrent, one dir sync | D: A on a thread pool |
+|---|---|---|---|---|
+| 1 × 128 KB | 1.4–1.9 | 1.5 | 1.7 | 1.9 |
+| 5 × 128 KB | 3.9–6.6 | 3.3 | 3.0 | 1.9 |
+| 20 × 128 KB | 16.6–21.0 | 5.3 | 4.8 | 4.6 |
+| 1 × 1 MB | 1.9–2.3 | 2.0 | 2.1 | 2.1 |
+| 5 × 1 MB | 8.1–8.4 | 4.0 | 4.1 | 4.0 |
+| 20 × 1 MB | 27.8–30.3 | 9.6 | 9.8 | 9.8 |
+| 1 × 8 MB | 5.2–5.4 | 5.4 | 5.6 | 5.4 |
+| 5 × 8 MB | 71–107 | 59 | 54 | 55 |
+| 20 × 8 MB | 290–365 | 204 | 211 | 284 |
+
+What it says:
+- **One blob costs the same every way.** That is most cells: a variable under 64 KB is
+  inline, and a cell rarely spills more than one that is not.
+- **Several blobs cost 2–4 times as much written one after another**, because the fsyncs
+  queue instead of sharing a commit: 3–17 ms more at 5–20 variables up to 1 MB, and
+  50–150 ms more at 5–20 variables of 8 MB.
+- **The one directory sync per batch buys nothing measurable here** (B ≈ C): on ZFS a
+  directory sync rides the same intent-log commit. It may matter more on ext4, which was
+  not measured.
+- **Concurrency inside the door recovers it** (D: `write_atomic_all` fanning its files
+  out on a small pool, a single blob skipping the pool), so the fix needs no change
+  outside `paths.py` and keeps `write_atomic_all` the spill store's one door.
+
+**Verdict.** Worth doing only in the cheap form, and only because it is cheap: D is about
+fifteen lines inside `write_atomic_all`, costs nothing for a single blob, and gives back
+the concurrency the old code had. The saving is real but small against a cell's model
+latency, and appears only in cells that spill several large variables. A per-call pool
+(created only for K > 1) avoids a process-wide executor.
+
+**Landed.** `write_atomic_all` writes a batch of more than one file at once (at most
+`_WRITERS`, 8): the calling thread writes the first, a `ThreadPoolExecutor` made for the
+call the rest, and the pool is shut down without waiting, since every result is in hand.
+Then each directory is synced once. One file is written on the calling thread alone.
+Writing the first itself and not joining the pool took about 0.5 ms off a small batch,
+which made two files a win over one after another (8.2 → 6.1 ms) instead of level. Re-measured through
+`SpillStore.try_save_all`: 20 × 128 KB 16.6 → 5.4 ms, 20 × 1 MB 27.8 → 10.2 ms,
+5 × 8 MB 71 → 50 ms, one blob unchanged — level with the concurrent variants.
 
 ### R8 — A resumed fork or segment still reads its whole lineage twice
 
@@ -282,5 +323,12 @@ gate fails), `./test.sh` green outside the sandbox, nothing committed by Claude.
     and `test_tui_pilot.py::test_a_fresh_tui_session_takes_the_id_the_daemon_gives_it`.
   - *Sabotaged two ways*, and each failed its gate: the daemon minting the id and
     passing it on, and the TUI minting it again.
-- [ ] **R7** — optional: measure `write_atomic_all` against concurrent writes for large
+- [x] **R7** — optional: measure `write_atomic_all` against concurrent writes for large
   snapshots.
+  - *Measured* (table above): no difference for one blob; 2–4 times slower for 5–20.
+  - *Landed:* a per-call pool inside `write_atomic_all`, for batches of more than one.
+  - *Gates:* ph-core `test_paths.py::test_a_batch_writes_its_files_at_once` (four
+    writers must meet at a barrier, in a directory they make together) and
+    `test_one_file_is_written_on_the_calling_thread`.
+  - *Sabotaged two ways*, and each failed its gate: the batch written one file after
+    another (the barrier broke), and a batch of one sent to the pool.

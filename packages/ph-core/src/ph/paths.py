@@ -41,6 +41,7 @@ import secrets
 import stat
 import sys
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -487,6 +488,11 @@ def write_atomic(
         sync_directory(written.parent)
 
 
+_WRITERS = 8
+"""At most this many files of one batch are written at once (`write_atomic_all`), the
+calling thread's among them."""
+
+
 def write_atomic_all(
     items: Iterable[tuple[Path, bytes]], *, skip_if_present: bool = False
 ) -> list[OSError | None]:
@@ -498,25 +504,40 @@ def write_atomic_all(
     the last of them, once each rather than once per file. None of the renames is
     durable until this returns, so nothing may name a file before it does.
 
-    One file at a time, on the calling thread. A file that could not be written
-    answers its error in its place, and the rest are still written; every other
-    answers `None`. One `skip_if_present` left alone dirtied no directory, and costs
-    no sync.
+    **Several files are written at once** (at most `_WRITERS`), so their syncs share
+    the disk's commits rather than queueing for one each — two to four times faster
+    for 5 to 20 files, measured (R7, `plans/Persistence_Followups_Todo.md`). The
+    calling thread writes the first itself, and a pool made for the call the rest; a
+    single file is the calling thread's alone. Writers making one new directory
+    together are safe, since `make_directories` takes one already made.
+
+    A file that could not be written answers its error in its place, and the rest are
+    still written; every other answers `None`. One `skip_if_present` left alone
+    dirtied no directory, and costs no sync.
     """
-    failures: list[OSError | None] = []
-    directories: dict[Path, None] = {}
-    for path, payload in items:
+    batch = list(items)
+
+    def write(item: tuple[Path, bytes]) -> Path | OSError | None:
+        path, payload = item
         try:
-            written = _write_file(path, payload, skip_if_present=skip_if_present)
+            return _write_file(path, payload, skip_if_present=skip_if_present)
         except OSError as error:
-            failures.append(error)
-            continue
-        failures.append(None)
-        if written is not None:
-            directories[written.parent] = None
-    for directory in directories:
+            return error
+
+    if len(batch) < 2:
+        written = list(map(write, batch))
+    else:
+        pool = ThreadPoolExecutor(_WRITERS - 1, "ph-write")
+        try:
+            rest = pool.map(write, batch[1:])
+            written = [write(batch[0]), *rest]
+        finally:
+            # Every result is in hand by here, so the threads only have to exit:
+            # waiting for them was most of what the pool cost a small batch.
+            pool.shutdown(wait=False)
+    for directory in dict.fromkeys(one.parent for one in written if isinstance(one, Path)):
         sync_directory(directory)
-    return failures
+    return [one if isinstance(one, OSError) else None for one in written]
 
 
 def _write_file(

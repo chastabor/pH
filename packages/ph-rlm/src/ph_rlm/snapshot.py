@@ -186,8 +186,8 @@ class KernelSnapshotPolicy:
         In the log, not yet on disk: the next request's barrier puts the records on
         disk before the model reads the cell's result, and a blob is durable before
         any record naming it is. The blobs are written together (`try_save_all`):
-        one thread hop, each file synced, and their one directory synced once rather
-        than once per variable — the guest's `done` waits on all of it.
+        at once, each file synced, and their one directory synced once rather than once
+        per variable — the guest's `done` waits on all of it.
         """
         session = self._session(namespace)
         if session is None:

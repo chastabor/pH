@@ -205,10 +205,10 @@ class SpillStore:
         their references in order — the store's one writer.
 
         For a producer that names more than one blob at once — a kernel cell's
-        variables, which all live under one owner. One thread hop writes them all,
-        each file synced, and their directory is synced **once** rather than once per
-        blob (`write_atomic_all`), so a cell that spills K variables costs one
-        directory sync rather than K. The records come after this returns, so every
+        variables, which all live under one owner. They are written together, each
+        file synced, and their directory synced **once** rather than once per blob
+        (`write_atomic_all`, which says how), so a cell that spills K variables costs
+        one directory sync rather than K. The records come after this returns, so every
         blob is durable before anything names it.
 
         **Through a temp and a rename (L7)**, because the name carries the sha256 of

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -466,6 +467,54 @@ def test_an_atomic_write_is_on_disk_before_its_name_is(
     write_atomic(tmp_path / "blob", b"bytes")
 
     assert order == ["file", "rename", "dir"]
+
+
+def test_a_batch_writes_its_files_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R7. A kernel cell's spilled variables are written together, and their syncs
+    share the disk's commits only if the writes overlap: one after another, five to
+    twenty files took two to four times as long. Into a directory none of them found,
+    which they make together.
+
+    Sabotage: write the batch one file after another, and the writers never meet.
+    """
+    from ph import paths
+
+    meeting = threading.Barrier(4, timeout=5)
+    real = paths.write_all
+
+    def met(fd: int, payload: bytes) -> None:
+        meeting.wait()
+        real(fd, payload)
+
+    monkeypatch.setattr(paths, "write_all", met)
+    items = [(tmp_path / "kernel" / "ns" / f"v{n}", bytes([n])) for n in range(4)]
+
+    assert paths.write_atomic_all(items) == [None] * 4
+    assert [path.read_bytes() for path, _ in items] == [bytes([n]) for n in range(4)]
+
+
+def test_one_file_is_written_on_the_calling_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Most cells spill one variable, and a pool would only add threads to it; in a
+    batch, the calling thread writes the first file rather than waiting idle.
+
+    Sabotage: hand every file to the pool, and a single one is written on another
+    thread.
+    """
+    from ph import paths
+    from ph.testing import noted
+
+    threads: list[int] = []
+    real = paths.write_all
+    monkeypatch.setattr(
+        paths,
+        "write_all",
+        lambda fd, payload: noted(threads, threading.get_ident(), real(fd, payload)),
+    )
+
+    assert paths.write_atomic_all([(tmp_path / "v0", b"x")]) == [None]
+    assert threads == [threading.get_ident()]
 
 
 @pytest.mark.parametrize("durable", [True, False])
