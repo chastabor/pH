@@ -188,7 +188,7 @@ becomes `checkInvariants`, a flag. The socket is watched by the kernel (P12-05):
 `unavailable: <why>`). That is the whole of Phase 12's change to this reply; the
 guest's parent watch (P12-07) moved to kqueue without touching the wire.
 
-**8 (unreleased): `session/new` may omit `sessionId`, and the daemon names the
+**8 (0.8.0): `session/new` may omit `sessionId`, and the daemon names the
 session.** The reply carries the id, as it always has. An id the daemon makes is
 new, so its store is not searched for it; one a client made and sent was searched
 for twice, once for its start and once by the open, for a log that could not be

@@ -359,11 +359,33 @@ three resolved, and which tier `PH_RUNTIME` landed in.
 
 ## Upgrading from 0.7
 
+0.8 asks the session store less: a stored log is found once and read once, never on
+the daemon's event loop, a new session is never searched for, and a kernel cell's
+spilled variables are written together. What that changes for an 0.7 setup:
+
 - **Restart the daemon.** It speaks protocol 8: `session/new` may omit `sessionId`,
-  and the daemon names the new session in its reply, so a new session is no longer
-  searched for across every stored log. A 0.7 client always sends an id and is
-  unaffected; the new TUI omits it for a fresh session, which a 0.7 daemon refuses
-  as `invalid_params` until it is restarted.
+  and the daemon names the new session in its reply. A 0.7 client always sends an
+  id and is unaffected; the 0.8 TUI omits it for a fresh session, which a 0.7
+  daemon refuses as `invalid_params`. `phern agents shutdown`, and the next command
+  that needs one starts the new one.
+- **Sessions carry on.** The log format is still 3.
+- **Spilled output is written, then named.** A blob reaches disk before the record
+  that points at it, with no staging step. A 0.7 run that died mid-spill may have
+  left a `.staging` directory beside its blobs under `$PH_HOME/spill`; 0.8 neither
+  finishes nor collects it, so a record naming such a blob reads as one that is not
+  there.
+- **For code built on pH:**
+  - `Context.emit` no longer takes `contained=`: every `emit` logs a failing
+    listener and runs the rest, and a listener that must refuse belongs on
+    `serial` or `waterfall`.
+  - `SpillStore` writes only through `try_save`, `try_save_text` and
+    `try_save_all`, before the record naming the blob is appended; `plan` names a
+    blob before it is written. `reserve`, `commit`, `save`, `save_text` and
+    `locator_for` are gone, and so are `ph.paths.holds` and `is_atomic_temp`.
+  - `ph.persistence.resume_session(ctx, session_id, header, events)` takes the log
+    its caller read; `open_session` reads and resumes. A `SessionPersistence`
+    backend raises `NoStoredSession` when nothing is stored under an id, and its
+    `exists` takes `family=`.
 
 ## Upgrading from 0.6
 
@@ -564,7 +586,7 @@ enumerated list of platform gaps — which is empty on both platforms today.
 ## Building a release
 
 Every member is released together, at one version: each pins the others exactly
-(`ph-core==0.7.0`), so a change in any of them is a release of all seven.
+(`ph-core==0.8.0`), so a change in any of them is a release of all seven.
 
 ```bash
 # 1. The version, everywhere it is written: `version` and the `==` pins between
