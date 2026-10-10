@@ -40,6 +40,7 @@ from ph.session import (
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
+    assert_fold_laws,
     assistant_payload,
     log_event,
     run_tool,
@@ -175,19 +176,27 @@ async def test_a_section_keeps_its_id_as_the_log_grows(mount: MountProfile) -> N
     assert [one.id for one in _sections(ctx, agent.session)][: len(before)] == before
 
 
-async def test_a_kept_map_agrees_with_a_fresh_one(mount: MountProfile) -> None:
-    """The per-event memo, extended across appends and edits, folds to what a map
-    built from nothing does — `SessionFoldCache`'s own contract, held for this fold."""
+async def test_the_section_map_is_a_fold_of_the_log(mount: MountProfile) -> None:
+    """The per-event memo keeps `SessionFoldCache`'s contract, checked two ways over a
+    log with revisions in it: the fold laws over every prefix, and a map kept across
+    the edits agreeing with one built from nothing."""
     ctx = await _mounted(mount)
     agent = _agent(ctx)
     kept = SectionMap(ctx.require(TOKEN_METER), protect_task=True)
     _converse(agent.session)
     kept(agent.session)
-    step = _sections(ctx, agent.session)[1]
+    step, reply = _sections(ctx, agent.session)[1:3]
     await _edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "stale"})
+    await _edit(
+        ctx,
+        agent,
+        "context_rewrite",
+        {"section": reply.name, "old": "line 1 of parser.py", "new": "parser.py:1"},
+    )
     log_event(agent.session, "user/message", user_payload("more", "m9"), SurfaceIntent("append"))
 
     assert kept(agent.session) == _sections(ctx, agent.session)
+    assert_fold_laws(agent.session, kept.fold, kept.extend)
 
 
 async def test_the_step_in_flight_cannot_be_edited(mount: MountProfile) -> None:
@@ -296,8 +305,9 @@ async def test_a_rewrite_changes_only_the_passage(mount: MountProfile) -> None:
     )
 
 
-async def test_a_rewritten_reply_carries_no_usage_or_step(mount: MountProfile) -> None:
-    """Compaction's D8, held here: the copy is at the tail and must not read as new."""
+async def test_a_rewritten_reply_keeps_its_section_name(mount: MountProfile) -> None:
+    """In place, through the door: the same message, so the same section — what the
+    door keeps beyond that (the id, the usage left behind) is tested at the door."""
     ctx = await _mounted(mount)
     agent = _agent(ctx)
     _converse(agent.session)
@@ -315,7 +325,6 @@ async def test_a_rewritten_reply_carries_no_usage_or_step(mount: MountProfile) -
     rewritten = agent.session.events[logged]
     assert rewritten.type == "assistant/message"
     assert is_in_place_rewrite(rewritten)
-    assert not {"usage", "turn", "step"} & set(rewritten.data)
     assert _sections(ctx, agent.session)[2].id == reply.id, "the rewrite renamed the section"
 
 

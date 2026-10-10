@@ -485,41 +485,6 @@ async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: Mo
     assert body in json.dumps(thaw_json(session.events[rewritten[0]].data)), "the log lost it"
 
 
-async def test_the_replacement_does_not_announce_a_step_that_already_ended(
-    mount: MountProfile,
-) -> None:
-    """D8 — the elision runs between steps and appends at the tail of the log.
-
-    Copying the original's payload wholesale carried its `turn` and `step` along
-    with it, so the newest `assistant/message` in the log named a step that had
-    already closed. Every reader keyed on "the latest assistant message" then
-    read a finished step as the open one — the crash repair built its closers
-    around those coordinates, which is B3, fixed on the repair side and caused
-    here.
-
-    The same argument `usage` is dropped for, one step further, and asserted
-    beside it: both are facts about the request that produced the original, and
-    the original still holds them. What the replacement carries instead is
-    `SurfaceReplace(replaces=…)`, which names the node rather than describing it.
-    """
-    ctx = await mount(profile=PROFILE)
-    session = _long_write_session("coordinates", "x" * (MAX_ARG_LENGTH + 1))
-
-    (rewritten,) = _truncate(ctx, session)
-
-    original = session.events[rewritten]
-    assert (original.data["turn"], original.data["step"]) == (1, 1), "the original lost them"
-    replacement = next(
-        event
-        for event in reversed(session.events)
-        if event.type == "assistant/message" and event.seq != rewritten
-    )
-    assert "turn" not in replacement.data, "a closed step is the newest thing in the log"
-    assert "step" not in replacement.data
-    assert "usage" not in replacement.data
-    assert replacement.source_event_seqs == (rewritten,), "and it still names what it stands for"
-
-
 async def test_an_argument_at_the_limit_is_left_alone(mount: MountProfile) -> None:
     """The boundary as a pair, for the reason every threshold here is: one
     tested only from the far side passes for any limit at or below it."""
@@ -634,7 +599,7 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
     _pressured(session)
     before = (session.seq, session.surface.nodes)
 
-    real = compaction.truncated_assistant_payload
+    real = compaction.truncated_assistant_message
     calls: list[int] = []
 
     def refused_second(event: Any, **options: Any) -> Any:  # noqa: ANN401
@@ -644,7 +609,7 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
             return {**found[0], "unwritable": {1, 2}}, found[1]
         return found
 
-    monkeypatch.setattr(compaction, "truncated_assistant_payload", refused_second)
+    monkeypatch.setattr(compaction, "truncated_assistant_message", refused_second)
     with pytest.raises(InvalidJsonValueError):
         _truncate(ctx, session)
 
@@ -652,7 +617,7 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
     assert (session.seq, session.surface.nodes) == before
     assert session.latest("compaction/args-truncated") is None
 
-    monkeypatch.setattr(compaction, "truncated_assistant_payload", real)
+    monkeypatch.setattr(compaction, "truncated_assistant_message", real)
     assert len(_truncate(ctx, session)) == 2
     record = not_none(session.latest("compaction/args-truncated"))
     assert record.seq == session.seq - 1

@@ -308,10 +308,11 @@ def _tail(events: Sequence[SessionEvent]) -> _Tail:
                 # have this fold write a second `tool/result` for one id.
                 #
                 # `is_in_place_rewrite` rather than `is_replacement_surface_event`:
-                # the narrower predicate is the one that means "not new work". A
-                # substitution putting a genuinely new assistant message in place
-                # of a range would carry calls that *do* need closing, and the
-                # coarse test would skip those too.
+                # the narrower predicate is the one that means "not new work". The
+                # commit refuses an assistant replacement that is anything else
+                # (`surface._assert_assistant_rewrite`) — new speech in place of a
+                # range would carry calls that *do* need closing — so the two agree
+                # today, and the narrow one stays right if that ever changes.
                 continue
             content = as_seq(as_obj(event.data.get("message")).get("content"))
             for block in (as_obj(one) for one in content):

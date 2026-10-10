@@ -63,6 +63,7 @@ from .request_header import (
     fold_request_header,
     header_equals,
 )
+from .revise import editable_message, origin_of, originals, rewrite, substitute
 from .session import (
     Session,
     SessionBatch,
@@ -95,6 +96,7 @@ from .surface import (
     is_replacement_surface_event,
     is_stand_in,
     is_surface_event,
+    shadowed_by,
 )
 
 __all__ = [
@@ -152,6 +154,7 @@ __all__ = [
     "declared_intents",
     "derive_event_message",
     "derive_transcript",
+    "editable_message",
     "extend_index",
     "family_for",
     "fold_intents",
@@ -178,10 +181,15 @@ __all__ = [
     "open_call_delta",
     "open_intents",
     "open_turn_at",
+    "origin_of",
+    "originals",
     "outcome_of",
+    "rewrite",
     "safe_cutoff",
     "session_written",
     "settle_of",
+    "shadowed_by",
+    "substitute",
     "unsettled",
     "unsettled_why",
     "valid_session_id",

@@ -26,9 +26,9 @@ from rich.filesize import decimal
 from ph.seams.commands import CommandDefinition
 from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
+from ph.text import one_line
 
 from ...sessions import SessionSummary
-from ...wire import one_line
 from ..state import PromptRecord
 from ..themes import ThemeCatalog, ThemeProfile
 from .base import Choice
@@ -119,8 +119,8 @@ def history_choices(history: Sequence[PromptRecord]) -> list[Choice]:
     than by anything in the prompt. It adds a row to the list rather than hiding
     one, which is why it is named here instead of worked around.
 
-    `one_line` is the TUI's own answer for "a person's text, on a row" — used by
-    the tool cards, the trajectory and `phern agents` — so a pasted prompt of three
+    `one_line` is the one answer for "a person's text, on a row" — used by the tool
+    cards, the trajectory and `phern agents` — so a pasted prompt of three
     hundred lines renders like every other truncated row, with the ellipsis that
     says it was cut. The whole text is what gets inserted.
     """

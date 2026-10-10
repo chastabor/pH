@@ -56,21 +56,22 @@ from ph.seams.approval import INTERRUPTED
 from ph.session import (
     Session,
     SessionEvent,
-    SurfaceReplace,
     is_in_place_rewrite,
     is_replacement_surface_event,
+    is_stand_in,
     settle_of,
+    shadowed_by,
     unsettled_why,
 )
 from ph.session.kinds import SESSION_HOLDER, hold_of
 from ph.session.request_header import parse_request_context
-from ph.text import count_of
+from ph.text import count_of, one_line
 from ph.tools import ToolCallView, ToolResult, ToolResultView
 from ph.tools.presentation import render_call_view, render_result_view
 from ph.tools.registry import ToolRuntime
 
 from ..shell import shell_body
-from ..wire import media_labels, one_line, result_block, text_of_wire
+from ..wire import media_labels, result_block, text_of_wire
 from .state import ChatItem, ItemRole, Surface, ToolCard, TuiState
 
 __all__ = [
@@ -200,19 +201,15 @@ class TuiEventAdapter:
             # The **op's set**, not the citation. `source_event_seqs` may name
             # more than the replacement shadowed — the chunks a message was
             # built from — so dimming from it grays rows that are still live.
-            operation = event.surface_op
-            self._mark_shadowed(
-                operation.replaces
-                if isinstance(operation, SurfaceReplace)
-                else tuple(event.source_event_seqs or ())
-            )
-            # But only compaction is compaction. `input-offload` (P4-02) also
-            # substitutes on the surface, and calling its preview "history
+            self._mark_shadowed(shadowed_by(event))
+            # But only a stand-in is a compaction row. `input-offload` (P4-02)
+            # also substitutes on the surface, and calling its preview "history
             # compacted" would tell the reader their conversation was summarized
             # when a paste was relocated. The discriminator is the log's own
-            # attribution: a compaction summary declares `form: compaction`
-            # (P4-03), which is a claim about the surface and not a color.
-            if source.get("form") == "compaction":
+            # attribution: text standing in for conversation — a compaction
+            # summary, a model's own revision — declares `form: compaction`
+            # (`is_stand_in`), which is a claim about the surface and not a color.
+            if is_stand_in(event):
                 self._row("compaction", "compaction", text or "(history compacted)", event)
                 return
         self._row("msg", "context" if kind == "plugin" else "user", text, event)
@@ -277,10 +274,11 @@ class TuiEventAdapter:
             # because the message is still what the model sees. Falling through
             # would also let `_count_usage` reset the footer to an old turn's.
             #
-            # Keyed on the shape rather than on "any replacement": a
-            # *substitution* of an assistant message is a different event that
-            # does remove conversation, and blanket-returning would drop it
-            # silently — the mechanism-not-cause mistake this file already fixed
+            # Keyed on the shape rather than on "any replacement", although the
+            # commit now refuses the other shape for an assistant message: a
+            # substitution is a `user/message` (`surface._assert_assistant_rewrite`),
+            # so blanket-returning here could only ever drop what that rule lets
+            # through — the mechanism-not-cause mistake this file already fixed
             # once, fifty lines up.
             return
         turn, step = as_int(event.data.get("turn")), as_int(event.data.get("step"))

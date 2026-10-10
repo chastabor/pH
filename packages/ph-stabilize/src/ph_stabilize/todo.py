@@ -649,8 +649,8 @@ def _executing_message(event: SessionEvent) -> Message | None:
 
     `is_in_place_rewrite` rather than `is_replacement_surface_event`, for
     `persistence.repair`'s reason one package over: the narrow predicate is the
-    one that means "not new work", and a substitution putting a genuinely new
-    message in place of a range carries calls that do need counting.
+    one that means "not new work". The commit refuses any other assistant
+    replacement (`surface._assert_assistant_rewrite`), so today the two agree.
 
     A module-level function because `Session.projection` keys its fold on
     `(type, parse)` — a lambda here would build a fold per call.

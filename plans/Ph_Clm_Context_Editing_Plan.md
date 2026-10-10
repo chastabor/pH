@@ -208,8 +208,20 @@ diff into the verbs above**.
 [Caching](#caching-what-a-middle-edit-costs-and-what-helps)). Lines in a body that start with
 `[[` are escaped, as pi-clm does.
 
-Read-back happens on `agent/pre-step`, before compaction's listener on the same event.
-ph-clm hashes the file and compares it with the render it wrote:
+**Read-back happens in `tools/post-execute` of the top-level call that wrote the
+file**, before that call's result is logged. ph-clm hashes the file after every
+top-level call and compares it with the render it wrote. Shell writes and kernel-side
+Python writes are caught the same way: a Code Mode cell's call is the `ipython` call.
+
+Not on `agent/pre-step`, which was the first draft. The log has to say what the
+model was told. Suppose the model's `sed` succeeds and its result is logged, and the
+daemon then dies before the next step reads the file back. On resume the mirror is
+re-rendered from the log, so the edit is gone, while the log still says the write
+succeeded. With post-execute, the edit lands before the result does. A crash between
+the two leaves an interrupted call beside an edit that did land, which is exactly
+what happened.
+
+The diff compiles to edits as follows:
 
 | what changed in the file | becomes |
 |---|---|
@@ -219,7 +231,7 @@ ph-clm hashes the file and compares it with the render it wrote:
 | assistant text changed, `RESULT` headers intact | assistant rewrite (calls kept) |
 | several adjacent blocks' headers removed and their text replaced | one substitution over those sections |
 | a whole-file rewrite with no headers | one substitution over the editable region (CLM's "replace everything with notes") |
-| blocks reordered, a sub-header damaged, a section split, a protected section touched | **refused**: `clm/declined` plus a receipt naming the block |
+| blocks reordered, a sub-header damaged, a section split, a protected section touched | **refused**: the receipt names the block, and `clm/declined` records it for the auditor |
 | `replace_generation` moved since the render, because another replace landed meanwhile (an offload or a compaction) | refused and re-rendered. The model edits against the current surface. |
 
 Only `replace_generation` decides staleness. The last node seq in `base=` is informational,
@@ -227,9 +239,12 @@ the way pi-clm treats its `baseline=` digest. Sections appended since the render
 the file and read as untouched. Otherwise every edit made in a step, after that step's own
 results landed, would be refused.
 
-The step that made the edit gets a one-line receipt in the next request, in CLM's style:
-"edit applied: 3 sections → 1, ~41.2k→29.8k tokens, re-reads 12.4k following". Unlike CLM,
-the receipt is a logged message, so the log still records what the model saw.
+The call that made the edit carries a one-line receipt in its own result, in CLM's
+style: "edit applied: 3 sections → 1, ~41.2k→29.8k tokens, re-reads 12.4k following".
+`post-execute` returns the result with the receipt appended (`Accept` with new
+content, as tool-result offload does), so the receipt is logged with the result. No
+separate notice message is added to the context, and the explicit tools already
+work the same way.
 
 **Where the file lives.** The tools run in different places: the host, a sandbox, or
 ph-runtime-guest. pi-clm's stated limitation is that "remote tool backends cannot see the local
@@ -239,7 +254,7 @@ is the first thing to settle in Phase 2.
 
 ## Calling the operations directly
 
-The same door, `ctx.clm.apply(edits)`, also backs explicit tools. The mirror is one front end
+The same door, the `Editor` that `clm-context` provides as `ctx.clm` (Phase 1b), also backs explicit tools. The mirror is one front end
 and these are another, so there is one implementation of the rules:
 
 | tool | does |
@@ -367,7 +382,7 @@ against that.
 | where the surface may be cut | `cuts_over` (ph-stabilize) | **move it to ph-core** |
 | why, how, by whom, at what cost | — | **`clm/revised`** (ignorable): `{via: mirror\|tool\|person, ops: [{verb, sections, replacement, tokensBefore, tokensAfter}], reread, reason}`, in the same batch as the replacements |
 | refused edits | — | **`clm/declined`** (ignorable): `{via, code, reason, block?}`. This is compaction's "record the attempts that fail". |
-| write permission | `_WRITTEN_BY` writers table, `test_log_writers.py` | a `ph_clm.edits` row for `user/message`, `assistant/message`, `tool/result`, `clm/revised`, `clm/declined`, written through `_LOG = log_writer(__name__)`, with the two types added beside ph-rlm's |
+| write permission | `_WRITTEN_BY` writers table, `test_log_writers.py` | a `ph_clm.edits` row for `clm/revised` (and `clm/declined` in Phase 2), beside ph-rlm's types. Phase 1 also granted it the three surface types. From Phase 1b, core's revision door (`ph.session.revise`) writes every replacement, and the row keeps only ph-clm's own records. |
 | bring an original back | every original is in the log by seq | nothing for `context_recall` (at the tail) or a flattened restore |
 | restore a multi-message range as separate messages, or insert a new block | no op inserts a node after another | **deferred**: a surface op would mean `SESSION_FORMAT_VERSION` 4 (open decision 3) |
 | a tombstone that leaves *no* message | no type does this honestly | **deferred**: see open decision 1 |
@@ -404,16 +419,146 @@ packages/ph-clm/
 - Compaction stays on as the backstop at 0.85 of the window. It composes with ph-clm because
   both are surface replaces.
 
+## The durable log and one mechanism
+
+This section reviews the plan against ph's two ground rules: **the session log is
+durable and append-only**, and **a rule several producers share lives in one core
+door and is tested there once**.
+
+**What already holds:**
+- Every edit is an appended event. The log is never mutated (I4), and `transcript()`
+  keeps the originals.
+- A resumed session folds to the same view, and a test pins it.
+- Each edit and its record land in one batch, and a crash mid-call reconciles from the
+  record.
+- The mirror is a derived cache: rendered from the log, never trusted as a source,
+  and refused if a surface rewrite moved underneath it.
+- The explicit tools and the mirror share one `Editor`. Compaction and ph-clm share one
+  balance rule (`ph.session.balance`) and one stand-in predicate (`is_stand_in`).
+
+**What did not hold, now changed in this plan:**
+- **Mirror read-back.** Moved from `agent/pre-step` to `tools/post-execute`, for the
+  durability reason given in the mirror section.
+- **Budget readouts.** Phase 3's readouts now travel the receipt's channel: a trailer
+  that `post-execute` appends to a tool result, as pi-clm's `sizeTrailer` does. Under
+  I3, anything the model is shown must be logged. A separate notice message per
+  threshold would be one more surface node to edit away, and a second mechanism for
+  the same job.
+- **The cache floor.** Phase 4's floor hint goes in the request config, so the
+  `request/header` event that records a config change records every floor move, and a
+  replay reproduces the cache markers. The markers never enter the messages, so I3
+  holds as it is.
+
+**What still does not hold: replacements are built in three places.** Compaction
+(summary, argument elision, overflow clip), input-offload (paste preview) and ph-clm
+(substitute, rewrite) each:
+- construct `SurfaceReplace` and `SurfaceIntent` by hand;
+- copy the payload rules: D8's dropping of usage/turn/step, content-only result
+  rewrites, message-id handling;
+- hold the three surface types in the writers table.
+
+ph's convention for a rule several producers share is a core door that keeps it.
+`ph.seams.subagents`' `record_*` doors are the precedent: providers report a child
+through them, and the doors keep each record's durability rule. Phase 1b is that door
+for surface replacements.
+
+### Phase 1b: one door for every surface revision
+
+None of this bumps `SESSION_FORMAT_VERSION`: the door writes the shapes the log
+already holds.
+
+| change | where | replaces |
+|---|---|---|
+| `substitute(log, shadowed, message)` and `rewrite(log, event, message)`, the only two ways to append a replacement. A **substitution** mints a new message id and cites every shadowed seq. A **rewrite** keeps the message id, keeps a result's call id and error flag, and drops usage/turn/step from an assistant payload. Both write into the caller's batch, so each producer's own record lands beside the edit. | new `ph.session.revise`, with its own `_LOG` | compaction's `_land`, elision and clip; input-offload's `_append_preview`; ph-clm's `Editor._substitute` and `Editor.rewrite` |
+| `is_in_place_rewrite` decided **by type**: an `assistant/message` or `tool/result` replacing one node cited as its source. The door makes the type equal to message identity. Every rewrite is one of those two types and keeps the id; every substitution is a `user/message` with a new id. So the predicate is exact by construction, and it still reads the event alone. | `ph.session.surface` | today's structural test (one seq, cited as the source), which also matches a single-node substitution |
+| Lineage: `shadowed_by(event)`, `origin_of(session, seq)`, `originals(session, seq)` | `ph.session.revise` | ph-clm's private copies. Any phern view of revisions needs these too (the Phase 5 diff panel, a `phern clm diff` command), and `ph_app` may not import `ph_clm`. |
+| `one_line(text, limit)` | `ph.text` | `ph_app.wire.one_line` and ph-clm's `clip` |
+
+**Governance.** `ph.session.revise` becomes the one writer of replacement surface
+events. Compaction, input-offload and ph-clm keep only their own record types
+(`compaction/*`, `offload/input-spilled`, `clm/revised`). A static walk, like
+`test_log_writers.py`'s, holds that no shipped module but the door constructs a
+`SurfaceReplace`.
+
+**Testing the shared parts once:**
+- The door's suite covers every rule it keeps, each one sabotage-checked.
+- Producers keep only their policy tests (what to shadow, what text to write) and stop
+  asserting payload mechanics.
+- The section map's fold cache gets its invariant row (`contribute_fold_cache`), as
+  the six other fold caches do. Its tests run it through `ph.testing.VerifyingFoldCache`,
+  which checks every read against a cold fold.
+
+**ph-clm's side, in ph-rlm's shape.** A `keys.py` with `CLM: ServiceKey[Editor]`, which
+`clm-context` provides. The Phase 2 `clm-mirror` row injects it rather than building
+a second map with its own cache and settings.
+
+**Not advised:**
+- **Declaring `clm/revised` with `declare_log_type`.** ph-rlm keeps its types in
+  core's tables. Once the door owns the surface types, ph-clm's core row is only
+  `clm/revised`. Moving that type out is worth it only together with a generic
+  trajectory fallback for declared types, which would help every plugin.
+- **A shared core message renderer.** Compaction's `render_for_summary` and ph-clm's
+  `render_messages` differ on purpose, and core has no second consumer.
+- **Sections or spans in core.** Compaction cuts a prefix and does not need sections.
+  Revisit if its planner wants the memoized sizes.
+
 ## Phases
 
 | phase | work | gate |
 |---|---|---|
 | **0. Core prep** ✅ | Move `cuts_over`/`balanced_cuts`/`safe_cutoff` to ph-core (`ph.session.balance`), with compaction importing them. | compaction tests unchanged; the three balance tests moved to `packages/ph-core/tests/test_session_balance.py` |
 | **1. Sections and the door** ✅ | `sections.py`, `edits.py`, the six tools; `clm/revised` and the `ph_clm.edits` writers row | Each verb lands as a surface replace; `derive_messages` shows the replacement and `transcript` the original; a resumed session derives the same messages; refusals for an unbalanced or non-contiguous set, a stale seq, a protected section, or a result rewrite that touches more than content; `clm/revised` is in the same batch; the agent-loop invariant holds. Sabotage-check each refusal. |
-| **2. The mirror** | render through `ctx.fs`, read back on `agent/pre-step`, the diff compiler, receipts, `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and receipt |
-| **3. Budget and prompt** | nudges from `ctx.token_meter` pressure, the protocol section, the profiles | a recorded `rlm-clm` session on a real provider shows nudges at their thresholds and edits that land |
-| **4. Caching** | `after=` costs; the floor breakpoint hint (core request field + Anthropic adapter); optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints |
+| **1b. One revision door** ✅ | `ph.session.revise`; `is_in_place_rewrite` by message identity; lineage in `ph.session.surface`; `one_line` in `ph.text`; compaction, input-offload and ph-clm moved onto the door; `ph_clm/keys.py`; the fold-cache invariant row | the door's own suite, sabotage-checked; the static walk shows no `SurfaceReplace` outside the door; compaction, input-offload and ph-clm suites green without asserting payload mechanics; `VerifyingFoldCache` over the section map |
+| **2. The mirror** | render through `ctx.fs`; read back in `tools/post-execute` of the writing call, with the receipt on its result; the diff compiler; `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and result; a crash between an edit and its result resumes with the edit landed and the call interrupted |
+| **3. Budget and prompt** | budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
+| **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
 | **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+
+### Phase 1b as built
+
+- **The door is `ph.session.revise`.** It holds `substitute`, `rewrite`,
+  `editable_message`, `origin_of` and `originals`. `originals` lives here rather than in
+  `ph.session.surface` because it derives messages, and `ph.session.derive` already
+  imports `surface`. `shadowed_by` needs nothing of that, so it sits in `surface`, where
+  `is_in_place_rewrite` and the TUI adapter use it too.
+- **`is_in_place_rewrite` decides by type, and the commit makes the type exact.** A
+  message-id comparison would need the replaced event, and the predicate's callers
+  (repair, the todo row, the TUI) hand it the event alone. Instead:
+  - `surface._assert_assistant_rewrite` sits beside the existing tool-result check. An
+    `assistant/message` replacement must name exactly one current
+    `assistant/message`, cite only it, and keep its message id.
+  - Every other replacement is therefore a `user/message`, for every writer and on
+    every replay, not only for the door's own writes.
+  - Every log this format reads already agrees.
+- **What the door adds, and what it leaves to the core.** The door builds the payload
+  from the original, drops D8's fields, and writes the citation. It refuses only what
+  the commit cannot: rewriting a user message, and a substitution in assistant role.
+  The id rule, the content-only rule and the empty-run rule are the core's.
+- **The writers table now has one writer of replacements**, `ph.session.revise`.
+  Compaction, input-offload and ph-clm keep only `compaction/*`,
+  `offload/input-spilled` and `clm/revised`. The writers walk in `test_log_writers.py`,
+  which already polices who writes to the log, also fails on any `SurfaceReplace(...)`
+  outside the door.
+- **Compaction's `truncated_assistant_payload` is now `truncated_assistant_message`.**
+  It returns the message, and the door builds the payload around it and drops D8's
+  fields. The D8 reasoning moved into the door's docstring.
+- **`one_line` is in `ph.text`.** phern's five importers use it, and ph-clm's
+  `clip` is gone.
+- **ph-clm:**
+  - `keys.py` holds `CLM`, which `clm-context` provides;
+  - the section map's fold cache has its invariant row (`clm-section-map`);
+  - `SectionMap.fold`/`extend` are public, so a test runs `assert_fold_laws` over a
+    log with revisions in it, and compares a map kept across edits with a fresh one.
+- **Tests now sit where their rules live:**
+  - the door's 8 tests cover its rules, and `test_surface.py` covers the commit-time
+    assistant rule;
+  - sabotage checks: 7 against the door and commit (one of them the static walk) and 9
+    against ph-clm;
+  - ph-clm's rewrite test asserts only its own policy (the section keeps its name);
+  - compaction's duplicate of the door's D8 test is gone. Its end-to-end meter test
+    stays, and its other tests pass unchanged.
+  - A todo fixture that built a "rewrite" with a new message id now keeps the id, as a
+    real rewrite does.
 
 ### Phases 0 and 1 as built
 
@@ -430,7 +575,8 @@ Where the build departs from the sections above, the build is what holds:
   the surface. Two things follow for free:
   - the TUI draws the edit as a revision row, with the originals dimmed;
   - compaction treats the edit as a prior summary, so it won't spend a model call
-    summarizing it again (`_is_prior_summary`).
+    summarizing it again (`ph.session.is_stand_in`, which the simplify pass promoted out
+    of compaction).
 - **A section's id is its first node's origin seq** (`sections.origin_of`). Without
   this, an in-place rewrite of a single-message section would rename it (`S3` became
   `S8` in a test), which breaks "ids never change" for the edit meant to change
@@ -451,9 +597,10 @@ Where the build departs from the sections above, the build is what holds:
 - **A section keeps its id only through a true in-place rewrite**, judged by the
   replacement keeping the original's message id. Core's `is_in_place_rewrite` reads
   structure alone: one shadowed seq, cited as the source. That also matches a
-  substitution standing for a single node, such as a one-message tombstone, or an
-  offloaded paste (which the TUI already redraws in place). A discriminator on
-  `SurfaceReplace` would settle it for every reader. That is follow-up work for core.
+  substitution standing for a single node, such as a one-message tombstone. Today only
+  ph-clm meets that case: the core readers ask only about assistant messages, and
+  every assistant replacement is a rewrite. Phase 1b moves the message-identity rule
+  into core.
 - **The open decisions follow their recommendations:**
   - visible tombstones, with adjacent ones absorbed into one marker;
   - user role for substitutions, and the original role for in-place rewrites;

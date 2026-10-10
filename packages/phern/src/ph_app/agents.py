@@ -45,7 +45,7 @@ from ph.resources import SHUTDOWN_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
 from ph.session import now_ms
-from ph.text import duration
+from ph.text import duration, one_line
 
 from . import verbs
 from .console import TypeOption, console, detail, fail, section, selectors_or_exit
@@ -62,7 +62,7 @@ from .protocol import (
     cursor_text,
     parse_cursor,
 )
-from .wire import describe, message_of, one_line, result_block, text_of_wire
+from .wire import describe, message_of, result_block, text_of_wire
 
 __all__ = ["agents_app"]
 

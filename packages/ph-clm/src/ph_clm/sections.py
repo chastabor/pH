@@ -24,11 +24,10 @@ Only the cut into sections is redone, because the surface moves.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, assert_never
 
-from ph.json import as_obj, as_str
 from ph.llm.types import (
     MediaBlock,
     Message,
@@ -46,24 +45,22 @@ from ph.session import (
     Session,
     SessionEvent,
     SessionFoldCache,
-    SurfaceReplace,
     cuts_of,
     derive_event_message,
-    is_replacement_surface_event,
     is_stand_in,
     open_call_delta,
+    origin_of,
+    shadowed_by,
 )
 from ph.system_prompt.assembly import is_context_snapshot
-from ph.text import block_marker
+from ph.text import block_marker, one_line
 from ph.tools.errors import HarnessError
 
 __all__ = [
     "EditRefused",
     "Section",
     "SectionMap",
-    "clip",
     "label",
-    "originals",
     "render_messages",
     "resolve_one",
     "resolve_run",
@@ -130,12 +127,6 @@ def span_label(first: int, last: int) -> str:
     return label(first) if first == last else f"{label(first)}..{label(last)}"
 
 
-def clip(text: str, limit: int) -> str:
-    """`text` on one line, cut to `limit` characters with an ellipsis."""
-    one_line = " ".join(text.split())
-    return one_line if len(one_line) <= limit else one_line[: limit - 1] + "…"
-
-
 # ------------------------------------------------------------------ the map --
 
 
@@ -166,8 +157,13 @@ class SectionMap:
         self.meter = meter
         self.protect_task = protect_task
         self._nodes: SessionFoldCache[dict[int, _Node]] = SessionFoldCache(
-            lambda session: self._extend({}, session, 0), extend=self._extend
+            self.fold, extend=self.extend
         )
+
+    def stale(self, sessions: Iterable[Session]) -> list[str]:
+        """Every cached map whose facts no longer equal the fold of its log (I6) —
+        the delegate `contribute_fold_cache` polls."""
+        return self._nodes.stale(sessions)
 
     def __call__(self, session: Session) -> tuple[Section, ...]:
         """The session's current surface, as sections, oldest first."""
@@ -213,22 +209,23 @@ class SectionMap:
             return "it is the context snapshot, which is re-added whenever it is missing"
         return None
 
-    def _extend(self, known: dict[int, _Node], session: Session, start: int) -> dict[int, _Node]:
+    def fold(self, session: Session) -> dict[int, _Node]:
+        """Every surface event's facts, from the start of the log."""
+        return self.extend({}, session, 0)
+
+    def extend(self, known: dict[int, _Node], session: Session, start: int) -> dict[int, _Node]:
+        """`known`, with the facts of every surface event from `start` on — in place,
+        which `SessionFoldCache` allows (`ph.testing.check_fold_laws` says why)."""
         for event in session.events_from(start):
             if event.surface_op is not None:
-                known[event.seq] = self._node(session, event, known)
+                known[event.seq] = self._node(session, event)
         return known
 
-    def _node(self, session: Session, event: SessionEvent, known: dict[int, _Node]) -> _Node:
-        replaced = _replaced(event)
-        origin = event.seq
-        if len(replaced) == 1 and _message_id(event) == _message_id(session.at(replaced[0])):
-            # The same message, rewritten in place: the section keeps its name. A
-            # substitution mints a new message, so it does not pass this test even
-            # when it stands for one node — which is where the surface's own
-            # `is_in_place_rewrite`, reading structure alone, cannot tell the two.
-            ancestor = known.get(replaced[0])
-            origin = replaced[0] if ancestor is None else ancestor.origin
+    def _node(self, session: Session, event: SessionEvent) -> _Node:
+        # A rewrite in place keeps its section's name; a substitution is a new one
+        # (`origin_of`, which follows only what `is_in_place_rewrite` calls a rewrite).
+        origin = origin_of(session, event.seq)
+        replaced = shadowed_by(event)
         message = derive_event_message(event)
         if message is None:
             return _Node(origin, False, "assistant", False, 0, 0, (), "", replaced)
@@ -298,26 +295,6 @@ def resolve_run(
 # --------------------------------------------------------------- reading back --
 
 
-def originals(session: Session, seq: int) -> Iterator[Message]:
-    """The messages a surface node stands for, back to what was first appended.
-
-    A node that replaced nothing is its own original. A replacement is expanded
-    through every node it shadowed, recursively — a revision of a revision reads
-    back to the conversation it all started from.
-    """
-    event = session.at(seq)
-    if event is None:
-        return
-    replaced = _replaced(event)
-    if replaced:
-        for shadowed in replaced:
-            yield from originals(session, shadowed)
-        return
-    message = derive_event_message(event)
-    if message is not None:
-        yield message
-
-
 def render_messages(messages: Iterable[Message]) -> str:
     """Messages as plain text, one role-headed block each — for recall and diffs."""
     blocks: list[str] = []
@@ -341,23 +318,6 @@ def render_messages(messages: Iterable[Message]) -> str:
 
 
 # ------------------------------------------------------------------ helpers --
-
-
-def _replaced(event: SessionEvent) -> tuple[int, ...]:
-    """The nodes `event` took off the surface; `()` for anything but a replacement."""
-    operation = event.surface_op
-    if is_replacement_surface_event(event) and isinstance(operation, SurfaceReplace):
-        return operation.replaces
-    return ()
-
-
-def _message_id(event: SessionEvent | None) -> str:
-    """The id of the message an event carries — a `user/message` payload is the
-    message; the other two surface types wrap one."""
-    if event is None:
-        return ""
-    data = event.data
-    return as_str(data.get("id")) or as_str(as_obj(data.get("message")).get("id"))
 
 
 def _span(name: str) -> list[str]:
@@ -393,7 +353,7 @@ def _ever_stood_for(session: Session, nodes: Iterable[int]) -> set[int]:
     pending = list(nodes)
     while pending:
         event = session.at(pending.pop())
-        fresh = [seq for seq in (() if event is None else _replaced(event)) if seq not in seen]
+        fresh = [seq for seq in (() if event is None else shadowed_by(event)) if seq not in seen]
         seen.update(fresh)
         pending.extend(fresh)
     return seen
@@ -439,5 +399,5 @@ def _preview(message: Message) -> str:
         else:
             continue
         if line:
-            return clip(line, PREVIEW_CHARS)
+            return one_line(line, PREVIEW_CHARS)
     return ""

@@ -187,6 +187,8 @@ def _walk() -> _Walk:
                 strays.append(f"{line} reaches for the scaffolding writer")
             if name == "LogWriter" and module != "ph.session.writers":
                 strays.append(f"{line} constructs a LogWriter rather than minting one")
+            if name == "SurfaceReplace" and module != "ph.session.revise":
+                strays.append(f"{line} constructs a SurfaceReplace past ph.session.revise")
             if name == "_append" and len(node.args) >= 2 and not in_session:
                 strays.append(f"{line} calls a log's _append past its writer")
             if name == "IntentKind":
@@ -271,6 +273,11 @@ def test_nothing_writes_a_log_but_its_own_writer() -> None:
 
     Sabotage: import `ph.seams.sandbox`'s `_LOG` into `ph_stabilize.hitl` and write
     `sandbox/mode` with it, and this names the import and the write.
+
+    The same walk holds the revision door: a surface replacement is built in
+    `ph.session.revise` and nowhere else, so the rules every replacement keeps are
+    kept in one place. Sabotage: build a `SurfaceReplace(...)` in
+    `ph_stabilize.input_offload` again, and this names the line.
     """
     assert not WALK.strays, WALK.strays
 

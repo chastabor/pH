@@ -27,6 +27,7 @@ from .events import (
 )
 
 __all__ = [
+    "REWRITTEN_IN_PLACE",
     "SurfaceError",
     "SurfaceFoldReplacement",
     "SurfaceFoldResult",
@@ -37,6 +38,7 @@ __all__ = [
     "is_replacement_surface_event",
     "is_stand_in",
     "is_surface_event",
+    "shadowed_by",
 ]
 
 
@@ -62,6 +64,14 @@ def is_append_surface_event(event: SessionEvent) -> bool:
 
 def is_replacement_surface_event(event: SessionEvent) -> bool:
     return is_surface_event(event) and event.surface_op != "append"
+
+
+def shadowed_by(event: SessionEvent) -> tuple[int, ...]:
+    """The nodes `event` took off the surface; `()` for anything but a replacement."""
+    operation = event.surface_op
+    if is_replacement_surface_event(event) and isinstance(operation, SurfaceReplace):
+        return operation.replaces
+    return ()
 
 
 def is_stand_in(event: SessionEvent) -> bool:
@@ -92,23 +102,34 @@ def is_in_place_rewrite(event: SessionEvent) -> bool:
 
     The two shapes a `replace` comes in, told apart structurally rather than by
     guessing from the producer. A **substitution** stands in for a range with
-    something new — a compaction summary, an offloaded paste — and the rows it
-    shadows leave the model's view. An **in-place rewrite** replaces a single
-    node with a near-copy of itself: a tool result whose content was relocated,
-    an assistant message whose call arguments were elided. Nothing leaves the
-    conversation, so a reader should update the row it already has rather than
-    draw a second one and dim the first.
+    something new — a compaction summary, an offloaded paste, a model's revision of
+    its context — and the rows it shadows leave the model's view. An **in-place
+    rewrite** replaces a single node with a near-copy of itself: a tool result whose
+    content was relocated, an assistant message whose call arguments were elided.
+    Nothing leaves the conversation, so a reader should update the row it already
+    has rather than draw a second one and dim the first.
+
+    **By type, because the commit makes the type exact**: an `assistant/message` or
+    `tool/result` replacement is refused unless it rewrites exactly one node of its
+    own type, cites it, and keeps its message id (`_assert_assistant_rewrite`,
+    `_assert_tool_result_rewrite`) — so every other replacement, a substitution, is
+    a `user/message`. The shape alone — one node, cited as the source — cannot tell
+    them apart: a substitution standing for a single message has it too.
 
     A consumer that keyed on `is_replacement_surface_event` alone had to hold a
     list of which producers do which — exactly the shape-matching that the
     `form` discriminator replaced one layer up.
     """
-    operation = event.surface_op
-    if not is_replacement_surface_event(event) or not isinstance(operation, SurfaceReplace):
-        return False
+    replaced = shadowed_by(event)
     return (
-        len(operation.replaces) == 1 and tuple(event.source_event_seqs or ()) == operation.replaces
+        event.type in REWRITTEN_IN_PLACE
+        and len(replaced) == 1
+        and tuple(event.source_event_seqs or ()) == replaced
     )
+
+
+REWRITTEN_IN_PLACE = frozenset({"assistant/message", "tool/result"})
+"""The types a replacement may rewrite in place — and the only types it may."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +264,43 @@ def _assert_tool_result_rewrite(
         raise SurfaceError("tool/result surface replacement may change only content")
 
 
+def _assert_assistant_rewrite(
+    event: SessionEvent, shadowed_seqs: Sequence[int], log: Sequence[SessionEvent]
+) -> None:
+    """An `assistant/message` replacement rewrites one reply in place, or nothing.
+
+    The reply-side twin of `_assert_tool_result_rewrite`, and what lets
+    `is_in_place_rewrite` decide by type: a replacement in assistant role that named
+    a range, or carried a message of its own, would be new speech the model never
+    made — and readers that skip a rewrite's calls as already answered (repair, the
+    todo row) would skip a substitution's too. Text standing in for a range is a
+    `user/message`. Every log this format reads already agrees: the one producer of
+    assistant replacements has always rewritten a single reply in place.
+    """
+    if event.type != "assistant/message":
+        return
+    original = log[shadowed_seqs[0]] if len(shadowed_seqs) == 1 else None
+    if original is None or original.type != "assistant/message":
+        raise SurfaceError(
+            "assistant/message surface replacement must rewrite exactly one current "
+            "assistant/message; text standing in for a range is a user/message"
+        )
+    if tuple(event.source_event_seqs or ()) != tuple(shadowed_seqs):
+        raise SurfaceError(
+            "assistant/message surface replacement must cite only the reply it rewrites"
+        )
+    if _message_id(event) != _message_id(original):
+        raise SurfaceError(
+            "assistant/message surface replacement must keep the message id; a new "
+            "message in place of a reply is a substitution, a user/message"
+        )
+
+
+def _message_id(event: SessionEvent) -> object:
+    message = event.data.get("message")
+    return message.get("id") if isinstance(message, Mapping) else None
+
+
 def _blank_result_content(data: object) -> PlainJsonValue:
     """A `tool/result` payload with every result block's content blanked out.
 
@@ -285,6 +343,7 @@ def _plan(
     shadowed = _shadowed(state, op)
     _assert_provenance(event, shadowed)
     _assert_tool_result_rewrite(event, shadowed, log)
+    _assert_assistant_rewrite(event, shadowed, log)
     return _ReplacePlan(seq=event.seq, shadowed_seqs=shadowed)
 
 

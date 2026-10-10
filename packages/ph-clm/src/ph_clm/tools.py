@@ -26,8 +26,9 @@ from ph.cordis import Context, plugin
 from ph.json import JsonObject
 from ph.keys import TOKEN_METER, TOOLS
 from ph.llm.types import ContentBlock
+from ph.seams.invariants import contribute_fold_cache
 from ph.seams.token_meter import TokenMeter
-from ph.session import Session, SessionEvent, derive_event_message
+from ph.session import Session, SessionEvent, derive_event_message, originals
 from ph.text import thousands
 from ph.tools.definition import (
     Done,
@@ -46,12 +47,12 @@ from ph.tools.presentation import simple_views
 from ph.wire import WireModel
 
 from .edits import Editor, Gate, Revision, revision_of
+from .keys import CLM
 from .sections import (
     EditRefused,
     Section,
     SectionMap,
     label,
-    originals,
     render_messages,
     resolve_one,
     span_label,
@@ -171,6 +172,10 @@ async def apply(ctx: Context, config: Config) -> None:
     meter = ctx.require(TOKEN_METER)
     mapper = SectionMap(meter, protect_task=config.protect_task)
     editor = Editor(mapper, config.gate)
+    ctx.provide(CLM, editor)
+    # The map's per-event facts are a fold over the log, and every such cache gets
+    # its own invariant row (`docs/seams/invariants.md`, "Fold caches get one row each").
+    contribute_fold_cache(ctx, id="clm-section-map", subject="section map", stale=mapper.stale)
 
     def sections_tool(args: SectionsArgs, run: ToolRunContext) -> JsonObject:
         session = _session(run)

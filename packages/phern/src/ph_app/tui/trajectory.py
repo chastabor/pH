@@ -36,9 +36,9 @@ from ph.seams.skills import read_summary
 from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
 from ph.session.request_header import parse_request_header
 from ph.session_profile import EnvironmentFold, environment_listing, record_summary
-from ph.text import block_marker, count_of
+from ph.text import block_marker, count_of, one_line
 
-from ..wire import describe, message_of, one_line, result_block, source_of, text_of_wire
+from ..wire import describe, message_of, result_block, source_of, text_of_wire
 
 __all__ = [
     "HANDLERS",

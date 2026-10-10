@@ -74,7 +74,7 @@ from ph.agent.types import (
 from ph.agent_loop import AgentCanceled
 from ph.cancel import Canceled
 from ph.cordis import Context, Next, plugin
-from ph.json import as_obj, as_seq, as_str, dumps, thaw_json
+from ph.json import as_obj, as_seq, as_str, dumps
 from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
 from ph.llm import BlockAssembler
 from ph.llm.types import (
@@ -99,14 +99,14 @@ from ph.seams.token_meter import TokenBaseline
 from ph.session import (
     EpochHeader,
     Session,
-    SessionBatch,
     SessionEvent,
-    SurfaceIntent,
     derive_event_message,
+    editable_message,
     is_stand_in,
+    rewrite,
     safe_cutoff,
+    substitute,
 )
-from ph.session.events import SurfaceReplace
 from ph.session.writers import log_writer
 from ph.text import block_marker, count_of
 from ph.wire import WireModel
@@ -129,7 +129,7 @@ __all__ = [
     "apply",
     "render_for_summary",
     "truncated_arguments",
-    "truncated_assistant_payload",
+    "truncated_assistant_message",
 ]
 
 log = logging.getLogger("ph_stabilize.compaction")
@@ -450,34 +450,20 @@ def _elided_arguments(
     return None if shorter is None else (shorter, len(arguments))
 
 
-def truncated_assistant_payload(
+def truncated_assistant_message(
     event: SessionEvent, *, elides: Callable[[str], bool], max_length: int
 ) -> tuple[dict[str, Any], int] | None:
-    """One `assistant/message` payload with long call arguments elided.
+    """One `assistant/message`'s message with long call arguments elided.
 
-    Returns the replacement payload and the characters it saves, or `None` when
+    Returns the replacement message and the characters it saves, or `None` when
     there is nothing to elide — and answers `None` **without deep-copying**,
-    which is the common case: `thaw_json` is a full recursive copy of a payload
+    which is the common case: `thaw_json` is a full recursive copy of a message
     that may carry a whole tool-call batch, and paying it per message per step to
     discover there is nothing to do was the pass's real cost.
 
-    **`usage` is dropped, and that is load-bearing.** The replacement is
-    appended at the end of the log, and `TokenMeter.last_usage` folds to the
-    newest `assistant/message` carrying one — so a replacement that
-    copied an old turn's usage would become the meter's baseline and tell the
-    compaction trigger the session had shrunk. The TUI's own footer reads the
-    last usage it sees and would have shown the same stale number. The usage
-    belongs to the request that produced the original, which still has it.
-
-    **`turn` and `step` go with it, for the same reason one step further** (D8).
-    This pass runs *between* steps and appends at the tail, so a replacement that
-    kept them announced a finished step as the newest thing in the log: every
-    reader keyed on "the latest `assistant/message`" then read a step that had
-    already closed as the open one, and the crash repair built its closers around
-    those coordinates (B3, repaired on its own side; this is the source). The
-    coordinates belong to the original, which still has them, and the replacement
-    names it — `SurfaceReplace(replaces=(at,))` is a stronger link than a pair of
-    integers a reader has to match up.
+    The message only: `ph.session.revise.rewrite` builds the payload around it, and
+    drops the `usage`, `turn` and `step` that belong to the original (D8 — the door
+    says why, once, for every producer of a rewrite).
     """
     blocks = as_seq(as_obj(event.data.get("message")).get("content"))
     elisions = {
@@ -488,20 +474,17 @@ def truncated_assistant_payload(
     if not elisions:
         return None
     saved = sum(before - len(elided) for elided, before in elisions.values())
-    plain = thaw_json(event.data)
     # The frozen pass above proved the shape — a message whose `content` is a
     # block list — and `thaw_json` preserves it exactly: object to `dict`, array
     # to `list`, all the way down. So this is a claim already checked, and
     # re-checking it would cost two branches no test can reach. `cast` is the
     # honest spelling for that; `workspace.py`'s rule against casting a `Literal`
     # off JSON is about an *unchecked* claim, which this is not.
-    message = cast("dict[str, Any]", plain["message"])
+    message = editable_message(event)
     rewritten = cast("list[dict[str, Any]]", message["content"])
     for index, (shorter, _before) in elisions.items():
         rewritten[index] = {**rewritten[index], "arguments": shorter}
-    for derived in ("usage", "turn", "step"):
-        plain.pop(derived, None)
-    return plain, saved
+    return message, saved
 
 
 # ------------------------------------------------------------------ reading --
@@ -865,20 +848,13 @@ class SummarizeEngine:
                 event = events[at]
                 if event.type != "assistant/message":
                     continue
-                replacement = truncated_assistant_payload(
+                replacement = truncated_assistant_message(
                     event, elides=elides, max_length=settings.max_length
                 )
                 if replacement is None:
                     continue
-                payload, savings = replacement
-                _LOG.append(
-                    batch,
-                    "assistant/message",
-                    payload,
-                    SurfaceIntent(
-                        surface_op=SurfaceReplace(replaces=(at,)), source_event_seqs=(at,)
-                    ),
-                )
+                message, savings = replacement
+                rewrite(batch, event, message)
                 rewritten.append(at)
                 saved += savings
             if rewritten:
@@ -997,32 +973,22 @@ class SummarizeEngine:
             # batch is what must shrink, and a member that would grow is not
             # part of shrinking it.
             return False
-        payload = thaw_json(event.data)
-        thawed = payload.get("message")
-        blocks = thawed.get("content") if isinstance(thawed, dict) else None
+        clipped = editable_message(event)
+        blocks = clipped.get("content")
         if not isinstance(blocks, list) or not blocks or not isinstance(blocks[0], dict):
             return False
-        # Only the result block's content changes — everything else, the message
-        # id included, must match: `Session._append` refuses a `tool/result`
-        # replacement that touches anything but content.
+        # Only the result block's content changes. The door builds the rest of the
+        # payload from the original, and core refuses a `tool/result` rewrite that
+        # touches anything but content.
         blocks[0] = {**blocks[0], "content": [{"type": "text", "text": planned.replacement}]}
 
-        def replace_result(batch: SessionBatch) -> None:
-            # In the spill's own batch: the accounting and the replacement it
-            # describes land together or not at all.
-            _LOG.append(
-                batch,
-                "tool/result",
-                payload,
-                SurfaceIntent(
-                    surface_op=SurfaceReplace(replaces=(event.seq,)),
-                    source_event_seqs=(event.seq,),
-                ),
-            )
-
-        # Fail open, as everywhere else in this bundle: a clip that cannot store
-        # the content must not be the reason the model loses it.
-        return await spill_tool_result(self.ctx, session, planned, beside=replace_result)
+        # In the spill's own batch: the accounting and the replacement it describes
+        # land together or not at all. And fail open, as everywhere else in this
+        # bundle: a clip that cannot store the content must not be the reason the
+        # model loses it.
+        return await spill_tool_result(
+            self.ctx, session, planned, beside=lambda batch: rewrite(batch, event, clipped)
+        )
 
     def _window(self, session: Session) -> int | None:
         context = session.request_context()
@@ -1230,9 +1196,9 @@ class SummarizeEngine:
                 if ref is None
                 else REPLACEMENT_WITH_PATH.format(file_path=ref.locator, summary=summary)
             )
-            replacement = _LOG.append(
+            replacement = substitute(
                 batch,
-                "user/message",
+                plan.shadowed_seqs,
                 create_user_message(
                     content=[{"type": "text", "text": text}],
                     # The harness speaking, and saying which kind of speech it is.
@@ -1248,13 +1214,6 @@ class SummarizeEngine:
                             f" (~{plan.shadowed_tokens} tokens)"
                         ),
                     ),
-                ).to_wire(),
-                SurfaceIntent(
-                    # The set it already has, passed through — where the range
-                    # forced it to collapse the list to its two ends and let the fold
-                    # re-derive what sat between them.
-                    surface_op=SurfaceReplace(replaces=plan.shadowed_seqs),
-                    source_event_seqs=plan.shadowed_seqs,
                 ),
             )
         return CompactionResult(

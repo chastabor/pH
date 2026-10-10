@@ -31,7 +31,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ph.json import JsonObject, JsonValue, as_obj, as_seq, as_str
-from ph.text import brief_value, redacted_marker
+from ph.text import brief_value, one_line, redacted_marker
 from ph.tools import ToolCallView, ToolResultView
 from ph.tools.presentation import CARD_VIEWS
 
@@ -42,7 +42,6 @@ __all__ = [
     "matches_terms",
     "media_labels",
     "message_of",
-    "one_line",
     "result_block",
     "source_of",
     "split_terms",
@@ -201,12 +200,6 @@ def matches_terms(haystack: str, query: str) -> bool:
     escape key, the focus order and the filter semantics subtly different".
     """
     return all(term in haystack.lower() for term in query.lower().split())
-
-
-def one_line(text: str, limit: int = 120) -> str:
-    """Whitespace collapsed and truncated with an ellipsis — a card subtitle."""
-    flat = " ".join(text.split())
-    return flat if len(flat) <= limit else f"{flat[: limit - 1]}…"
 
 
 def index_at_or_before(seqs: Iterable[int], target: int) -> int:

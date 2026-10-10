@@ -192,6 +192,39 @@ def test_tool_result_replacement_may_change_only_content() -> None:
         )
 
 
+def test_an_assistant_replacement_rewrites_one_reply_in_place() -> None:
+    """The reply-side twin of the result rule, held at commit for every writer — so
+    `is_in_place_rewrite` can decide by type. Text standing in for a range, or a
+    message of its own, is a `user/message`; in assistant role it would be speech
+    the model never made, and repair would skip its calls as already answered.
+    """
+    session = Session("s")
+    asked = log_event(session, "user/message", user_payload("q", "m1"), SurfaceIntent("append"))
+    reply = log_event(
+        session, "assistant/message", assistant_payload("a", "m2"), SurfaceIntent("append", ())
+    )
+    other = log_event(
+        session, "assistant/message", assistant_payload("b", "m3"), SurfaceIntent("append", ())
+    )
+
+    def replace(*seqs: int) -> SurfaceIntent:
+        return SurfaceIntent(SurfaceReplace(replaces=seqs), seqs)
+
+    with pytest.raises(SurfaceError, match="must keep the message id"):
+        log_event(session, "assistant/message", assistant_payload("a'", "m9"), replace(reply.seq))
+    with pytest.raises(SurfaceError, match="exactly one current assistant/message"):
+        log_event(
+            session,
+            "assistant/message",
+            assistant_payload("both", "m2"),
+            replace(reply.seq, other.seq),
+        )
+    with pytest.raises(SurfaceError, match="exactly one current assistant/message"):
+        log_event(session, "assistant/message", assistant_payload("q'", "m1"), replace(asked.seq))
+    log_event(session, "assistant/message", assistant_payload("a'", "m2"), replace(reply.seq))
+    assert len(session.surface.nodes) == 3
+
+
 def test_tool_result_replacement_targets_exactly_one_node() -> None:
     session = Session("s")
     log_event(session, "tool/result", tool_result_payload("a", "r1"), SurfaceIntent("append"))
@@ -247,34 +280,44 @@ def test_surface_predicates() -> None:
 
 
 def test_an_in_place_rewrite_is_told_apart_from_a_substitution() -> None:
-    """The two shapes a `replace` comes in, distinguished structurally.
+    """The two shapes a `replace` comes in, distinguished by type.
 
     A consumer that keyed on `is_replacement_surface_event` alone had to carry a
     list of which producers do which. A node replacing *itself* — a truncated
     argument, a relocated tool result — removes nothing from the conversation and
     should update the row a reader already has; a substitution stands in for a
-    range and shadows it.
+    range and shadows it. One node cited as its own source is not enough to say
+    which: a substitution standing for a single message has that shape too, and it
+    is a `user/message`, which `ph.session.revise` never writes as a rewrite.
     """
     session = Session("shapes")
     first = log_event(session, "user/message", user_payload("one", "m1"), SurfaceIntent("append"))
     second = log_event(session, "user/message", user_payload("two", "m2"), SurfaceIntent("append"))
+    reply = log_event(
+        session, "assistant/message", assistant_payload("three", "m3"), SurfaceIntent("append", ())
+    )
 
     in_place = log_event(
         session,
+        "assistant/message",
+        assistant_payload("three, elided", "m3"),
+        SurfaceIntent(SurfaceReplace(replaces=(reply.seq,)), (reply.seq,)),
+    )
+    single = log_event(
+        session,
         "user/message",
-        user_payload("one, elided", "m3"),
+        user_payload("one, summarized", "m4"),
         SurfaceIntent(SurfaceReplace(replaces=(first.seq,)), (first.seq,)),
     )
     substitution = log_event(
         session,
         "user/message",
-        user_payload("a summary of both", "m4"),
-        SurfaceIntent(
-            SurfaceReplace(replaces=(in_place.seq, second.seq)), (in_place.seq, second.seq)
-        ),
+        user_payload("a summary of both", "m5"),
+        SurfaceIntent(SurfaceReplace(replaces=(single.seq, second.seq)), (single.seq, second.seq)),
     )
 
     assert is_in_place_rewrite(in_place)
+    assert not is_in_place_rewrite(single), "one node cited as its source, and a substitution"
     assert not is_in_place_rewrite(substitution)
     assert is_replacement_surface_event(substitution), "both are still replacements"
     assert not is_in_place_rewrite(first), "an append is not a rewrite"

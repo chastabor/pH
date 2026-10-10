@@ -23,8 +23,10 @@ turn's speaker.
 **Whole sections, one unbroken run, nothing protected** — `sections.resolve_run`
 holds those, because a replacement lands where its earliest node was and a run that
 split a call from its result would hand the provider an orphan. Core holds the rest:
-the named nodes must be on the surface now, and a `tool/result` rewrite may change
-only content.
+every write goes through its revision door (`ph.session.revise`), which keeps a
+rewrite's message id and leaves an assistant reply's usage and step behind with the
+original, and the surface refuses a node that is no longer current and a
+`tool/result` rewrite that changes more than content.
 
 **The gate is off unless a row asks** (decision 4): `fit` refuses growth past the
 window, `shrink` refuses any growth. ph's limits ship unset for the reason the
@@ -40,19 +42,21 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from ph.json import JsonObject, as_int, as_obj, as_seq, as_str, thaw_json
+from ph.json import JsonObject, as_int, as_obj, as_seq, as_str
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, Message, PluginSource, create_user_message
 from ph.session import (
     Session,
     SessionBatch,
     SessionEvent,
-    SurfaceIntent,
-    SurfaceReplace,
     derive_event_message,
+    editable_message,
+    rewrite,
+    substitute,
 )
 from ph.session.writers import log_writer
+from ph.text import one_line
 
-from .sections import EditRefused, Section, SectionMap, clip, resolve_one, resolve_run, span_label
+from .sections import EditRefused, Section, SectionMap, resolve_one, resolve_run, span_label
 
 _LOG = log_writer(__name__)
 
@@ -220,7 +224,7 @@ class Editor:
             )
         seq, path = next((seq, path) for seq, path, text in sites if old in text)
         event = _at(session, seq)
-        payload = _rewritten(event, path, old, new)
+        message = _rewritten(event, path, old, new)
         meter = self.sections.meter
         before = derive_event_message(event)
         later = section.nodes[section.nodes.index(seq) + 1 :]
@@ -229,20 +233,9 @@ class Editor:
             for message in (derive_event_message(_at(session, one)) for one in later)
             if message is not None
         )
-        in_place = SurfaceIntent(
-            surface_op=SurfaceReplace(replaces=(seq,)), source_event_seqs=(seq,)
-        )
-
-        def write(batch: SessionBatch) -> SessionEvent:
-            # Spelled per type rather than `event.type`: the writers table is read off
-            # the literal, so a rewrite can only ever land the type it rewrites.
-            if event.type == "assistant/message":
-                return _LOG.append(batch, "assistant/message", payload, in_place)
-            return _LOG.append(batch, "tool/result", payload, in_place)
-
         return self._land(
             session,
-            write,
+            lambda batch: rewrite(batch, event, message),
             Revision(
                 verb="rewrite",
                 first=section.id,
@@ -250,7 +243,7 @@ class Editor:
                 replacement=_UNLANDED,
                 shadowed=(seq,),
                 tokens_before=0 if before is None else meter.measure(before),
-                tokens_after=meter.measure(Message.model_validate(payload["message"])),
+                tokens_after=meter.measure(Message.model_validate(message)),
                 reread=section.after + later_tokens,
                 context_before=sum(one.tokens for one in sections),
                 call_id=call_id,
@@ -272,16 +265,15 @@ class Editor:
         message = create_user_message(
             content=[{"type": "text", "text": text}],
             source=PluginSource(
-                plugin=PLUGIN, form="compaction", summary=clip(summary, CONTEXT_SUMMARY_MAX_CHARS)
+                plugin=PLUGIN,
+                form="compaction",
+                summary=one_line(summary, CONTEXT_SUMMARY_MAX_CHARS),
             ),
         )
         shadowed = tuple(seq for section in span for seq in section.nodes)
-        intent = SurfaceIntent(
-            surface_op=SurfaceReplace(replaces=shadowed), source_event_seqs=shadowed
-        )
         return self._land(
             session,
-            lambda batch: _LOG.append(batch, "user/message", message.to_wire(), intent),
+            lambda batch: substitute(batch, shadowed, message),
             Revision(
                 verb=verb,
                 first=span[0].id,
@@ -381,22 +373,15 @@ def _text_sites(session: Session, seq: int) -> list[tuple[int, _Path, str]]:
 
 
 def _rewritten(event: SessionEvent, path: _Path, old: str, new: str) -> dict[str, Any]:
-    """`event`'s payload with the one passage changed.
-
-    An assistant reply also loses `usage`, `turn` and `step`, as compaction's elision
-    does and for its reason (D8): the replacement is appended at the tail, and a
-    copied usage or step would be read as the newest one. A tool result keeps
-    everything but the text — core refuses a result rewrite that changes more.
-    """
-    plain = cast("dict[str, Any]", thaw_json(event.data))
-    blocks = cast("list[dict[str, Any]]", plain["message"]["content"])
+    """`event`'s message with the one passage changed — what `ph.session.revise.rewrite`
+    lands in its place, keeping everything else the door says a rewrite keeps."""
+    message = editable_message(event)
+    blocks = cast("list[dict[str, Any]]", message["content"])
     if event.type == "assistant/message":
         (index,) = path
         blocks[index] = {**blocks[index], "text": blocks[index]["text"].replace(old, new, 1)}
-        for derived in ("usage", "turn", "step"):
-            plain.pop(derived, None)
     else:
         index, inner = path
         parts = cast("list[dict[str, Any]]", blocks[index]["content"])
         parts[inner] = {**parts[inner], "text": parts[inner]["text"].replace(old, new, 1)}
-    return plain
+    return message

@@ -43,11 +43,10 @@ from ph.session import (
     Session,
     SessionBatch,
     SessionEvent,
-    SurfaceIntent,
     derive_event_message,
     is_replacement_surface_event,
+    substitute,
 )
-from ph.session.events import SurfaceReplace
 from ph.session.writers import log_writer
 from ph.text import count_of
 from ph.wire import WireModel
@@ -193,9 +192,9 @@ async def apply(ctx: Context, config: Config) -> None:
 
 def _append_preview(batch: SessionBatch, event: SessionEvent, ref: SpillRef, preview: str) -> None:
     """The notice that stands in for a spilled paste, on the surface where it was."""
-    _LOG.append(
+    substitute(
         batch,
-        "user/message",
+        (event.seq,),
         create_user_message(
             content=[{"type": "text", "text": preview}],
             # A plugin's notice, not the person's words. Attributing the preview
@@ -207,9 +206,5 @@ def _append_preview(batch: SessionBatch, event: SessionEvent, ref: SpillRef, pre
                 form="notice",
                 summary=f"{count_of(ref.bytes, 'byte')} offloaded to {Path(ref.locator).name}",
             ),
-        ).to_wire(),
-        SurfaceIntent(
-            surface_op=SurfaceReplace(replaces=(event.seq,)),
-            source_event_seqs=(event.seq,),
         ),
     )

@@ -608,6 +608,11 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "profile/withdrawn",
             }
         ),
+        # Every surface replacement — a substitution as a `user/message`, a rewrite in
+        # place as the `assistant/message` or `tool/result` it rewrites — from the one
+        # door that keeps their rules. Compaction, input-offload and ph-clm write
+        # through it, and keep only their own records here.
+        "ph.session.revise": frozenset({"assistant/message", "tool/result", "user/message"}),
         "ph.session.store": frozenset({"session/end-seed", "session/segmented"}),
         "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
         "ph_app.daemon.supervisor": frozenset(
@@ -620,33 +625,21 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "supervisor/violated",
             }
         ),
-        # A model's context edits are surface `replace`s, for compaction's reason
-        # below: a substitution as a `user/message`, a rewrite in place as the
-        # `assistant/message` or `tool/result` it rewrites.
-        "ph_clm.edits": frozenset(
-            {"assistant/message", "clm/revised", "tool/result", "user/message"}
-        ),
+        # A model's context edits, written through `ph.session.revise`; the record of
+        # each is ph-clm's own.
+        "ph_clm.edits": frozenset({"clm/revised"}),
         "ph_rlm.context_loader": frozenset({"context/loaded"}),
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
         "ph_rlm.harness.service": frozenset({"harness/refined"}),
         "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
-        # Compaction rewrites the model's history through surface `replace` — a
-        # summary as a `user/message`, an elided call as an `assistant/message`, a
-        # clipped result as a `tool/result` — which is why the three surface types
-        # have a second writer, and the one reason they may.
+        # Compaction rewrites the model's history — a summary, an elided call, a
+        # clipped result — through `ph.session.revise`, and records here why.
         "ph_stabilize.compaction": frozenset(
-            {
-                "assistant/message",
-                "compaction/args-truncated",
-                "compaction/declined",
-                "compaction/summarized",
-                "tool/result",
-                "user/message",
-            }
+            {"compaction/args-truncated", "compaction/declined", "compaction/summarized"}
         ),
         "ph_stabilize.hitl": frozenset({"approval/mode"}),
-        # An offloaded paste is a `user/message` replace for the same reason.
-        "ph_stabilize.input_offload": frozenset({"offload/input-spilled", "user/message"}),
+        # An offloaded paste's preview goes through the same door.
+        "ph_stabilize.input_offload": frozenset({"offload/input-spilled"}),
         "ph_stabilize.limits": frozenset({"limits/breaker-tripped", "limits/exceeded"}),
         "ph_stabilize.offload": frozenset({"offload/spilled"}),
         # Two writers of one list on purpose: a procedure a skill declares is a todo

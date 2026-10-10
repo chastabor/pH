@@ -641,12 +641,13 @@ def test_the_parallel_rule_reads_the_message_being_executed_not_a_rewrite() -> N
     )
     assert _parallel_write_todos(session), "the baseline: two calls in one message"
 
-    # A clip lands, rewriting the *first* message in place. It is now the newest
-    # `assistant/message` event in the log, and it is not new work.
+    # A clip lands, rewriting the *first* message in place — the same message, so the
+    # same id. It is now the newest `assistant/message` event in the log, and it is
+    # not new work.
     log_event(
         session,
         "assistant/message",
-        _assistant([todo_call("c0", _todos(("early", "completed")))], "m3"),
+        _assistant([todo_call("c0", _todos(("early", "completed")))], "m1"),
         SurfaceIntent(SurfaceReplace(replaces=(old.seq,)), (old.seq,)),
     )
 

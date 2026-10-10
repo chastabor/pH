@@ -81,7 +81,11 @@ The loop knows nothing about any of this — compaction attaches to
 
 * **Append the summary and the replace atomically with respect to durability.**
   The pair is what makes the surface consistent; an interleave leaves a log whose
-  derivation depends on when it was read.
+  derivation depends on when it was read. Write the summary through
+  `ph.session.revise.substitute`, into the batch that carries the engine's own
+  record. That door is the only module allowed to construct a `SurfaceReplace`
+  (`test_session_revise.py` holds it), and it keeps the rules every replacement
+  shares.
 * **Record the attempts that fail.** `compaction/declined` exists because the
   manual path once recorded *nothing* while telling the person "the attempt is
   recorded" — the failed attempt has to be visible in the log, which is one of

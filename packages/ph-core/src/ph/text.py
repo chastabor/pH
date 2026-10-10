@@ -21,6 +21,7 @@ __all__ = [
     "brief_value",
     "count_of",
     "duration",
+    "one_line",
     "redacted_marker",
     "thousands",
     "truncation_marker",
@@ -135,6 +136,18 @@ def duration(milliseconds: float) -> str:
         if count:
             parts.append(f"{count}{name}")
     return " ".join(parts[:2]) or "0s"
+
+
+def one_line(text: str, limit: int = 120) -> str:
+    """Whitespace collapsed and truncated with an ellipsis — a subtitle, a preview,
+    a summary that must fit a row.
+
+    Here rather than in `ph_app.wire`, where it was written, because a plugin needs
+    the same row-sized line (ph-clm's section previews and the summaries its
+    revisions carry) and may not import the app.
+    """
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else f"{flat[: limit - 1]}…"
 
 
 def thousands(count: int) -> str:
