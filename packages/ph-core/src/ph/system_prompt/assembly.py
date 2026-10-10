@@ -59,6 +59,7 @@ __all__ = [
     "ToolsProvider",
     "apply",
     "context_message",
+    "is_context_snapshot",
     "join_context_sections",
     "render_context_sections",
     "render_prompt",
@@ -213,15 +214,22 @@ def context_message(assembly: PromptAssembly, shown: Sequence[Message]) -> Messa
     )
 
 
+def is_context_snapshot(message: Message) -> bool:
+    """Whether `message` is a context snapshot this module wrote — the one question
+    another package may ask about `CONTEXT_PLUGIN`, answered here so the name stays
+    written and read in this module alone."""
+    source = message.source
+    return (
+        isinstance(source, PluginSource)
+        and source.plugin == CONTEXT_PLUGIN
+        and source.form == "snapshot"
+    )
+
+
 def _shown_context(shown: Sequence[Message]) -> str | None:
     """The newest snapshot's text in `shown`, or `None` — a later one supersedes it."""
     for message in reversed(shown):
-        source = message.source
-        if (
-            isinstance(source, PluginSource)
-            and source.plugin == CONTEXT_PLUGIN
-            and source.form == "snapshot"
-        ):
+        if is_context_snapshot(message):
             return text_of(message.content)
     return None
 

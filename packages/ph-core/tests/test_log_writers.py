@@ -249,7 +249,7 @@ def _writes() -> set[tuple[str, str]]:
 def test_the_walk_sees_every_package() -> None:
     """A walk that silently shrank would pass every gate below."""
     writers = {module.partition(".")[0] for modules in WALK.static.values() for module in modules}
-    assert {"ph", "ph_app", "ph_rlm", "ph_stabilize"} <= writers, writers
+    assert {"ph", "ph_app", "ph_clm", "ph_rlm", "ph_stabilize"} <= writers, writers
     assert {module.partition(".")[0] for module in WALK.minted} >= writers
 
 

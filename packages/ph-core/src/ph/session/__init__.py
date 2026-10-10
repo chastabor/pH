@@ -8,6 +8,7 @@ repair must settle in it. See `ph.session.kinds` for why they live in a leaf.
 from __future__ import annotations
 
 from . import kinds as kinds
+from .balance import balanced_cuts, cuts_of, cuts_over, open_call_delta, safe_cutoff
 from .derive import derive_event_message, derive_transcript, settle_of
 from .events import (
     SESSION_FORMAT_VERSION,
@@ -92,6 +93,7 @@ from .surface import (
     is_append_surface_event,
     is_in_place_rewrite,
     is_replacement_surface_event,
+    is_stand_in,
     is_surface_event,
 )
 
@@ -139,8 +141,11 @@ __all__ = [
     "UnknownEventTypeError",
     "Unsettled",
     "abandoned",
+    "balanced_cuts",
     "canonical_header",
     "child_session_id",
+    "cuts_of",
+    "cuts_over",
     "cwd_tag",
     "declare_intent",
     "declare_log_type",
@@ -163,15 +168,18 @@ __all__ = [
     "is_fork_boundary",
     "is_in_place_rewrite",
     "is_replacement_surface_event",
+    "is_stand_in",
     "is_surface_eligible_type",
     "is_surface_event",
     "key_of",
     "kinds",
     "new_session_id",
     "now_ms",
+    "open_call_delta",
     "open_intents",
     "open_turn_at",
     "outcome_of",
+    "safe_cutoff",
     "session_written",
     "settle_of",
     "unsettled",

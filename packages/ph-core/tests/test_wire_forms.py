@@ -137,7 +137,15 @@ def _wire_models() -> set[type[WireModel]]:
     depend on what else the run imported.
     """
     found: set[type[WireModel]] = set()
-    for package in ("ph", "ph_app", "ph_rlm", "ph_stabilize", "ph_text_index", "ph_code_graph"):
+    for package in (
+        "ph",
+        "ph_app",
+        "ph_rlm",
+        "ph_stabilize",
+        "ph_text_index",
+        "ph_code_graph",
+        "ph_clm",
+    ):
         try:
             root = importlib.import_module(package)
         except ImportError:  # pragma: no cover - a package this deployment lacks

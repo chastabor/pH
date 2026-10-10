@@ -529,6 +529,9 @@ HANDLERS: Mapping[str, Handler] = {
     "compaction/summarized": _on_harness_event,
     "compaction/declined": _on_harness_event,
     "compaction/args-truncated": _on_harness_event,
+    # A model's own context edit (ph-clm), for compaction's reason: which sections
+    # it took off the surface, why, and what the re-read cost.
+    "clm/revised": _on_harness_event,
     "attachment/degraded": _on_harness_event,
     "attachment/oversized": _on_harness_event,
     "attachment/uploaded": _on_harness_event,

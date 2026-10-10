@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, assert_never, cast
 
@@ -103,7 +103,8 @@ from ph.session import (
     SessionEvent,
     SurfaceIntent,
     derive_event_message,
-    is_replacement_surface_event,
+    is_stand_in,
+    safe_cutoff,
 )
 from ph.session.events import SurfaceReplace
 from ph.session.writers import log_writer
@@ -126,10 +127,7 @@ __all__ = [
     "SummarizeEngine",
     "TruncateArgsConfig",
     "apply",
-    "balanced_cuts",
-    "cuts_over",
     "render_for_summary",
-    "safe_cutoff",
     "truncated_arguments",
     "truncated_assistant_payload",
 ]
@@ -375,72 +373,6 @@ class Config(WireModel):
 # ------------------------------------------------------------- tool pairing --
 
 
-def _open_call_delta(message: Message | None) -> int:
-    """How one surface node changes the count of calls still awaiting a result.
-
-    Counted over `derive_event_message`'s output — THE projection — rather than
-    over the payload, so this cannot disagree with what the model was sent about
-    how many calls a message made.
-    """
-    if message is None:
-        return 0
-    opened = sum(1 for block in message.content if isinstance(block, ToolCallBlock))
-    closed = sum(1 for block in message.content if isinstance(block, ToolResultBlock))
-    return opened - closed
-
-
-def cuts_over(projected: Sequence[Message | None]) -> tuple[bool, ...]:
-    """Whether each cut in an already-projected surface is tool-pairing balanced.
-
-    A surface of *n* nodes has *n + 1* cuts; entry `i` is the cut before node
-    `i`, so `balanced[i]` answers "may the first `i` nodes be replaced on their
-    own". Cut `0` is trivially balanced and cut `n` is balanced exactly when the
-    conversation has no call outstanding.
-
-    Takes the projection rather than the session because a caller that has one
-    already should not pay for a second: `derive_event_message` is a pydantic
-    validation per node, and `_plan` was deriving the whole surface, then
-    deriving it again inside the balance fold.
-    """
-    cuts = [True]
-    open_calls = 0
-    for message in projected:
-        open_calls += _open_call_delta(message)
-        cuts.append(open_calls == 0)
-    return tuple(cuts)
-
-
-def balanced_cuts(session: Session) -> tuple[bool, ...]:
-    """`cuts_over`, folded across a session's current surface.
-
-    Folded over the surface in *current* order, which is dsh's reason for
-    deriving this from content rather than from step boundaries: a landed
-    replacement moves positions, so a rule written in terms of steps would be
-    right only until the first compaction.
-    """
-    events = session.events
-    return cuts_over([derive_event_message(events[seq]) for seq in session.surface.nodes])
-
-
-def safe_cutoff(projected: Sequence[Message | None], target: int) -> int:
-    """The greatest balanced cut at or before `target`; `0` when there is none.
-
-    *Backward*, so a pair that straddles the retention boundary is kept whole on
-    the retained side — the model keeps a call it can still see the result of,
-    and the summary is one exchange shorter. Advancing forward instead would
-    summarize the call and hand the model an orphaned result, which several
-    providers reject outright.
-
-    `0` means "no safe range", not "cut nothing": the caller reports it rather
-    than compacting an empty prefix.
-    """
-    cuts = cuts_over(projected)
-    for index in range(min(target, len(cuts) - 1), -1, -1):
-        if cuts[index]:
-            return index
-    return 0
-
-
 def _trailing_results(session: Session) -> tuple[int, ...]:
     """The run of `tool/result` nodes the surface currently ends with.
 
@@ -639,27 +571,6 @@ def _instruction_message(text: str) -> Message:
 # ------------------------------------------------------------------- the row --
 
 
-def _is_prior_summary(event: SessionEvent) -> bool:
-    """Whether this surface node is a summary an earlier compaction wrote.
-
-    The pair of tests is what makes it specific: `form="compaction"` separates it
-    from an offloaded paste, which is also a plugin-authored `user/message`, and
-    the replacement test separates it from a row that merely says it came from
-    this row. Both are how `_land` writes it.
-
-    `data["source"]`, not `data["message"]["source"]`: a `user/message` event's
-    payload *is* the message, where an `assistant/message` wraps one. An
-    assistant node therefore has no top-level source and answers `False` here,
-    which is the right answer for it.
-    """
-    source = as_obj(event.data.get("source"))
-    return (
-        is_replacement_surface_event(event)
-        and source.get("kind") == "plugin"
-        and source.get("form") == "compaction"
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class _Plan:
     """One compaction's selected range, decided before any model call."""
@@ -849,7 +760,7 @@ class SummarizeEngine:
             # to shadow silence with a paragraph about silence.
             return None
         shadowed = tuple(message for _, message in above)
-        if all(_is_prior_summary(events[seq]) for seq, _ in above):
+        if all(is_stand_in(events[seq]) for seq, _ in above):
             # Nothing here but the last summary (D9). The retained tail can sit
             # one pair over `keep_fraction` and stay there: pressure never drops,
             # so the pre-step trigger fires again at the next step, and the only

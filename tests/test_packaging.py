@@ -1,4 +1,4 @@
-"""What the seven manifests promise about each other, held against the tree.
+"""What the eight manifests promise about each other, held against the tree.
 
 **Every fact here is declared in a file nothing imports.** A version, a pin, a
 `packages` entry, a classifier — read by the build backend at upload time and by
@@ -78,8 +78,8 @@ def test_every_suite_is_type_checked_and_collected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The seven versions, held against each other and against the pins between them.
-# `phern` pins the other six with `==`, so a member bumped without it is not a
+# The eight versions, held against each other and against the pins between them.
+# `phern` pins the other seven with `==`, so a member bumped without it is not a
 # skew a resolver papers over but an install that cannot resolve at all —
 # discovered by whoever runs `pip install phern` after the upload.
 

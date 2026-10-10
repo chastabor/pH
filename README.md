@@ -43,10 +43,10 @@ uv tool install phern
 ```
 
 That is the whole harness: one name, every profile. `phern` is the distribution
-a person installs and the command they get; the six libraries it is assembled
+a person installs and the command they get; the seven libraries it is assembled
 from publish under their own names — `ph-core`, `ph-rlm`, `ph-runtime-guest`,
-`ph-stabilize`, `ph-text-index`, `ph-code-graph` — because each is usable on its
-own. A front end of your own over `ph-core`, or a deployment that wants
+`ph-stabilize`, `ph-text-index`, `ph-code-graph`, `ph-clm` — because each is usable
+on its own. A front end of your own over `ph-core`, or a deployment that wants
 `ph-code-graph`'s two tools and nothing else, installs exactly that and never
 sees this package.
 
@@ -488,17 +488,19 @@ some of what an 0.4 setup did now lands somewhere else:
 
 ## Optional plugins
 
-Packages in this workspace that ship rows no profile mounts by default, because
-each brings a third-party dependency not every deployment wants. Add a row and
-they are there:
+Packages in this workspace that ship rows no profile mounts by default — because
+each brings a third-party dependency not every deployment wants, or, for
+`ph-clm`, changes how the model treats its own context. Add a row and they are
+there:
 
 | package | rows | tools |
 |---|---|---|
 | [`ph-code-graph`](packages/ph-code-graph/) | `code-graph` | `code_index` / `code_graph` — a tree-sitter code graph: search by prose, find definitions, callers, callees, transitive impact, biggest symbols. Every answer is a `path:start-end`. |
 | [`ph-text-index`](packages/ph-text-index/) | `text-index`, `text-index-local` | `text_index` / `text_search` — semantic retrieval over documents on a local turbovec index, answering with the passage **and** its `path:start-end`. |
+| [`ph-clm`](packages/ph-clm/) | `clm-context` | `context_sections` / `context_tombstone` / `context_replace` / `context_rewrite` / `context_recall` / `context_diff` — the model edits its own context, section by section. Every edit is a surface replace, so the log keeps the originals. |
 
 Each registers a **bundle**, so `--profile rlm-indexed` is `rlm-stable` plus
-both of them — the RLM asking a codebase and a corpus about themselves instead
+the first two — the RLM asking a codebase and a corpus about themselves instead
 of reading them. Under Code Mode they arrive as `await tools.code_graph(...)`
 and `await tools.text_search(...)`, because every registered tool is in the
 generated SDK listing:
@@ -586,13 +588,13 @@ enumerated list of platform gaps — which is empty on both platforms today.
 ## Building a release
 
 Every member is released together, at one version: each pins the others exactly
-(`ph-core==0.8.0`), so a change in any of them is a release of all seven.
+(`ph-core==0.8.0`), so a change in any of them is a release of all eight.
 
 ```bash
 # 1. The version, everywhere it is written: `version` and the `==` pins between
 #    members in packages/*/pyproject.toml, and `__version__` in
 #    packages/ph-core/src/ph/__init__.py. Then:
-uv lock                                          # moves the seven workspace entries
+uv lock                                          # moves the eight workspace entries
 ./test.sh                                        # the four gates, on the new version
 
 # 2. A wheel and a source distribution per member. dist/ keeps only its

@@ -15,7 +15,7 @@ the whole log, so `seq` is the list index everywhere (A1).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from ..json import PlainJsonValue, thaw_json
@@ -35,6 +35,7 @@ __all__ = [
     "is_append_surface_event",
     "is_in_place_rewrite",
     "is_replacement_surface_event",
+    "is_stand_in",
     "is_surface_event",
 ]
 
@@ -61,6 +62,29 @@ def is_append_surface_event(event: SessionEvent) -> bool:
 
 def is_replacement_surface_event(event: SessionEvent) -> bool:
     return is_surface_event(event) and event.surface_op != "append"
+
+
+def is_stand_in(event: SessionEvent) -> bool:
+    """Whether this node is text standing in for conversation that left the surface.
+
+    The claim `PluginSource.form == "compaction"` makes — a summary compaction wrote,
+    or a model's own revision of its context — on a replacement, which is what
+    separates it from the other plugin-authored replacement, an offloaded paste, and
+    from a row that merely names a plugin. A reader that keys on it treats the text
+    as already condensed: compaction declines to summarize a summary, and a context
+    editor lists it as a revision.
+
+    `data["source"]`, not `data["message"]["source"]`: a `user/message` payload *is*
+    the message, where an `assistant/message` wraps one. An assistant node therefore
+    has no top-level source and answers `False`, which is the right answer for it.
+    """
+    source = event.data.get("source")
+    return (
+        is_replacement_surface_event(event)
+        and isinstance(source, Mapping)
+        and source.get("kind") == "plugin"
+        and source.get("form") == "compaction"
+    )
 
 
 def is_in_place_rewrite(event: SessionEvent) -> bool:

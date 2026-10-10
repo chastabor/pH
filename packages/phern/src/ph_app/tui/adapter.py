@@ -1259,6 +1259,10 @@ RECORDLESS: frozenset[str] = frozenset(
         "tool/effect-settled",
         "kernel/snapshot",
         "compaction/summarized",
+        # A model's own context edit (ph-clm): the replacement it describes renders
+        # as the revision row, as a compaction summary does; the account is the
+        # trajectory's.
+        "clm/revised",
         # A skill's nudge budget (D16). The nudges it bounds each render as
         # their own row; the number behind them is the auditor's.
         "skill-steps/budget",

@@ -10,6 +10,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "ph-clm",
     "ph-code-graph",
     "ph-core",
     "ph-rlm",
@@ -1388,6 +1389,17 @@ wheels = [
 ]
 
 [[package]]
+name = "ph-clm"
+version = "0.8.0"
+source = { editable = "packages/ph-clm" }
+dependencies = [
+    { name = "ph-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ph-core", editable = "packages/ph-core" }]
+
+[[package]]
 name = "ph-code-graph"
 version = "0.8.0"
 source = { editable = "packages/ph-code-graph" }
@@ -1517,6 +1529,7 @@ source = { editable = "packages/phern" }
 dependencies = [
     { name = "anyio" },
     { name = "httpx" },
+    { name = "ph-clm" },
     { name = "ph-code-graph" },
     { name = "ph-core" },
     { name = "ph-rlm" },
@@ -1544,6 +1557,7 @@ web = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.4,<5" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "ph-clm", editable = "packages/ph-clm" },
     { name = "ph-code-graph", editable = "packages/ph-code-graph" },
     { name = "ph-core", editable = "packages/ph-core" },
     { name = "ph-core", extras = ["otel"], marker = "extra == 'otel'", editable = "packages/ph-core" },

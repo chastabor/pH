@@ -55,6 +55,7 @@ ph-runtime-guest = { workspace = true }
 ph-stabilize = { workspace = true }
 ph-text-index = { workspace = true }
 ph-code-graph = { workspace = true }
+ph-clm = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -96,6 +97,7 @@ src = [
     "packages/ph-stabilize/src",
     "packages/ph-text-index/src",
     "packages/ph-code-graph/src",
+    "packages/ph-clm/src",
 ]
 
 [tool.ruff.lint]
@@ -147,9 +149,9 @@ strict = true
 # does below: `daemon_helpers`, `tui_helpers`, `rlm_fixtures` and friends are
 # top-level modules that tests import by name, and both tools have to find them
 # in the same place.
-mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:tests"
+mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-clm/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:tests"
 # One list, because mypy takes `packages` or `files` and not both. The `src`
-# entries are the seven shipped packages, reached by path so `mypy_path` above
+# entries are the eight shipped packages, reached by path so `mypy_path` above
 # supplies the base that makes their module names come out as `ph`, `ph_app`
 # and so on rather than as the directories they sit in.
 files = [
@@ -160,6 +162,7 @@ files = [
     "packages/ph-stabilize/src/ph_stabilize",
     "packages/ph-text-index/src/ph_text_index",
     "packages/ph-code-graph/src/ph_code_graph",
+    "packages/ph-clm/src/ph_clm",
     "conftest.py",
     "packages/ph-core/tests",
     "packages/phern/tests",
@@ -167,6 +170,7 @@ files = [
     "packages/ph-stabilize/tests",
     "packages/ph-text-index/tests",
     "packages/ph-code-graph/tests",
+    "packages/ph-clm/tests",
     "packages/ph-runtime-guest/tests",
     "tests",
 ]
@@ -197,6 +201,7 @@ testpaths = [
     "packages/ph-stabilize/tests",
     "packages/ph-text-index/tests",
     "packages/ph-code-graph/tests",
+    "packages/ph-clm/tests",
     "packages/ph-runtime-guest/tests",
     "tests",
 ]

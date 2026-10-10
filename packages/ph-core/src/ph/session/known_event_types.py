@@ -385,6 +385,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.
         "context/loaded",
+        # A model's own context edit (ph-clm): which sections it took off the
+        # surface, the node standing for them, and what that cost. Ignorable — the
+        # edit itself is the surface `replace` beside it, a core event any build
+        # folds, so a reader that skips this loses the account and not the context.
+        "clm/revised",
     }
 )
 
@@ -398,6 +403,7 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "harness/probe",
         "harness/probed",
         "context/loaded",
+        "clm/revised",
         "offload/spilled",
         "offload/input-spilled",
         "skill-steps/budget",
@@ -613,6 +619,12 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "supervisor/unreachable",
                 "supervisor/violated",
             }
+        ),
+        # A model's context edits are surface `replace`s, for compaction's reason
+        # below: a substitution as a `user/message`, a rewrite in place as the
+        # `assistant/message` or `tool/result` it rewrites.
+        "ph_clm.edits": frozenset(
+            {"assistant/message", "clm/revised", "tool/result", "user/message"}
         ),
         "ph_rlm.context_loader": frozenset({"context/loaded"}),
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
