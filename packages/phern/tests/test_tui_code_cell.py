@@ -1,6 +1,6 @@
 """The code cell and the subagent panel (P3-19).
 
-Both are consumers of records that existed before they did: `IpythonToolDetails`
+Both are consumers of records that existed before they did: `CellDetails`
 was written at P3-09 with nothing to draw it, and the children's records sat in
 the adapter's `RECORDLESS` set naming *this* row as the reason they were
 classified rather than rendered.
@@ -58,9 +58,9 @@ pytestmark = pytest.mark.anyio
 def cell() -> ToolCard:
     return ToolCard(
         call_id="c1",
-        name="ipython",
+        name="python",
         arguments='{"program": "x = 1\\nprint(x)"}',
-        title="ipython",
+        title="python",
         subtitle="2 lines",
         card="terminal",
         input_text="x = 1\nprint(x)",
@@ -124,7 +124,7 @@ def test_the_program_is_what_the_call_view_offered() -> None:
     assert widget._program() == "x = 1\nprint(x)"
 
     broken = CodeCellWidget(
-        ChatItem(key="t2", role="tool", tool=ToolCard(call_id="c", name="ipython", arguments="{"))
+        ChatItem(key="t2", role="tool", tool=ToolCard(call_id="c", name="python", arguments="{"))
     )
     assert broken._program() == ""
 

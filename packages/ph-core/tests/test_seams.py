@@ -28,7 +28,6 @@ from typing import Any, ClassVar, Literal, cast
 import anyio
 import pytest
 
-from ph.agent.types import AgentHandle
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
 from ph.json import JsonValue, as_str
 from ph.seams._names import SLUG_CHARACTERS
@@ -70,6 +69,7 @@ from ph.session.kinds import APPROVAL_ASK, WORKSPACE_RESTORE, restore_settled
 from ph.testing import (
     MountProfile,
     StubAgent,
+    StubCompactionEngine,
     log_event,
     not_none,
     noted,
@@ -818,21 +818,11 @@ async def test_only_one_engine_may_hold_the_seam() -> None:
     """Two answers to "when and how is history replaced" is a contradiction."""
     seam = CompactionSeam(ctx=Context())
 
-    class Engine:
-        async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> None:
-            return None
-
-        def trigger_fraction(self) -> float | None:
-            return None
-
-        async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> None:
-            return None
-
-    release = seam.register(Engine())
+    release = seam.register(StubCompactionEngine())
     with pytest.raises(RuntimeError, match="already registered"):
-        seam.register(Engine())
+        seam.register(StubCompactionEngine())
     release()
-    seam.register(Engine())
+    seam.register(StubCompactionEngine())
 
 
 async def test_the_seam_reports_its_engines_trigger_and_nothing_without_one() -> None:
@@ -840,17 +830,7 @@ async def test_the_seam_reports_its_engines_trigger_and_nothing_without_one() ->
     seam = CompactionSeam(ctx=Context())
     assert seam.trigger_fraction() is None
 
-    class Engine:
-        async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> None:
-            return None
-
-        def trigger_fraction(self) -> float | None:
-            return 0.8
-
-        async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> None:
-            return None
-
-    seam.register(Engine())
+    seam.register(StubCompactionEngine(0.8))
     assert seam.trigger_fraction() == 0.8
 
 

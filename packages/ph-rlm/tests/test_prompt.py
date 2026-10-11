@@ -30,7 +30,7 @@ from ph.keys import AGENTS, SUBAGENTS, SYSTEM_PROMPT, WORKSPACE
 from ph.seams.subagents import SubagentRequest
 from ph.session import Session
 from ph.system_prompt import join_context_sections, render_context_sections, render_prompt
-from ph_rlm.presentation import IPYTHON
+from ph_rlm.presentation import PYTHON
 from ph_rlm.prompt import CHILD_DOCTRINE, DELEGATION, DOCTRINE, WORKSPACE_LINE
 from ph_rlm.subagents import PROVIDER_NAME, RLM_MAX_DEPTH
 
@@ -85,15 +85,12 @@ async def test_the_doctrine_names_the_one_callable_and_the_kernel(prompted: Moun
     text = await _prompt(ctx, agent)
 
     assert DOCTRINE.strip() in text
-    # The two facts the constant would be wrong without: the transport's
-    # *presented* name, and the shell-cell rule.
-    assert IPYTHON in DOCTRINE
-    # Named, and refused. The doctrine used to promise `%%bash` shell cells —
-    # ported from prime-agent, where they existed — while pH's guest raises a
-    # `SyntaxError` for one (P3-22). It still names the case the model was
-    # trained on, because that is the thing it would otherwise try.
-    assert "%%bash" in DOCTRINE
-    assert "no IPython magics" in DOCTRINE
+    # The transport's *presented* name. What the interpreter is and is not is the
+    # tool's own description (`test_presentation.py`); the doctrine used to say it
+    # too — and before that to promise `%%bash` shell cells the guest refuses (P3-22).
+    assert f"`{PYTHON}`" in DOCTRINE
+    assert "%%bash" not in DOCTRINE
+    assert "IPython" not in DOCTRINE, "the doctrine re-describes the runtime"
 
 
 async def test_the_doctrine_does_not_re_describe_the_sdk_surface(prompted: MountedRuntime) -> None:

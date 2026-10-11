@@ -2,7 +2,7 @@
 
 The row's gate names two things: the four decision flows, and *a destructive
 cell prompts in `MANUAL`*. The second is the one worth reading, because it is
-where the shape of the design shows: a cell is not a tool name, so one `ipython`
+where the shape of the design shows: a cell is not a tool name, so one `python`
 call may delete a tree or force-push, and asking about the *transport* would
 either prompt on every cell or on none. The rule matches the call's arguments.
 

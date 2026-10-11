@@ -87,7 +87,7 @@ from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_tr
 from ph_app.profiles import compose_profile
 from ph_app.protocol import PROTOCOL_VERSION, request, result_of
 from ph_app.runtime import mounted
-from ph_rlm.presentation import IPYTHON
+from ph_rlm.presentation import PYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -457,8 +457,8 @@ async def _delegating_cell() -> AsyncIterator[StreamChunk]:
         {"program": f"h = await rlm.run(prompt={CHILD_TASK!r}, name='scout')\nh['name']"}
     )
     yield BlockStart(index=0, block_type="tool-call")
-    yield ToolCallDelta(index=0, id="cell-1", name=IPYTHON, arguments_delta=arguments)
-    yield BlockEnd(index=0, block=ToolCallBlock(id="cell-1", name=IPYTHON, arguments=arguments))
+    yield ToolCallDelta(index=0, id="cell-1", name=PYTHON, arguments_delta=arguments)
+    yield BlockEnd(index=0, block=ToolCallBlock(id="cell-1", name=PYTHON, arguments=arguments))
     yield UsageChunk(usage=TokenUsage(input_tokens=10, output_tokens=10))
     yield Finish(reason=FinishReason(kind="tool-calls"))
 

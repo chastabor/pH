@@ -145,9 +145,9 @@ def test_a_code_cell_shows_its_program_and_what_it_cost(snap_compare: Any) -> No
     """
     card = ToolCard(
         call_id="c1",
-        name="ipython",
+        name="python",
         arguments='{"program": "..."}',
-        title="ipython",
+        title="python",
         subtitle="3 lines",
         card="terminal",
         input_text="rows = await tools.read(path='data.csv')\ntotal = len(rows)\ntotal",

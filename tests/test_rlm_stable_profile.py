@@ -107,7 +107,7 @@ async def test_the_human_gate_fires_on_the_renamed_transport(mount: MountProfile
 
     A profile writes `run_code` because that is the *reserved* transport name,
     but the registry renames the transport in place to whatever the presentation
-    calls it — `ipython`, here. Keyed literally, the whole Code Mode half of a
+    calls it — `python`, here. Keyed literally, the whole Code Mode half of a
     deployment's human gate is silently inert: the config parses, a test that
     reads the YAML back passes, and nothing ever asks.
     """
@@ -119,10 +119,10 @@ async def test_the_human_gate_fires_on_the_renamed_transport(mount: MountProfile
         lambda request, next_: asked.append(request.tool_name) or "rejected"  # type: ignore[func-returns-value]
     )
 
-    assert ctx.require(TOOLS).view(DEPLOYMENT).transport_name == "ipython", (
+    assert ctx.require(TOOLS).view(DEPLOYMENT).transport_name == "python", (
         "the premise of this test changed"
     )
-    await run_tool(ctx, "ipython", {"code": "import subprocess"}, agent=agent, session=session)
+    await run_tool(ctx, "python", {"code": "import subprocess"}, agent=agent, session=session)
 
     assert asked, "the gate never fired: the rule is keyed to a name nothing presents"
 
@@ -138,6 +138,6 @@ async def test_an_ordinary_program_is_not_gated(mount: MountProfile) -> None:
         lambda request, next_: asked.append(request.tool_name) or "rejected"  # type: ignore[func-returns-value]
     )
 
-    await run_tool(ctx, "ipython", {"code": "print(1 + 1)"}, agent=agent, session=session)
+    await run_tool(ctx, "python", {"code": "print(1 + 1)"}, agent=agent, session=session)
 
     assert asked == []

@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 from rlm_fixtures import MountedRuntime
-from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
+from runtime_helpers import dispatch_names, run_python_cell, settled_dispatches
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
@@ -169,7 +169,7 @@ async def test_each_query_is_its_own_governed_dispatch(loaded: Loaded) -> None:
     never leaves the kernel.
     """
     ctx, session, agent = await loaded()
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "a = await tools.context_search(query='deploy key')\n"
         "b = await tools.context_search(query='unrelated')\n"
@@ -208,7 +208,7 @@ async def test_one_oversized_query_is_offloaded_without_its_siblings(loaded: Loa
 
     ctx.on("tools/post-execute", offload)
 
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "big = await tools.context_search(query='line about deploys', limit=50)\n"
         "small = await tools.context_search(query='vault')\n"

@@ -4,9 +4,10 @@ Ported from prime-agent's `prompts/rlm.ts`. Three things about the port are
 decisions rather than transcription:
 
 **Nothing here re-describes the generated surface.** `tools:sdk` *is* the listing
-of the delegation calls, built from the registry, so prose beside it would be a
-second description of one surface with the hand-written copy going stale first.
-What survives is what the listing cannot say: the rules.
+of the delegation calls, built from the registry, and the transport's own description
+(`presentation.PYTHON_DESCRIPTION`) says what the interpreter is and is not — so prose
+beside them would be a second description of one surface with the hand-written copy
+going stale first. What survives is what neither can say: the rules.
 
 **The non-blocking rule is stated as a rule, not a hint.** `rlm.run` returns an
 admission handle, so a model that waits for an answer waits forever.
@@ -31,22 +32,13 @@ from ph.system_prompt.assembly import (
     PromptContext,
     PromptSection,
 )
-from ph_runtime.cell import MAGIC_PREFIXES
 
 from .bindings import RUN_TOOL
 from .keys import RLM_CHILDREN
-from .presentation import IPYTHON
+from .presentation import PYTHON
 from .subagents import RLM_MAX_DEPTH, TASK_PREFIX, delegation_depth
 
-__all__ = ["CHILD_DOCTRINE", "DELEGATION", "DOCTRINE", "MAGICS", "WORKSPACE_LINE", "apply"]
-
-MAGICS = ", ".join(f"`{prefix}`" for prefix in MAGIC_PREFIXES)
-"""The prefixes the guest actually refuses, rendered for the doctrine.
-
-Derived rather than restated: a fourth prefix added to the runtime would
-otherwise leave the prompt describing a different runtime from the one the model
-is talking to — which is exactly the drift that had the doctrine promising
-`%%bash` shell cells for a phase (P3-22)."""
+__all__ = ["CHILD_DOCTRINE", "DELEGATION", "DOCTRINE", "WORKSPACE_LINE", "apply"]
 
 ORDER_RLM_DOCTRINE = ORDER_TOOL_GUIDANCE + 10
 ORDER_RLM_DELEGATION = ORDER_TOOL_GUIDANCE + 20
@@ -58,25 +50,17 @@ DOCTRINE = f"""\
 # Writing code to solve tasks
 
 You are a general purpose agent that uses code to solve tasks. Your one callable
-is `{IPYTHON}`: you write Python, it runs in a kernel that persists across calls,
-and you read what it printed and returned.
+is `{PYTHON}`; its description says what the interpreter is, and is not.
 
-The kernel is *yours* and it keeps its state. A variable you set in one cell is
-there in the next, so build up a working set rather than recomputing it. Import
-from the target project's own environment for project imports, tests, scripts and
-CLIs — that is what the kernel is for — rather than reimplementing what the
-project already does.
+The interpreter keeps its state, so build up a working set across cells rather
+than recomputing it, and use the project's own tests, scripts and CLIs rather than
+reimplementing what the project already does.
 
-There are no IPython magics — no {MAGICS}, so no `%%bash` cell. A cell that
-starts with one is a syntax error. Shell commands go through
-`await tools.bash(...)`, which is governed and recorded like every other
-binding; the magic was the one shell that nothing could see.
-
-Every capability outside plain Python is reached as an `await` on a binding — the
-SDK block above lists them. Those calls are governed and recorded individually: a
-cell that edits forty files produces forty reviewable records, not one. Prefer
-them over reaching for `pathlib` or `subprocess` directly, because a binding is
-the form the harness can check, report and, where a policy says so, refuse.
+Reach what plain Python cannot through the bindings the SDK block above lists, and
+prefer them to `pathlib` or `subprocess`: each call is governed and recorded on its
+own — a cell that edits forty files produces forty reviewable records, not one — so
+a binding is the form the harness can check, report and, where a policy says so,
+refuse.
 
 If a binding call is refused, the cell stops there. That is deliberate: re-plan
 with the refusal in mind rather than looking for another route to the same effect.

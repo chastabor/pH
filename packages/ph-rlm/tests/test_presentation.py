@@ -3,64 +3,59 @@
 `test_code_mode.py` in ph-core tests the *mechanism* (a profile may present the
 transport under its own name, and every place the name is load-bearing follows).
 This file tests the RLM profile's use of it against the real kernel: the model
-sees `ipython`, the text it gets back is prime-agent's layout, and the card
+sees `python`, the text it gets back is prime-agent's layout, and the card
 payload is derived from the durable result alone.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 from rlm_fixtures import MountedRuntime
-from runtime_helpers import run_cell
+from runtime_helpers import run_cell, run_python_cell
 
-from ph.agent.types import AgentDriver
 from ph.cancel import CancelToken
-from ph.cordis import Context
 from ph.keys import TOOLS
 from ph.llm.types import ToolCallBlock
-from ph.session import Session
 from ph.testing import block_text, simple_tool
 from ph.tools.batch import execute_tool_calls
 from ph.tools.registry import RUN_CODE
-from ph_rlm.presentation import IPYTHON, IPYTHON_DESCRIPTION, cell_details, render_cell
+from ph_rlm.presentation import PYTHON, PYTHON_DESCRIPTION, cell_details, render_cell
+from ph_runtime.cell import MAGIC_PREFIXES
 
 pytestmark = pytest.mark.anyio
-
-
-async def _cell(
-    ctx: Context,
-    program: str,
-    *,
-    agent: AgentDriver,
-    session: Session,
-    call_id: str = "c1",
-) -> Any:  # noqa: ANN401
-    return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 
 # ------------------------------------------------------------------ surface --
 
 
-async def test_the_description_is_prime_agents_verbatim(mounted_runtime: MountedRuntime) -> None:
-    """The description is the contract the model was trained against.
+async def test_the_description_says_what_runtime_the_model_is_in(
+    mounted_runtime: MountedRuntime,
+) -> None:
+    """The description describes the runtime the model is in — pH's interpreter, not
+    IPython — and never promises what the guest refuses.
 
-    Asserted against the constant rather than a paraphrase so an edit to the
-    wording has to be deliberate.
+    It used to be prime-agent's, verbatim, promising "`%%bash` shell cells" the guest
+    raises a `SyntaxError` for, so the doctrine had to contradict the tool it
+    introduced. Asserted against the constant so a change to the wording is
+    deliberate, and against the guest's own prefixes so it cannot drift from them.
     """
     ctx, _session, agent = await mounted_runtime(presentation=True)
-    definition = ctx.require(TOOLS).get(IPYTHON, scope=agent.ctx)
+    definition = ctx.require(TOOLS).get(PYTHON, scope=agent.ctx)
     assert definition is not None
-    assert definition.description == IPYTHON_DESCRIPTION
-    assert "%%bash" in definition.description
-    assert "the target project's own environment" in definition.description
+    assert definition.description == PYTHON_DESCRIPTION
+    assert "not IPython or Jupyter" in definition.description
+    assert "%%bash" not in definition.description, "the tool promises a magic the guest refuses"
+    for prefix in MAGIC_PREFIXES:
+        assert f"`{prefix}`" in definition.description, f"{prefix} is not named as absent"
+    assert "await tools.bash(command=...)" in definition.description
+    assert "not the project's environment" in definition.description
 
 
 async def test_a_cell_runs_under_the_presented_name(mounted_runtime: MountedRuntime) -> None:
     ctx, session, agent = await mounted_runtime(presentation=True)
-    result = await _cell(ctx, "6 * 7", agent=agent, session=session)
+    result = await run_python_cell(ctx, "6 * 7", agent=agent, session=session)
     assert result.is_error is False
     assert result.value["value"] == 42
 
@@ -78,14 +73,14 @@ async def test_the_log_records_the_name_the_model_used(mounted_runtime: MountedR
         turn=1,
         step=0,
         tool_calls=[
-            ToolCallBlock(id="call-1", name=IPYTHON, arguments=json.dumps({"program": "6 * 7"}))
+            ToolCallBlock(id="call-1", name=PYTHON, arguments=json.dumps({"program": "6 * 7"}))
         ],
         token=CancelToken(),
         accept_context=lambda _message: None,
     )
     assert outcome.aborted is False
     calls = [event for event in session.events if event.type == "tool/call"]
-    assert [event.data["name"] for event in calls] == [IPYTHON]
+    assert [event.data["name"] for event in calls] == [PYTHON]
     results = [event for event in session.events if event.type == "tool/result"]
     assert len(results) == 1
     assert "[result] 42" in repr(results[0].data)
@@ -151,12 +146,12 @@ async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: MountedRun
     any program forge the flag by printing the marker as its first output.
     """
     ctx, session, agent = await mounted_runtime(presentation=True)
-    await _cell(ctx, "import os\nos._exit(1)", agent=agent, session=session, call_id="c1")
-    result = await _cell(ctx, "'alive'", agent=agent, session=session, call_id="c2")
+    await run_python_cell(ctx, "import os\nos._exit(1)", agent=agent, session=session, call_id="c1")
+    result = await run_python_cell(ctx, "'alive'", agent=agent, session=session, call_id="c2")
     assert result.meta["reset"] is True
     assert result.meta["status"] == "ok"
 
-    forged = await _cell(
+    forged = await run_python_cell(
         ctx, "print('<runtime_reset>')", agent=agent, session=session, call_id="c3"
     )
     assert forged.meta["reset"] is False
@@ -166,7 +161,7 @@ async def test_a_real_cell_produces_the_card_and_the_text(mounted_runtime: Mount
     """The two projections, computed by the pipeline rather than called directly."""
     ctx, session, agent = await mounted_runtime(presentation=True)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "print('hello')\nawait tools.ping()\n'done'",
         agent=agent,
@@ -195,7 +190,7 @@ async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: MountedRuntime
     than a hand-built dict, because a hand-built dict is exactly what missed it.
     """
     ctx, session, agent = await mounted_runtime(presentation=True)
-    result = await _cell(
+    result = await run_python_cell(
         ctx, "for _ in range(4000):\n    print('x' * 64)", agent=agent, session=session
     )
     assert result.is_error is False
@@ -208,7 +203,7 @@ async def test_a_failing_cell_is_an_error_carrying_its_traceback(
     mounted_runtime: MountedRuntime,
 ) -> None:
     ctx, session, agent = await mounted_runtime(presentation=True)
-    result = await _cell(ctx, "1 / 0", agent=agent, session=session)
+    result = await run_python_cell(ctx, "1 / 0", agent=agent, session=session)
     # The cell failed, but the *tool call* succeeded: a traceback is the model's
     # to read and act on, exactly as under prime-agent.
     assert result.is_error is False

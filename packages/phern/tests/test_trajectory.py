@@ -424,7 +424,7 @@ def test_both_invariant_transitions_read_as_themselves() -> None:
 def test_a_code_mode_sub_dispatch_is_a_subtool() -> None:
     """C2's records, in the view whose job is showing them: one cell, many calls."""
     session = Session("subtool")
-    log_event(session, "tool/call", {"callId": "c1", "name": "ipython", "arguments": "{}"})
+    log_event(session, "tool/call", {"callId": "c1", "name": "python", "arguments": "{}"})
     for index in range(3):
         log_event(
             session,

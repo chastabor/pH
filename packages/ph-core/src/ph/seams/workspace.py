@@ -2546,7 +2546,7 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
     Around the *transport*, because a run is the unit that can be denied with work
     already done (Q9a) — a native call that is denied never ran, so there is nothing
     to restore it to. The transport is identified by the view's own
-    `transport_name`, since a profile may present it as `ipython`.
+    `transport_name`, since a profile may present it as `python`.
 
     **Tier-agnostic since the capability became the seam's.** This was a git row
     that cached git directories and asked a kind-keyed predicate, so a second tier

@@ -149,7 +149,7 @@ Three things that rule says, spelled out:
   shipped test pinning an ordinary push as ordinary — one security judgement
   beats two that disagree.
 - **Key Code Mode on the *reserved* name.** The registry renames the transport
-  to whatever the presentation calls it (`ipython`, in the `rlm` bundle) and
+  to whatever the presentation calls it (`python`, in the `rlm` bundle) and
   `hitl` resolves that. Keying on the presented name would not turn the gate off
   — the tool declares `is_irreversible`, so `declared` still catches it — but
   the `when:` additions are keyed by name and would silently stop applying.

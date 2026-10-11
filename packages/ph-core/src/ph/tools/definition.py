@@ -825,9 +825,8 @@ class TransportPresentation:
 
     The transport's name is reserved so nothing can occupy it and misdirect a
     model told to call it (P1-04, C6) — but a profile still needs to present it
-    under its own name and description. The RLM profile calls it `ipython` and
-    ports prime-agent's wording verbatim, so a model that knows that surface
-    finds the surface it knows.
+    under its own name and description. The RLM profile calls it `python`, and
+    describes pH's own interpreter in its own words.
 
     Only the presentation is restated. `parameters` and `execute` are absent by
     design: the argument schema and the governed body are what make the transport

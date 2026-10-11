@@ -359,7 +359,7 @@ class ToolCardWidget(Vertical):
 
 
 def _cell_facts(details: dict[str, JsonValue]) -> str:
-    """The `IpythonToolDetails` line — only the facts that are true.
+    """The `CellDetails` line — only the facts that are true.
 
     Read as a plain mapping rather than by importing the model: the payload is
     ph-rlm's, and ph-app does not depend on the bundle. A field this build does not

@@ -16,17 +16,17 @@ from pathlib import Path
 import pytest
 import yaml
 from rlm_fixtures import HOST_INTERPRETER, ShippedProfile
-from runtime_helpers import dispatch_names, run_ipython_cell
+from runtime_helpers import dispatch_names, run_python_cell
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
-from ph.keys import CODE_RUNTIME, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.keys import AGENTS, CODE_RUNTIME, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.system_prompt.assembly import render_prompt
 from ph.testing import report_section
 from ph.tools.registry import RUN_CODE
 from ph_rlm import BUNDLE
 from ph_rlm.keys import PYTHON_RUNTIME
-from ph_rlm.presentation import IPYTHON
+from ph_rlm.presentation import PYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -94,12 +94,12 @@ async def test_the_bundle_mounts_over_base(shipped_profile: ShippedProfile) -> N
 async def test_a_cell_runs_and_its_state_reaches_the_log(shipped_profile: ShippedProfile) -> None:
     """The end-to-end claim of everything landed so far, in one test.
 
-    Called as `ipython`, because that is the only name this profile's model is
+    Called as `python`, because that is the only name this profile's model is
     ever offered — `rlm-presentation` renames the transport, and a bundle test
     that reached past the rename would be testing a surface nobody ships.
     """
     ctx, session, agent = await shipped_profile()
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx, "remembered = 'yes'\nlen(remembered)", agent=agent, session=session
     )
     assert result.is_error is False
@@ -115,11 +115,11 @@ async def test_the_shipped_profile_offers_exactly_one_callable(
     view = ctx.require(TOOLS).view(agent.ctx)
 
     assert view.mode == "code"
-    assert view.transport_name == IPYTHON
+    assert view.transport_name == PYTHON
     # Under Code Mode the model is handed one schema, the transport's, under the
     # name the profile presents; everything else is reached as a binding (P1-04,
     # C6). Handed none, a real provider has no tool for the model to call.
-    assert [one.name for one in ctx.require(TOOLS).schemas(scope=agent.ctx)] == [IPYTHON]
+    assert [one.name for one in ctx.require(TOOLS).schemas(scope=agent.ctx)] == [PYTHON]
     assert ctx.require(TOOLS).get(RUN_CODE, scope=agent.ctx) is None
     # And the base tool rows are still mounted — not directly callable, but
     # present, which is what makes them bindings rather than absences.
@@ -158,7 +158,7 @@ async def test_a_cell_can_delegate_through_the_shipped_profile(
     reaching the provider the bundle registers.
     """
     ctx, session, agent = await shipped_profile()
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "h = await rlm.run(prompt='look into it', name='scout')\nh['name']",
         agent=agent,
@@ -174,6 +174,13 @@ async def test_a_cell_can_delegate_through_the_shipped_profile(
     # child shares its parent's checkout and can write it. `read` here would be a
     # guarantee nothing in this profile enforces (§4.8).
     assert child.granted_access == "write"
+    # And the child can run code: its grant lists what its parent sees, where the
+    # transport goes by its presented name, and a restriction applied under the
+    # registered one used to leave every child with no tool to call.
+    child_agent = ctx.require(AGENTS).get(child.session_id)
+    assert child_agent is not None
+    offered = ctx.require(TOOLS).schemas(scope=child_agent.ctx)
+    assert [one.name for one in offered] == [PYTHON]
 
 
 async def test_the_shipped_runtime_gets_the_configured_graces(

@@ -38,7 +38,7 @@ from typing import Any
 
 import pytest
 from rlm_fixtures import ModelGate, ShippedProfile
-from runtime_helpers import dispatch_names, run_ipython_cell, settled_dispatches
+from runtime_helpers import dispatch_names, run_python_cell, settled_dispatches
 
 from ph.keys import AGENTS, SESSIONS, SUBAGENTS
 from ph.seams.subagents import SubagentRequest
@@ -72,7 +72,7 @@ async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
         return "the gate vetoed this write"
 
     ctx.on("fs/write-intent", veto)
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         f"await tools.write(path={str(target)!r}, content='should not land')",
         agent=agent,
@@ -118,7 +118,7 @@ async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
         return await next_()
 
     ctx.on("tools/pre-execute", refuse)
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "import time\n"
         "from pathlib import Path\n"
@@ -157,7 +157,7 @@ async def test_b_three_binding_calls_are_three_governed_evaluations(
     test authoring the policy it checks.
     """
     ctx, session, agent = await shipped_profile({"tools-code-mode": {"maxDispatchesPerRun": 3}})
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         f"seen = [await tools.glob(pattern='*.nothing', path={str(tmp_path)!r})"
         " for _ in range(3)]\nlen(seen)",
@@ -172,7 +172,7 @@ async def test_b_three_binding_calls_are_three_governed_evaluations(
     assert len(settled_dispatches(session)) == 3
 
     # And the counter counts *dispatches*: a fourth in one cell is refused.
-    fourth = await run_ipython_cell(
+    fourth = await run_python_cell(
         ctx,
         f"[await tools.glob(pattern='*.nothing', path={str(tmp_path)!r}) for _ in range(4)]",
         agent=agent,
@@ -227,7 +227,7 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
 
     ctx.on("tools/post-execute", offload)
 
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         f"big = await tools.read(path={str(big_path)!r})\n"
         f"small = await tools.read(path={str(small_path)!r})\n"
@@ -242,7 +242,7 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
     assert dispatch_names(session) == ["read", "read"]
     # And the seam fired per dispatch rather than once for the cell, which is the
     # boundary the Phase 4 row needs to exist.
-    assert seen == ["read", "read", "ipython"]
+    assert seen == ["read", "read", "python"]
 
 
 # ------------------------------------------------------------------- (d) --
@@ -282,7 +282,7 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(
 
     # From a cell, because under this profile that is the only way the model can
     # reach a tool at all (C6) — a native call is refused before policy runs.
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "await agent_message.send(message='hello', receiver_role='child', receiver_name='recon')",
         agent=parent,
@@ -305,7 +305,7 @@ async def test_e_a_runaway_cell_fails_at_its_budget(
     exact leverage a single-tool surface hands a model.
     """
     ctx, session, agent = await shipped_profile({"tools-code-mode": {"maxDispatchesPerRun": 4}})
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "for _ in range(20):\n"
         f"    await tools.glob(pattern='*.nothing', path={str(tmp_path)!r})\n"
@@ -344,4 +344,4 @@ async def test_the_shipped_profile_still_refuses_a_native_tool_call(
     assert result.is_error is True
     failure = not_none(result.error)
     assert failure.kind == "denied"
-    assert "ipython" in failure.message, "the route back does not name the transport"
+    assert "python" in failure.message, "the route back does not name the transport"

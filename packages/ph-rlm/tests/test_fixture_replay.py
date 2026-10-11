@@ -33,7 +33,6 @@ from rlm_fixtures import ShippedProfile
 
 from ph.keys import TOOLS
 from ph_app.profiles import resolve_profile
-from ph_rlm.presentation import IPYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -130,7 +129,8 @@ def test_the_fixtures_are_the_coding_agent_not_the_rlm(shapes: dict[str, Traject
     """
     for shape in shapes.values():
         assert shape.total_tool_calls > 0
-        assert IPYTHON not in shape.tool_calls, "a fixture used the RLM surface after all"
+        # Prime-agent's own name for its RLM tool, which pH presents as `python`.
+        assert "ipython" not in shape.tool_calls, "a fixture used the RLM surface after all"
         assert not any(name.startswith("rlm") for name in shape.tool_calls)
 
 

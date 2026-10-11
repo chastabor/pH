@@ -236,12 +236,12 @@ def test_both_renderers_close_every_namespace_they_open() -> None:
 
 
 def test_the_code_only_rule_names_the_transport_it_was_given() -> None:
-    """Profiles rename the transport — the RLM bundle presents it as `ipython` —
+    """Profiles rename the transport — the RLM bundle presents it as `python` —
     so a rule quoting a fixed name would tell the model to call something that is
     not there (C6). It also states the C3 consequence, because a refusal ending
     the whole program is the fact that decides whether a model checks first.
     """
-    rule = code_only_rule("ipython")
+    rule = code_only_rule("python")
 
-    assert "`ipython`" in rule and "run_code" not in rule
+    assert "`python`" in rule and "run_code" not in rule
     assert "fails the whole program" in rule

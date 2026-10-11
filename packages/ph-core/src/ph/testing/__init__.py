@@ -99,6 +99,7 @@ from .builders import (
 from .diagnostics import report_section
 from .folds import VerifyingFoldCache, assert_fold_laws, check_fold_laws, prefix_of
 from .skills import skill, write_skill
+from .stub_compaction import StubCompactionEngine
 from .stub_sandbox import StubSandboxProvider
 from .stub_subagent import HoldingProvider, RefusingProvider, StubSubagentProvider
 from .stub_workspace import (
@@ -146,6 +147,7 @@ __all__ = [
     "StubAgent",
     "StubCheckpointingProvider",
     "StubCodeRuntime",
+    "StubCompactionEngine",
     "StubSandboxProvider",
     "StubSubagentProvider",
     "StubWorkspaceProvider",

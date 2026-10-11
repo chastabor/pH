@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 from rlm_fixtures import HOST_INTERPRETER
-from runtime_helpers import dispatch_names, run_ipython_cell
+from runtime_helpers import dispatch_names, run_python_cell
 
 from ph.bundles import BASE, HEADLESS, installed_bundles, resolve_bundle
 from ph.cordis import Profile
@@ -29,7 +29,7 @@ from ph.tools import ToolResult
 from ph_app.profiles import PRESENTATION, PROFILE_DIR, available_profiles, resolve_profile
 from ph_rlm import BUNDLE
 from ph_rlm.keys import HARNESS
-from ph_rlm.presentation import IPYTHON
+from ph_rlm.presentation import PYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -109,7 +109,7 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
 
     # The whole stack in one call: a cell into the kernel, a governed binding
     # call back out through the tool pipeline, and a value returned.
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "found = await tools.glob(pattern='*.nothing', path='.')\nlen(found['paths'])",
         agent=agent,
@@ -120,7 +120,7 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
     assert dispatch_names(session) == ["glob"]
 
     # And the model's surface is the one the profile promises.
-    assert ctx.require(TOOLS).get(IPYTHON, scope=agent.ctx) is not None
+    assert ctx.require(TOOLS).get(PYTHON, scope=agent.ctx) is not None
     assert ctx.require(HARNESS) is not None
     assert ctx.require(COMMANDS).get("refine") is not None
 
@@ -129,7 +129,7 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
     # dropped it, and `present_result` tested its meta with `isinstance(..., dict)`
     # — which a frozen `MappingProxyType` off the log is not. Every widget test
     # constructs a `ToolCard` by hand, so nothing else crosses this seam.
-    definition = ctx.require(TOOLS).get(IPYTHON, scope=agent.ctx)
+    definition = ctx.require(TOOLS).get(PYTHON, scope=agent.ctx)
     assert definition is not None
     assert definition.present_call is not None, "the mounted definition renders a card"
     assert definition.present_result is not None

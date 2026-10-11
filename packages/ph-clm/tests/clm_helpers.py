@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any
 
@@ -11,6 +12,7 @@ from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.keys import AGENTS, LLM_FAKE, SESSIONS, TOKEN_METER
 from ph.llm.types import GenerateOptions, StreamChunk
+from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent
 from ph.testing import (
     FAKE_OPTIONS,
@@ -32,11 +34,14 @@ __all__ = [
     "ROW",
     "agent_in",
     "answer_first_request",
+    "context_tokens",
     "converse",
     "edit",
+    "filler",
     "human_text",
     "model_text",
     "mounted",
+    "readout_share",
     "sections_of",
 ]
 
@@ -151,3 +156,24 @@ def answer_first_request(
 async def _stream(chunks: Iterable[StreamChunk]) -> AsyncIterator[StreamChunk]:
     for chunk in chunks:
         yield chunk
+
+
+def context_tokens(ctx: Context, session: Session) -> int:
+    """The context as compaction, the `fit` gate and a readout count it."""
+    return ctx.require(TOKEN_METER).baseline(session).tokens
+
+
+def filler(meter: TokenMeter, tokens: int, unit: str = "word ") -> str:
+    """Text the meter counts as at least `tokens`, in whole `unit`s: as many as the
+    estimate of one says, then one at a time until the meter agrees."""
+    text = unit * (tokens // max(1, meter.measure_text(unit)))
+    while meter.measure_text(text) < tokens:
+        text += unit
+    return text
+
+
+def readout_share(line: str) -> int:
+    """The share of the window a readout line reports, `(57%)` → 57."""
+    found = re.search(r"tokens \((\d+)%\)", line)
+    assert found is not None, line
+    return int(found.group(1))

@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW, MountedRuntime
-from runtime_helpers import run_cell
+from runtime_helpers import run_python_cell
 
-from ph.agent.types import AgentDriver, AgentHandle
+from ph.agent.types import AgentHandle
 from ph.cordis import Context
 from ph.keys import SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
 from ph.seams.subagents import admitted_by
@@ -25,7 +25,7 @@ from ph.testing import not_none
 from ph.tools import Deny, ToolExecution
 from ph.tools.registry import ToolRestriction
 from ph_rlm.bindings import DELETE_TOOL, LIST_TOOL, NAMESPACE, RUN_TOOL
-from ph_rlm.presentation import IPYTHON
+from ph_rlm.presentation import PYTHON
 
 pytestmark = pytest.mark.anyio
 
@@ -44,17 +44,6 @@ def delegating_runtime(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
         return built
 
     return build
-
-
-async def _cell(
-    ctx: Context,
-    program: str,
-    *,
-    agent: AgentDriver,
-    session: Session,
-    call_id: str = "c1",
-) -> Any:  # noqa: ANN401
-    return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
 
 
 # ------------------------------------------------------------------- surface --
@@ -96,7 +85,7 @@ async def test_the_tools_are_not_directly_callable_under_code_mode(
 
     result = await run_tool(ctx, RUN_TOOL, {"prompt": "x"}, agent=agent, session=session)
     assert result.is_error is True
-    assert IPYTHON in repr(result.content)
+    assert PYTHON in repr(result.content)
 
 
 # -------------------------------------------------------------- the dispatch --
@@ -107,7 +96,7 @@ async def test_a_spawn_from_a_cell_is_a_durable_dispatch(
 ) -> None:
     """C2: one governed dispatch pair per spawn, not one blob per cell."""
     ctx, session, agent = await delegating_runtime()
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "handle = await rlm.run(prompt='find the bug', name='scout')\nhandle['name']",
         agent=agent,
@@ -134,7 +123,7 @@ async def test_a_spawn_from_a_cell_is_a_durable_dispatch(
 async def test_the_handle_is_not_the_answer(delegating_runtime: MountedRuntime) -> None:
     """A cell gets admission facts, so the model knows to keep working."""
     ctx, session, agent = await delegating_runtime()
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "h = await rlm.run(prompt='think about it')\nsorted(h.keys())",
         agent=agent,
@@ -154,7 +143,7 @@ async def test_access_defaults_to_read_from_a_cell(delegating_runtime: MountedRu
     the word it asked for (§4.8's "not read-only" row).
     """
     ctx, session, agent = await delegating_runtime()
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "h = await rlm.run(prompt='just read')\n(h['requestedAccess'], h['grantedAccess'])",
         agent=agent,
@@ -171,7 +160,7 @@ async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: Mounte
     the parent has to re-plan.
     """
     ctx, session, agent = await delegating_runtime()
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "h = await rlm.run(prompt='implement it', access='write')\n"
         "(h['grantedAccess'], h.get('note'))",
@@ -198,7 +187,7 @@ async def test_a_policy_row_can_deny_spawning(delegating_runtime: MountedRuntime
         return await next_()
 
     ctx.on("tools/pre-execute", refuse)
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "try:\n    await rlm.run(prompt='sneak')\nexcept BaseException:\n    pass\n'survived'",
         agent=agent,
@@ -215,7 +204,7 @@ async def test_the_spawn_budget_bounds_one_cell(delegating_runtime: MountedRunti
     ctx, session, agent = await delegating_runtime(
         extra_rows=[{"id": "tools-code-mode", "config": {"maxSubagentSpawnsPerRun": 2}}]
     )
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "for index in range(5):\n    await rlm.run(prompt=f'task {index}')\n'unreached'",
         agent=agent,
@@ -231,7 +220,7 @@ async def test_a_refused_spawn_is_the_programs_to_handle(
 ) -> None:
     """A *failed* spawn is not a denial: the model may re-plan around it."""
     ctx, session, agent = await delegating_runtime()
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "await rlm.run(prompt='first', name='dup')\n"
         "try:\n"
@@ -254,7 +243,7 @@ async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: MountedRu
     """Each child as its own log tells it — no side table, and no copy in the
     parent's log to fall out of step with the child's."""
     ctx, session, agent = await delegating_runtime()
-    await _cell(
+    await run_python_cell(
         ctx,
         "await rlm.run(prompt='one', name='alpha')\nawait rlm.run(prompt='two', name='beta')",
         agent=agent,
@@ -262,7 +251,7 @@ async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: MountedRu
         call_id="c1",
     )
     await ctx.drain()
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         "roster = await rlm.list_subagents()\nsorted(c['name'] for c in roster['children'])",
         agent=agent,
@@ -276,11 +265,11 @@ async def test_deleting_from_a_cell_tombstones_the_child(
     delegating_runtime: MountedRuntime,
 ) -> None:
     ctx, session, agent = await delegating_runtime()
-    spawn = await _cell(
+    spawn = await run_python_cell(
         ctx, "h = await rlm.run(prompt='doomed')\nh['childId']", agent=agent, session=session
     )
     child_id = spawn.value["value"]
-    result = await _cell(
+    result = await run_python_cell(
         ctx,
         f"outcome = await rlm.delete_subagent(child_id={child_id!r})\noutcome['deleted']",
         agent=agent,

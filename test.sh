@@ -376,10 +376,10 @@ EOF
 # `tests/test_local_server.py`, `test_local_rlm.py` and `test_local_clm.py` are the
 # files in this suite that talk to a real model — the route, Code Mode over it, and a
 # model editing its own context — and they skip themselves unless `LLAMA_BASE_URL` is
-# set. That is right for
-# `./test.sh` — a suite must not depend on a server somebody happens to have
-# running — and useless as a way to *run* it: exporting a variable to un-skip four
-# tests is a step nobody remembers, and it is not discoverable from `--help`.
+# set. That is right for `./test.sh` — a suite must not depend on a server somebody
+# happens to have running — and useless as a way to *run* them: exporting a variable
+# to un-skip a suite is a step nobody remembers, and it is not discoverable from
+# `--help`.
 #
 # **The URL is read out of the profile the tests mount.** `llama.yaml` owns the
 # default port; this reads it back rather than restating it, because a second

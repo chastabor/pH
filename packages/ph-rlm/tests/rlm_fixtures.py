@@ -287,7 +287,7 @@ def mounted_runtime(mount: MountProfile, guest_coverage: None) -> MountedRuntime
 
     `snapshots=False` mounts the runtime *without* the snapshot policy, which is
     how `test_runtime_integration.py` checks the runtime on its own;
-    `presentation=True` adds the row that renames the transport to `ipython`;
+    `presentation=True` adds the row that renames the transport to `python`;
     `extra_rows` appends whatever else a test needs — profile rows, or a config
     *patch* (an `id` with no `name`), which is how a test reaches the budgets on
     `tools-code-mode` without this fixture growing a parameter per knob.

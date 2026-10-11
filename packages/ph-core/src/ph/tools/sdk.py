@@ -32,7 +32,7 @@ from typing import Any
 
 from ..seams.code_runtime import CodeBinding, CodeBindingNamespace
 
-__all__ = ["code_only_rule", "render_python_sdk", "render_typescript_sdk"]
+__all__ = ["code_only_rule", "parameter_names", "render_python_sdk", "render_typescript_sdk"]
 
 _PYTHON_TYPES = {
     "string": "str",
@@ -68,6 +68,13 @@ def _properties(binding: CodeBinding) -> list[tuple[str, dict[str, Any], bool]]:
         (name, definition if isinstance(definition, dict) else {}, name in required)
         for name, definition in properties.items()
     ]
+
+
+def parameter_names(binding: CodeBinding) -> list[str]:
+    """A binding's parameters in the order the listing declares them — what a runtime
+    binds positional arguments to, so a call written from the listing means what it
+    says (`ph_runtime.proxies`)."""
+    return [name for name, _definition, _required in _properties(binding)]
 
 
 def _type_name(definition: dict[str, Any], table: dict[str, str], fallback: str) -> str:

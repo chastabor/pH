@@ -36,7 +36,7 @@ build` (removes files)* — so a person is told what the harness saw and an audi
 can tune it. A gate whose reasoning is invisible is one nobody can tune.
 
 **`run_code` is the case that motivates the shape.** A cell is not a tool name;
-one `ipython` call may delete a tree, force-push, or open a socket. So the
+one `python` call may delete a tree, force-push, or open a socket. So the
 classifier reads the program, follows a `subprocess.run(...)` back into the shell
 reader, and asks about *that cell* rather than about the transport.
 

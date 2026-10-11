@@ -17,11 +17,14 @@ Unknown attributes and unknown keyword arguments fail loudly, with the available
 names in the message. The reader is a model, and a silent `None` is how a cell
 spends a turn discovering that a capability it invented does not exist.
 
-**One positional argument is read as the first parameter.** The SDK listing shows
-keyword-only signatures, and a live model passed `tools.context_tombstone(['S12'],
-reason=...)` anyway — the list positionally — and lost the step it had to edit in
-before compaction summarized the sections. So the first parameter may come
-positionally; anything more is refused with the call spelled out by keyword.
+**A binding is called the way the SDK listing shows it.** The listing renders
+`async def tools.context_tombstone(sections: list, reason: str)`, so positional
+arguments bind to the parameters in the order it declares them, and keywords by
+name — the host sends that order (`ph.tools.sdk.parameter_names`), so the two read
+one source. A live model wrote `tools.context_tombstone(['S12'], reason=...)` from
+the listing and was refused when this took keywords only, losing the step it had to
+edit in. More positionals than parameters, or one parameter given both ways, is
+refused with the call spelled out.
 
 @module ph_runtime.proxies
 """
@@ -49,17 +52,13 @@ class Namespace:
     """A group of governed callables — `tools`, `agent_message`, `agent_observe`."""
 
     def __init__(
-        self,
-        name: str,
-        bindings: Sequence[str],
-        dispatch: Dispatch,
-        parameters: Mapping[str, Sequence[str]] | None = None,
+        self, name: str, bindings: Mapping[str, Sequence[str]], dispatch: Dispatch
     ) -> None:
         self._name = name
-        self._bindings = tuple(bindings)
+        self._parameters = {binding: tuple(names) for binding, names in bindings.items()}
+        """Each binding, with its parameter names in the order the host declared them."""
+        self._bindings = tuple(self._parameters)
         self._dispatch = dispatch
-        self._parameters = {binding: tuple(names) for binding, names in (parameters or {}).items()}
-        """Each binding's parameter names, in order, as the host declared them."""
 
     def __repr__(self) -> str:
         return f"<{self._name}: {', '.join(self._bindings)}>"
@@ -74,11 +73,11 @@ class Namespace:
                 f"{', '.join(sorted(self._bindings)) or '(none)'}"
             )
 
-        parameters = self._parameters.get(name, ())
+        parameters = self._parameters[name]
 
         async def call(*positional: object, **arguments: object) -> Any:  # noqa: ANN401
             if positional:
-                arguments = _keyword(f"{self._name}.{name}", parameters, positional, arguments)
+                arguments = _bound(f"{self._name}.{name}", parameters, positional, arguments)
             return await self._dispatch(self._name, name, arguments)
 
         call.__name__ = name
@@ -101,24 +100,25 @@ class RlmNamespace(Namespace):
         return await self._dispatch(self._name, self.RUN, {"prompt": prompt, **kwargs})
 
 
-def _keyword(
+def _bound(
     call: str,
     parameters: Sequence[str],
     positional: Sequence[object],
     arguments: dict[str, object],
 ) -> dict[str, object]:
-    """`arguments`, with one positional argument read as the first parameter — or a
-    refusal that spells the call out by keyword."""
-    spelled = ", ".join(f"{name}=..." for name in parameters)
-    if len(positional) > 1 or not parameters:
+    """`arguments`, with the positional ones bound to the parameters in declared order —
+    or a refusal that spells the call out."""
+    spelled = f"{call}({', '.join(parameters)})"
+    if len(positional) > len(parameters):
         raise TypeError(
-            f"{call}() takes its arguments by keyword"
-            + (f": {call}({spelled})" if parameters else "")
+            f"{call}() takes {len(parameters)} argument(s), {len(positional)} given "
+            f"positionally: {spelled}"
         )
-    first = parameters[0]
-    if first in arguments:
-        raise TypeError(f"{call}() got {first} both positionally and as {first}=")
-    return {first: positional[0], **arguments}
+    bound = dict(zip(parameters, positional, strict=False))
+    twice = sorted(set(bound) & set(arguments))
+    if twice:
+        raise TypeError(f"{call}() got {', '.join(twice)} both positionally and by name: {spelled}")
+    return {**bound, **arguments}
 
 
 def build_namespaces(
@@ -134,18 +134,13 @@ def build_namespaces(
         name = namespace.get("name")
         if not isinstance(name, str) or not name:
             continue
-        declared_bindings = [
-            binding
-            for binding in namespace.get("bindings") or ()
-            if isinstance(binding, dict) and isinstance(binding.get("name"), str)
-        ]
-        bindings = [binding["name"] for binding in declared_bindings]
-        parameters = {
+        bindings = {
             binding["name"]: [
                 one for one in binding.get("parameters") or () if isinstance(one, str)
             ]
-            for binding in declared_bindings
+            for binding in namespace.get("bindings") or ()
+            if isinstance(binding, dict) and isinstance(binding.get("name"), str)
         }
         factory = RlmNamespace if name == "rlm" else Namespace
-        built[name] = factory(name, bindings, dispatch, parameters)
+        built[name] = factory(name, bindings, dispatch)
     return built

@@ -40,7 +40,7 @@ from ph.testing import (
     run_tool,
     simple_tool,
 )
-from ph.tools import Deny, ToolExecutionInput, ToolExecutionResult, text_content
+from ph.tools import Deny, ToolExecutionInput, ToolExecutionResult, ToolRestriction, text_content
 from ph.tools.code_mode import (
     CodeDispatchRef,
     ToolCallError,
@@ -491,9 +491,9 @@ async def test_a_pre_execute_denial_of_a_sub_call_also_fails_the_run(mount: Moun
 # the name is load-bearing, not just the schema.
 
 
-def _as_ipython() -> TransportPresentation:
+def _as_python() -> TransportPresentation:
     return TransportPresentation(
-        name="ipython",
+        name="python",
         description="Python cells.",
         output=ToolOutput(schema={"type": "object"}, render=lambda _a, v: text_content(repr(v))),
     )
@@ -501,16 +501,16 @@ def _as_ipython() -> TransportPresentation:
 
 async def test_a_profile_can_present_the_transport_under_its_own_name(mount: MountProfile) -> None:
     ctx = await _code_ctx(mount)
-    ctx.require(TOOLS).present_transport(_as_ipython())
+    ctx.require(TOOLS).present_transport(_as_python())
 
     view = ctx.require(TOOLS).view(DEPLOYMENT)
-    assert view.transport_name == "ipython"
+    assert view.transport_name == "python"
     # Renamed, not duplicated: two callables would be exactly the ambiguity the
     # reservation exists to prevent.
-    ipython = ctx.require(TOOLS).get("ipython", scope=DEPLOYMENT)
-    assert ipython is not None
+    presented = ctx.require(TOOLS).get("python", scope=DEPLOYMENT)
+    assert presented is not None
     assert ctx.require(TOOLS).get(RUN_CODE, scope=DEPLOYMENT) is None
-    assert ipython.description == "Python cells."
+    assert presented.description == "Python cells."
 
 
 async def test_a_request_offers_the_transport_and_nothing_else(mount: MountProfile) -> None:
@@ -531,11 +531,35 @@ async def test_a_request_offers_the_transport_and_nothing_else(mount: MountProfi
     tools.present_as("code", scope=agent.ctx)
 
     plain = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
-    tools.present_transport(_as_ipython())
+    tools.present_transport(_as_python())
     presented = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
 
     assert [schema.name for schema in plain.tools] == [RUN_CODE]
-    assert [schema.name for schema in presented.tools] == ["ipython"]
+    assert [schema.name for schema in presented.tools] == ["python"]
+
+
+@pytest.mark.parametrize("allow", ["inherited", "narrowed"])
+async def test_a_restricted_child_is_still_offered_the_transport(
+    mount: MountProfile, allow: str
+) -> None:
+    """The transport is unrestrictable (`RUN_CODE`). A child's grant lists what its
+    parent sees — the transport by its presented name — and a restriction checked
+    under the registered name left every Code Mode child with no tool to call. What a
+    cell may do is still restricted at each binding it awaits.
+
+    Sabotage: let restrictions reach `run_code` again, and both cases offer nothing.
+    """
+    ctx = await _code_ctx(mount)
+    tools = ctx.require(TOOLS)
+    tools.register(_recorder("touch", []))
+    tools.present_transport(_as_python())
+    tools.present_as("code")
+    child = ctx.scope("agent:child")
+    held = frozenset(tools.names(scope=DEPLOYMENT)) if allow == "inherited" else frozenset()
+    tools.restrict(ToolRestriction(allow=held), scope=child)
+
+    assert [schema.name for schema in tools.schemas(scope=child)] == ["python"]
+    assert ("touch" in tools.view(child).visible) == (allow == "inherited")
 
 
 async def test_renaming_the_transport_keeps_what_it_declares_about_itself(
@@ -560,9 +584,9 @@ async def test_renaming_the_transport_keeps_what_it_declares_about_itself(
     before = ctx.require(TOOLS).get(RUN_CODE, scope=DEPLOYMENT)
     assert before is not None and before.irreversible({"program": "anything"})
 
-    ctx.require(TOOLS).present_transport(_as_ipython())
+    ctx.require(TOOLS).present_transport(_as_python())
 
-    after = ctx.require(TOOLS).get("ipython", scope=DEPLOYMENT)
+    after = ctx.require(TOOLS).get("python", scope=DEPLOYMENT)
     assert after is not None
     assert after.irreversible({"program": "anything"}), (
         "the declaration must travel with the tool, not with the name it was registered under"
@@ -573,13 +597,13 @@ async def test_the_presented_name_is_what_the_model_may_call(mount: MountProfile
     """The C6 refusal follows the rename, or the model is told to call a name
     that no longer resolves."""
     ctx = await _code_ctx(mount)
-    ctx.require(TOOLS).present_transport(_as_ipython())
+    ctx.require(TOOLS).present_transport(_as_python())
     ctx.require(TOOLS).register(_recorder("touch", []))
     ctx.require(CODE_RUNTIME_STUB).register_program("p", lambda _b: "ok")
     session = ctx.require(SESSIONS).create("s-alias")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
-    settled = await run_tool(ctx, "ipython", {"program": "p"}, agent=agent, session=session)
+    settled = await run_tool(ctx, "python", {"program": "p"}, agent=agent, session=session)
     assert settled.is_error is False
 
     # And the old name is gone from the model's surface — with the denial naming
@@ -588,14 +612,14 @@ async def test_the_presented_name_is_what_the_model_may_call(mount: MountProfile
         ctx, RUN_CODE, {"program": "p"}, agent=agent, session=session, call_id="c2"
     )
     assert refused.is_error is True
-    assert 'presented as "ipython"' in repr(refused.content)
+    assert 'presented as "python"' in repr(refused.content)
 
 
 async def test_the_route_back_names_the_presented_transport(mount: MountProfile) -> None:
     """A native call is refused with the SDK path; under a rename that path has
     to be the name the model was actually offered."""
     ctx = await _code_ctx(mount)
-    ctx.require(TOOLS).present_transport(_as_ipython())
+    ctx.require(TOOLS).present_transport(_as_python())
     ctx.require(TOOLS).register(_recorder("touch", []))
     session = ctx.require(SESSIONS).create("s-route")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -603,14 +627,14 @@ async def test_the_route_back_names_the_presented_transport(mount: MountProfile)
 
     result = await run_tool(ctx, "touch", {}, agent=agent, session=session)
     assert result.is_error is True
-    assert "from inside ipython" in repr(result.content)
+    assert "from inside python" in repr(result.content)
 
 
 async def test_the_presented_name_is_not_bound_into_its_own_namespace(mount: MountProfile) -> None:
-    """`tools.ipython` inside a cell would hand the program a way to re-enter
+    """`tools.python` inside a cell would hand the program a way to re-enter
     the transport, which the `RUN_CODE` skip existed to prevent."""
     ctx = await _code_ctx(mount)
-    ctx.require(TOOLS).present_transport(_as_ipython())
+    ctx.require(TOOLS).present_transport(_as_python())
     ctx.require(TOOLS).register(_recorder("touch", []))
     session = ctx.require(SESSIONS).create("s-bindings")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -618,24 +642,24 @@ async def test_the_presented_name_is_not_bound_into_its_own_namespace(mount: Mou
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     text = render_prompt(assembly)
     assert "tools.touch" in text
-    assert "tools.ipython" not in text
+    assert "tools.python" not in text
     # The code-only rule names the presented transport, and the reserved name —
     # which this profile's model has never seen — appears nowhere at all.
-    assert "ipython" in text
+    assert "python" in text
     assert RUN_CODE not in text
 
 
 async def test_the_presented_name_cannot_be_occupied_either(mount: MountProfile) -> None:
     """Both orders fail: the name is unshadowable however the race runs."""
     ctx = await _code_ctx(mount)
-    ctx.require(TOOLS).present_transport(_as_ipython())
+    ctx.require(TOOLS).present_transport(_as_python())
     with pytest.raises(ValueError, match="presents the Code Mode transport"):
-        ctx.require(TOOLS).register(_recorder("ipython", []))
+        ctx.require(TOOLS).register(_recorder("python", []))
 
     other = await _code_ctx(mount)
-    other.require(TOOLS).register(_recorder("ipython", []))
+    other.require(TOOLS).register(_recorder("python", []))
     with pytest.raises(ValueError, match="unshadowable"):
-        other.require(TOOLS).present_transport(_as_ipython())
+        other.require(TOOLS).present_transport(_as_python())
 
 
 async def test_a_scoped_presentation_cannot_be_occupied_from_a_parent_scope(
@@ -647,18 +671,18 @@ async def test_a_scoped_presentation_cannot_be_occupied_from_a_parent_scope(
     ctx = await _code_ctx(mount)
     session = ctx.require(SESSIONS).create("s-backstop")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
-    ctx.require(TOOLS).present_transport(_as_ipython(), scope=agent.ctx)
+    ctx.require(TOOLS).present_transport(_as_python(), scope=agent.ctx)
     # Registered globally, where no presentation is in sight — the claim-time
     # check passes, and only the agent's view knows there is a contradiction.
-    ctx.require(TOOLS).register(_recorder("ipython", []))
+    ctx.require(TOOLS).register(_recorder("python", []))
     with pytest.raises(ValueError, match="unshadowable"):
         ctx.require(TOOLS).view(agent.ctx)
 
 
 async def test_disposing_the_presentation_restores_the_reserved_name(mount: MountProfile) -> None:
     ctx = await _code_ctx(mount)
-    dispose = ctx.require(TOOLS).present_transport(_as_ipython())
-    assert ctx.require(TOOLS).view(DEPLOYMENT).transport_name == "ipython"
+    dispose = ctx.require(TOOLS).present_transport(_as_python())
+    assert ctx.require(TOOLS).view(DEPLOYMENT).transport_name == "python"
     dispose()
     assert ctx.require(TOOLS).view(DEPLOYMENT).transport_name == RUN_CODE
     assert ctx.require(TOOLS).get(RUN_CODE, scope=DEPLOYMENT) is not None

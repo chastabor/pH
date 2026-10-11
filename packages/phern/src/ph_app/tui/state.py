@@ -104,7 +104,7 @@ class ToolCard:
     model emitted and may not even parse."""
     details: dict[str, JsonValue] = field(default_factory=dict)
     """The tool's own durable presentation payload, threaded verbatim from
-    `tool/result.meta` — for a cell, `IpythonToolDetails`. The card shows what it
+    `tool/result.meta` — for a cell, `CellDetails`. The card shows what it
     understands and ignores the rest, so a tool can enrich its own card without
     the transcript learning its schema."""
     settled: bool = False

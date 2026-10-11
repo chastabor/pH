@@ -28,7 +28,7 @@ from pathlib import Path
 import anyio
 import pytest
 from rlm_fixtures import ShippedProfile
-from runtime_helpers import run_ipython_cell
+from runtime_helpers import run_python_cell
 
 from ph.keys import TOOLS
 from ph.seams.subprocess import scrub_env
@@ -36,6 +36,7 @@ from ph_app.profiles import resolve_profile
 from ph_rlm.kernel.codec import decode, encode
 from ph_rlm.kernel.manager import KernelLimits
 from ph_rlm.kernel.venv import resolve_interpreter
+from ph_rlm.presentation import PYTHON_DESCRIPTION
 from ph_rlm.prompt import DOCTRINE
 from ph_rlm.snapshot import RESERVED_KINDS, SNAPSHOT_KINDS
 from ph_runtime.cell import MAGIC_HINT, MAGIC_PREFIXES, compile_cell
@@ -181,7 +182,7 @@ async def test_every_shipped_namespace_is_callable_from_a_cell(
     # have is `test_bundle.py`'s claim; the calls are governed and have their own
     # tests.
     program = "\n".join(f"assert {name}, {name!r}" for name in sorted(declared)) + "\n'reached'"
-    result = await run_ipython_cell(ctx, program, agent=agent, session=session)
+    result = await run_python_cell(ctx, program, agent=agent, session=session)
 
     assert result.is_error is False, result.error
     assert result.value["value"] == "reached"
@@ -190,24 +191,25 @@ async def test_every_shipped_namespace_is_callable_from_a_cell(
 # ------------------------------------------------ the layers agreeing --
 
 
-def test_the_doctrine_describes_the_runtime_it_runs_on() -> None:
-    """The runtime and the prompt have to describe the same runtime.
+def test_the_transport_describes_the_runtime_it_runs_on() -> None:
+    """The runtime and what the model is told about it have to describe one runtime.
 
     D19's argument is that owning the runtime is what closes the `%%bash` hole —
-    "the magic was the bypass; removing the mechanism closes the hole". The
-    doctrine is what tells the model that, and for a phase it said the opposite:
-    it promised `%%bash` shell cells, ported from prime-agent, which pH's own
-    guest raises a `SyntaxError` for. A model reading it would have spent turns
-    on a cell that cannot run.
+    "the magic was the bypass; removing the mechanism closes the hole". The model is
+    told that by the transport's description, and for a phase the prompt said the
+    opposite: it promised `%%bash` shell cells, ported from prime-agent, which pH's
+    own guest raises a `SyntaxError` for. A model reading it would have spent turns
+    on a cell that cannot run. The doctrine now points at the description rather
+    than saying it again.
 
     The prefixes come from the guest's own tuple rather than a third copy, so a
-    fourth escape added there reaches the prompt by construction.
+    fourth escape added there reaches the description by construction.
     """
     for prefix in MAGIC_PREFIXES:
-        assert f"`{prefix}`" in DOCTRINE, f"the doctrine does not mention {prefix}"
-    assert "no IPython magics" in DOCTRINE
-    assert "await tools.bash(...)" in DOCTRINE
-    assert "shell cell" not in DOCTRINE, "the doctrine promises a magic the runtime refuses"
+        assert f"`{prefix}`" in PYTHON_DESCRIPTION, f"the description does not mention {prefix}"
+    assert "not IPython or Jupyter" in PYTHON_DESCRIPTION
+    assert "await tools.bash(command=...)" in PYTHON_DESCRIPTION
+    assert "shell cell" not in PYTHON_DESCRIPTION + DOCTRINE, "a magic the runtime refuses"
 
 
 @pytest.mark.parametrize("prefix", MAGIC_PREFIXES)

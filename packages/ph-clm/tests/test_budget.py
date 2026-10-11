@@ -10,11 +10,20 @@ measures after that file's edit has landed; with no window there is no readout.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import pytest
-from clm_helpers import MIRROR_ROW, agent_in, converse, edit, mounted, sections_of
+from clm_helpers import (
+    MIRROR_ROW,
+    agent_in,
+    context_tokens,
+    converse,
+    edit,
+    filler,
+    mounted,
+    readout_share,
+    sections_of,
+)
 
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
@@ -24,6 +33,7 @@ from ph.llm.types import TokenUsage, text_of
 from ph.session import SurfaceIntent
 from ph.testing import (
     MountProfile,
+    StubCompactionEngine,
     assistant_payload,
     code_mode_stub,
     log_event,
@@ -37,11 +47,6 @@ from ph_clm.keys import CLM_MIRROR
 pytestmark = pytest.mark.anyio
 
 
-def _tokens(ctx: Context, agent: ReactLoopAgent) -> int:
-    """The context as the readout measures it."""
-    return ctx.require(TOKEN_METER).baseline(agent.session).tokens
-
-
 async def _filled(
     mount: MountProfile, share: float, *extra: dict[str, Any], **config: object
 ) -> tuple[Context, ReactLoopAgent, int]:
@@ -50,7 +55,7 @@ async def _filled(
     ctx = await mounted(mount, *extra, **config)
     agent = agent_in(ctx)
     converse(agent.session)
-    window = int(_tokens(ctx, agent) / share)
+    window = int(context_tokens(ctx, agent.session) / share)
     log_event(
         agent.session,
         "request/context",
@@ -59,11 +64,7 @@ async def _filled(
     meter = ctx.require(TOKEN_METER)
 
     def emit(args: Any, _run: Any) -> str:  # noqa: ANN401
-        wanted = int(as_str(args.get("tokens")))
-        text = "word " * wanted
-        while meter.measure_text(text) < wanted:
-            text += "word " * 16
-        return text
+        return filler(meter, int(as_str(args.get("tokens"))))
 
     ctx.require(TOOLS).register(simple_tool("emit", emit))
     return ctx, agent, window
@@ -86,8 +87,7 @@ async def test_a_result_that_crosses_a_share_ends_with_a_readout(mount: MountPro
     said = _readout(await _emit(ctx, agent, window // 6))
 
     assert said is not None
-    share = re.search(r"tokens \((\d+)%\)", said)
-    assert share is not None and 50 <= int(share.group(1)) < 75, said
+    assert 50 <= readout_share(said) < 75, said
     assert "next reminder comes at 75%" in said
     assert "context_tombstone" in said
 
@@ -108,7 +108,7 @@ async def test_a_share_is_reported_once_until_an_edit_brings_the_context_back(
 
     step = sections_of(ctx, agent.session)[1]
     await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "done"})
-    needed = window // 2 - _tokens(ctx, agent) + window // 20
+    needed = window // 2 - context_tokens(ctx, agent.session) + window // 20
     assert _readout(await _emit(ctx, agent, needed)) is not None, "not re-armed by the edit"
 
 
@@ -198,34 +198,17 @@ async def test_the_readout_counts_what_the_provider_counted(mount: MountProfile)
     said = _readout(await _emit(ctx, agent, 10))
 
     assert said is not None
-    share = re.search(r"tokens \((\d+)%\)", said)
-    assert share is not None and 55 <= int(share.group(1)) < 75, said
-
-
-class _Compacting:
-    """A compaction engine that only says where it would compact."""
-
-    def __init__(self, share: float) -> None:
-        self.share = share
-
-    async def compact_if_needed(self, agent: object, trigger: object) -> None:
-        return None
-
-    def trigger_fraction(self) -> float | None:
-        return self.share
-
-    async def compact_now(self, agent: object, *, instructions: str = "") -> None:
-        return None
+    assert 55 <= readout_share(said) < 75, said
 
 
 def test_the_last_reminder_gives_way_below_compactions_trigger() -> None:
     """A margin below the engine's trigger, so the model has room to act before a summary;
     a share at or past that point gives way to it. Nothing moves without an engine, and
     no shares stays no readouts."""
-    assert Shares.of([0.5, 0.75], 0.2, 0.85).thresholds == (0.5, 0.65)
-    assert Shares.of([0.5, 0.75], 0.2, None).thresholds == (0.5, 0.75)
-    assert Shares.of([], 0.2, 0.85).thresholds == ()
-    assert Shares.of([0.5], 0.9, 0.85).thresholds == (0.5,)
+    assert Shares.of([0.5, 0.75], 0.2, 0.85, 16_384).thresholds == (0.5, 0.65)
+    assert Shares.of([0.5, 0.75], 0.2, None, 16_384).thresholds == (0.5, 0.75)
+    assert Shares.of([], 0.2, 0.85, 16_384).thresholds == ()
+    assert Shares.of([0.5], 0.9, 0.85, 16_384).thresholds == (0.5,)
 
 
 async def test_the_last_reminder_comes_before_compaction_and_says_so(
@@ -237,7 +220,7 @@ async def test_the_last_reminder_comes_before_compaction_and_says_so(
     Sabotage: ignore the engine's trigger, and 70% is no last reminder at all.
     """
     ctx, agent, window = await _filled(mount, 0.55)
-    ctx.require(COMPACTION).register(_Compacting(0.85))
+    ctx.require(COMPACTION).register(StubCompactionEngine(0.85))
 
     said = _readout(await _emit(ctx, agent, window * 15 // 100))
 

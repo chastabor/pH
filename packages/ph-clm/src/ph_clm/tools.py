@@ -192,7 +192,9 @@ class DiffValue(ToolModel):
 # ---------------------------------------------------------------- the row --
 
 
-@plugin("clm-context", affects="environment", inject=[TOOLS, TOKEN_METER], config=Config)
+@plugin(
+    "clm-context", affects="environment", inject=[TOOLS, TOKEN_METER, COMPACTION], config=Config
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the section map and the five context tools."""
     tools = ctx.require(TOOLS)
@@ -227,23 +229,20 @@ async def apply(ctx: Context, config: Config) -> None:
             return decision
         text = text_of(content)
         before = baseline.tokens
-        compaction = ctx.get(COMPACTION)
-        compacts_at = None if compaction is None else compaction.trigger_fraction()
-        shares = Shares.of(config.remind_at, config.last_margin, compacts_at)
+        compacts_at = ctx.require(COMPACTION).trigger_fraction()
+        shares = Shares.of(config.remind_at, config.last_margin, compacts_at, window)
         # A token is at least a byte, so the result's UTF-8 length bounds its count, and
         # it is tokenized only when that bound could cross a threshold.
-        crossed = readouts.crossed(
+        after = readouts.crossed(
             session.id,
             shares,
             before,
             before + len(text.encode()),
-            window,
             lambda: before + meter.measure_text(text),
         )
-        if crossed is None:
+        if after is None:
             return decision
-        level, after = crossed
-        line = shares.line(after, window, level, _how(ctx, execution))
+        line = shares.line(after, _how(ctx, execution))
         return replace(decision, content=[*content, TextBlock(text=line)])
 
     if config.remind_at:

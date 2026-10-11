@@ -21,9 +21,10 @@ offered them.
 ## What the model sees
 
 One callable. Under `tools.mode: code` the registry presents the reserved
-transport `run_code` as **`ipython`**, with prime-agent's wording ported
-verbatim and its result layout (`stdout / stderr / result / traceback`) kept, so
-a model trained against that surface finds the surface it knows. Everything else
+transport `run_code` as **`python`**, described in pH's own words: plain Python
+in an interpreter of the agent's own that persists across calls — not IPython or
+Jupyter, so there are no magics — with a shell reached as `await tools.bash(...)`.
+Prime-agent's result layout (`stdout / stderr / result / traceback`) is kept. Everything else
 arrives in the cell's `globals()` as namespaces whose every call is one `call`
 frame out of the kernel and back through the whole tool pipeline:
 
@@ -50,7 +51,7 @@ Each is a listener on a seam that already exists; the bundle
 | row | what it adds |
 |---|---|
 | `code-runtime-python` | the runtime: one CPython child per agent, fd 3 as the framed channel, resource limits applied in the child |
-| `rlm-presentation` | the transport renamed to `ipython`, and how a settled cell reads |
+| `rlm-presentation` | the transport renamed to `python`, and how a settled cell reads |
 | `rlm-bindings` | the `rlm` namespace — `rlm_run`, `rlm_list_subagents`, `rlm_delete_subagent` |
 | `rlm-subagent-provider` | `rlm()` as a `ctx.subagents` provider: admission logged, the handle returns before the child answers |
 | `rlm-messaging` | `agent_message` and `agent_observe` — `agent_message_send`, `agent_message_list_agents`, `agent_observe_list`, `agent_observe_get` |

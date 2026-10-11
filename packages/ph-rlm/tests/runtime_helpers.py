@@ -33,7 +33,7 @@ async def run_cell(
 ) -> Any:  # noqa: ANN401
     """Execute one cell through the real transport and pipeline.
 
-    `name` is for the profile that presents the transport as `ipython` —
+    `name` is for the profile that presents the transport as `python` —
     the reserved name stops resolving once the rename is mounted.
     """
     return await run_tool(
@@ -41,7 +41,7 @@ async def run_cell(
     )
 
 
-async def run_ipython_cell(
+async def run_python_cell(
     ctx: Context,
     program: str,
     *,
@@ -49,15 +49,15 @@ async def run_ipython_cell(
     session: Session | None = None,
     call_id: str = "c1",
 ) -> Any:  # noqa: ANN401
-    """`run_cell` under the name the RLM profile presents (`ipython`).
+    """`run_cell` under the name the RLM profile presents (`python`).
 
     Three modules wanted this two-liner; the reserved `run_code` stops resolving
     once `rlm-presentation` is mounted, so a test on that profile has to name the
     transport the model sees.
     """
-    from ph_rlm.presentation import IPYTHON
+    from ph_rlm.presentation import PYTHON
 
-    return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=IPYTHON)
+    return await run_cell(ctx, program, agent=agent, session=session, call_id=call_id, name=PYTHON)
 
 
 def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:  # noqa: ANN401

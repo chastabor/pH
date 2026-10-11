@@ -47,15 +47,7 @@ from typing import Any
 
 import httpx
 import pytest
-from local_server import (
-    LIVE,
-    PROBE_TIMEOUT,
-    local_model,
-    server_root,
-)
-from local_server import answer as answer_of
-from local_server import get as get_json
-from local_server import props as server_props
+from local_server import LIVE, answer_of, get_json, server_props, server_root
 
 from ph.agent.types import AgentOptions
 from ph.json import as_int, as_obj
@@ -75,12 +67,6 @@ whether the *model* received an image, because "what animal is this" has no
 answer for a test pattern. It is checked into the repo so the gate needs no
 fixture step, and skipped rather than failed when absent, since a clone that
 omitted it is not a defect in pH."""
-
-
-@pytest.fixture
-def route(monkeypatch: pytest.MonkeyPatch) -> str:
-    """The model to ask for, with the route's credential defaulted (`local_model`)."""
-    return local_model(monkeypatch)
 
 
 def _options(model: str, *, max_tokens: int = 32) -> AgentOptions:
@@ -179,7 +165,7 @@ async def test_a_tool_call_comes_back_parsed(
     )
 
 
-async def test_thinking_does_not_arrive_as_theanswer(mount: MountProfile, route: str) -> None:
+async def test_thinking_does_not_arrive_as_the_answer(mount: MountProfile, route: str) -> None:
     """A reasoning block is a block, not prose with a close tag in it.
 
     pH maps `reasoning_content` to a `ReasoningBlock` — the adapter has done so
@@ -262,7 +248,7 @@ async def test_the_configured_window_fits_one_slot(mount: MountProfile, route: s
 
     Skipped rather than failed on a server with no `/props`: this file is opt-in
     for anything speaking the OpenAI wire, and only llama.cpp publishes its slot
-    geometry — beside `/v1` rather than under it, which is what `_server_root`
+    geometry — beside `/v1` rather than under it, which is what `server_root`
     is for.
     """
     # `or {}` so the skip below is the only place "no /props" is spelled: an
@@ -365,15 +351,11 @@ def _slots() -> list[dict[str, Any]] | None:
     turns it off, and a server that declines to describe its own scheduling is
     not a defect in pH.
     """
-    url = f"{server_root()}/slots"
-    try:
-        reply = httpx.get(url, timeout=PROBE_TIMEOUT)
-        if reply.status_code in (httpx.codes.NOT_FOUND, httpx.codes.NOT_IMPLEMENTED):
-            return None
-        reply.raise_for_status()
-    except httpx.HTTPError as error:
-        pytest.fail(f"{url} did not answer: {error}")
-    answer = reply.json()
+    answer = get_json(
+        f"{server_root()}/slots", absent=(httpx.codes.NOT_FOUND, httpx.codes.NOT_IMPLEMENTED)
+    )
+    if answer is None:
+        return None
     rows = answer.get("slots", answer) if isinstance(answer, dict) else answer
     return [dict(as_obj(row)) for row in rows] if isinstance(rows, list) else None
 

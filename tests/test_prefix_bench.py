@@ -143,7 +143,7 @@ def test_offload_cannot_reach_a_code_mode_result_at_shipped_defaults(
     `rlm` bundle sets it), and 64 KiB of text is ~17 000 tokens.
     `tool-result-offload` triggers at `TOOL_TOKEN_LIMIT_BEFORE_EVICT = 20_000`.
     So a Code Mode result is capped *below* the threshold that would offload it,
-    and in these profiles almost nothing is native — `ipython` is the only
+    and in these profiles almost nothing is native — `python` is the only
     callable tool — so offload has essentially nothing to act on.
 
     Asserted through the measurement rather than by reading the two constants:

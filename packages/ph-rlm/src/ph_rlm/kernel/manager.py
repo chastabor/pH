@@ -55,7 +55,7 @@ from pydantic import PositiveFloat
 from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, first_of, is_canceled
 from ph.cordis import Context, Disposer, plugin
-from ph.json import as_obj, as_str, thaw_json
+from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
 from ph.orphans import OrphanJournal, host_journal
 from ph.paths import resolve_roots
@@ -72,6 +72,7 @@ from ph.seams.workspace import Workspace, workspace_of, workspace_policy
 from ph.text import count_of
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
+from ph.tools.sdk import parameter_names
 from ph.wire import WireModel
 
 from ..keys import PYTHON_RUNTIME
@@ -720,10 +721,9 @@ class Kernel:
     ) -> CodeRunResult:
         """Run one program to settlement. Serialized: one namespace, one program."""
         async with self._lock:
-            declaration = [_declare(namespace) for namespace in namespaces]
             restarted = False
             if not self._alive:
-                await self.start(declaration)
+                await self.start([_declare(namespace) for namespace in namespaces])
                 await self._rehydrate()
                 # Consumed by the run that *gets* the fresh namespace, not by the
                 # run that lost the old one: the cell that called `os._exit` knows
@@ -1725,8 +1725,8 @@ class PythonCodeRuntime:
 
 def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
     """What the guest needs to build a proxy: names, not dispatch closures — and each
-    binding's parameter names in order, so a call that passes the first one
-    positionally can be read as the keyword it meant (`ph_runtime.proxies`)."""
+    binding's parameter names in the order the SDK listing shows them, so a call
+    written from the listing binds as it reads (`ph_runtime.proxies`)."""
     return {
         "name": namespace.name,
         "description": namespace.description,
@@ -1734,17 +1734,11 @@ def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
             {
                 "name": binding.name,
                 "description": binding.description,
-                "parameters": _parameter_names(binding),
+                "parameters": parameter_names(binding),
             }
             for binding in namespace.bindings
         ],
     }
-
-
-def _parameter_names(binding: CodeBinding) -> list[str]:
-    """A binding's parameter names, in the order its schema declares them."""
-    properties = as_obj(binding.parameters.get("properties"))
-    return [*properties]
 
 
 class Config(KernelLimits):

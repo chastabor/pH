@@ -15,7 +15,7 @@ statement about the fabrication rather than about pH.
 **Why the workload is authored at all** is the part that has to be said plainly:
 there is no recorded RLM session to replay. P3-23 established that the
 prime-agent fixtures are "the *coding* agent, not the RLM" — neither contains a
-single `ipython` call — and dsh's own `python-sdk-single-exe` snapshots, which
+single `python` call — and dsh's own `python-sdk-single-exe` snapshots, which
 *are* RLM-shaped, call `cordis_define`, `cordis_run`, `workflow` and
 `cordis_undefine`: dsh-only tools with no pH counterpart, so replaying them
 produces resolution failures rather than a trajectory. Recording a fresh one
@@ -176,7 +176,7 @@ def authored_steps(files: Sequence[Path], transport: str) -> list[RecordedStep]:
 
     **Through Code Mode, because that is what the `rlm` bundle is.** `read` is
     not a native tool in these profiles — calling it directly is refused with
-    "call it from inside ipython as `await tools.read(...)`" — so a workload of
+    "call it from inside python as `await tools.read(...)`" — so a workload of
     native `read` calls would have measured six identical error strings. That is
     what the first draft measured.
 

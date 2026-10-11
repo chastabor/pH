@@ -41,14 +41,18 @@ __all__ = ["Readouts", "Shares"]
 
 @dataclass(frozen=True, slots=True)
 class Shares:
-    """The thresholds one reading is judged against, ascending, and the share at which
-    compaction summarizes on its own, when an engine says."""
+    """The thresholds one reading is judged against, ascending, as shares of its
+    window — and the share at which compaction summarizes on its own, when an engine
+    says."""
 
     thresholds: tuple[float, ...]
-    compacts_at: float | None = None
+    window: int
+    compacts_at: float | None
 
     @classmethod
-    def of(cls, remind_at: Sequence[float], margin: float, compacts_at: float | None) -> Shares:
+    def of(
+        cls, remind_at: Sequence[float], margin: float, compacts_at: float | None, window: int
+    ) -> Shares:
         """`remind_at`, with the last reminder moved to `margin` below compaction's
         trigger: any configured share at or past that point gives way to it. Unchanged
         with no engine, or a margin that would put it at or below zero; empty stays
@@ -56,21 +60,21 @@ class Shares:
         shares = sorted(remind_at)
         # Rounded, so 0.85 - 0.2 is the 0.65 it means rather than 0.6499999999999999.
         last = None if compacts_at is None else round(compacts_at - margin, 6)
-        if not shares or last is None or last <= 0:
-            return cls(tuple(shares), compacts_at)
-        earlier = (share for share in shares if share < last)
-        return cls(tuple(sorted({*earlier, last})), compacts_at)
+        if shares and last is not None and last > 0:
+            shares = [*(share for share in shares if share < last), last]
+        return cls(tuple(shares), window, compacts_at)
 
-    def reached(self, tokens: int, window: int) -> int:
-        """How many thresholds, as shares of `window`, `tokens` is at or past."""
-        return sum(1 for share in self.thresholds if tokens >= share * window)
+    def reached(self, tokens: int) -> int:
+        """How many thresholds `tokens` is at or past."""
+        return sum(1 for share in self.thresholds if tokens >= share * self.window)
 
-    def line(self, tokens: int, window: int, level: int, how: str) -> str:
-        """What a result carries when the context reached `level` thresholds: its size,
-        what to do, and when the next reminder comes — or that this is the last, and
-        what happens after it."""
-        share = tokens * 100 // window
-        head = f"[context: ~{thousands(tokens)} of {thousands(window)} tokens ({share}%)."
+    def line(self, tokens: int, how: str) -> str:
+        """What a result carries when the context reached `tokens`: its size, what to
+        do, and when the next reminder comes — or that this is the last, and what
+        happens after it."""
+        level = self.reached(tokens)
+        share = tokens * 100 // self.window
+        head = f"[context: ~{thousands(tokens)} of {thousands(self.window)} tokens ({share}%)."
         if level >= len(self.thresholds):
             after = (
                 ""
@@ -92,31 +96,25 @@ class Readouts:
     _reached: dict[str, int] = field(default_factory=dict)
 
     def crossed(
-        self,
-        session_id: str,
-        shares: Shares,
-        before: int,
-        most: int,
-        window: int,
-        measure: Callable[[], int],
-    ) -> tuple[int, int] | None:
+        self, session_id: str, shares: Shares, before: int, most: int, measure: Callable[[], int]
+    ) -> int | None:
         """When a result takes the context from `before` tokens to at most `most`: the
-        level reached and the tokens after, if this session had not reached that level;
-        `None` otherwise.
+        tokens after, if that reached a threshold this session had not; `None`
+        otherwise.
 
         `measure` counts the tokens after exactly, and is asked only when the answer
         needs it — when `most` could reach a threshold `before` had not, or when a
         readout fires. Tokenizing a long result is the costly part, and most results
         cross nothing.
         """
-        floor = shares.reached(before, window)
+        floor = shares.reached(before)
         known = self._reached.get(session_id, floor)
-        after = measure() if shares.reached(most, window) > floor else None
-        level = floor if after is None else shares.reached(after, window)
+        after = measure() if shares.reached(most) > floor else None
+        level = floor if after is None else shares.reached(after)
         self._reached[session_id] = level
         if level <= known:
             return None
-        return level, measure() if after is None else after
+        return measure() if after is None else after
 
     def forget(self, session_id: str) -> None:
         self._reached.pop(session_id, None)

@@ -249,8 +249,8 @@ class _View:
     first the moment shadowing changed."""
     mode: PresentationMode
     schemas: tuple[ToolSchema, ...]
-    """The model-facing schemas, or empty under Code Mode — where the model is
-    offered one callable and reaches the rest through the SDK (P1-04)."""
+    """The model-facing schemas — under Code Mode only the transport's, where the
+    model is offered one callable and reaches the rest through the SDK (P1-04)."""
     transport_name: str
     """What this scope's model calls the transport.
 
@@ -690,7 +690,14 @@ class ToolRuntime:
                     # A nearer scope already answered this name; scoped
                     # registrations shadow globals rather than merging.
                     continue
-                if not all(outer.admits(name) for outer in nearer):
+                if name != RUN_CODE and not all(outer.admits(name) for outer in nearer):
+                    # **The transport is never restricted** (`RUN_CODE`): a grant
+                    # lists the names its parent sees, where the transport goes by
+                    # the name a profile presents it as, and filtering it here
+                    # under its registered one left every child in Code Mode with
+                    # nothing to call. What a cell may *do* is restricted where it
+                    # counts — at each binding it awaits.
+                    #
                     # **A restriction reaches everything *outside* the scope that
                     # wrote it, and nothing inside** (P6-27). `nearer` excludes
                     # this layer, so a layer is never filtered by its own

@@ -27,8 +27,9 @@ from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.cordis.loader import compose_rows
 from ph.testing import ReapedHost
 
-pytest_plugins = ["app_fixtures", "rlm_fixtures"]
-"""The two per-package fixture sets, registered from the **one** conftest.
+pytest_plugins = ["app_fixtures", "local_server", "rlm_fixtures"]
+"""The per-package fixture sets, and the live gate's, registered from the **one**
+conftest.
 
 They were `packages/phern/tests/conftest.py` and
 `packages/ph-rlm/tests/conftest.py`, which is what kept the test trees out
@@ -37,8 +38,9 @@ flag fixes it because the unique name it would need —
 `packages.ph-rlm.tests.conftest` — is not an identifier (issue 32).
 
 Registering them here rather than merging their bodies into this file keeps
-each set beside the tests it serves, and `pythonpath` in `pyproject.toml` is
-what makes them importable by name at startup. It also fixed a latent bug
+each set beside the tests it serves — `local_server` holds the repo-level live
+suites' `route` — and `pythonpath` in `pyproject.toml` is what makes them
+importable by name at startup. It also fixed a latent bug
 the trees had documented in five separate comments: `from conftest import
 ROW` resolved to whichever conftest won the name under full collection, so
 ph-rlm's row constants were reachable from the app's tree and vice versa.

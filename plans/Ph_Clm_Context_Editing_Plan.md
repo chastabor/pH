@@ -684,11 +684,11 @@ trigger; positional calls both spelled out and accepted; and `fit` gating a batc
 - **A positional call.**
   - Under Code Mode the readout's how-to line is the call a cell writes:
     `await tools.context_tombstone(sections=['S12'], reason='...')`.
-  - The kernel's boot frame now carries each binding's parameter names in order
-    (`_parameter_names`). The guest's proxy reads one positional argument as the
-    first parameter.
-  - Anything more is refused with the call spelled out by keyword:
-    `tools.tombstone(sections=..., reason=...)`.
+  - The kernel's boot frame now carries each binding's parameter names in the
+    order the SDK listing shows them (`ph.tools.sdk.parameter_names`). The guest's
+    proxy binds positional arguments in that order, as the listing's signature reads.
+  - More positionals than parameters, or one parameter given both ways, is refused
+    with the call spelled out by keyword: `tools.tombstone(sections=..., reason=...)`.
   - The frame field is additive; an older guest ignores it.
 - **`fit` gates the batch.** `Editor.land` admits the batch's summed change once,
   against the one baseline it holds. Two drafts that each fit can no longer land
@@ -696,8 +696,8 @@ trigger; positional calls both spelled out and accepted; and `fit` gating a batc
 - **Tests:**
   - core: the seam's trigger;
   - ph-stabilize: the engine's trigger, and `None` when `auto` is off;
-  - ph-rlm: one positional argument is the first parameter, and two are refused
-    with the call spelled out;
+  - ph-rlm: positionals bind in the listing's order, and a call the listing cannot
+    mean is refused with it spelled out;
   - ph-clm: `Shares.of`; the last reminder at 65% saying compaction comes next; the
     Code Mode how-to line; the batch gate.
   - Sabotage, 8 mutations, all caught.
@@ -713,6 +713,44 @@ trigger; positional calls both spelled out and accepted; and `fit` gating a batc
   - `CompactionEngine` implementations need `trigger_fraction()`.
   - `Readouts(...)` takes no thresholds; `Shares` carries them.
   - A batch under `fit` that grew past the window in total is now refused.
+  - The gate is on the batch's *net* change, so under `shrink` one draft that grows
+    can land beside another that frees more. Each draft is not gated alone.
+
+**The simplify pass over 3c and the rename:**
+- **A child was offered no tools.** Code Mode's view applied a scope's restrictions
+  to `run_code` under its registered name, and a child's grant lists the parent's
+  tools by their presented names, so `python` never matched `run_code` and every
+  RLM child's request offered nothing. `_build_view` now exempts the transport from
+  the name check: what a cell may call is gated per binding, at dispatch, as before.
+  `test_code_mode.py::test_a_restricted_child_is_still_offered_the_transport`
+  (inherited and narrowed grants) and the delegation test in `test_bundle.py` hold
+  it; the live child test now has the child run a cell of its own.
+- **Positionals bind in the listing's order** rather than only the first, since
+  the SDK listing renders positional-or-keyword signatures. `_keyword` became
+  `_bound`; the kernel's `_parameter_names` became the public
+  `ph.tools.sdk.parameter_names`.
+- **The transport's description owns the runtime facts** (plain Python run by pH,
+  no magics, a shell is `tools.bash`, the interpreter is not the project's). The
+  doctrine keeps only the rules and points at the description, so the two cannot
+  disagree.
+- **`Shares`** carries its window and compaction's share; `line(tokens, how)`
+  computes the level itself, and `Readouts.crossed` returns the tokens or `None`.
+  The readout reads the trigger through `ctx.require(COMPACTION)`.
+- **Tests:** one `ph.testing.StubCompactionEngine` replaces three hand-written
+  engines; `clm_helpers` gained `context_tokens`, `filler` and `readout_share`; the
+  live suites share `live_agent`, `cells_after`, `answer_of` and the `route`
+  fixture in `tests/local_server.py`, which the root conftest registers through
+  `pytest_plugins` (a second `conftest.py` is the duplicate module mypy refuses,
+  issue 32).
+- **Results:** offline 4030 passed, 15 skipped. Sabotage: 79 mutations across the
+  eight scripts, all caught — nine new ones for this pass (the transport exemption,
+  in-order positionals, the refusals, the description owning the runtime, the
+  doctrine not re-describing it, `Shares.line`'s level, a crossing, the stub's
+  trigger). `./test.sh smoke`: 14 passed (one fewer: the "offered `python`" check
+  folded into the kernel test). A second pass failed two route tests in
+  `test_local_server.py` — the turn ended on `max-tokens` (32) and the picture's
+  answer was empty (256) — then that file passed 3 of 3: Qwen's thinking
+  sometimes outruns those budgets. Unchanged by this pass; left as it is.
 
 ### Phase 3's gate, run live
 
@@ -750,26 +788,38 @@ Run against llama.cpp on localhost: Qwen3.8-27B, 16,384 tokens per slot, 5 slots
 
 **ph-rlm's own live gate** (`tests/test_local_rlm.py`, the same opt-in, run by
 `./test.sh smoke`), on `rlm` over the llama route:
-- every loop request offers exactly `ipython`, and a cell runs;
+- every loop request offers exactly `python`, and a cell runs;
 - the kernel keeps a variable from one turn's cell to the next;
 - `await tools.read(...)` from a cell is a `tool/code-dispatch` of `read`, and its
   value reaches the cell;
 - a shell command from a cell is a governed `tools.bash` call;
-- `rlm.run(...)` from a cell admits a child on the same model, which runs in its own
-  log and settles `done`, and its answer reaches the parent's next turn through the
-  inbox.
+- `rlm.run(...)` from a cell admits a child on the same model, which runs a cell of
+  its own in its own log and settles `done`, and its answer reaches the parent's
+  next turn through the inbox.
 
 Each test looks at every cell of the turn: a model may look around in a cell of its
 own before the one it was told to run, and an earlier version that read only the
 first cell failed once that way. `./test.sh smoke` (route, ph-rlm and ph-clm, 15
 tests) passed twice clean after that, in 2–3 minutes a pass.
 
-**A finding for ph-rlm, not changed:** the `ipython` tool's description, ported
-verbatim from prime-agent, offers "`%%bash` shell cells", but pH runs plain Python
-and refuses the magic. The refusal points the model at `await tools.bash(command=...)`.
-A model that believes the description spends a call learning otherwise. Correcting
-the description would depart from the port's "verbatim" rule, so that is ph-rlm's
-call.
+**A finding for ph-rlm, resolved:** the transport was presented as `ipython`, with
+prime-agent's description ported verbatim, which offered "`%%bash` shell cells".
+pH owns its interpreter rather than running IPython (D19), so the guest refuses
+every magic, and the doctrine had to contradict the tool it introduced. Since pH no
+longer keeps prime-agent's IPython surface:
+- The transport is presented as **`python`**.
+- It has a description in pH's own words: plain Python in the agent's own
+  interpreter, not IPython or Jupyter, so no magics; everything else is an `await`
+  on a binding, a shell is `tools.bash`; and the interpreter is pH's, not the
+  project's environment.
+- The description takes the refused prefixes from the guest's `MAGIC_PREFIXES`.
+  The doctrine keeps the rules and points at the description for the runtime.
+- Tests that pinned the old wording now assert the new.
+- `IpythonToolDetails` is `CellDetails`. The live tests' prompts say "python cell".
+- **What breaks:** old logs keep the tool name `ipython` in their records. A view is
+  found by tool name and none is registered under it now, so a replayed old cell
+  draws the generic tool card rather than the code cell's. Its content is
+  unchanged.
 
 **Unscripted runs**, on the installed `rlm-clm` profile with a scratch `PH_HOME`. Notes
 files of about 1.4k tokens each; the model read them one per cell. The task never

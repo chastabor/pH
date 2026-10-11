@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 from rlm_fixtures import HOST_RUNTIME_ROW, MountedRuntime
-from runtime_helpers import run_ipython_cell
+from runtime_helpers import run_python_cell
 
 from ph.cordis import DEPLOYMENT
 from ph.keys import AGENTS, SESSIONS, SKILLS, SYSTEM_PROMPT
@@ -188,7 +188,7 @@ async def test_a_skills_run_is_callable_in_a_cell(
     )
     assert ctx.require(PYTHON_RUNTIME).skill_modules == ("greeter",)
 
-    result = await run_ipython_cell(
+    result = await run_python_cell(
         ctx,
         "(await greeter(name='world'), greeter.VERSION)",
         agent=agent,
@@ -208,7 +208,7 @@ async def test_a_skill_that_does_not_import_says_so(
         session_id="skills-broken", presentation=True, extra_rows=[row([tmp_path])]
     )
     # Nothing put `broken` on the child's path, so the import fails.
-    result = await run_ipython_cell(ctx, "repr(broken)", agent=agent, session=session)
+    result = await run_python_cell(ctx, "repr(broken)", agent=agent, session=session)
 
     assert result.is_error is False
     assert "unavailable skill broken" in result.value["value"]
@@ -216,7 +216,7 @@ async def test_a_skill_that_does_not_import_says_so(
     # Calling it raises *inside the cell*, so the traceback is the cell's result
     # rather than a tool failure — a skill that did not import is the
     # deployment's problem to fix, not a refusal the model should route around.
-    called = await run_ipython_cell(ctx, "broken()", agent=agent, session=session, call_id="c2")
+    called = await run_python_cell(ctx, "broken()", agent=agent, session=session, call_id="c2")
     rendered = "".join(block.text for block in called.content if hasattr(block, "text"))
     assert "is unavailable" in rendered
     assert "ask for it to be" in rendered

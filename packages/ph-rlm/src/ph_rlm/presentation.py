@@ -1,18 +1,21 @@
 """`rlm-presentation` — the one callable the RLM model sees (P3-09, C1/C6).
 
-Prime Agent's model-facing registry has exactly one entry, `ipython`, and that
-single fact is what C1-C3 exist to undo: one tool meant one permission
+Prime Agent's model-facing registry has exactly one entry, its `ipython` tool, and
+that single fact is what C1-C3 exist to undo: one tool meant one permission
 evaluation, one approval prompt and one call-limit tick per cell, no matter how
 many files the cell wrote. Code Mode restores the per-capability boundary while
-keeping the surface — so this row does not add a tool. It *renames the transport*
-and states how a settled cell reads.
+keeping the one-callable surface — so this row does not add a tool. It *renames
+the transport* and states how a settled cell reads.
 
 Three things, and the reason each is here rather than in `ph-core`:
 
 * **The name and description.** `run_code` is the reserved transport name and
-  stays reserved (nothing may occupy it, C6); `ipython` is how this profile
-  presents it, with prime-agent's wording ported verbatim so a model that knows
-  that surface finds the surface it knows. The mechanism is
+  stays reserved (nothing may occupy it, C6); `python` is how this profile
+  presents it. **In pH's own words, describing pH's own runtime** — not
+  prime-agent's: pH owns its interpreter rather than running IPython (D19), so
+  prime-agent's name and its "`%%bash` shell cells" described an environment the
+  model is not in, and the doctrine had to contradict the tool it was introducing.
+  The model gets one account of where it is. The mechanism is
   `ctx.tools.present_transport`, which is scoped like every other registration.
 
 * **The result text.** Prime Agent concatenates
@@ -24,7 +27,7 @@ Three things, and the reason each is here rather than in `ph-core`:
   the stream split. That deviation is deliberate and stated here because it is
   the kind of thing a later reader would file as a porting bug.
 
-* **The details payload.** `IpythonToolDetails` is what drives the code-cell
+* **The details payload.** `CellDetails` is what drives the code-cell
   widget (P3-19). It is computed from the durable result alone, like every other
   presentation projection, so a replayed cell draws the same card as a live one
   (A11).
@@ -45,36 +48,45 @@ from ph.tools.code_mode import CodeCellValue
 from ph.tools.definition import ToolOutput, ToolResult, TransportPresentation, text_content
 from ph.tools.presentation import ToolCallView, ToolResultView
 from ph.wire import WireModel
+from ph_runtime.cell import MAGIC_PREFIXES
 
-__all__ = ["IPYTHON", "IPYTHON_DESCRIPTION", "IpythonToolDetails", "apply", "render_cell"]
+__all__ = ["MAGICS", "PYTHON", "PYTHON_DESCRIPTION", "CellDetails", "apply", "render_cell"]
 
-IPYTHON = "ipython"
+PYTHON = "python"
 """What the RLM profile calls the transport. `run_code` is still the reserved
-name, and still what `register_transport` claims."""
+name, and still what `register_transport` claims.
 
-IPYTHON_DESCRIPTION = (
-    "Python scratchpad code or `%%bash` shell cells to execute in the agent "
-    "kernel. Use the target project's own environment for project imports, "
-    "tests, scripts, CLIs, and dependency checks instead of direct kernel "
-    "imports."
+Not prime-agent's `ipython`: the cell runs in pH's own interpreter, which has no
+magics, no `!`, no Jupyter display hooks, so a name promising IPython promised an
+environment the model is not in."""
+
+MAGICS = ", ".join(f"`{prefix}`" for prefix in MAGIC_PREFIXES)
+"""The prefixes the guest actually refuses, rendered for the model.
+
+Derived rather than restated: a prefix added to the runtime would otherwise leave
+the tool and the doctrine describing a different runtime from the one the model is
+talking to — which is exactly the drift that had the doctrine promising `%%bash`
+shell cells for a phase (P3-22)."""
+
+PYTHON_DESCRIPTION = (
+    "Run a Python program in your own interpreter and get back what it printed and "
+    "the value of its last expression. Variables, imports and functions persist from "
+    "one call to the next. This is plain Python run by pH, not IPython or Jupyter: "
+    f"there are no magics ({MAGICS}). Everything else is an `await` on a binding the "
+    "SDK lists, each one governed and recorded; a shell is "
+    "`await tools.bash(command=...)`. The interpreter is pH's, not the project's "
+    "environment: run the project's own tests, scripts and CLIs through `tools.bash`."
 )
-"""Ported verbatim from prime-agent's `src/core/tools/ipython.ts`.
+"""The transport as the model reads it: the one account of the runtime it has.
 
-Verbatim on purpose: the description is the contract the model was trained
-against, and paraphrasing it is a silent behavior change with no test that
-would catch it.
-
-**It says `%%bash` and pH has no magics.** That is a known, deliberate
-inconsistency, not an oversight — D19 removed the magic *because* it was the one
-shell nothing could see, and this sentence is the trained contract rather than a
-statement of fact. The correction is the doctrine's job (`ph_rlm.prompt`), which
-states plainly that there are no magics and names `await tools.bash(...)`; the
-conformance suite asserts the doctrine and the runtime agree. Do not "fix" this
-string to match — changing it changes what the model was trained against, and
-it is pinned verbatim for that reason."""
+What persists, what is not there (the magics the guest refuses,
+`ph_runtime.cell.MAGIC_PREFIXES`), how everything else is reached, and where the
+project's own environment is. The doctrine (`ph_rlm.prompt`) points here rather than
+saying it again, and states only the rules; the conformance suite holds this to the
+runtime."""
 
 
-class IpythonToolDetails(WireModel):
+class CellDetails(WireModel):
     """The durable card payload for one cell.
 
     Every field is derived from the settled result, never from live execution
@@ -115,7 +127,7 @@ def render_cell(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: A
 
 
 def cell_details(_args: JsonObject, value: Any) -> JsonObject:  # noqa: ANN401
-    return IpythonToolDetails(
+    return CellDetails(
         status="error" if value.get("error") else "ok",
         dispatches=as_int(value.get("dispatches")),
         truncated=as_bool(value.get("truncated")),
@@ -142,7 +154,7 @@ def _present_call(args: JsonObject) -> ToolCallView:
     # header line, `body` the program the code cell renders under it (P3-19).
     head = _program(args)[:2048]
     first = next((line for line in head.splitlines() if line.strip()), "")
-    return ToolCallView(card="terminal", title=IPYTHON, input=first, body=head)
+    return ToolCallView(card="terminal", title=PYTHON, input=first, body=head)
 
 
 def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:
@@ -151,7 +163,7 @@ def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:
     subtitle = count_of(count, "line")
     return ToolResultView(
         card="terminal",
-        title=IPYTHON,
+        title=PYTHON,
         subtitle=subtitle,
         is_error=result.is_error,
         # `dict(...)` because a live result's meta arrives frozen as a
@@ -163,7 +175,7 @@ def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:
 
 @plugin("rlm-presentation", affects="environment", inject=[TOOLS])
 async def apply(ctx: Context, config: None) -> None:
-    """Present the transport as `ipython`, with the RLM cell projections.
+    """Present the transport as `python`, with the RLM cell projections.
 
     `present_as("code")` is *not* called here. The mode is the profile's, set by
     the bundle's `tools` row, and claiming it again would put two rows on one
@@ -171,8 +183,8 @@ async def apply(ctx: Context, config: None) -> None:
     """
     ctx.require(TOOLS).present_transport(
         TransportPresentation(
-            name=IPYTHON,
-            description=IPYTHON_DESCRIPTION,
+            name=PYTHON,
+            description=PYTHON_DESCRIPTION,
             output=ToolOutput(
                 schema=CodeCellValue,
                 render=render_cell,

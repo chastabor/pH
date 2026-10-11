@@ -667,10 +667,13 @@ def _tombstone(received: list[dict[str, object]]) -> CodeBindingNamespace:
     )
 
 
-async def test_one_positional_argument_is_the_first_parameter(make_kernel: MakeKernel) -> None:
-    """A live model wrote `tools.context_tombstone(['S12'], reason=...)` against a
-    keyword-only listing and lost the step it had to edit in. The first parameter may
-    come positionally; what reaches the host is keywords.
+async def test_a_binding_is_called_the_way_the_listing_shows_it(
+    make_kernel: MakeKernel,
+) -> None:
+    """The SDK listing renders `async def tools.tombstone(sections, reason)`, so
+    positional arguments bind in that order. A live model wrote
+    `tools.context_tombstone(['S12'], reason=...)` from the listing and was refused when
+    the proxy took keywords only, losing the step it had to edit in.
 
     Sabotage: drop the parameter names from `_declare`, and the call is refused.
     """
@@ -678,23 +681,35 @@ async def test_one_positional_argument_is_the_first_parameter(make_kernel: MakeK
     namespace = _tombstone(received)
     kernel = await make_kernel(namespaces=(namespace,))
 
-    result = await kernel.run("await tools.tombstone(['S12'], reason='done')", (namespace,), None)
+    result = await kernel.run(
+        "await tools.tombstone(['S1'], reason='a')\nawait tools.tombstone(['S2'], 'b')",
+        (namespace,),
+        None,
+    )
 
     assert result.error is None, result.error
-    assert received == [{"sections": ["S12"], "reason": "done"}]
+    assert received == [
+        {"sections": ["S1"], "reason": "a"},
+        {"sections": ["S2"], "reason": "b"},
+    ]
 
 
-async def test_more_positional_arguments_are_refused_with_the_call_spelled_out(
-    make_kernel: MakeKernel,
+@pytest.mark.parametrize(
+    "call",
+    ["await tools.tombstone(['S1'], 'b', 'extra')", "await tools.tombstone(['S1'], sections=[])"],
+)
+async def test_a_call_the_listing_cannot_mean_is_refused_with_it_spelled_out(
+    make_kernel: MakeKernel, call: str
 ) -> None:
+    """More positionals than parameters, or one given both ways."""
     received: list[dict[str, object]] = []
     namespace = _tombstone(received)
     kernel = await make_kernel(namespaces=(namespace,))
 
-    result = await kernel.run("await tools.tombstone(['S12'], 'done')", (namespace,), None)
+    result = await kernel.run(call, (namespace,), None)
 
     assert result.error is not None
-    assert "tools.tombstone(sections=..., reason=...)" in result.error, result.error
+    assert "tools.tombstone(sections, reason)" in result.error, result.error
     assert received == [], "a refused call reached the host"
 
 

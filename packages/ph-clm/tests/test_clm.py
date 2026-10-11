@@ -17,6 +17,7 @@ from clm_helpers import (
     answer_first_request,
     converse,
     edit,
+    filler,
     human_text,
     model_text,
     mounted,
@@ -526,9 +527,7 @@ async def test_fit_gates_a_batch_as_one_change(mount: MountProfile) -> None:
         "request/context",
         {"provider": "fake", "model": "m", "contextWindow": window},
     )
-    text = "word " * 100
-    while meter.measure_text(text) < room * 6 // 10:
-        text += "word " * 100
+    text = filler(meter, room * 6 // 10)
     sections = editor.sections(agent.session)
     drafts = [editor.replacing(sections, position, position + 1, text) for position in (2, 3)]
 
