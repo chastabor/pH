@@ -23,6 +23,7 @@ from ph.cordis import ChildLimit, ChildReach, Context, Profile, ProfileDocument,
 from ph.json import JsonObject, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SANDBOX, SESSIONS, SKILLS, SUBAGENTS
 from ph.paths import canonical
+from ph.seams.models import ModelChoice, choose
 from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
 from ph.seams.skills import Skill
 from ph.seams.subagents import SubagentRequest, SubagentSpawnError
@@ -107,6 +108,81 @@ async def test_a_spawn_names_a_listed_model_by_key(mount: MountProfile) -> None:
     run = await _spawn(ctx, parent, model_key="classify")
 
     assert run.model == "fake-9"
+
+
+TUNED: JsonObject = {
+    "id": "models",
+    "config": {
+        "default": "main",
+        "models": {
+            "main": {
+                "provider": "fake",
+                "model": "fake-1",
+                "temperature": 0.9,
+                "maxTokens": 64,
+                "reasoningEffort": "low",
+            },
+            "careful": {
+                "provider": "fake",
+                "model": "fake-7",
+                "temperature": 0.2,
+                "maxTokens": 777,
+                "reasoningEffort": "high",
+            },
+            "plain": {"provider": "fake", "model": "fake-9"},
+        },
+    },
+}
+"""Routes with call settings and one with none, so a child that took its parent's
+settings rather than its route's shows it."""
+
+
+async def _tuned_parent(mount: MountProfile) -> tuple[Context, Any]:
+    """A parent started on `main` the way a daemon starts a root: the entry's options."""
+    ctx = await mount(dict(PROVIDER_ROW), dict(TUNED))
+    session = ctx.require(SESSIONS).create("parent")
+    return ctx, ctx.require(AGENTS).create(session, choose(ctx, ModelChoice(key="main")).options())
+
+
+async def test_a_child_on_a_listed_route_runs_with_that_route_s_settings(
+    mount: MountProfile,
+) -> None:
+    """Its temperature, token budget and effort, as a root started on the key has them,
+    and recorded with the route, since a restart rebuilds the child from its admission.
+    Sabotage: drop the settings from `resolve_model`, and the child runs with none."""
+    ctx, parent = await _tuned_parent(mount)
+
+    run = await _spawn(ctx, parent, model_key="careful")
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert child.options == choose(ctx, ModelChoice(key="careful")).options()
+    admitted = _admitted(ctx, parent)
+    assert (admitted["temperature"], admitted["maxTokens"]) == (0.2, 777)
+
+
+async def test_a_listed_route_that_sets_nothing_takes_nothing_from_the_parent(
+    mount: MountProfile,
+) -> None:
+    """A temperature tuned for the parent's model is not one for this one. Sabotage:
+    build the child from its parent's options with the route swapped in, as `ph_rlm`
+    did, and it runs at its parent's 0.9 on a 64-token budget."""
+    ctx, parent = await _tuned_parent(mount)
+
+    run = await _spawn(ctx, parent, model_key="plain")
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert child.options == choose(ctx, ModelChoice(key="plain")).options()
+
+
+async def test_a_child_on_its_parent_s_route_runs_with_its_parent_s_settings(
+    mount: MountProfile,
+) -> None:
+    ctx, parent = await _tuned_parent(mount)
+
+    run = await _spawn(ctx, parent)
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert child.options == parent.options
 
 
 async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(

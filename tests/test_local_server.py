@@ -47,7 +47,7 @@ from typing import Any
 
 import httpx
 import pytest
-from local_server import LIVE, answer_of, get_json, server_props, server_root
+from local_server import LIVE, TEMPERATURE, answer_of, get_json, server_props, server_root
 
 from ph.agent.types import AgentOptions
 from ph.json import as_int, as_obj
@@ -69,16 +69,27 @@ fixture step, and skipped rather than failed when absent, since a clone that
 omitted it is not a defect in pH."""
 
 
-def _options(model: str, *, max_tokens: int = 32) -> AgentOptions:
-    """Small `max_tokens` by default, because what is under test is the round trip.
+BUDGET = 512
+"""Every test's `max_tokens`, measured rather than guessed: a thinking model spends
+the budget on its thinking before it answers.
 
-    The answer's *content* is not asserted anywhere above — a local server runs
+Each request here was replayed 25 times against Qwen3.8-27B at `TEMPERATURE`. The
+longest reply, thinking and answer together, was 462 tokens; a typical "say ok" was
+about 20. The budget was 32, and the turn test failed about one run in six on
+`max-tokens`; the vision test's empty answer was its 256 spent the same way. A
+normal run stops on its own, so the headroom costs nothing until a model rambles,
+and then it caps the ramble at about a minute."""
+
+
+def _options(model: str) -> AgentOptions:
+    """The route's options for every test here: `BUDGET` and `TEMPERATURE`.
+
+    The answer's *content* is not asserted anywhere here — a local server runs
     whatever model the person loaded, and a gate that expected a particular word
     would be a test of that model's instruction following. The vision test is
-    the one exception and says why, and it is also why this is a parameter: a
-    model that narrates before answering needs room to reach the answer.
+    the one exception and says why.
     """
-    return AgentOptions(provider="llama", model=model, max_tokens=max_tokens)
+    return AgentOptions(provider="llama", model=model, max_tokens=BUDGET, temperature=TEMPERATURE)
 
 
 def _usage(session: Session) -> list[dict[str, Any]]:
@@ -147,7 +158,7 @@ async def test_a_tool_call_comes_back_parsed(
     (tmp_path / "note.txt").write_text("the secret word is marmalade\n", encoding="utf-8")
     ctx = await mount(profile=resolve_profile("llama"))
     session = ctx.require(SESSIONS).create("local-tools")
-    agent = ctx.require(AGENTS).create(session, _options(route, max_tokens=256))
+    agent = ctx.require(AGENTS).create(session, _options(route))
 
     await agent.prompt("Use the read tool to read the file note.txt, then say what it contains.")
 
@@ -181,7 +192,7 @@ async def test_thinking_does_not_arrive_as_the_answer(mount: MountProfile, route
     """
     ctx = await mount(profile=resolve_profile("llama"))
     session = ctx.require(SESSIONS).create("local-reasoning")
-    agent = ctx.require(AGENTS).create(session, _options(route, max_tokens=256))
+    agent = ctx.require(AGENTS).create(session, _options(route))
 
     await agent.prompt("Say ok.")
 
@@ -380,6 +391,10 @@ async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
       instruction following the way "reply with exactly `ok`" would be. A model
       that gets this wrong while the first assertion passes is a model that
       cannot see, which is worth a failure even though the fix is not pH's.
+      The failure says how the turn ended, because an empty answer has two
+      causes: a thinking model that spent the whole budget before answering
+      ends on `max-tokens`, and a server that refused the request ends on
+      `error`. Neither is a picture that failed to arrive.
 
     Skipped when the server declares no vision: `--mmproj` is a launch flag, not
     a property of pH, and a red suite for a server started without it would be a
@@ -398,7 +413,7 @@ async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
     # the path with the harness's own permissions, and `prompt_message` is the
     # message `prompted` builds — text first, then the media.
     refs = await ingest(ctx, [CAT])
-    agent = ctx.require(AGENTS).create(session, _options(route, max_tokens=256))
+    agent = ctx.require(AGENTS).create(session, _options(route))
     agent.followup(prompt_message("What animal is in this photograph?", refs))
     await agent.run()
 
@@ -408,7 +423,10 @@ async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
         f"{[dict(event.data) for event in degraded]}"
     )
     answer = answer_of(session)
+    *_, ended = session.select("turn/end")
     assert any(word in answer.lower() for word in ("cat", "kitten", "feline")), (
-        f"nothing in the answer names the animal in {CAT.name}, so the picture "
-        f"probably did not arrive as one: {answer!r}"
+        f"nothing in the answer names the animal in {CAT.name}: {answer!r}. The turn "
+        f"ended {dict(as_obj(ended.data['reason']))}: `max-tokens` is a budget spent "
+        "before the answer, thinking included; `completed` means the picture "
+        "probably did not arrive as one"
     )

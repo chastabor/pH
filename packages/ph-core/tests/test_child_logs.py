@@ -10,13 +10,14 @@ provider's.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import anyio
 import pytest
 
-from ph.agent.types import AgentDriver
+from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
 from ph.json import JsonValue, as_obj, as_seq, as_str
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS
@@ -29,6 +30,7 @@ from ph.seams.subagents import (
     SubagentRequest,
     SubagentRun,
     SubagentSpawnError,
+    child_options,
     exhausted_detail,
     record_deleted,
     record_ended,
@@ -61,6 +63,8 @@ class _Readmitting:
 
     inner: StubSubagentProvider
     asked: list[str] = field(default_factory=list)
+    requests: list[SubagentRequest] = field(default_factory=list)
+    """What each was rebuilt into from its admission."""
 
     async def start(self, request: SubagentRequest) -> SubagentRun:
         return await self.inner.start(request)
@@ -69,19 +73,31 @@ class _Readmitting:
         self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
     ) -> SubagentRun | None:
         self.asked.append(run_id)
+        self.requests.append(request)
         return None
 
 
 async def _from_an_earlier_process(
-    ctx: Context, parent: Session, *records: tuple[str, dict[str, JsonValue]], owner: str = "stub"
+    ctx: Context,
+    parent: Session,
+    *records: tuple[str, dict[str, JsonValue]],
+    owner: str = "stub",
+    admission: Mapping[str, JsonValue] | None = None,
 ) -> str:
     """A child admitted by `owner`, its log on disk and nothing about it in memory —
-    what the next process finds. Returns its session id."""
+    what the next process finds; `admission` adds to its record. Returns its session
+    id."""
     child = admitted_child(
         ctx,
         parent,
         "r1",
-        {"name": "scout", "owner": owner, "prompt": "look", "modelProvider": "fake"},
+        {
+            "name": "scout",
+            "owner": owner,
+            "prompt": "look",
+            "modelProvider": "fake",
+            **(admission or {}),
+        },
     )
     for kind, data in records:
         log_event(child, kind, data)
@@ -222,6 +238,40 @@ async def test_readmission_finds_the_provider_that_admitted_the_child(
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
 
     assert (first.asked, second.asked) == ([], ["r1"])
+
+
+async def test_a_readmitted_child_keeps_its_listed_route_s_settings(mount: MountProfile) -> None:
+    """A restart rebuilds a child from its admission and nothing else, and the parent's
+    list may have changed since: a listed route's temperature and token budget are
+    recorded with the route, and the child comes back with them.
+
+    Sabotage: leave them out of `_request_of`, and the child comes back with none.
+    """
+    ctx = await mount()
+    provider = _Readmitting(StubSubagentProvider(root=ctx))
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
+    parent = _parent(ctx)
+    assert parent.session is not None
+    route: dict[str, JsonValue] = {
+        "model": "fake-7",
+        "modelKey": "careful",
+        "reasoningEffort": "high",
+        "temperature": 0.2,
+        "maxTokens": 777,
+    }
+    await _from_an_earlier_process(ctx, parent.session, admission=route)
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    (request,) = provider.requests
+    assert child_options(request) == AgentOptions(
+        provider="fake",
+        model="fake-7",
+        max_tokens=777,
+        temperature=0.2,
+        reasoning_effort="high",
+        model_key="careful",
+    )
 
 
 async def test_a_child_settled_by_an_earlier_process_can_be_deleted(mount: MountProfile) -> None:

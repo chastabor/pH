@@ -31,6 +31,7 @@ from ph_app.profiles import PROFILE_DIR, resolve_profile
 
 __all__ = [
     "LIVE",
+    "TEMPERATURE",
     "answer_of",
     "cells_after",
     "get_json",
@@ -50,6 +51,17 @@ LIVE = pytest.mark.skipif(
 """**Opt-in, and the opt-in is the base URL**: nothing marked with this runs unless
 `LLAMA_BASE_URL` is set, so a developer with something unrelated listening on the
 port never has a suite talk to it."""
+
+TEMPERATURE = 0.6
+"""Pinned on every live request, so the gate does not depend on how the server was
+started — and a child a live agent delegates to inherits it with the rest of its
+parent's options.
+
+Measured on `test_local_server.py`'s requests, each replayed 25 times: at the
+server's earlier 1.0 there was a runaway tail — one "reply with ok" thought for 7,446
+tokens, about sixteen minutes at a 27B model's speed, and then called a tool nobody
+asked for. At 0.6, the setting Qwen's model cards give for thinking, the longest of
+175 replies was 462 tokens and none called a stray tool."""
 
 PROBE_TIMEOUT = 30.0
 """For the metadata endpoints only. Generation gets the adapter's own timeout, which
@@ -137,7 +149,8 @@ async def live_agent(
     ctx = await mount(profile=[*resolve_profile(profile), PROFILE_DIR / "llama.yaml"])
     session = ctx.require(SESSIONS).create(name)
     agent = ctx.require(AGENTS).create(
-        session, AgentOptions(provider="llama", model=route, max_tokens=2048)
+        session,
+        AgentOptions(provider="llama", model=route, max_tokens=2048, temperature=TEMPERATURE),
     )
     assert isinstance(agent, ReactLoopAgent)
     return ctx, agent

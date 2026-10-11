@@ -749,8 +749,23 @@ trigger; positional calls both spelled out and accepted; and `fit` gating a batc
   trigger). `./test.sh smoke`: 14 passed (one fewer: the "offered `python`" check
   folded into the kernel test). A second pass failed two route tests in
   `test_local_server.py` — the turn ended on `max-tokens` (32) and the picture's
-  answer was empty (256) — then that file passed 3 of 3: Qwen's thinking
-  sometimes outruns those budgets. Unchanged by this pass; left as it is.
+  answer was empty (256).
+- **The route tests' budget, measured.** Each route-test request, captured off the
+  wire, was replayed 25 times with an 8,192-token cap. At the server's temperature
+  1.0 the turn test went past 32 in 4 of 25 replies and the picture test past 256 in
+  1 of 25, and there was a runaway tail: one "reply with ok" thought for 7,446
+  tokens (about sixteen minutes at 7.8 tokens a second) and then called a tool. At
+  0.6 the longest of 175 replies was 462 tokens, with no stray tool calls. The image
+  costs 627 prompt tokens, so the slot was never the problem. Now every route test
+  sends `max_tokens` 512 and `temperature` 0.6 (`BUDGET`, `TEMPERATURE`), so the gate
+  does not depend on how the server was started; the picture test's failure names
+  how the turn ended.
+- **The clm edit tests check the section, not the text.** A live run failed
+  `test_the_model_removes_a_section_with_the_context_tools` after its edit had
+  landed: the model printed the context file in a cell of its own first, which
+  copied the listing into a new result. Both edit tests now assert that the
+  section's own nodes left the surface. Smoke after the route change: one clean
+  pass, then that failure; after the clm fix, two clean passes, 14 of 14 each.
 
 ### Phase 3's gate, run live
 

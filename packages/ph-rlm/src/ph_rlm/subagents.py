@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 
 import anyio
@@ -67,8 +67,7 @@ from ph.seams.subagents import (
     SubagentResult,
     SubagentRun,
     SubagentSpawnError,
-    child_model_key,
-    child_route,
+    child_options,
     open_child_log,
     record_deleted,
     record_ended,
@@ -159,11 +158,12 @@ class _Child:
     run: SubagentRun
     finished: anyio.Event
     options: AgentOptions
-    """The options the child's agent was built with: its parent's at spawn, with the
-    child's route resolved over them. Kept for a rehydration, which rebuilds the agent
-    after the parent that lent them may have gone. The admission records the route and
-    the reasoning effort the spawn *asked* for (`Admission.reasoning_effort`); an
-    effort it left unnamed was its parent's, and survives only here."""
+    """The options the child's agent was built with (`child_options`): a listed route's
+    own, or on its parent's route its parent's at spawn. Kept for a rehydration, which
+    rebuilds the agent after the parent that lent them may have gone. The admission
+    records the route, a listed route's settings and the reasoning effort the spawn
+    *asked* for (`Admission.reasoning_effort`); on its parent's route, settings it
+    inherited survive only here."""
     agent: AgentDriver | None = None
     session: Session | None = None
     job_id: str | None = None
@@ -284,20 +284,13 @@ class RlmChildProvider:
         parent = request.parent
         parent_session = self._parent_session(parent)
         prompt = request.prompt.strip()
-        provider_name, model, effort = self._resolve_model(request, parent)
+        options = self._child_options(request)
 
         child_session = await self._child_session(parent_session, run_id)
         # Created before the seam writes the admission, so the ways `agents.create`
         # can fail — no driver, no route, options the driver rejects — cannot leave
         # an admitted child behind. It does not *run* yet, so the ordering the log
         # cares about still holds.
-        options = replace(
-            parent.options,
-            provider=provider_name,
-            model=model,
-            reasoning_effort=effort,
-            model_key=child_model_key(request),
-        )
         try:
             # `parent=` nests the child's scope inside its parent's (P6-27), so
             # the ceiling is inherited rather than applied.
@@ -323,8 +316,8 @@ class RlmChildProvider:
             name=name,
             session_id=child_session.id,
             parent_id=parent.id,
-            model_provider=provider_name,
-            model=model,
+            model_provider=options.provider,
+            model=options.model,
             requested_access=request.access,
             granted_access=granted,
             downgrade_reason=downgrade,
@@ -403,17 +396,16 @@ class RlmChildProvider:
         """
         return await open_child_log(self.ctx, parent_session, run_id, agentPreset="rlm")
 
-    def _resolve_model(
-        self, request: SubagentRequest, parent: AgentHandle
-    ) -> tuple[str, str, str | None]:
-        """The child's model, with **no fallback** on an explicit selector.
+    def _child_options(self, request: SubagentRequest) -> AgentOptions:
+        """The child's options (`child_options`), with **no fallback** on an explicit
+        selector.
 
         Falling back would answer the parent's question on a model it did not
         choose, and the parent has no way to tell from the reply.
         """
-        options = parent.options
-        provider_name, model = child_route(request)
-        if not provider_name or not model:
+        options = child_options(request)
+        provider_name = options.provider
+        if not provider_name or not options.model:
             raise SubagentSpawnError(
                 "a subagent needs a provider and a model; the parent has none to inherit"
             )
@@ -429,7 +421,7 @@ class RlmChildProvider:
                 f'provider "{provider_name}" has no registered adapter, so a child cannot '
                 f"run on it: {error}"
             ) from error
-        return provider_name, model, request.reasoning_effort or options.reasoning_effort
+        return options
 
     # ------------------------------------------------------------- lifecycle --
 

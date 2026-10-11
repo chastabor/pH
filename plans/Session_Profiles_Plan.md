@@ -668,6 +668,14 @@ nothing committed by Claude.
     - **`model` is a key now, not a model name.** A spawn could name any model string on
       its parent's provider; the list bounds what an agent picks (S1c's settlement). A
       readmitted child keeps the route it was admitted on and is not resolved again.
+    - **A child on a listed route runs with that route's settings, not its parent's**
+      (found later, live). `resolve_model` read only the provider, model and effort off
+      the entry, and the provider built the child from its parent's options with those
+      swapped in, so a child on `fast` kept its parent's temperature and token budget,
+      and its parent's effort when the route named none. `resolve_model` now reads
+      `temperature` and `maxTokens` too, `ph.seams.subagents.child_options` builds a
+      child's options by one rule (a listed route's own, else its parent's), and the
+      admission records the settings so a readmitted child comes back with them.
     - **An assigned profile is read, not mounted**, for what a child can hold less of:
       a row it runs that the parent does not is refused by name; the tools of rows it
       does not run are taken away; skills by the `skills-progressive` paths; its models

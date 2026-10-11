@@ -29,7 +29,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from clm_helpers import context_tokens, filler, model_text, readout_share
+from clm_helpers import context_tokens, filler, readout_share
 from local_server import LIVE, cells_after, live_agent, output_of
 
 from ph.agent_loop.driver import ReactLoopAgent
@@ -123,6 +123,17 @@ def _declined(agent: ReactLoopAgent) -> list[str]:
     return [str(event.data.get("reason")) for event in agent.session.select(DECLINED)]
 
 
+def _still_sent(agent: ReactLoopAgent, section: Section) -> set[int]:
+    """The section's own nodes still in what the model is sent — none, once it is removed.
+
+    Its nodes and not the listing's text: a model that looks before it edits —
+    printing the context file in a cell of its own — copies the listing into a new
+    result, which is its own doing and not the edit's. A live run did exactly that,
+    and the text check failed an edit that had landed.
+    """
+    return set(section.nodes) & set(agent.session.surface.nodes)
+
+
 async def test_a_result_past_half_the_window_ends_with_a_readout(
     mount: MountProfile, route: str, tmp_path: Path
 ) -> None:
@@ -179,7 +190,7 @@ async def test_the_model_removes_a_section_with_the_context_tools(
     mount: MountProfile, route: str
 ) -> None:
     """Told which tool, which section and why, from a cell: the edit lands as a
-    tombstone through the tools, and the listing leaves what the model is sent."""
+    tombstone through the tools, and the section leaves what the model is sent."""
     ctx, agent = await live_agent(mount, route, "rlm-clm", "clm-live-tools")
     step = _noisy(ctx, agent)
     asked = len(agent.session.events)
@@ -195,7 +206,7 @@ async def test_the_model_removes_a_section_with_the_context_tools(
     assert revisions, f"no edit landed; declined: {_declined(agent)}"
     assert revisions[0].data["via"] == "tool" and revisions[0].data["verb"] == "tombstone"
     assert revisions[0].data["first"] == step.id
-    assert NOISE not in model_text(agent.session), "the listing is still in what the model sees"
+    assert not _still_sent(agent, step), "the section is still in what the model is sent"
 
 
 async def test_the_model_removes_a_section_by_editing_the_context_file(
@@ -221,4 +232,4 @@ async def test_the_model_removes_a_section_by_editing_the_context_file(
     assert revisions[0].data["via"] == "mirror"
     applied = [cell for cell in cells if "[context file applied." in output_of(agent.session, cell)]
     assert applied, "no cell's result carried the receipt"
-    assert NOISE not in model_text(agent.session), "the listing is still in what the model sees"
+    assert not _still_sent(agent, step), "the section is still in what the model is sent"

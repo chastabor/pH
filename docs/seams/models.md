@@ -17,7 +17,8 @@ nowhere a profile could say. The row lists them by key:
 ```
 
 Each route may carry `reasoningEffort`, `temperature` and `maxTokens`, which a
-root started on it gets as its agent settings. `default` must be a listed key; a
+root started on it gets as its agent settings, and so does a child an agent starts
+on it by key (`child_options`), rather than its parent's. `default` must be a listed key; a
 list may be empty, which is `ph-base`'s: it registers no adapter, so there is
 nothing to list.
 
