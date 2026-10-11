@@ -18,8 +18,16 @@ from typing import Any
 import pytest
 from daemon_helpers import daemon_in_thread
 from textual.app import App, ComposeResult
-from tui_helpers import tui_app, until
+from tui_helpers import revisable, rewritten, stand_in, tui_app, until
 
+from ph.session import Session, substitute
+from ph.session.known_event_types import declare_log_type
+from ph.testing import (
+    isolated_log_types,
+    log_event,
+)
+from ph_app.tui.diff_screen import DiffScreen
+from ph_app.tui.diffs import build_diffs
 from ph_app.tui.state import ChatItem, ToolCard, TuiState
 from ph_app.tui.themes import DEFAULT_THEME, fallback_variables, load_catalog
 from ph_app.tui.widgets.transcript import TranscriptView
@@ -174,6 +182,43 @@ def test_a_compaction_marker_keeps_what_it_replaced(snap_compare: Any) -> None: 
         ChatItem(key="u2", role="user", text="and now the next thing", seq=4),
     )
     assert snap_compare(_Snapshot(items), terminal_size=(80, 18))
+
+
+class _DiffSnapshot(App[None]):
+    """The diff screen alone, over a log built by hand, opened at one change."""
+
+    def __init__(self, session: Session, at: int) -> None:
+        super().__init__()
+        self.session = session
+        self.at = at
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return fallback_variables()
+
+    async def on_mount(self) -> None:
+        load_catalog().install(self)
+        self.theme = DEFAULT_THEME
+        screen = DiffScreen(build_diffs(self.session), session_id=self.session.id)
+        screen.reveal(self.at)
+        await self.push_screen(screen)
+
+
+def test_the_diff_screen_shows_a_change_its_records_and_its_diff(
+    snap_compare: Any,  # noqa: ANN401
+) -> None:
+    """A rewrite and the stand-in over it: the table, the stand-in's record with its
+    recorded size, and the diff against what it replaced."""
+    session, _, replied, result = revisable("# a\nfirst line\nsecond line")
+    cut = rewritten(session, result, "# a\n(2 lines cut)")
+    with isolated_log_types():
+        declare_log_type("probe/revised", owner="probe", ignorable=True, audit_only=True)
+        with session.batch() as batch:
+            summary = stand_in("Read a.md: a heading and two lines.")
+            replacement = substitute(batch, (replied.seq, cut.seq), summary)
+            log_event(
+                batch, "probe/revised", {"verb": "replace", "tokensBefore": 31, "tokensAfter": 9}
+            )
+    assert snap_compare(_DiffSnapshot(session, replacement.seq), terminal_size=(100, 32))
 
 
 def test_markup_in_user_text_renders_literally(snap_compare: Any) -> None:  # noqa: ANN401

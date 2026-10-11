@@ -40,11 +40,20 @@ than a pair of integers a reader has to match up.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from ..json import JsonValue, thaw_json
-from ..llm.types import Message
+from ..llm.types import (
+    MediaBlock,
+    Message,
+    ReasoningBlock,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    text_of,
+)
+from ..text import block_marker
 from .derive import derive_event_message
 from .events import SessionEvent, SurfaceIntent, SurfaceReplace
 from .surface import REWRITTEN_IN_PLACE, SurfaceError, is_in_place_rewrite, shadowed_by
@@ -55,7 +64,15 @@ if TYPE_CHECKING:
 
 _LOG = log_writer(__name__)
 
-__all__ = ["editable_message", "origin_of", "originals", "rewrite", "substitute"]
+__all__ = [
+    "editable_message",
+    "messages_of",
+    "origin_of",
+    "originals",
+    "render_messages",
+    "rewrite",
+    "substitute",
+]
 
 
 def substitute(
@@ -152,3 +169,41 @@ def originals(session: Session, seq: int) -> Iterator[Message]:
     message = derive_event_message(event)
     if message is not None:
         yield message
+
+
+def messages_of(session: Session, seqs: Iterable[int]) -> Iterator[Message]:
+    """The messages the events at `seqs` carry, in that order — skipping an event that
+    carries none, as an empty assistant turn does. What a revision's two sides are made
+    of, before `render_messages` reads them."""
+    for seq in seqs:
+        event = session.at(seq)
+        if event is not None and (message := derive_event_message(event)) is not None:
+            yield message
+
+
+def render_messages(messages: Iterable[Message]) -> str:
+    """Messages as plain text, one role-headed block each: how a revision and what it
+    stands for read side by side.
+
+    One rendering for every reader that compares a revision with what it replaced, so
+    each shows it the same way. Calls keep their name and arguments and results their
+    text; reasoning and media are markers.
+    """
+    blocks: list[str] = []
+    for message in messages:
+        lines: list[str] = []
+        for block in message.content:
+            match block:
+                case TextBlock():
+                    lines.append(block.text)
+                case ToolCallBlock():
+                    lines.append(f"[call {block.name} {block.arguments}]")
+                case ToolResultBlock():
+                    lines.append(f"[result {block.tool_call_id}]")
+                    lines.append(text_of(block.content, placeholder=block_marker))
+                case ReasoningBlock() | MediaBlock():
+                    lines.append(block_marker(block.type))
+                case _ as unhandled:
+                    assert_never(unhandled)
+        blocks.append(f"[{message.role}]\n" + "\n".join(lines))
+    return "\n\n".join(blocks)

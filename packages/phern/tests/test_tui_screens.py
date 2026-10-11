@@ -3,7 +3,8 @@
 The row's gates, one test each: *a plugin row registers a screen and gets a
 verb, a key and a palette entry; unloading the row removes all three; the
 trajectory opens over the chat and returns to it; a record jumps to its
-transcript row and back.*
+transcript row and back.* The diff screen gets the first two as a shipped screen
+and its own over a log the daemon revised.
 
 The lifetime tests are the ones to read. A screen is easy; a screen whose slash
 command and whose key disappear with the row that contributed it is the property
@@ -21,15 +22,21 @@ from typing import Any
 
 import pytest
 from daemon_helpers import Daemon
-from tui_helpers import MakeApp, root_of, running, turn_done, until
+from textual.pilot import Pilot
+from tui_helpers import MakeApp, root_of, running, stand_in, turn_done, until
 
 import ph_app.tui
 from ph.keys import TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
+from ph.session import Session, SessionEvent, substitute
 from ph_app.daemon.supervisor import Root
+from ph_app.screen_rows import DIFF_KEY
+from ph_app.tui import diffs
 from ph_app.tui.app import PHTuiApp
+from ph_app.tui.diff_screen import DiffScreen
 from ph_app.tui.frontend import FrontSession
 from ph_app.tui.modals.pickers import command_choices
+from ph_app.tui.remote import LOCAL_SCREENS
 from ph_app.tui.trajectory_screen import SCREEN_ID, TRAJECTORY_KEY, TrajectoryScreen
 from ph_app.tui.widgets.prompt import PromptInput
 
@@ -87,16 +94,22 @@ ROUTES = {"command", "palette", "key"}
 # ------------------------------------------------- a verb, a key, an entry --
 
 
+SHIPPED = pytest.mark.parametrize("shipped", LOCAL_SCREENS, ids=lambda one: one.id)
+"""Every screen pH ships, so a screen added to `LOCAL_SCREENS` is held to the same
+gates as the trajectory without a test of its own for each."""
+
+
+@SHIPPED
 async def test_a_contributed_screen_becomes_a_verb_a_key_and_a_palette_entry(
-    make_tui_app: MakeApp,
+    make_tui_app: MakeApp, shipped: ScreenDefinition
 ) -> None:
     """The gate. One `ScreenDefinition`, three routes to it — and the row that
-    contributed the trajectory is an ordinary row, not a special case."""
+    contributed each screen is an ordinary row, not a special case."""
     async with running(make_tui_app()) as (app, _pilot):
-        assert _routes(app, SCREEN_ID) == ROUTES
+        assert _routes(app, shipped.id) == ROUTES
 
-        binding = _binding(app, SCREEN_ID)
-        assert binding is not None and binding.key == TRAJECTORY_KEY
+        binding = _binding(app, shipped.id)
+        assert binding is not None and binding.key == shipped.key
 
 
 async def test_a_plugin_screens_key_is_rebindable_like_every_other(
@@ -116,8 +129,9 @@ async def test_a_plugin_screens_key_is_rebindable_like_every_other(
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
 
 
+@SHIPPED
 async def test_a_screen_hidden_in_tui_json_is_not_offered(
-    make_tui_app: MakeApp, tmp_path: Path
+    make_tui_app: MakeApp, tmp_path: Path, shipped: ScreenDefinition
 ) -> None:
     """Hiding a screen is the terminal's, not the profile's (decision 23).
 
@@ -126,16 +140,17 @@ async def test_a_screen_hidden_in_tui_json_is_not_offered(
     drop the `hidden` check in `_screens_of` and every route comes back.
     """
     (tmp_path / "tui.json").write_text(
-        json.dumps({"hidden_screens": [SCREEN_ID]}), encoding="utf-8"
+        json.dumps({"hidden_screens": [shipped.id]}), encoding="utf-8"
     )
     async with running(make_tui_app()) as (app, _pilot):
         assert app.front is not None
-        assert _routes(app, SCREEN_ID) == set()
-        assert app.front.screen(SCREEN_ID) is None
+        assert _routes(app, shipped.id) == set()
+        assert app.front.screen(shipped.id) is None
 
 
+@SHIPPED
 async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
-    make_tui_app: MakeApp, tui_daemon: Daemon
+    make_tui_app: MakeApp, tui_daemon: Daemon, shipped: ScreenDefinition
 ) -> None:
     """I2 across a socket: a screen's routes do not outlive its row.
 
@@ -146,25 +161,26 @@ async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
     from a terminal one socket removed, which is the whole claim the seam makes
     in process.
 
-    Driven with a *drawable* screen: `trajectory` is the id `LOCAL_SCREENS` has a
-    builder for, so it is the one whose routes a client actually opens. Sabotage:
-    drop the `present_with` subscription and the terminal keeps a verb whose row
-    is gone.
+    Driven with each *drawable* screen: the ids `LOCAL_SCREENS` has a builder
+    for are the ones whose routes a client actually opens. Sabotage: drop the
+    `present_with` subscription and the terminal keeps a verb whose row is gone.
     """
     async with running(make_tui_app()) as (app, pilot):
-        assert _routes(app, SCREEN_ID) == ROUTES
+        assert _routes(app, shipped.id) == ROUTES
 
         row = root_of(tui_daemon).ctx.get("tui_screens")
         assert row is not None
-        entry = row.get(SCREEN_ID)
+        entry = row.get(shipped.id)
         assert entry is not None
-        await until(pilot, lambda: _routes(app, SCREEN_ID) == ROUTES)
+        await until(pilot, lambda: _routes(app, shipped.id) == ROUTES)
 
         # Unload it the way removing the row does: dispose the scope that owns
         # the registration.
-        await _unload(root_of(tui_daemon), SCREEN_ID)
+        await _unload(root_of(tui_daemon), shipped.id)
 
-        await until(pilot, lambda: _routes(app, SCREEN_ID) == set())
+        await until(pilot, lambda: _routes(app, shipped.id) == set())
+        others = {one.id for one in LOCAL_SCREENS} - {shipped.id}
+        assert all(_routes(app, other) == ROUTES for other in others), "it took another's"
 
 
 async def test_a_screen_this_build_cannot_draw_is_not_offered(
@@ -367,6 +383,111 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
             if named or through_self:
                 offenders.append(f"{path.name}:{node.lineno} reads front.{node.attr}")
     assert offenders == [], offenders
+
+
+# ------------------------------------------------------------- the diff --
+
+
+async def _turns_with_revisions(
+    app: PHTuiApp, pilot: Pilot[str | None], root: Root
+) -> list[SessionEvent]:
+    """Three turns, the first two user messages each replaced in the daemon's log
+    after its own turn, so each revision has transcript rows on both sides."""
+    assert app.front is not None
+    front = app.front
+    await pilot.press(*"first")
+    await pilot.press(app.keys.submit)
+    await until(pilot, turn_done(app))
+    landed: list[SessionEvent] = []
+    for text in ("second", "third"):
+        asked = [one for one in root.session.events if one.type == "user/message"][-1]
+        landed.append(substitute(root.session, (asked.seq,), stand_in(f"[{asked.seq}]")))
+        await front.submit(text)
+    await until(pilot, lambda: front.session.seq == root.session.seq)
+    app.state_changed()
+    await until(pilot, lambda: app._view is not None and len(app._view._rows) >= 8)
+    return landed
+
+
+async def _open_diff(app: PHTuiApp, pilot: Pilot[str | None]) -> DiffScreen:
+    await pilot.press(DIFF_KEY)
+    await until(pilot, lambda: isinstance(app.screen, DiffScreen))
+    screen = app.screen
+    assert isinstance(screen, DiffScreen)
+    return screen
+
+
+async def test_the_diff_lists_the_daemons_revisions_and_escape_returns_to_the_chat(
+    make_tui_app: MakeApp, tui_daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built from this client's mirror of the log, which holds every replacement
+    the daemon wrote, so no request beyond the ones the transcript already made; and
+    only the row on screen is rendered."""
+    rendered: list[int] = []
+    render = diffs._texts
+
+    def counting(session: Session, shadowed: tuple[int, ...], seq: int) -> tuple[str, str]:
+        rendered.append(seq)
+        return render(session, shadowed, seq)
+
+    monkeypatch.setattr(diffs, "_texts", counting)
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+        landed = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
+
+        screen = await _open_diff(app, pilot)
+        await pilot.pause()
+        assert [entry.seq for entry in screen.entries] == [one.seq for one in landed]
+        assert {entry.title for entry in screen.entries} == {"stand-in"}
+        selected = screen.selected()
+        assert selected is not None
+        assert set(rendered) == {selected.seq}, "a row nobody looked at was rendered"
+
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, DiffScreen))
+        assert app.focused is app.query_one(PromptInput).area, "the prompt lost focus"
+
+
+async def test_enter_on_a_change_goes_to_its_transcript_row(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
+    """The join the trajectory uses, from the other screen: a substitution's entry
+    lands on the row the replacement drew."""
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+        first, _ = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
+        assert app._view is not None
+        app._view.scroll_to_seq(0)
+        await pilot.pause()
+
+        screen = await _open_diff(app, pilot)
+        assert screen.select_seq(first.seq)
+        await pilot.pause()
+        await pilot.press("enter")
+        await until(pilot, lambda: not isinstance(app.screen, DiffScreen))
+
+        assert app._view.seq_in_view() == first.seq, "the jump landed elsewhere"
+
+
+async def test_opened_from_the_chat_it_starts_at_the_nearest_change_before_the_reader(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
+    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+        first, second = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
+        assert app.front is not None and app._view is not None
+        between = next(
+            item.seq for item in app.front.state.items if first.seq < item.seq < second.seq
+        )
+
+        for reading, expected in ((between, first), (second.seq, second)):
+            app._view.scroll_to_seq(reading)
+            await pilot.pause()
+            screen = await _open_diff(app, pilot)
+            # The cursor moves after the table's first refresh (`DiffScreen.on_mount`).
+            await pilot.pause()
+            await pilot.pause()
+            selected = screen.selected()
+            assert selected is not None and selected.seq == expected.seq
+            await pilot.press("escape")
+            await until(pilot, lambda: not isinstance(app.screen, DiffScreen))
 
 
 async def _unload(root: Root, screen_id: str) -> None:

@@ -17,8 +17,11 @@ import anyio
 from textual.binding import Binding
 from textual.pilot import Pilot
 
+from ph.llm.types import ContextForm, Message, PluginSource, create_user_message
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
+from ph.session import Session, SessionEvent, SurfaceIntent, editable_message, rewrite
+from ph.testing import assistant_payload, log_event, tool_result_payload, user_payload
 from ph_app.daemon.supervisor import Root
 from ph_app.payloads import AskKey, ProfileDecision
 from ph_app.tui.app import PHTuiApp
@@ -264,3 +267,41 @@ class WorkingApp(StubApp):
             await work
 
         self.tasks.start_soon(run)
+
+
+# ------------------------------------------------------- a log to revise --
+
+
+def stand_in(text: str, *, form: ContextForm = "compaction", summary: str | None = None) -> Message:
+    """Text a plugin wrote in place of conversation: a summary (`compaction`, a stand-in)
+    or, with another form, a relocated paste's preview."""
+    return create_user_message(
+        content=[{"type": "text", "text": text}],
+        source=PluginSource(plugin="probe", form=form, summary=summary),
+    )
+
+
+def revisable(output: str) -> tuple[Session, SessionEvent, SessionEvent, SessionEvent]:
+    """user · assistant(call) · tool/result printing `output`, for a test to revise."""
+    session = Session("diffs")
+    asked = log_event(
+        session, "user/message", user_payload("read a.md", "m1"), SurfaceIntent("append")
+    )
+    call = {"type": "tool-call", "id": "c1", "name": "read", "arguments": '{"path": "a.md"}'}
+    replied = log_event(
+        session,
+        "assistant/message",
+        assistant_payload("", "m2", content=[{"type": "text", "text": "reading a.md"}, call]),
+        SurfaceIntent("append"),
+    )
+    result = log_event(
+        session, "tool/result", tool_result_payload(output, "m3", "c1"), SurfaceIntent("append")
+    )
+    return session, asked, replied, result
+
+
+def rewritten(session: Session, result: SessionEvent, text: str) -> SessionEvent:
+    """`result` with its output rewritten in place to `text`."""
+    message = editable_message(result)
+    message["content"][0]["content"] = [{"type": "text", "text": text}]
+    return rewrite(session, result, message)

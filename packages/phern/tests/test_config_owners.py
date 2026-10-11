@@ -120,7 +120,8 @@ def test_every_named_profile_mounts_the_screens_pH_ships() -> None:
     Hiding one is `tui.json`'s (`test_tui_screens.py`)."""
     for name in available_profiles():
         rows = {row.id for row in profile_or_exit(name).enabled_rows()}
-        assert "tui-screen-trajectory" in rows, f"{name} ships without the trajectory screen"
+        for screen in ("tui-screen-trajectory", "tui-screen-diff"):
+            assert screen in rows, f"{name} ships without {screen}"
 
 
 def test_a_session_profile_may_not_remove_a_screen(tmp_path: Path) -> None:

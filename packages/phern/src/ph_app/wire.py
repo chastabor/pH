@@ -37,6 +37,7 @@ from ph.tools.presentation import CARD_VIEWS
 
 __all__ = [
     "describe",
+    "fields_of",
     "first",
     "index_at_or_before",
     "matches_terms",
@@ -154,10 +155,14 @@ def describe(data: object) -> str:
     Read frozen: this builds one truncated line, and deep-copying the payload to
     iterate its top level was a second full copy of the same tree.
     """
-    payload = as_obj(data)
-    return one_line(
-        ", ".join(f"{key}={brief_value(value)}" for key, value in payload.items() if value != "")
-    )
+    return one_line(", ".join(f"{key}={value}" for key, value in fields_of(data)))
+
+
+def fields_of(data: object) -> list[tuple[str, str]]:
+    """A payload's top-level fields as `(key, value)`, each value on one line
+    (`brief_value`) and an empty one left out — what `describe` joins, and what a view
+    that lists the fields one per line shows."""
+    return [(key, brief_value(value)) for key, value in as_obj(data).items() if value != ""]
 
 
 def source_of(message: object) -> tuple[str, str, str]:

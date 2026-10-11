@@ -265,6 +265,7 @@ and these are another, so there is one implementation of the rules:
 | `context_rewrite(section, old, new)` | `str_replace` inside one result or assistant body: an in-place rewrite |
 | `context_diff(section)` | unified diff, current versus the original messages it stands for, read from the log |
 | `context_recall(section, max_tokens)` | the originals behind a replacement, returned as this call's result and bounded like pi-clm's `live_context_recall`. It appends at the tail, so it costs no middle edit (open decision 3). |
+| `context_restore(section)` | undoes the section's latest edit, one level (Phase 5, decision 3's option A): a rewrite exactly; a substitution as the text it shadowed, in one `recall`-form message |
 
 Under Code Mode they are registered as a code namespace (`tools.register_code_namespace`, as
 `rlm-messaging` does). A cell can then compute an edit in Python, which is CLM's
@@ -657,8 +658,92 @@ They are settled here, and the first half of Phase 3 builds them.
 | **3. Budget and prompt** ✅ built; the live gate passes (see "Phase 3's gate, run live") | first, the context file's design (above): label out of the body, escaped forms cached, private and short-lived files, symlinks refused, edits outside a call caught; then budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
 | **3b. One baseline** ✅ | `TokenMeter.baseline` follows the surface from the last reported usage: what was appended since is added, what a replacement shadowed is taken off; readouts and receipts read it | the baseline's own tests and 9 sabotage mutations; compaction's suite with the elision now moving the baseline; readouts counting what the provider counted |
 | **3c. Live-gate fixes** ✅ | the last reminder a margin below compaction's trigger (`CompactionEngine.trigger_fraction`); a readout that spells the call out under Code Mode, and a positional first argument accepted; `fit` gating a batch as one change | each by unit test and 8 sabotage mutations; the ten-file run repeated live |
-| **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
-| **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+| **4. Caching** ⏸ skipped for now: its measurements need an Anthropic key (the lookback probe, decision 5) or a self-hosted Qwen on SGLang with SCR, and neither is available | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
+| **5. Later** ✅ as scoped (see "Phase 5 as built") | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | built: `context_restore` without a format change, and a general `/diff` screen; deferred, each with the evidence that reopens it: the format-4 exact restore, and briefs as files |
+
+### Phase 5 as built: restore, and a general `/diff`
+
+**Scope.** Phase 4 is skipped for now (its measurements need an Anthropic key or a
+self-hosted Qwen on SGLang with SCR). Three read-only passes scoped Phase 5's items,
+and the owner chose: the restore that needs no format change, and the diff panel as a
+general screen over every surface replacement; the format-4 restore and briefs as files
+deferred.
+
+**`context_restore(section)`** (decision 3's option A):
+- Undoes the latest ph-clm edit in a section, one level. The record of the edit that put
+  a node on the surface is the event after it (`Editor.land` writes them adjacent), so
+  finding it is O(1) (`edits._edit_at`, which the tombstone reader now shares).
+- A rewrite goes back to the version it replaced, exactly: the same message, so the
+  door's checks hold and the section keeps its id.
+- A tombstone or replace comes back as what it shadowed, one level down and in surface
+  order (its record keeps that order). One user-role message comes back as a copy, so
+  undoing a restore, or restoring a marker a later edit took in, is exact. Otherwise the
+  messages' text, through `render_messages`, lands in one message under a
+  `[restored context, standing for …]` label, as `form="recall"`: it is the conversation
+  back, not a summary, so compaction may summarize it again (`is_stand_in` is false).
+- A restore is an edit, so restoring it redoes what it undid; it does not step further
+  back. Refused for a section as written, and for one the harness revised (a compaction
+  summary, an offloaded paste), naming `context_recall` instead. The gates apply: `shrink`
+  refuses every restore, as decision 4 said it would. The receipt's "This GREW the
+  context" warning is skipped for a restore, whose point is growth.
+- `Revision` gains `in_place`, so a receipt says whether the edit kept its section's id.
+  It is not recorded: the replacement event says so (`is_in_place_rewrite`), and
+  reconciling a call a crash left open asks it there.
+
+**`render_messages` moved to core** (`ph.session.render_messages`, in `revise.py` beside
+the lineage helpers), so `context_diff`, recall and the `/diff` screen render a revision
+one way. `ph_clm.sections` closes its own `ContentBlock` dispatch now that the match it
+carried is gone (`test_exhaustive_dispatch`).
+
+**The `/diff` screen** (`ph_app.tui.diffs`, `ph_app.tui.diff_screen`, row
+`tui-screen-diff`; `docs/dev-notes/screen-registry-design.md`):
+- `/diff`, `f3` and a palette entry. A table (`# · kind · seq · change · by · size`) over
+  the selected change's details: its summary, its producer, the records that landed in
+  its batch field by field, and a unified diff, computed only for the selected row.
+  Enter goes to the change in the transcript (a rewrite to the row it rewrote).
+- Every surface replacement, whoever wrote it, classified as substitution, stand-in or
+  rewrite from the event alone. No protocol change: the TUI's mirrored session already
+  holds the originals and the records, and `ph_app` imports no bundle.
+- Before is what the change replaced, so a revision of a revision shows each edit once.
+  The size column is a record's own `<unit>Before`/`<unit>After` pair (ph-clm's
+  `tokensBefore`/`tokensAfter`); a change with none has its characters counted when
+  its row is shown. No client-side tokenizer.
+- Nothing is rendered to build the list, and only the row on screen is rendered after:
+  a summary's before can be most of the conversation. Each batch's records are paired
+  with its replacements in one pass, so a compaction batch of a thousand elisions builds
+  in about 20 ms (13k events), where pairing per replacement took 760.
+- **Meant to grow kinds:** `DiffKind` has one member and `SOURCES` one function. A
+  workspace file change or the `/profile diff` would be one more of each.
+
+**Deferred, and what reopens each:**
+- **The exact restore (format 4).** Bringing shadowed nodes back as themselves needs a new
+  surface op, carried by a visible marker node so the one-event-one-node rule the meter,
+  map and mirror rely on holds; the fold must keep each replacement's shadowed seqs in
+  surface order; `TokenMeter.baseline`, the TUI adapter, the trajectory and input-offload
+  each learn it. About 350–500 lines, and every format-3 log stops opening (no migration).
+  If built, include insertion in the same bump and leave reordering out. *Reopen when*
+  recorded sessions show `clm/declined` refusals for reorders or unknown ids, recall
+  followed by a replace that re-types the originals, or flattened restores of tool steps
+  that a model then struggles with.
+- **Sub-agent briefs as files.** CLM's released code has removed its sub-agent
+  implementation (only `SUBCTX` traces in ATIF-CTX remain), and its main gain, handing
+  context over without the model re-typing it, exists already: an `rlm.run` cell can build
+  the prompt from files. *Reopen when* admissions show large prompts or parents re-typing
+  their own context. If built: the text snapshotted into the admission, written to a
+  private file in the child's scratch as a cache rebuilt on readmit, and named something
+  other than "brief", which `Grant.brief` already means.
+- **"Fork from before this change"** as a second action in `/diff`: a fork is exact but
+  discards everything after its boundary and cannot start inside an open turn, so it is a
+  person's branch, not a model's restore (decision 3's option D).
+
+**Found on the way:** an in-place rewrite of an assistant reply draws nothing in the
+transcript (`/diff` lists it); no test checks that a child agent gets a context file of its
+own; DESIGN.md's I4 still describes `replace(start, end)`; `render_messages` shows a tool
+result under `[user]`, as `derive_event_message` gives it.
+
+**What breaks:** `ph_clm.sections.render_messages` is `ph.session.render_messages`
+(beside a new `messages_of`); every shipped named profile ships `tui-screen-diff`
+beside `tui-screen-trajectory`.
 
 ### Phase 3c as built: what the live gate found
 
@@ -1489,6 +1574,9 @@ one decision.
 **Recommendation: B in Phase 1, with A available as an explicit undo.** Hold off on C until
 recorded sessions show that scratchpads or insertion matter. If it is adopted, one format bump
 covers restore, insertion and reordering.
+
+*Built:* B in Phase 1 (`context_recall`); A in Phase 5 (`context_restore`). C stays deferred,
+with the evidence that would reopen it listed under "Phase 5 as built".
 
 ### 4. Edit gate default
 

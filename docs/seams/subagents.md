@@ -101,7 +101,8 @@ profile says. The child runs with that route's call settings (`reasoningEffort`,
 parent's: a temperature tuned for the parent's model is not one for this. A child on
 its parent's route runs with its parent's options. `child_options` states that rule
 once, for every provider. The child's `subagent/admitted` records the key and the
-route's settings beside the route it resolved to.
+whole listed route (`route`, a `ModelRoute`), so no route setting is carried
+field by field.
 Two skills naming different models are refused — name one with `model=`.
 
 `profile="reviewer"` assigns the child a named profile, composed by the host
@@ -223,7 +224,7 @@ that skipped one would miscount the retry ladder or bring back a deleted child.
 
 | record | carries | door | durable when |
 |---|---|---|---|
-| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`, `temperature`, `maxTokens`) and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
+| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`, `route`) and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
 | `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `notice`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
 | `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |
 
@@ -446,8 +447,8 @@ to restore work that was once allowed. Guards gate new work.
 is decided two different ways today:
 
 * **The route is pinned at admission, with its call settings.** The admission
-  records the provider and model the spawn resolved to, and a listed route's
-  `temperature` and `maxTokens`, and `resolve_model` leaves a request that already
+  records the provider and model the spawn resolved to, and a listed route whole
+  (`route`), and `resolve_model` leaves a request that already
   carries a route as it is. So a readmitted child runs on the model and settings
   it was admitted with, even if the skill that chose it (`model:` in its front
   matter) or the parent's `models` list has since moved to another.

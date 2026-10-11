@@ -1,4 +1,4 @@
-"""ph-clm Phase 1: the section map, the edit door, and the five context tools.
+"""ph-clm Phase 1: the section map, the edit door, and the context tools.
 
 The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 1): each verb lands as a
 surface `replace`; the model's view shows the replacement and the person's
@@ -26,12 +26,15 @@ from clm_helpers import (
 
 from ph.json import as_obj, as_seq
 from ph.keys import LLM_FAKE, SESSIONS, TOKEN_METER
-from ph.llm.types import TokenUsage, text_of
+from ph.llm.types import PluginSource, TokenUsage, create_user_message, text_of
 from ph.session import (
     SurfaceIntent,
     balanced_cuts,
+    derive_event_message,
     is_in_place_rewrite,
     is_replacement_surface_event,
+    is_stand_in,
+    substitute,
 )
 from ph.testing import (
     MountProfile,
@@ -416,6 +419,146 @@ async def test_an_unrevised_section_has_nothing_to_recall(mount: MountProfile) -
     assert result.is_error and "has not been revised" in text_of(result.content)
 
 
+# ------------------------------------------------------------------- restore --
+
+
+async def test_a_restored_rewrite_is_the_text_before_it_exactly(mount: MountProfile) -> None:
+    """In place and exact: the same message comes back, so the section keeps its id.
+    Sabotage: restore through a substitution instead, and the id moves."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    reply = sections_of(ctx, agent.session)[2]
+    before = agent.session.derive_messages()
+    await edit(
+        ctx,
+        agent,
+        "context_rewrite",
+        {"section": reply.name, "old": "line 1 of parser.py", "new": "parser.py:1"},
+    )
+
+    result = await edit(ctx, agent, "context_restore", {"section": reply.name})
+
+    assert not result.is_error, result.content
+    assert agent.session.derive_messages() == before
+    assert sections_of(ctx, agent.session)[2].id == reply.id
+    said = text_of(result.content)
+    assert f"Restored {reply.name} to its text before its last edit" in said
+    assert "GREW" not in said, "a restore was warned about for growing, which is its point"
+    record = agent.session.events[-1]
+    assert (record.type, record.data["verb"]) == (REVISED, "restore")
+
+
+async def test_a_restored_tombstone_brings_its_run_back_as_text(mount: MountProfile) -> None:
+    """Flattened, under a label, and not a stand-in: it is the conversation back, so
+    compaction may summarize it again. Sabotage: land it as `compaction`, and it reads
+    as a summary compaction declines to touch."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    step, reply = sections_of(ctx, agent.session)[1:3]
+    shown = human_text(agent.session)
+    await edit(
+        ctx, agent, "context_tombstone", {"sections": [step.name, reply.name], "reason": "done"}
+    )
+    marker = sections_of(ctx, agent.session)[1]
+
+    result = await edit(ctx, agent, "context_restore", {"section": marker.name})
+
+    assert not result.is_error, result.content
+    model = model_text(agent.session)
+    assert f"[restored context, standing for {step.name}..{reply.name}]" in model
+    assert "noise from a long listing" in model and "[call read" in model
+    assert "removed from context" not in model
+    restored = sections_of(ctx, agent.session)[1]
+    event = agent.session.events[restored.nodes[0]]
+    assert not is_stand_in(event) and restored.kind == "context"
+    assert f"now {restored.name}" in text_of(result.content)
+    assert human_text(agent.session) == shown, "a restore changed the person's transcript"
+
+
+async def test_restoring_a_restore_brings_the_marker_back_exactly(mount: MountProfile) -> None:
+    """One user-role message stood there, so it comes back as itself. Sabotage: drop
+    the copy, and the marker returns as text under a second label."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    step = sections_of(ctx, agent.session)[1]
+    await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "done"})
+    marker = sections_of(ctx, agent.session)[1]
+    await edit(ctx, agent, "context_restore", {"section": marker.name})
+
+    result = await edit(
+        ctx, agent, "context_restore", {"section": sections_of(ctx, agent.session)[1].name}
+    )
+
+    assert not result.is_error, result.content
+    first = derive_event_message(agent.session.events[marker.nodes[0]])
+    again = derive_event_message(agent.session.events[sections_of(ctx, agent.session)[1].nodes[0]])
+    assert first is not None and again is not None
+    assert (again.content, again.source) == (first.content, first.source)
+
+
+async def test_restoring_a_restore_redoes_the_edit_it_undid(mount: MountProfile) -> None:
+    """A restore is an edit, and the latest one: restoring again toggles, it does not
+    step further back. Sabotage: pass over restores when picking the edit, and the
+    second restore finds nothing to undo."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    reply = sections_of(ctx, agent.session)[2]
+    for old, new in (("line 1", "line one"), ("parser.py", "the parser")):
+        await edit(ctx, agent, "context_rewrite", {"section": reply.name, "old": old, "new": new})
+
+    await edit(ctx, agent, "context_restore", {"section": reply.name})
+    once = model_text(agent.session)
+    await edit(ctx, agent, "context_restore", {"section": reply.name})
+
+    assert "the bug is on line one of parser.py" in once
+    assert "the bug is on line one of the parser" in model_text(agent.session)
+
+
+async def test_only_a_context_edit_is_restored(mount: MountProfile) -> None:
+    """A section as written has nothing to undo, and one the harness revised — a
+    compaction summary here — is not the model's edit to take back. Sabotage: restore
+    any replacement, and the summary is unpicked."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    step, reply = sections_of(ctx, agent.session)[1:3]
+    summary = create_user_message(
+        content=[{"type": "text", "text": "the parser was read"}],
+        source=PluginSource(plugin="compaction-summarize", form="compaction", summary="read"),
+    )
+    substitute(agent.session, step.nodes, summary)
+    summarized = sections_of(ctx, agent.session)[1]
+    logged = len(agent.session.events)
+
+    harness = await edit(ctx, agent, "context_restore", {"section": summarized.name})
+    written = await edit(ctx, agent, "context_restore", {"section": reply.name})
+
+    assert harness.is_error and "revised by the harness" in text_of(harness.content)
+    assert written.is_error and "has not been revised" in text_of(written.content)
+    assert len(agent.session.events) == logged
+
+
+async def test_the_shrink_gate_refuses_a_restore(mount: MountProfile) -> None:
+    """A restore brings text back, which is growth: `shrink` refuses it, as the plan
+    says it would (decision 4)."""
+    ctx = await mounted(mount, gate="shrink")
+    agent = agent_in(ctx)
+    converse(agent.session)
+    step = sections_of(ctx, agent.session)[1]
+    await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "done"})
+    marker = sections_of(ctx, agent.session)[1]
+    logged = len(agent.session.events)
+
+    result = await edit(ctx, agent, "context_restore", {"section": marker.name})
+
+    assert result.is_error and "gate is `shrink`" in text_of(result.content)
+    assert len(agent.session.events) == logged
+
+
 # --------------------------------------------------------- durability, resume --
 
 
@@ -459,6 +602,29 @@ async def test_a_crash_after_an_edit_reconciles_as_done(mount: MountProfile) -> 
 
     assert isinstance(done, tuple) and "Removed" in text_of(list(done))
     assert isinstance(not_done, NotDone)
+
+
+async def test_a_reconciled_restore_says_what_it_did(mount: MountProfile) -> None:
+    """The record does not say whether a restore kept its section's id; the edit it
+    describes does. Sabotage: leave `in_place` unset when reconciling, and a restored
+    rewrite reads as a section that came back under a new id."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    reply = sections_of(ctx, agent.session)[2]
+    rewrite = {"section": reply.name, "old": "line 1 of parser.py", "new": "parser.py:1"}
+    await run_tool(
+        ctx, "context_rewrite", rewrite, agent=agent, session=agent.session, call_id="call-0"
+    )
+    arguments = {"section": reply.name}
+    await run_tool(
+        ctx, "context_restore", arguments, agent=agent, session=agent.session, call_id="call-1"
+    )
+
+    done = await reconciled_call(ctx, agent.session, "context_restore", arguments)
+
+    assert isinstance(done, tuple)
+    assert f"Restored {reply.name} to its text before its last edit" in text_of(list(done))
 
 
 # --------------------------------------------------------------- in the loop --

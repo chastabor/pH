@@ -53,7 +53,7 @@ from ph.session import (
     shadowed_by,
 )
 from ph.system_prompt.assembly import is_context_snapshot
-from ph.text import block_marker, one_line
+from ph.text import one_line
 from ph.tools.errors import HarnessError
 
 __all__ = [
@@ -61,7 +61,6 @@ __all__ = [
     "Section",
     "SectionMap",
     "label",
-    "render_messages",
     "resolve_one",
     "resolve_run",
     "span_label",
@@ -297,31 +296,6 @@ def resolve_run(
     return start, stop
 
 
-# --------------------------------------------------------------- reading back --
-
-
-def render_messages(messages: Iterable[Message]) -> str:
-    """Messages as plain text, one role-headed block each — for recall and diffs."""
-    blocks: list[str] = []
-    for message in messages:
-        lines: list[str] = []
-        for block in message.content:
-            match block:
-                case TextBlock():
-                    lines.append(block.text)
-                case ToolCallBlock():
-                    lines.append(f"[call {block.name} {block.arguments}]")
-                case ToolResultBlock():
-                    lines.append(f"[result {block.tool_call_id}]")
-                    lines.append(text_of(block.content, placeholder=block_marker))
-                case ReasoningBlock() | MediaBlock():
-                    lines.append(block_marker(block.type))
-                case _ as unhandled:
-                    assert_never(unhandled)
-        blocks.append(f"[{message.role}]\n" + "\n".join(lines))
-    return "\n\n".join(blocks)
-
-
 # ------------------------------------------------------------------ helpers --
 
 
@@ -396,13 +370,17 @@ def _kind(event: SessionEvent, message: Message, calls: tuple[str, ...]) -> Sect
 
 
 def _preview(message: Message) -> str:
+    """The first line of text a message shows: its words, or a result's output."""
     for block in message.content:
-        if isinstance(block, TextBlock):
-            line = first_line(block.text)
-        elif isinstance(block, ToolResultBlock):
-            line = first_line(text_of(block.content))
-        else:
-            continue
+        match block:
+            case TextBlock():
+                line = first_line(block.text)
+            case ToolResultBlock():
+                line = first_line(text_of(block.content))
+            case ToolCallBlock() | ReasoningBlock() | MediaBlock():
+                continue
+            case _ as unhandled:
+                assert_never(unhandled)
         if line:
             return one_line(line, PREVIEW_CHARS)
     return ""

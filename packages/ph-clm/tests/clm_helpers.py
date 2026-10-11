@@ -13,7 +13,7 @@ from ph.cordis import Context
 from ph.keys import AGENTS, LLM_FAKE, SESSIONS, TOKEN_METER
 from ph.llm.types import GenerateOptions, StreamChunk
 from ph.seams.token_meter import TokenMeter
-from ph.session import Session, SurfaceIntent
+from ph.session import Session, SurfaceIntent, render_messages
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -25,7 +25,7 @@ from ph.testing import (
     user_payload,
 )
 from ph.tools.definition import ToolExecutionResult
-from ph_clm.sections import Section, SectionMap, render_messages
+from ph_clm.sections import Section, SectionMap
 
 __all__ = [
     "CALL_ID",

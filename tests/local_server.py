@@ -54,14 +54,14 @@ port never has a suite talk to it."""
 
 TEMPERATURE = 0.6
 """Pinned on every live request, so the gate does not depend on how the server was
-started — and a child a live agent delegates to inherits it with the rest of its
-parent's options.
+started. A child a live agent delegates to on its own route inherits it with the rest
+of its parent's options; one spawned on a listed key runs with that route's.
 
 Measured on `test_local_server.py`'s requests, each replayed 25 times: at the
 server's earlier 1.0 there was a runaway tail — one "reply with ok" thought for 7,446
 tokens, about sixteen minutes at a 27B model's speed, and then called a tool nobody
-asked for. At 0.6, the setting Qwen's model cards give for thinking, the longest of
-175 replies was 462 tokens and none called a stray tool."""
+asked for. At 0.6, the setting Qwen's model cards give for thinking, no reply ran away
+or called a stray tool (`test_local_server.BUDGET` has the lengths)."""
 
 PROBE_TIMEOUT = 30.0
 """For the metadata endpoints only. Generation gets the adapter's own timeout, which

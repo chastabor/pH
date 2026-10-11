@@ -9,8 +9,10 @@
 # also what a TUI attaches to, and a screen nothing draws costs nothing. A person
 # who does not want one hides it in `$PH_HOME/tui.json`.
 
-# The trajectory screen: `/trajectory`, its key and its palette entry, all three
-# with this row's lifetime.
+# Each screen is its own row, so `/<id>`, its key and its palette entry share that
+# row's lifetime: the trajectory (`/trajectory`) and the diff (`/diff`).
 - insert:
     - id: tui-screen-trajectory
       name: tui-screen-trajectory
+    - id: tui-screen-diff
+      name: tui-screen-diff

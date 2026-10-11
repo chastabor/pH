@@ -156,8 +156,8 @@ async def test_a_child_on_a_listed_route_runs_with_that_route_s_settings(
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == choose(ctx, ModelChoice(key="careful")).options()
-    admitted = _admitted(ctx, parent)
-    assert (admitted["temperature"], admitted["maxTokens"]) == (0.2, 777)
+    route = as_obj(_admitted(ctx, parent)["route"])
+    assert (route["model"], route["temperature"], route["maxTokens"]) == ("fake-7", 0.2, 777)
 
 
 async def test_a_listed_route_that_sets_nothing_takes_nothing_from_the_parent(

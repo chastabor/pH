@@ -672,10 +672,11 @@ nothing committed by Claude.
       (found later, live). `resolve_model` read only the provider, model and effort off
       the entry, and the provider built the child from its parent's options with those
       swapped in, so a child on `fast` kept its parent's temperature and token budget,
-      and its parent's effort when the route named none. `resolve_model` now reads
-      `temperature` and `maxTokens` too, `ph.seams.subagents.child_options` builds a
-      child's options by one rule (a listed route's own, else its parent's), and the
-      admission records the settings so a readmitted child comes back with them.
+      and its parent's effort when the route named none. `resolve_model` now puts the
+      entry's whole `ModelRoute` on the request (`SubagentRequest.route`),
+      `ph.seams.subagents.child_options` builds a child's options by one rule (a listed
+      route's `ModelEntry.options()`, else its parent's), and the admission records the
+      route so a readmitted child comes back with it.
     - **An assigned profile is read, not mounted**, for what a child can hold less of:
       a row it runs that the parent does not is refused by name; the tools of rows it
       does not run are taken away; skills by the `skills-progressive` paths; its models

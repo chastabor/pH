@@ -279,3 +279,16 @@ reader scrolls away, so the next event snapped them straight back — which woul
 also have made a jump to a record last exactly until the next chunk arrived. It
 re-arms from the bottom now, and on the first frame that has anything to scroll.
 Scrolling up in a live conversation stays put for the first time as well.
+
+### A second registrant: `/diff`
+
+`tui-screen-diff` (ph-clm's Phase 5, `plans/Ph_Clm_Context_Editing_Plan.md`) follows
+the trajectory row exactly: a daemon-side row in `ph_app.screen_rows` that publishes
+the id, label and key (`f3`), inserted beside the trajectory's in
+`profiles/presentation.yaml`, and a client-side builder in `LOCAL_SCREENS`
+(`ph_app.tui.diff_screen`). It lists every surface replacement in the log — a
+compaction summary, an elided argument, an offloaded paste, a model's own context
+edit — with the records that landed beside each and a unified diff, from the mirrored
+session alone, so it needed no protocol change and the app still imports no bundle.
+It is meant to grow kinds of change: its projection (`ph_app.tui.diffs`) is a tuple
+of source functions, and context revisions are the first.

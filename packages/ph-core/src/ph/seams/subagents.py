@@ -100,7 +100,7 @@ from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
 from .credentials import hold_for_credential, missing_credential
 from .invariants import contribute_fold_cache
-from .models import ModelChoice, ModelChoiceError, choose
+from .models import ModelChoice, ModelChoiceError, ModelEntry, ModelRoute, choose
 from .skills import ORDER_SKILLS, Skill, SkillRestriction, SkillService, record_read
 from .subagent_profiles import narrowing
 from .token_meter import SPENDING_TYPES, event_tokens
@@ -318,29 +318,17 @@ def child_route(request: SubagentRequest) -> tuple[str, str]:
 def child_options(request: SubagentRequest) -> AgentOptions:
     """The options a child's agent runs with.
 
-    **A child on a listed route runs with that route's call settings**, the way a root
-    started on its key does (`ModelEntry.options`): the temperature and token budget
-    `resolve_model` read off the list with the route, and none of its parent's — a
-    temperature tuned for the parent's model is not one for this. A child on its
-    parent's route runs with its parent's options. A reasoning effort the spawn asked
-    for is the child's either way; one it left unnamed is the listed route's, or on
-    its parent's route its parent's.
-
-    Here, once, for every provider that builds a child: `ph_rlm`'s copied its parent's
-    options by hand and swapped the route in, which dropped a listed route's
-    temperature and token budget for the parent's.
+    **A child on a listed route runs with that route's settings**, the way a root started
+    on its key does (`ModelEntry.options`), and none of its parent's: a temperature tuned
+    for the parent's model is not one for this. A child on its parent's route runs with
+    its parent's options. A reasoning effort the spawn asked for is the child's either
+    way. Here once, for every provider that builds a child.
     """
+    if request.route is not None:
+        listed = ModelEntry(key=child_model_key(request), route=request.route).options()
+        return replace(listed, reasoning_effort=request.reasoning_effort or listed.reasoning_effort)
     parent = request.parent.options
     provider, model = child_route(request)
-    if request.model_key:
-        return AgentOptions(
-            provider=provider,
-            model=model,
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-            reasoning_effort=request.reasoning_effort,
-            model_key=request.model_key,
-        )
     return replace(
         parent,
         provider=provider,
@@ -533,11 +521,9 @@ class SubagentRequest:
     profile says (`SubagentService.resolve_model`). `None` with no route runs the
     child on its parent's."""
     reasoning_effort: str | None = None
-    temperature: float | None = None
-    max_tokens: int | None = None
-    """The call settings of the listed route `model_key` names, read off the list with it
-    (`resolve_model`). Read only beside a key: a child on its parent's route runs with
-    its parent's (`child_options`)."""
+    route: ModelRoute | None = None
+    """The listed route `model_key` resolved to (`resolve_model`), whose settings a child
+    on it runs with (`child_options`). `None` runs the child with its parent's."""
     access: Access = "read"
     preset: str | None = None
     """A named kind of child the deployment configured (`subagent-presets`).
@@ -761,9 +747,8 @@ class Admission(WireModel):
     model_key: str | None = None
     """The key a spawn named beside the route it resolved to, for the audit (item 8)."""
     reasoning_effort: str | None = None
-    temperature: float | None = None
-    max_tokens: int | None = None
-    """The listed route's call settings, recorded beside it because a restart rebuilds
+    route: ModelRoute | None = None
+    """The listed route a key resolved to, settings and all, because a restart rebuilds
     the child from this record and nothing else, and the list may have changed since.
     `None` on a child that ran on its parent's route, which inherits again."""
     requested_access: Access = "read"
@@ -802,8 +787,7 @@ def admission_payload(
         model=run.model,
         model_key=request.model_key,
         reasoning_effort=request.reasoning_effort,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens,
+        route=request.route,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
         downgrade_reason=run.downgrade_reason,
@@ -1487,8 +1471,7 @@ class SubagentService:
             provider=entry.route.provider,
             model=entry.route.model,
             reasoning_effort=request.reasoning_effort or entry.route.reasoning_effort,
-            temperature=entry.route.temperature,
-            max_tokens=entry.route.max_tokens,
+            route=entry.route,
         )
 
     def _skill_model(self, request: SubagentRequest) -> str:
@@ -2277,8 +2260,7 @@ class SubagentService:
                 model=admission.model or None,
                 model_key=admission.model_key,
                 reasoning_effort=admission.reasoning_effort,
-                temperature=admission.temperature,
-                max_tokens=admission.max_tokens,
+                route=admission.route,
                 access=admission.requested_access,
                 preset=admission.preset,
                 skills=admission.skills,

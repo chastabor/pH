@@ -253,13 +253,18 @@ async def test_a_readmitted_child_keeps_its_listed_route_s_settings(mount: Mount
     parent = _parent(ctx)
     assert parent.session is not None
     route: dict[str, JsonValue] = {
+        "provider": "fake",
         "model": "fake-7",
-        "modelKey": "careful",
-        "reasoningEffort": "high",
         "temperature": 0.2,
         "maxTokens": 777,
     }
-    await _from_an_earlier_process(ctx, parent.session, admission=route)
+    admission: dict[str, JsonValue] = {
+        "model": "fake-7",
+        "modelKey": "careful",
+        "reasoningEffort": "high",
+        "route": route,
+    }
+    await _from_an_earlier_process(ctx, parent.session, admission=admission)
 
     await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
 

@@ -120,6 +120,7 @@ from ..sessions import SessionSummary
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
 from .commands import action_command, local_commands
+from .diff_screen import CLIENT_SIDE as DIFF
 from .frontend import ModalHost
 from .screens import AppSurface, open_screen_action
 from .state import CatalogEntry, Surface, TuiState
@@ -135,7 +136,7 @@ UNKNOWN_REPEAT = (
 
 log = logging.getLogger("ph_app.tui.remote")
 
-LOCAL_SCREENS: tuple[ScreenDefinition, ...] = (TRAJECTORY,)
+LOCAL_SCREENS: tuple[ScreenDefinition, ...] = (TRAJECTORY, DIFF)
 """Every screen this build can draw without a harness. See the module docstring."""
 
 

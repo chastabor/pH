@@ -13,6 +13,9 @@ the client draws is built by its own copy of the definition
 that cannot travel. Outside `ph_app.tui` on purpose: that package's `__init__`
 imports the app.
 
+Two rows, one per screen, so each screen's verb and key go away with its own row:
+the trajectory (`/trajectory`) and the diff (`/diff`, `ph_app.tui.diff_screen`).
+
 @module ph_app.screen_rows
 """
 
@@ -24,7 +27,7 @@ from ph.cordis import Context, plugin
 from ph.keys import TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
 
-__all__ = ["SCREEN_ID", "TRAJECTORY_KEY", "trajectory"]
+__all__ = ["DIFF_KEY", "DIFF_SCREEN_ID", "SCREEN_ID", "TRAJECTORY_KEY", "diff", "trajectory"]
 
 SCREEN_ID = "trajectory"
 """The trajectory's id in `ctx.tui_screens`, and so `/trajectory` and the binding id."""
@@ -34,11 +37,19 @@ TRAJECTORY_KEY = "f2"
 `tui.json` rebinds it like any built-in (see `TuiKeybindings.extra`)."""
 
 
+DIFF_SCREEN_ID = "diff"
+"""The diff screen's id, and so `/diff` and its binding id."""
+
+DIFF_KEY = "f3"
+"""Its default key, rebindable by id like the trajectory's."""
+
+
 def _built_by_the_front_end(session: object) -> NoReturn:
-    """The daemon's `build`, which nothing calls: a client builds from its own copy."""
+    """The daemon's `build`, which nothing calls: a client builds from its own copy,
+    the screen module's `CLIENT_SIDE`."""
     raise RuntimeError(
-        "the trajectory screen is built by the front end that draws it "
-        "(ph_app.tui.trajectory_screen.CLIENT_SIDE), not by the daemon"
+        "this screen is built by the front end that draws it (its module's CLIENT_SIDE), "
+        "not by the daemon"
     )
 
 
@@ -56,6 +67,25 @@ async def trajectory(ctx: Context, config: None) -> None:
             label="Trajectory",
             order=10,
             key=TRAJECTORY_KEY,
+            build=_built_by_the_front_end,
+        ),
+        scope=ctx,
+    )
+
+
+@plugin("tui-screen-diff", affects="presentation", inject=[TUI_SCREENS])
+async def diff(ctx: Context, config: None) -> None:
+    """Contribute the diff screen: every change the log records, before and after.
+
+    The same shape as `trajectory` above, for the same reason: its verb and its key
+    are effects of this row, gone when it unloads (I2).
+    """
+    ctx.require(TUI_SCREENS).register(
+        ScreenDefinition(
+            id=DIFF_SCREEN_ID,
+            label="Diff",
+            order=20,
+            key=DIFF_KEY,
             build=_built_by_the_front_end,
         ),
         scope=ctx,

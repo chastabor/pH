@@ -540,7 +540,7 @@ the tool call that made it finishes, and that call's result says what changed.
 - Only an edit one of your tool calls makes is applied; the file is rewritten before
   every request.
 - The session log keeps every original; `context_recall` and `context_diff` read
-  them back."""
+  them back, and `context_restore` undoes a section's last edit."""
 
 
 @plugin("clm-mirror", affects="environment", inject=[CLM, TOOLS, SYSTEM_PROMPT])

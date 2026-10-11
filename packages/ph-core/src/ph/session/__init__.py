@@ -66,7 +66,15 @@ from .request_header import (
     fold_request_header,
     header_equals,
 )
-from .revise import editable_message, origin_of, originals, rewrite, substitute
+from .revise import (
+    editable_message,
+    messages_of,
+    origin_of,
+    originals,
+    render_messages,
+    rewrite,
+    substitute,
+)
 from .session import (
     Session,
     SessionBatch,
@@ -182,6 +190,7 @@ __all__ = [
     "key_of",
     "kinds",
     "known_log_types",
+    "messages_of",
     "new_session_id",
     "now_ms",
     "open_call_delta",
@@ -190,6 +199,7 @@ __all__ = [
     "origin_of",
     "originals",
     "outcome_of",
+    "render_messages",
     "rewrite",
     "safe_cutoff",
     "session_written",

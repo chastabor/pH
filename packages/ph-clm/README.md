@@ -24,6 +24,7 @@ changes, so an id read on one call is good on the next.
 | `context_tombstone` | replace a run of sections with a one-line marker saying why |
 | `context_replace` | replace a run of sections with text the model wrote — a summary, or a rewrite |
 | `context_rewrite` | change one passage inside one section's tool output or reply |
+| `context_restore` | undo a section's latest edit, one level: a rewrite exactly, a removed or replaced run as the text it held |
 | `context_recall` | read back the originals a revised section stands for |
 | `context_diff` | a unified diff of a section against the originals it stands for |
 

@@ -82,9 +82,10 @@ it, and `command/run` records it), a Textual action, and a key:
 | `/quit` | `ctrl+d` | |
 
 Rows contribute their own screens and commands through `ctx.tui_screens` and
-`ctx.commands`, and they arrive with the same three routes — `/trajectory` is
-one such screen, contributed by a row rather than built in, and it takes its key
-and palette entry away with it if the row is removed. Screens are presentation,
+`ctx.commands`, and they arrive with the same three routes — `/trajectory` (`f2`)
+and `/diff` (`f3`, every change to what the model sees, before and after) are two
+such screens, each contributed by a row rather than built in, and each takes its
+key and palette entry away with it if its row is removed. Screens are presentation,
 so every named profile ships them (`profiles/presentation.yaml`) and a profile
 may not remove one; `hidden_screens` in `tui.json` hides one from this terminal.
 
@@ -202,6 +203,7 @@ in (`phern config` shows each row's kind; screens and footer readings are
 | `llm-google` | the same shape plus `uploadReadyMs` | `1048576` window, images/audio/video/PDF, 20 MiB, video routed through the Files API |
 | `llm-openai-compatible` | `profiles: [ProviderProfile, …]` | one entry per route; this is the row `llama` and `deepseek` insert |
 | `tui-screen-trajectory` | — | in every named profile (`presentation.yaml`); hidden per terminal in `tui.json` |
+| `tui-screen-diff` | — | in every named profile (`presentation.yaml`); hidden per terminal in `tui.json` |
 
 ```yaml
 # $PH_HOME/profiles/anthropic.yaml — a different model ceiling, caching off

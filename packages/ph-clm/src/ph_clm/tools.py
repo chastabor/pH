@@ -35,7 +35,14 @@ from ph.keys import COMPACTION, TOKEN_METER, TOOLS
 from ph.llm.types import ContentBlock, TextBlock, text_of
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.token_meter import TokenMeter
-from ph.session import Session, SessionEvent, derive_event_message, originals
+from ph.session import (
+    Session,
+    SessionEvent,
+    is_in_place_rewrite,
+    messages_of,
+    originals,
+    render_messages,
+)
 from ph.text import thousands
 from ph.tools.definition import (
     Accept,
@@ -65,7 +72,6 @@ from .sections import (
     Section,
     SectionMap,
     label,
-    render_messages,
     resolve_one,
     span_label,
 )
@@ -134,6 +140,10 @@ class RewriteArgs(ToolModel):
     new: str = Field(description="What it becomes. Empty deletes it.")
 
 
+class RestoreArgs(ToolModel):
+    section: str = Field(description="A section you revised, e.g. S2210.")
+
+
 class RecallArgs(ToolModel):
     section: str = Field(description="A revised section, e.g. S2210.")
     max_tokens: int = Field(2000, ge=128, le=8000, description="The most to return.")
@@ -196,7 +206,7 @@ class DiffValue(ToolModel):
     "clm-context", affects="environment", inject=[TOOLS, TOKEN_METER, COMPACTION], config=Config
 )
 async def apply(ctx: Context, config: Config) -> None:
-    """Register the section map and the five context tools."""
+    """Register the section map and the context tools."""
     tools = ctx.require(TOOLS)
     meter = ctx.require(TOKEN_METER)
     mapper = SectionMap(meter, protect_task=config.protect_task)
@@ -280,11 +290,7 @@ async def apply(ctx: Context, config: Config) -> None:
     def diff_tool(args: DiffArgs, run: ToolRunContext) -> JsonObject:
         session = _session(run)
         section = _revised(session, mapper, args.section)
-        current = render_messages(
-            message
-            for event in map(session.at, section.nodes)
-            if event is not None and (message := derive_event_message(event)) is not None
-        )
+        current = render_messages(messages_of(session, section.nodes))
         lines = difflib.unified_diff(
             _original_text(session, section).splitlines(),
             current.splitlines(),
@@ -350,6 +356,19 @@ async def apply(ctx: Context, config: Config) -> None:
                 session, args.section, args.old, args.new, call_id=call
             ),
             "Rewrite context",
+        )
+    )
+    tools.register(
+        _edit_tool(
+            "context_restore",
+            "Undo the latest edit of one section, one level. A rewrite goes back to the "
+            "text before it, exactly; a removed or replaced run comes back as the text it "
+            "held, in one message under a label, and restoring that undoes the restore. "
+            "Everything after the edit is re-read once; to read the originals without "
+            "changing your context, use context_recall.",
+            RestoreArgs,
+            lambda args, session, call: editor.restore(session, args.section, call_id=call),
+            "Restore context",
         )
     )
     tools.register(
@@ -422,7 +441,9 @@ async def _reconcile_edit(
     for event in session.events_from(opened.seq):
         revision = revision_of(event)
         if revision is not None and revision.call_id == call_id:
-            return Done(_edit_value(revision))
+            landed = session.at(revision.replacement)
+            in_place = landed is not None and is_in_place_rewrite(landed)
+            return Done(_edit_value(replace(revision, in_place=in_place)))
     return NotDone()
 
 

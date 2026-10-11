@@ -1,6 +1,6 @@
 """The one door every context edit goes through.
 
-Three verbs, each one surface `replace` and one `clm/revised` record, committed in
+Four verbs, each one surface `replace` and one `clm/revised` record, committed in
 one `Session.batch()` so the record never lands without the edit it describes:
 
 * **tombstone** — a run of whole sections becomes a one-line marker saying what was
@@ -14,6 +14,12 @@ one `Session.batch()` so the record never lands without the edit it describes:
 * **rewrite** — one passage inside one tool result or one assistant reply changes,
   in place. The call ids and the message id stay, so nothing about the pairing or
   the row moves.
+* **restore** — the latest of these edits in one section, undone one level: a
+  rewrite back to the text before it, exactly; a tombstone or replace as the text of
+  what it stood for, in one message under a label (decision 3's option A). Exact
+  for a substitution needs a surface op that brings shadowed nodes back, which is a
+  format change the plan defers until sessions show it is wanted. A restore is an
+  edit too, so restoring one redoes what it undid.
 
 A substitution (tombstone, replace) is a `user/message` from `PluginSource(plugin=
 "clm", form="compaction")` — the form that claims "this stands in for conversation
@@ -42,12 +48,13 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, assert_never, cast
+from typing import Any, Literal, assert_never, cast, get_args
 
 from ph.json import JsonObject, as_int, as_obj, as_seq, as_str
 from ph.llm.types import (
     CONTEXT_SUMMARY_MAX_CHARS,
     ContentBlock,
+    ContextForm,
     MediaBlock,
     Message,
     PluginSource,
@@ -64,7 +71,11 @@ from ph.session import (
     SessionBatch,
     SessionEvent,
     editable_message,
+    is_in_place_rewrite,
+    messages_of,
+    render_messages,
     rewrite,
+    shadowed_by,
     substitute,
 )
 from ph.session.writers import log_writer
@@ -92,7 +103,7 @@ __all__ = [
 PLUGIN = "clm"
 """The plugin name a substitution's `PluginSource` carries."""
 
-Verb = Literal["tombstone", "replace", "rewrite"]
+Verb = Literal["tombstone", "replace", "rewrite", "restore"]
 Gate = Literal["none", "fit", "shrink"]
 Via = Literal["tool", "mirror"]
 """Which front end an edit came through: a context tool, or the context file."""
@@ -136,6 +147,10 @@ class Revision:
     via: Via = "tool"
     removed: tuple[Removed, ...] = ()
     """For a tombstone: every span its marker stands for, with the reason given."""
+    in_place: bool = False
+    """Whether the edit kept its section's id — a rewrite, and a restore of one — rather
+    than landing a replacement with an id of its own. Not recorded: the replacement
+    event says so itself (`is_in_place_rewrite`), and a reader of the log asks it."""
 
     @property
     def context_after(self) -> int:
@@ -166,7 +181,7 @@ def revision_of(event: SessionEvent | None) -> Revision | None:
         return None
     data = event.data
     verb = as_str(data.get("verb"))
-    if verb not in ("tombstone", "replace", "rewrite"):
+    if verb not in get_args(Verb):
         return None
     via: Via = "mirror" if as_str(data.get("via")) == "mirror" else "tool"
     return Revision(
@@ -205,6 +220,13 @@ def receipt(revisions: Sequence[Revision]) -> str:
                 done.append(f"replaced {span}, now {label(revision.replacement)}")
             case "rewrite":
                 done.append(f"rewrote a passage in {span}")
+            case "restore" if revision.in_place:
+                done.append(f"restored {span} to its text before its last edit")
+            case "restore":
+                done.append(
+                    f"restored what {span} stood for, now {label(revision.replacement)}; "
+                    "restore that to undo this"
+                )
     before = revisions[0].context_before
     after = before + sum(one.tokens_after - one.tokens_before for one in revisions)
     reread = max(one.reread for one in revisions)
@@ -214,7 +236,9 @@ def receipt(revisions: Sequence[Revision]) -> str:
         f"The ~{thousands(reread)} tokens after it are read once more on the next request: "
         "a prefix cache cannot serve past an edit.",
     ]
-    if after > before:
+    if after > before and any(one.verb != "restore" for one in revisions):
+        # A restore grows the context by design; the warning is for a condensing edit
+        # that kept the old text beside the new.
         lines.append(
             "This GREW the context. If you meant to condense, you may have kept the old text "
             "as well as the new."
@@ -258,10 +282,10 @@ class Pending:
 
 @dataclass(frozen=True, slots=True)
 class Editor:
-    """The three verbs, under one row's section map and gate.
+    """The four verbs, under one row's section map and gate.
 
     Each verb is a draft (`tombstoning`, `tombstoning_runs`, `replacing`,
-    `rewriting_text`) that validates and measures without writing, and `land`, which
+    `rewriting_text`, `restoring`) that validates and measures without writing, and `land`, which
     gates and writes. The tools land one draft per call; the context file compiles
     one write into several and lands them together. Drafts take sections the caller
     has already resolved — protection and contiguity are the caller's to have held.
@@ -316,6 +340,12 @@ class Editor:
         draft = self._rewriting(session, section, event, message)
         return self.land(session, [draft], call_id=call_id)[0]
 
+    def restore(self, session: Session, name: str, *, call_id: str | None) -> Revision:
+        """Undo the latest edit of one section, one level."""
+        sections = self.sections(session)
+        section = resolve_one(session, sections, name, editing=True)
+        return self.land(session, [self.restoring(session, sections, section)], call_id=call_id)[0]
+
     # ----------------------------------------------------------------- drafts --
 
     def tombstoning(
@@ -341,7 +371,7 @@ class Editor:
         removed = tuple(_removals(session, sections[start:stop], reason.strip()))
         text = "removed from context: " + "; ".join(one.describe() for one in removed)
         return self._substituting(
-            sections, start, stop, (f"[{text}]",), summary=text, verb="tombstone", removed=removed
+            sections, start, stop, _note((f"[{text}]",), text), verb="tombstone", removed=removed
         )
 
     def tombstoning_runs(
@@ -386,10 +416,53 @@ class Editor:
             sections,
             start,
             stop,
-            (f"[revised context, standing for {span}]", body),
-            summary=f"revised {span}",
+            _note((f"[revised context, standing for {span}]", body), f"revised {span}"),
             verb="replace",
         )
+
+    def restoring(self, session: Session, sections: Sequence[Section], section: Section) -> Pending:
+        """The latest of this row's edits in `section`, undone one level.
+
+        A rewrite goes back to the text it replaced, exactly: the same message, so the
+        door's checks hold. A substitution comes back as what it shadowed, read one
+        level down and in surface order (its record keeps that order): a copy when that
+        was one user-role message — another marker, or a restore being undone — and
+        otherwise those messages' text in one, under a label. That one is `recall`, not
+        `compaction`: it is the conversation back, not a summary of it, so compaction
+        may summarize it again.
+        """
+        edits = [
+            (seq, revision)
+            for seq in section.nodes
+            if (revision := _edit_at(session, seq)) is not None
+        ]
+        if not edits:
+            if section.stands_for:
+                raise EditRefused(
+                    f"{section.name} was revised by the harness (a compaction summary, or a "
+                    "paste moved to a file), not by a context edit; context_recall reads "
+                    "what it stands for"
+                )
+            raise EditRefused(
+                f"{section.name} has not been revised; it is in your context as it was written"
+            )
+        seq, revision = max(edits, key=lambda edit: edit[0])
+        event = _at(session, seq)
+        if is_in_place_rewrite(event):
+            before = editable_message(_at(session, shadowed_by(event)[0]))
+            return self._rewriting(session, section, event, before, verb="restore")
+        stood = list(messages_of(session, revision.shadowed))
+        position = sections.index(section)
+        if len(stood) == 1 and stood[0].role == "user":
+            again = create_user_message(content=list(stood[0].content), source=stood[0].source)
+            return self._substituting(sections, position, position + 1, again, verb="restore")
+        span = span_label(revision.first, revision.last)
+        message = _note(
+            (f"[restored context, standing for {span}]", render_messages(stood)),
+            f"restored {span}",
+            form="recall",
+        )
+        return self._substituting(sections, position, position + 1, message, verb="restore")
 
     def rewriting_text(self, session: Session, section: Section, seq: int, text: str) -> Pending:
         """Every text in node `seq` of `section` becomes `text`, in place — a reply
@@ -436,23 +509,13 @@ class Editor:
         sections: Sequence[Section],
         start: int,
         stop: int,
-        texts: Sequence[str],
+        message: Message,
         *,
-        summary: str,
         verb: Verb,
         removed: tuple[Removed, ...] = (),
     ) -> Pending:
-        """A user message standing for `sections[start:stop]`: the label, then any text
-        of the model's, each its own block (`labeled`)."""
+        """`message`, a user message, standing for `sections[start:stop]`."""
         span = sections[start:stop]
-        message = create_user_message(
-            content=[{"type": "text", "text": text} for text in texts],
-            source=PluginSource(
-                plugin=PLUGIN,
-                form="compaction",
-                summary=one_line(summary, CONTEXT_SUMMARY_MAX_CHARS),
-            ),
-        )
         shadowed = tuple(seq for section in span for seq in section.nodes)
         return Pending(
             lambda batch: substitute(batch, shadowed, message),
@@ -470,14 +533,21 @@ class Editor:
         )
 
     def _rewriting(
-        self, session: Session, section: Section, event: SessionEvent, message: dict[str, Any]
+        self,
+        session: Session,
+        section: Section,
+        event: SessionEvent,
+        message: dict[str, Any],
+        *,
+        verb: Verb = "rewrite",
     ) -> Pending:
         meter = self.sections.meter
         later = section.nodes[section.nodes.index(event.seq) + 1 :]
         return Pending(
             lambda batch: rewrite(batch, event, message),
             Revision(
-                verb="rewrite",
+                verb=verb,
+                in_place=True,
                 first=section.id,
                 last=section.id,
                 replacement=_UNLANDED,
@@ -517,20 +587,35 @@ def _at(session: Session, seq: int) -> SessionEvent:
     return event
 
 
-def _removed_by(session: Session, section: Section) -> tuple[Removed, ...] | None:
-    """What an earlier tombstone removed, when `section` is that tombstone's marker.
+def _note(texts: Sequence[str], summary: str, *, form: ContextForm = "compaction") -> Message:
+    """A substitution of this row's: the label, then any text of the model's, each its
+    own block (`labeled`)."""
+    return create_user_message(
+        content=[{"type": "text", "text": text} for text in texts],
+        source=PluginSource(
+            plugin=PLUGIN, form=form, summary=one_line(summary, CONTEXT_SUMMARY_MAX_CHARS)
+        ),
+    )
+
+
+def _edit_at(session: Session, seq: int) -> Revision | None:
+    """The record of this row's edit that put node `seq` on the surface, or `None` when
+    none did.
 
     O(1): `Editor.land` writes the record immediately after the replacement it
-    describes, in the same batch, so the record of a marker at `seq` is the event at
+    describes, in the same batch, so the record of a node at `seq` is the event at
     `seq + 1`.
     """
+    revision = revision_of(session.at(seq + 1))
+    return revision if revision is not None and revision.replacement == seq else None
+
+
+def _removed_by(session: Session, section: Section) -> tuple[Removed, ...] | None:
+    """What an earlier tombstone removed, when `section` is that tombstone's marker."""
     if len(section.nodes) != 1:
         return None
-    marker = section.nodes[0]
-    revision = revision_of(session.at(marker + 1))
-    if revision is None or revision.verb != "tombstone" or revision.replacement != marker:
-        return None
-    return revision.removed
+    revision = _edit_at(session, section.nodes[0])
+    return revision.removed if revision is not None and revision.verb == "tombstone" else None
 
 
 def _absorbed(session: Session, neighbor: Section, keep: frozenset[int]) -> bool:
