@@ -363,8 +363,7 @@ def _changed(
             if text != before
         ]
         return [
-            editor.rewriting_text(session, base, section, seq, _unescaped(text))
-            for seq, text in changes
+            editor.rewriting_text(session, section, seq, _unescaped(text)) for seq, text in changes
         ]
     return [editor.replacing(base, position, position + 1, _unescaped(block.flattened()))]
 

@@ -1,7 +1,8 @@
 # `ctx.token_meter` — the provider's count is the truth; ours is for pressure
 
 **Module:** `ph/seams/token_meter.py` · **Row:** `token-meter` · **Consumers:**
-compaction policy, the offload rows, the TUI context gauge, `ctx.goals`
+compaction policy, the offload rows, ph-clm's gate, receipts, readouts and section
+map, `ctx.goals`
 
 Two numbers, and conflating them causes real bugs.
 
@@ -22,6 +23,27 @@ That one-way switch is the design: a meter that fell back to estimating after a
 request that reported nothing would make the gauge move for reasons the
 conversation cannot explain, and a compaction trigger that fired on an estimate
 *after* real numbers were available would be second-guessing the provider.
+
+## Until the next response, it follows the surface
+
+The provider counted the request it answered — system prompt and tool schemas
+included — and nothing after it. So the baseline is that count **moved by what the
+surface did since**:
+
+* every surface event after the reply that reported adds a node, estimated — the
+  step's tool results, a message spliced in;
+* a replacement takes off what it shadows: a node the provider counted is estimated
+  and subtracted, one added since simply never counts — a compaction summary, a
+  model's own context edit, an elided argument;
+* `pending`, messages not yet logged, goes on top.
+
+Only the events since that reply are walked, and each node is estimated once
+(`node_tokens`, kept per session and let go on `session/disposed`) — the same
+estimate the branch before any reply sums over the surface, and the one ph-clm's
+section map reads rather than measuring a node again. Before this, the baseline was the last
+count plus `pending` alone: a step's tool results were not in it until the next
+response, and an edit or an elision did not move it at all — so compaction's
+re-measure after eliding arguments could never spare the summary it was meant to.
 
 ## The surface
 
@@ -52,10 +74,19 @@ from.
 
 ## Reading pressure
 
-`TokenBaseline.pressure` is what a policy row and the TUI footer both read, so
-the number a person sees and the number that triggers compaction are the same
-number. A second definition of pressure is how a footer comes to disagree with
-the behavior it is describing.
+`TokenBaseline.pressure` is what compaction's trigger, ph-clm's `fit` gate and its
+readouts read, so the number the model is told and the number that triggers
+compaction are the same number. A second definition of pressure is how a readout
+comes to disagree with the behavior it is describing.
+
+**The TUI footer is the exception, and it agrees at every response.** It shows the
+provider's count of the last request (`TuiEventAdapter._count_usage`): the adapter
+folds events one at a time on the front end — a remote one holds only a mirror of
+the log and no meter — and does not estimate. Between a response and the next it does
+not move for a tool result or an edit, where the baseline does. The way to put it on
+the baseline is a daemon-side `StatusField` reading, as the meter already contributes
+`reasoning` and `cache`, re-published per step rather than only when the agent's
+status moves, with compaction's own threshold as its warning level.
 
 ## What it does not do
 

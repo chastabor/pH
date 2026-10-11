@@ -25,9 +25,7 @@ from clm_helpers import (
 
 from ph.json import as_obj, as_seq
 from ph.keys import LLM_FAKE, SESSIONS, TOKEN_METER
-from ph.llm.types import (
-    text_of,
-)
+from ph.llm.types import TokenUsage, text_of
 from ph.session import (
     SurfaceIntent,
     balanced_cuts,
@@ -43,6 +41,7 @@ from ph.testing import (
     user_payload,
 )
 from ph.testing.builders import reconciled_call, resume_stored
+from ph.text import thousands
 from ph.tools.definition import NotDone
 from ph_clm.kinds import REVISED
 from ph_clm.sections import SectionMap, label
@@ -486,3 +485,23 @@ async def test_an_edit_made_mid_step_reaches_the_next_request(mount: MountProfil
     assert "Bug: parser.py line 1." in after
     assert "the bug is on line 1" not in after
     assert session.select(REVISED), "the edit left no record"
+
+
+async def test_a_receipt_counts_the_context_as_compaction_does(mount: MountProfile) -> None:
+    """The receipt's "Context ~X" is the meter's baseline — the provider's last count,
+    system prompt included — so a receipt and a readout never disagree about the size
+    of one context."""
+    ctx = await mounted(mount)
+    agent = agent_in(ctx)
+    converse(agent.session)
+    usage = TokenUsage(input_tokens=5_000, output_tokens=10)
+    reply = assistant_payload("noted", "m20", usage=usage)
+    log_event(agent.session, "assistant/message", reply, SurfaceIntent("append"))
+    before = ctx.require(TOKEN_METER).baseline(agent.session).tokens
+    step = sections_of(ctx, agent.session)[1]
+
+    result = await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "x"})
+
+    (record,) = agent.session.select(REVISED)
+    assert record.data["contextBefore"] == before
+    assert f"Context ~{thousands(before)} →" in text_of(result.content)

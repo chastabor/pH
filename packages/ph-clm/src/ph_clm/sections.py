@@ -170,11 +170,6 @@ class SectionMap:
         session nobody can reach."""
         self._nodes.forget(session_id)
 
-    def tokens(self, session: Session) -> int:
-        """What every section adds up to, without cutting the surface into them."""
-        known = self._nodes.read(session)
-        return sum(known[seq].tokens for seq in session.surface.nodes)
-
     def __call__(self, session: Session) -> tuple[Section, ...]:
         """The session's current surface, as sections, oldest first."""
         known = self._nodes.read(session)
@@ -245,7 +240,7 @@ class SectionMap:
             shown=True,
             kind=_kind(event, message, calls),
             snapshot=is_context_snapshot(message),
-            tokens=self.meter.measure(message),
+            tokens=self.meter.node_tokens(session, event.seq),
             delta=open_call_delta(message),
             calls=calls,
             preview=_preview(message),

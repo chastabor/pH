@@ -655,8 +655,112 @@ They are settled here, and the first half of Phase 3 builds them.
 | **2. The mirror** ✅ | render through `ctx.fs`; read back in `tools/post-execute` of the writing call, with the receipt on its result; the diff compiler; `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and result; a crash between an edit and its result resumes with the edit landed and the call interrupted |
 | **2b. Audit-only records** ✅ | `AUDIT_ONLY_SESSION_EVENT_TYPES` and `declare_log_type(audit_only=)`; phern's TUI and trajectory derive their tables from it; ph-clm's two types declared in their own package | a new audit-only type touches only its declaration and its writer; the phern suites unchanged; coverage still fails a type that is neither rendered nor audit-only |
 | **3. Budget and prompt** ✅ built; the real-provider gate is pending | first, the context file's design (above): label out of the body, escaped forms cached, private and short-lived files, symlinks refused, edits outside a call caught; then budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
+| **3b. One baseline** ✅ | `TokenMeter.baseline` follows the surface from the last reported usage: what was appended since is added, what a replacement shadowed is taken off; readouts and receipts read it | the baseline's own tests and 9 sabotage mutations; compaction's suite with the elision now moving the baseline; readouts counting what the provider counted |
 | **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
 | **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+
+### Phase 3b as built: one baseline
+
+**Why first.** A probe on a 16k llama.cpp slot (Qwen3.8-27B) measured the `rlm-clm`
+system prompt and tool listing at 2,316 tokens, 14% of the window, before any
+conversation. Readouts counted only the conversation (`SectionMap.tokens`), while
+compaction counted the whole request. So on that window the 50% readout fired at about
+64% real, compaction at 85% real (71% by the readout's count), and the 75% "last
+reminder" could never fire before a summary was written.
+
+**What changed in core** (`ph.seams.token_meter`):
+- `baseline` takes the last reported usage, at seq `u`, and walks the events after `u`.
+  - Every surface event adds a node.
+  - A replacement removes what it shadows: a node at or below `u` is estimated and
+    subtracted; one added since just leaves the added set.
+  - `pending` goes on top.
+  - The cost is one step's events, and each node is estimated once.
+- `_nodes` keeps those per-node estimates per session. `forget` is wired to
+  `session/disposed`.
+- `last_usage` and `baseline` share one projection (`_reported_at`), which carries the
+  seq.
+- Two existing gaps closed with it:
+  - A step's tool results were not in the baseline until the next response: the
+    docstring said "plus an estimate of anything appended since", but only `pending`
+    was added.
+  - Compaction's re-measure after eliding arguments returned the same number, so the
+    elision could never spare a summary as its comment intended.
+  `test_the_replacement_carries_no_usage` now pins that the last usage is unchanged
+  and the baseline drops.
+
+**What changed in ph-clm:**
+- Readouts measure `meter.baseline(session)` plus the byte-bounded result.
+  `SectionMap.tokens` is gone.
+- `Editor.land` takes the baseline once, gates every draft against it, and stamps it
+  as each revision's `context_before`. A receipt's "Context ~X" and a readout give one
+  number. `_rewriting` and `rewriting_text` lost their now-unused `sections` parameter.
+
+**Not changed: the TUI footer.**
+- It shows the provider's count of the last request. The adapter folds events without
+  the session and does not estimate.
+- It agrees with the baseline at every response, and lags it in between.
+  `docs/seams/token_meter.md` now says so, where it used to claim the footer and the
+  trigger read one number.
+- The way to put the footer on the baseline is a daemon-side `StatusField` reading,
+  as the meter already contributes `reasoning` and `cache`. A remote front end holds
+  only a mirror of the log and no meter, so handing the adapter the session would not
+  do it. Readings ride `session.status`, which publishes when the agent's status
+  moves, so the reading must also be re-published per step. Its warning level should
+  be compaction's `trigger_fraction`, not phern's copy (`COMPACTION_THRESHOLD`). That
+  deletes `TuiState.tokens`, `context_window` and `pressure`, and the footer's count.
+  A follow-up.
+- The footer's count reads `TokenUsage.total` through `reported_usage` rather than
+  spelling out the four terms.
+
+**Tests:**
+- Core: what was appended is added, with `pending`; a replacement takes off what it
+  shadowed; a node added and shadowed since counts neither way; each node is estimated
+  once and forgotten; the mounted meter forgets a disposed session.
+- ph-clm: a readout counts what the provider counted; a receipt's context is the
+  baseline.
+- Sabotage, all caught:
+  - appended not counted;
+  - shadowed not subtracted;
+  - added-then-shadowed subtracted;
+  - `pending` dropped;
+  - no memo;
+  - `forget` a no-op;
+  - dispose not heard;
+  - the readout or the receipt on the conversation only.
+
+**After review:**
+- `TokenMeter.node_tokens(session, seq)` is the one per-node estimate.
+  - `SectionMap` reads it rather than tokenizing each node a second time, and
+    `_rewriting` reads it for what it replaces and what follows.
+  - The branch before any reply sums it over the surface rather than re-tokenizing
+    the conversation on every call. Measured with tiktoken on a 178k-token context:
+    40 ms a call before, which every readout paid on a route that reports no usage.
+- `Revision.context_before` defaults to `0`, as `call_id` defaults; `land` sets both.
+- Tests build a counted reply with `assistant_payload(usage=)` (new in `ph.testing`)
+  and a summary with `plugin_payload`.
+- Follow-ups the review raised:
+  - **The map's header is in other units.** `context_sections` says "N sections, ~Y
+    tokens" as the sections' sum. That is below the receipt's and the readout's
+    "Context ~X" by the system prompt and tool schemas: 2,316 tokens on the 16k
+    probe. Report both, or rename it.
+  - **Compaction's own per-node measures** (`_plan`, `_retention_cutoff`,
+    `_truncate_cutoff`, `clip_overflow_tail`) could read `node_tokens`. They run
+    only under pressure.
+  - **`fit` gates each draft of a batch alone** against the batch's starting
+    baseline, while the receipt sums the batch. Two growing drafts in one
+    context-file write can each fit and together not. Now that `land` holds one
+    baseline, gating the batch's net change once is the natural form. That is a
+    correctness change, for review.
+  - **A report that stops moving.** A session that got usage once and then stopped
+    reporting it walks every event since on each call, streamed chunks included:
+    5 ms at 202k events. An incremental fold reset when the reported seq moves
+    would make it O(new events), and would also give the cache an invariant row.
+  - `baseline(pending=)` has no production caller; the readout adds its result
+    itself, to keep the byte bound lazy.
+
+**What breaks:** `Editor.rewriting_text(session, section, seq, text)` has no `sections`
+argument. A `clm/revised` record's `contextBefore` is now the baseline, not the
+section map's sum.
 
 ### Phase 3 as built
 
@@ -730,7 +834,8 @@ They are settled here, and the first half of Phase 3 builds them.
     could cross a threshold, or when a readout fires. Most results cross nothing.
   - Measured as the receipts measure: `SectionMap.tokens` plus the meter's estimate
     of the projected result. The window is `session.request_context()`; with none,
-    there is no readout.
+    there is no readout. *Changed in 3b:* measured with `TokenMeter.baseline`, and
+    `SectionMap.tokens` is gone.
   - `Readouts.crossed` keeps the level reached per session. Each reading sets it, so
     an edit that frees space re-arms the shares below.
   - The level is in memory: after a restart, the first reading sets it silently.
@@ -774,7 +879,7 @@ They are settled here, and the first half of Phase 3 builds them.
   listener (only the readout is outermost). Offload's head-and-tail preview keeps a
   trailer, but clips lines at `PREVIEW_LINE_CLIP`.
 - **Follow-ups the review raised, not done here:**
-  - **A revision-aware `TokenMeter.baseline`.** After a surface revision, `baseline`
+  - **A revision-aware `TokenMeter.baseline`.** *Done in Phase 3b.* After a surface revision, `baseline`
     still uses the usage from before it, which is why the readout measures with the
     section map instead. That leaves the readout and compaction's 0.85 trigger (and
     the `fit` gate) in different units. The section map leaves out the system

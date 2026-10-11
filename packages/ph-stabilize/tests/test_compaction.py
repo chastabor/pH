@@ -521,21 +521,28 @@ async def test_the_replacement_carries_no_usage(mount: MountProfile) -> None:
 
     `TokenMeter.last_usage` folds to the newest `assistant/message`
     with a usage block, and a replacement is appended at the end of the log. One
-    that copied its original's usage would become the meter's baseline and tell
-    the pressure trigger the session had shrunk — and the TUI footer, which
-    reads the last usage it sees, would show the same stale number.
+    that copied its original's usage would become the meter's last count — a
+    request that was never made — and the TUI footer, which reads the last usage
+    it sees, would show it.
+
+    The baseline does move, and should: the elided argument left the surface, so
+    it is estimated and taken off the provider's count — which is what lets the
+    elision spare a summary this step.
     """
     ctx = await mount(profile=PROFILE)
+    meter = ctx.require(TOKEN_METER)
     session = _long_write_session("usage", "x" * (MAX_ARG_LENGTH + 1))
     _pressured(session, used=950)
-    baseline_before = ctx.require(TOKEN_METER).baseline(session).tokens
+    usage_before = meter.last_usage(session)
+    baseline_before = meter.baseline(session).tokens
 
     _truncate(ctx, session)
 
     replacement = session.events[-2]
     assert replacement.type == "assistant/message"
     assert "usage" not in replacement.data
-    assert ctx.require(TOKEN_METER).baseline(session).tokens == baseline_before
+    assert meter.last_usage(session) == usage_before, "the replacement became the count"
+    assert meter.baseline(session).tokens < baseline_before, "the elision is not in the baseline"
 
 
 async def test_a_recent_message_is_not_truncated(mount: MountProfile) -> None:

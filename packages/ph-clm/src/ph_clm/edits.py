@@ -58,11 +58,11 @@ from ph.llm.types import (
     create_user_message,
     text_of,
 )
+from ph.seams.token_meter import TokenBaseline
 from ph.session import (
     Session,
     SessionBatch,
     SessionEvent,
-    derive_event_message,
     editable_message,
     rewrite,
     substitute,
@@ -128,7 +128,10 @@ class Revision:
     reread: int
     """Tokens after the edit that a provider reads again, its prefix cache having
     stopped at the first change."""
-    context_before: int
+    context_before: int = 0
+    """The context before the batch this edit landed in, as `TokenMeter.baseline`
+    counts it — the provider's last count, moved by what changed since — so a receipt
+    and a readout give one number. `Editor.land` sets it, as it does `call_id`."""
     call_id: str | None = None
     via: Via = "tool"
     removed: tuple[Removed, ...] = ()
@@ -310,7 +313,7 @@ class Editor:
         seq, path = next((seq, path) for seq, path, text in sites if old in text)
         event = _at(session, seq)
         message = _rewritten(event, path, old, new)
-        draft = self._rewriting(session, sections, section, event, message)
+        draft = self._rewriting(session, section, event, message)
         return self.land(session, [draft], call_id=call_id)[0]
 
     # ----------------------------------------------------------------- drafts --
@@ -388,18 +391,11 @@ class Editor:
             verb="replace",
         )
 
-    def rewriting_text(
-        self,
-        session: Session,
-        sections: Sequence[Section],
-        section: Section,
-        seq: int,
-        text: str,
-    ) -> Pending:
+    def rewriting_text(self, session: Session, section: Section, seq: int, text: str) -> Pending:
         """Every text in node `seq` of `section` becomes `text`, in place — a reply
         keeps its calls, a result its call id and anything that is not text."""
         event = _at(session, seq)
-        return self._rewriting(session, sections, section, event, _with_text(event, text))
+        return self._rewriting(session, section, event, _with_text(event, text))
 
     def land(
         self,
@@ -411,13 +407,18 @@ class Editor:
     ) -> list[Revision]:
         """Gate every draft, then write them all, each followed by its record, in one
         batch — for one call, through one front end."""
+        baseline = self.sections.meter.baseline(session)
         for draft in drafts:
-            self._admit(session, draft.draft.tokens_before, draft.draft.tokens_after)
+            self._admit(baseline, draft.draft.tokens_before, draft.draft.tokens_after)
         landed: list[Revision] = []
         with session.batch() as batch:
             for draft in drafts:
                 revision = dataclasses.replace(
-                    draft.draft, replacement=draft.write(batch).seq, call_id=call_id, via=via
+                    draft.draft,
+                    replacement=draft.write(batch).seq,
+                    call_id=call_id,
+                    via=via,
+                    context_before=baseline.tokens,
                 )
                 _LOG.append(batch, REVISED, revision.record())
                 landed.append(revision)
@@ -459,27 +460,15 @@ class Editor:
                 tokens_before=sum(section.tokens for section in span),
                 tokens_after=self.sections.meter.measure(message),
                 reread=span[-1].after,
-                context_before=sum(section.tokens for section in sections),
                 removed=removed,
             ),
         )
 
     def _rewriting(
-        self,
-        session: Session,
-        sections: Sequence[Section],
-        section: Section,
-        event: SessionEvent,
-        message: dict[str, Any],
+        self, session: Session, section: Section, event: SessionEvent, message: dict[str, Any]
     ) -> Pending:
         meter = self.sections.meter
-        before = derive_event_message(event)
         later = section.nodes[section.nodes.index(event.seq) + 1 :]
-        later_tokens = sum(
-            meter.measure(one)
-            for one in (derive_event_message(_at(session, seq)) for seq in later)
-            if one is not None
-        )
         return Pending(
             lambda batch: rewrite(batch, event, message),
             Revision(
@@ -488,14 +477,13 @@ class Editor:
                 last=section.id,
                 replacement=_UNLANDED,
                 shadowed=(event.seq,),
-                tokens_before=0 if before is None else meter.measure(before),
+                tokens_before=meter.node_tokens(session, event.seq),
                 tokens_after=meter.measure(Message.model_validate(message)),
-                reread=section.after + later_tokens,
-                context_before=sum(one.tokens for one in sections),
+                reread=section.after + sum(meter.node_tokens(session, seq) for seq in later),
             ),
         )
 
-    def _admit(self, session: Session, before: int, after: int) -> None:
+    def _admit(self, baseline: TokenBaseline, before: int, after: int) -> None:
         """Refuse growth the row's gate does not allow. `none` allows everything."""
         if self.gate == "none" or after <= before:
             return
@@ -504,7 +492,6 @@ class Editor:
                 f"this edit grows the context (~{before} → ~{after} tokens), and the "
                 "clm-context row's gate is `shrink`: replace stale text with something shorter"
             )
-        baseline = self.sections.meter.baseline(session)
         window = baseline.context_window
         if window is None or baseline.tokens - before + after > window:
             # With no window there is no "fits" to test, so growth stays refused — the

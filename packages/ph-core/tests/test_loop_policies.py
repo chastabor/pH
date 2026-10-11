@@ -21,7 +21,7 @@ import pytest
 
 from ph.agent.types import AgentOptions, RequestErrorAction
 from ph.json import as_obj
-from ph.keys import AGENTS, LLM, SESSIONS
+from ph.keys import AGENTS, LLM, SESSIONS, TOKEN_METER
 from ph.llm.retry import is_transient
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -31,14 +31,22 @@ from ph.llm.types import (
     FinishReason,
     GenerateOptions,
     LlmFailure,
+    Message,
     TextBlock,
     TextDelta,
     TokenUsage,
     create_user_message,
 )
 from ph.seams.token_meter import TokenMeter
-from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, log_event, text_chunks, user_payload
+from ph.session import Session, SurfaceIntent, substitute
+from ph.testing import (
+    MountProfile,
+    assistant_payload,
+    log_event,
+    plugin_payload,
+    text_chunks,
+    user_payload,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -251,6 +259,107 @@ def test_a_rewritten_message_does_not_erase_the_last_reported_usage() -> None:
     usage = meter.last_usage(session)
     assert usage is not None and usage.input_tokens == 1_000
     assert meter.baseline(session).source == "usage"
+
+
+def _counted(session: Session) -> None:
+    """A user message, and the reply whose request the provider counted at 1 050."""
+    log_event(session, "user/message", user_payload("y" * 4_000, "m1"), SurfaceIntent("append"))
+    usage = TokenUsage(input_tokens=1_000, output_tokens=50)
+    log_event(
+        session,
+        "assistant/message",
+        assistant_payload("a reply", "m2", usage=usage),
+        SurfaceIntent("append", ()),
+    )
+
+
+def _summary(text: str) -> Message:
+    return Message.model_validate(
+        plugin_payload(text, plugin="test", form="compaction", summary="a summary")
+    )
+
+
+def test_what_was_appended_after_the_reply_is_in_the_baseline() -> None:
+    """The provider counted the request it answered; a tool result or a message that
+    came after is estimated and added, as are messages not yet logged."""
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    _counted(session)
+    log_event(session, "user/message", user_payload("z" * 400, "m3"), SurfaceIntent("append"))
+    appended = meter.measure_text("z" * 400)
+    pending = _summary("w" * 80)
+
+    baseline = meter.baseline(session, pending=[pending])
+
+    assert baseline.tokens == 1_050 + appended + meter.measure(pending)
+
+
+def test_a_replacement_after_the_reply_takes_off_what_it_shadowed() -> None:
+    """A summary, a context edit or an elision moves the baseline when it lands, not at
+    the next response: the node the provider counted comes off, its stand-in goes on."""
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    _counted(session)
+    original = meter.measure_text("y" * 4_000)
+
+    substitute(session, (0,), _summary("the gist"))
+
+    assert meter.baseline(session).tokens == 1_050 - original + meter.measure(_summary("the gist"))
+
+
+def test_a_node_added_and_shadowed_since_the_reply_counts_neither_way() -> None:
+    """Never counted by the provider, so it is not taken off either — only what stands
+    for it now is added."""
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    _counted(session)
+    late = log_event(
+        session, "user/message", user_payload("z" * 4_000, "m3"), SurfaceIntent("append")
+    )
+
+    substitute(session, (late.seq,), _summary("short"))
+
+    assert meter.baseline(session).tokens == 1_050 + meter.measure(_summary("short"))
+
+
+def test_each_node_is_estimated_once_and_forgotten_with_its_session() -> None:
+    """Every check until the next response asks about the same nodes; a long result
+    is tokenized once."""
+    measured: list[int] = []
+
+    class Counting(TokenMeter):
+        def measure(self, message: Message) -> int:
+            measured.append(1)
+            return super().measure(message)
+
+    meter = Counting(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    _counted(session)
+    log_event(session, "user/message", user_payload("z" * 400, "m3"), SurfaceIntent("append"))
+
+    first = meter.baseline(session).tokens
+    assert meter.baseline(session).tokens == first
+    assert len(measured) == 1
+
+    meter.forget(session.id)
+    meter.baseline(session)
+    assert len(measured) == 2
+
+
+async def test_the_mounted_meter_forgets_a_disposed_session(mount: MountProfile) -> None:
+    """The estimates `baseline` keeps are let go when the session leaves the store,
+    rather than kept for the life of the process."""
+    ctx = await mount()
+    meter = ctx.require(TOKEN_METER)
+    session = ctx.require(SESSIONS).create("s")
+    _counted(session)
+    log_event(session, "user/message", user_payload("z" * 400, "m3"), SurfaceIntent("append"))
+    meter.baseline(session)
+    assert session.id in meter._nodes
+
+    ctx.require(SESSIONS).dispose(session.id)
+
+    assert session.id not in meter._nodes
 
 
 def test_pressure_needs_a_known_window() -> None:

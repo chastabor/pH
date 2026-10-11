@@ -7,9 +7,12 @@ crossed the threshold, appended in `tools/post-execute` as the context file's re
 is (pi-clm's `sizeTrailer` does the same). Everything the model is shown is logged
 (I3), and a notice message per threshold would be one more surface node to edit away.
 
-**Measured as the receipts measure:** the section map's tokens — the meter's estimate
-of every surface node — plus the result about to be logged, against the window the
-last request was routed with. No window, no readouts: there is no share to report.
+**Measured as compaction measures** (`TokenMeter.baseline`): the provider's count of
+the last request — system prompt and tool schemas included — moved by what the
+surface did since, plus the result about to be logged, against the window that request
+was routed with. So the shares sit below compaction's in the same units, and a
+receipt's context figures are the same number. No window, no readouts: there is no
+share to report.
 
 **Once per crossing, and again after an edit brings the context back down.** Per
 session, `Readouts` keeps how many thresholds the context had reached; a readout fires

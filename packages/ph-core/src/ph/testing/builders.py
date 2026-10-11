@@ -33,6 +33,7 @@ from ..llm.types import (
     PluginSource,
     ReasoningBlock,
     TextBlock,
+    TokenUsage,
     ToolResultBlock,
     text_of,
 )
@@ -531,15 +532,17 @@ def assistant_payload(
     step: int = 1,
     provider: str = "fake",
     content: list[dict[str, Any]] | None = None,
+    usage: TokenUsage | None = None,
 ) -> dict[str, Any]:
     """An `assistant/message` payload; empty `text` gives an empty-content message.
 
-    `content` supplies the blocks outright — a message carrying tool calls —
-    so a test does not reach into this dict's shape to overwrite them.
+    `content` supplies the blocks outright — a message carrying tool calls — and
+    `usage` the provider's count of the request it answered, so a test does not
+    reach into this dict's shape to set either.
     """
     if content is None:
         content = [{"type": "text", "text": text}] if text else []
-    return {
+    payload: dict[str, Any] = {
         "turn": turn,
         "step": step,
         "message": {
@@ -549,6 +552,9 @@ def assistant_payload(
             "source": {"kind": "model", "provider": provider, "model": "m"},
         },
     }
+    if usage is not None:
+        payload["usage"] = usage.to_wire()
+    return payload
 
 
 def tool_result_payload(

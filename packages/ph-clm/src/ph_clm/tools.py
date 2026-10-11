@@ -211,15 +211,15 @@ async def apply(ctx: Context, config: Config) -> None:
         session = execution.session
         if execution.parent is not None or session is None or not isinstance(decision, Accept):
             return decision
-        route = session.request_context()
-        window = None if route is None else route.context_window
+        baseline = meter.baseline(session)
+        window = baseline.context_window
         if not window:
             return decision
         content = tools.projected_content(execution, decision, result)
         if content is None:
             return decision
         text = text_of(content)
-        before = mapper.tokens(session)
+        before = baseline.tokens
         # A token is at least a byte, so the result's UTF-8 length bounds its count, and
         # it is tokenized only when that bound could cross a threshold.
         crossed = readouts.crossed(

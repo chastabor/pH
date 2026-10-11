@@ -54,6 +54,7 @@ from pydantic import ValidationError
 
 from ph.json import JsonObject, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
 from ph.seams.approval import INTERRUPTED
+from ph.seams.token_meter import reported_usage
 from ph.session import (
     Session,
     SessionEvent,
@@ -274,7 +275,7 @@ class TuiEventAdapter:
             # on screen, so rendering the replacement would show the assistant
             # speaking twice; the row it stands for is deliberately not dimmed,
             # because the message is still what the model sees. Falling through
-            # would also let `_count_usage` reset the footer to an old turn's.
+            # would also let the footer's count reset to an old turn's.
             #
             # Keyed on the shape rather than on "any replacement", although the
             # commit now refuses the other shape for an assistant message: a
@@ -288,7 +289,13 @@ class TuiEventAdapter:
         streamed = self.state.end_streaming(turn, step)
         text = text_of_wire(blocks)
         thinking = text_of_wire(blocks, kind="reasoning")
-        self._count_usage(as_obj(event.data.get("usage")))
+        usage = reported_usage(event)
+        if usage is not None:
+            # The provider's own count of the last request: the meter's usage
+            # baseline at the moment of the reply. The meter's adjustment for what
+            # the surface did since is the meter's job, and a projection does not
+            # guess (`docs/seams/token_meter.md`, "Reading pressure").
+            self.state.tokens = usage.total
         # Finalize what streamed rather than adding a duplicate row: the message
         # is authoritative, so each open row takes its own half of it.
         shown: set[ItemRole] = set()
@@ -306,19 +313,6 @@ class TuiEventAdapter:
             self._row("think", "thinking", thinking, event, turn=turn)
         if text and "assistant" not in shown:
             self._row("msg", "assistant", text, event, turn=turn)
-
-    def _count_usage(self, usage: JsonObject) -> None:
-        """The provider's own count of the last request — the meter's `usage` baseline.
-
-        Same four terms as `TokenMeter.baseline`; the meter's *estimate* branch
-        is the meter's job, and a projection does not guess.
-        """
-        if not usage:
-            return
-        self.state.tokens = sum(
-            as_int(usage.get(key))
-            for key in ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
-        )
 
     # --------------------------------------------------------------- tools --
 

@@ -617,9 +617,9 @@ class SummarizeEngine:
         # the model already wrote costs no model call, and often takes enough
         # off that the summary is not needed this step (§7.4 item 2).
         if self.truncate_arguments(agent, session, trigger, baseline):
-            # Only re-measure when something actually moved. Nothing else can
-            # change the baseline between these two lines, and asking again
-            # unconditionally cost a reverse scan of the log per step.
+            # Re-measured, because the elision moved it: the baseline follows the
+            # surface since the last reported usage, so what was taken off comes
+            # off the count now rather than at the next response.
             baseline = meter.baseline(session)
         if trigger == "pressure" and not self._under_pressure(baseline):
             return None
@@ -875,11 +875,8 @@ class SummarizeEngine:
         message count when it is not — 20 rather than summarization's 170 000
         tokens, because eliding an argument is cheap enough to do early.
 
-        Takes the baseline rather than asking for one: `TokenMeter.baseline`
-        folds to the newest reported usage, and before any has been reported it
-        estimates the whole conversation — which is the expensive half and the
-        reason this still takes the baseline rather than asking twice. Two
-        callers asked for it on the same unchanged log within a few lines.
+        Takes the baseline its caller already measured, on the same unchanged
+        log, rather than asking for one again.
         """
         if baseline.pressure is not None:
             return baseline.pressure >= self.config.trigger_fraction

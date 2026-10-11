@@ -9,7 +9,13 @@ Two numbers, and conflating them causes real bugs.
   something has to guess, and a guess that is 15% off is fine for a threshold.
 
 So the baseline switches from estimate to reported usage the moment the first
-response lands (D15), and never drifts back. `tiktoken` is used when installed
+response lands (D15), and never drifts back. **From there it follows the surface
+until the next response**: what was appended since is estimated and added, and what
+a replacement took off the surface since — a compaction summary, a model's own
+context edit, an elided argument — is estimated and taken away. So compaction's
+trigger, a context edit's gate and its readouts all read one number that moves when
+the context does, in the provider's units, the system prompt and tool schemas
+included. `tiktoken` is used when installed
 and `len/4` otherwise — the fallback is deliberately crude, because a
 harness that refused to start without an optional tokenizer would be worse than
 one that occasionally compacts a turn early.
@@ -21,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, assert_never
 
 from pydantic import ValidationError
@@ -39,7 +45,7 @@ from ..llm.types import (
     ToolResultBlock,
     text_of,
 )
-from ..session import Session, SessionEvent
+from ..session import Session, SessionEvent, derive_event_message, shadowed_by
 from ..text import thousands
 from ._registry import contribute_item
 from .tui_status import StatusField, StatusReading
@@ -130,6 +136,10 @@ class TokenMeter:
     ctx: Context
     _encoder: Any = None
     _encoder_tried: bool = False
+    _nodes: dict[str, dict[int, int]] = field(default_factory=dict)
+    """Each surface node's estimate, by session id and seq (`node_tokens`): a node's
+    event never changes, so neither does its estimate, and a long result is tokenized
+    once — not on every check until the next response, nor again by each reader."""
 
     def _encode(self, text: str) -> int:
         if not self._encoder_tried:
@@ -190,15 +200,21 @@ class TokenMeter:
 
         An incremental fold, not a walk back through `session.events` — which
         materialized a snapshot of the whole log to read one field, and grew
-        more expensive the longer a conversation ran. `baseline` asks on every
-        pressure check, so the cost landed exactly where the log was longest.
+        more expensive the longer a conversation ran. `baseline` reads the same
+        fold on every pressure check, so the cost landed exactly where the log was
+        longest.
 
         The parser stays *here*, with the row that understands `TokenUsage`, and
         `Session` is asked to fold with it. It briefly lived on `Session`
         itself — a method, a slot and a private parser — which made the log
         model learn a seam's type so the seam could read it back (I5).
         """
-        return session.projection("assistant/message", reported_usage)
+        found = session.projection("assistant/message", _reported_at)
+        return None if found is None else found[1]
+
+    def forget(self, session_id: str) -> None:
+        """A session left the store: its node estimates go with it."""
+        self._nodes.pop(session_id, None)
 
     def reasoning_reading(self, session: Session) -> StatusReading | None:
         """What the route asks the model to spend on thinking, or nothing.
@@ -278,33 +294,71 @@ class TokenMeter:
     def baseline(self, session: Session, *, pending: Sequence[Message] = ()) -> TokenBaseline:
         """What the next request will cost, from usage when there is any.
 
-        Reported usage plus an estimate of anything appended since is closer
-        than either alone: the provider counted the prefix exactly, and only the
-        new tail has to be guessed.
+        Reported usage, adjusted by what the surface did since, is closer than
+        either count alone: the provider counted the request it answered exactly —
+        system prompt and tool schemas included — and only the change has to be
+        guessed. **Every surface event after the reply that reported adds a node**,
+        and a replacement takes off the nodes it shadows: one the provider counted
+        is estimated and subtracted, one added since simply never counts. So a tool
+        result appended after the reply is in the number, and a summary, a context
+        edit or a rewrite in place moves it the moment it lands rather than at the
+        next response. `pending` is added on top, as messages not yet logged.
+
+        Walks only the events since that reply — one step's worth — and estimates
+        each node once (`node_tokens`), as the estimate before any reply does.
         """
         window = None
         context = session.request_context()
         if context is not None:
             window = context.context_window
-        usage = self.last_usage(session)
-        if usage is None:
+        found = session.projection("assistant/message", _reported_at)
+        if found is None:
+            surface = sum(self.node_tokens(session, seq) for seq in session.surface.nodes)
             return TokenBaseline(
-                tokens=self.estimate_messages(session.derive_messages())
-                + self.estimate_messages(pending),
+                tokens=surface + self.estimate_messages(pending),
                 source="estimate",
                 context_window=window,
             )
-        counted = (
-            usage.input_tokens
-            + usage.output_tokens
-            + (usage.cache_read_tokens or 0)
-            + (usage.cache_write_tokens or 0)
-        )
+        reported, usage = found
+        added: set[int] = set()
+        shadowed: set[int] = set()
+        for event in session.events_from(reported + 1):
+            if event.surface_op is None:
+                continue
+            added.add(event.seq)
+            for seq in shadowed_by(event):
+                if seq in added:
+                    added.discard(seq)
+                else:
+                    shadowed.add(seq)
+        change = sum(self.node_tokens(session, seq) for seq in added)
+        change -= sum(self.node_tokens(session, seq) for seq in shadowed)
         return TokenBaseline(
-            tokens=counted + self.estimate_messages(pending),
+            tokens=max(0, usage.total + change) + self.estimate_messages(pending),
             source="usage",
             context_window=window,
         )
+
+    def node_tokens(self, session: Session, seq: int) -> int:
+        """One surface node's estimate, measured the first time anything asks — the
+        baseline, a section map, a context edit pricing what it replaces — and kept
+        for the session's life, since a node's event never changes. `0` for a node
+        that projects to no message."""
+        known = self._nodes.setdefault(session.id, {})
+        tokens = known.get(seq)
+        if tokens is None:
+            event = session.at(seq)
+            message = None if event is None else derive_event_message(event)
+            tokens = known[seq] = 0 if message is None else self.measure(message)
+        return tokens
+
+
+def _reported_at(event: SessionEvent) -> tuple[int, TokenUsage] | None:
+    """An event's usage and where it was reported, for the fold `baseline` and
+    `last_usage` share: the seq is where the provider's count stops being the
+    whole story."""
+    usage = reported_usage(event)
+    return None if usage is None else (event.seq, usage)
 
 
 def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None:
@@ -354,6 +408,7 @@ async def apply(ctx: Context, config: None) -> None:
     """Mount the token meter, and the one reading it can answer for a footer."""
     meter = TokenMeter(ctx=ctx)
     ctx.provide(TOKEN_METER, meter)
+    ctx.on("session/disposed", lambda session: meter.forget(session.id))
     # `contribute_item` rather than an `inject`, for `diagnostics`' reason: this
     # row must activate in a profile that mounts no front end at all, and a
     # dependency on `ctx.tui_status` would make the meter — which compaction

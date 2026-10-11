@@ -20,15 +20,17 @@ from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.json import as_str
 from ph.keys import TOKEN_METER, TOOLS
-from ph.llm.types import text_of
-from ph.testing import MountProfile, log_event, run_tool, simple_tool
+from ph.llm.types import TokenUsage, text_of
+from ph.session import SurfaceIntent
+from ph.testing import MountProfile, assistant_payload, log_event, run_tool, simple_tool
 from ph_clm.keys import CLM_MIRROR
 
 pytestmark = pytest.mark.anyio
 
 
 def _tokens(ctx: Context, agent: ReactLoopAgent) -> int:
-    return sum(section.tokens for section in sections_of(ctx, agent.session))
+    """The context as the readout measures it."""
+    return ctx.require(TOKEN_METER).baseline(agent.session).tokens
 
 
 async def _filled(
@@ -172,3 +174,20 @@ async def test_a_dispatch_inside_a_cell_carries_no_readout(mount: MountProfile) 
     )
 
     assert _readout(text_of(nested.content)) is None
+
+
+async def test_the_readout_counts_what_the_provider_counted(mount: MountProfile) -> None:
+    """The system prompt and tool schemas are in the provider's count and in no section:
+    a conversation at 30% of the window by its sections, in a request the provider
+    counted at 60%, is past the first share — in the units compaction reads."""
+    ctx, agent, window = await _filled(mount, 0.3)
+    assert _readout(await _emit(ctx, agent, 10)) is None
+    usage = TokenUsage(input_tokens=window * 3 // 5, output_tokens=10)
+    reply = assistant_payload("noted", "m20", usage=usage)
+    log_event(agent.session, "assistant/message", reply, SurfaceIntent("append"))
+
+    said = _readout(await _emit(ctx, agent, 10))
+
+    assert said is not None
+    share = re.search(r"tokens \((\d+)%\)", said)
+    assert share is not None and 55 <= int(share.group(1)) < 75, said

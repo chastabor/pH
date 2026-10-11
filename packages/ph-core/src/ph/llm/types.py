@@ -459,10 +459,10 @@ class TokenUsage(WireModel):
     def total(self) -> int:
         """Everything the provider billed for this call.
 
-        The four terms, in one place. `TokenMeter.baseline` and the TUI's
-        `_count_usage` each spell them out — the second's docstring saying "same
-        four terms as `TokenMeter.baseline`", which is a comment doing a type's
-        job — and P5-07's budget arrived as a third definition with only *two*,
+        The four terms, in one place, which `TokenMeter.baseline` and the TUI's
+        footer both read. Each once spelled them out — the footer's docstring saying
+        "same four terms as `TokenMeter.baseline`", which is a comment doing a
+        type's job — and P5-07's budget arrived as a third definition with only *two*,
         so a cache-heavy run spent most of its input outside the budget while
         the footer showed a larger number for the same word.
 
