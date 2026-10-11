@@ -1,11 +1,12 @@
 """A child's model from its parent's list, and a profile its parent assigns (S7b).
 
-The gate: a skill naming `classify` starts its child on that route; a key the list
-does not hold is refused; and an assigned profile wider than the parent is refused,
-naming the row. Around it: a spawn names a key itself, the admission records the key
-and the route, and an assigned profile narrows what a child holds — its tools, its
-model, its access, its skills and its writable directories — on the parent's own
-mount, each row by the narrower its plugin declares.
+The gate: a skill naming `classify` starts its child on that route; a key the spawn
+names that the list does not hold is refused, while a skill's key this mount cannot run
+falls back to the parent's route and says so; and an assigned profile wider than the
+parent is refused, naming the row. Around it: a spawn names a key or a whole route
+itself, the admission records the key and the route, and an assigned profile narrows
+what a child holds — its tools, its model, its access, its skills and its writable
+directories — on the parent's own mount, each row by the narrower its plugin declares.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import pytest
 from pydantic import Field
 from rlm_fixtures import PROVIDER_ROW
 
+from ph.agent.types import AgentOptions
 from ph.cordis import ChildLimit, ChildReach, Context, Profile, ProfileDocument, plugin
 from ph.json import JsonObject, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SANDBOX, SESSIONS, SKILLS, SUBAGENTS
@@ -26,7 +28,7 @@ from ph.paths import canonical
 from ph.seams.models import ModelChoice, choose
 from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
 from ph.seams.skills import Skill
-from ph.seams.subagents import SubagentRequest, SubagentSpawnError
+from ph.seams.subagents import SubagentRequest, SubagentSpawnError, admission_notes
 from ph.testing import FAKE_OPTIONS, MountProfile, not_none, write_skill
 from ph.wire import WireModel
 from ph_rlm.subagents import PROVIDER_NAME
@@ -60,12 +62,17 @@ class _Profiles:
 
 
 async def _parent(
-    mount: MountProfile, *rows: JsonObject, **profiles: list[JsonObject]
+    mount: MountProfile,
+    *rows: JsonObject,
+    models: JsonObject = MODELS,
+    options: AgentOptions = FAKE_OPTIONS,
+    **profiles: list[JsonObject],
 ) -> tuple[Context, Any]:
-    ctx = await mount(dict(PROVIDER_ROW), dict(MODELS), *rows)
+    """A parent on `options`, under `models`, with `profiles` it may assign by name."""
+    ctx = await mount(dict(PROVIDER_ROW), dict(models), *rows)
     ctx.provide(NAMED_PROFILES, _Profiles(ctx.require(MOUNT).profile, **profiles))
     session = ctx.require(SESSIONS).create("parent")
-    return ctx, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    return ctx, ctx.require(AGENTS).create(session, options)
 
 
 async def _spawn(ctx: Context, parent: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -185,17 +192,108 @@ async def test_a_child_on_its_parent_s_route_runs_with_its_parent_s_settings(
     assert child.options == parent.options
 
 
+async def test_a_whole_route_the_list_holds_runs_as_its_entry(mount: MountProfile) -> None:
+    """Named as provider and model rather than by key, it is still the listed entry: its
+    key and its settings, as a root started on the route gets. Sabotage: leave a whole
+    route unresolved, and the child runs `fake-7` at its parent's 0.9."""
+    ctx, parent = await _tuned_parent(mount)
+
+    run = await _spawn(ctx, parent, provider="fake", model="fake-7")
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert child.options == choose(ctx, ModelChoice(key="careful")).options()
+    assert _admitted(ctx, parent)["modelKey"] == "careful"
+
+
+async def test_a_whole_route_the_list_does_not_hold_takes_nothing_from_the_parent(
+    mount: MountProfile,
+) -> None:
+    """A route no entry matches runs as given, with no settings: the parent's were tuned
+    for another model. Sabotage: leave a whole route unresolved, and the child runs at
+    its parent's 0.9 on a 64-token budget."""
+    ctx, parent = await _tuned_parent(mount)
+
+    run = await _spawn(ctx, parent, provider="fake", model="fake-unlisted")
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert (
+        child.options == choose(ctx, ModelChoice(provider="fake", model="fake-unlisted")).options()
+    )
+    assert (child.options.temperature, child.options.model_key) == (None, "")
+
+
+async def test_half_a_route_with_nothing_to_complete_it_is_refused(mount: MountProfile) -> None:
+    """A provider with no model, under a parent that has none either, is no route: a
+    refused spawn, not a malformed choice raised from the resolver. Sabotage: build
+    the choice without asking whether the route is whole."""
+    ctx, parent = await _parent(mount, options=AgentOptions(provider="fake"))
+
+    with pytest.raises(SubagentSpawnError):
+        await _spawn(ctx, parent, provider="fake")
+
+
 async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(
     mount: MountProfile,
 ) -> None:
-    """The models an agent can reach are the ones its profile says. Sabotage: fall
-    back to the parent's route for an unknown key, and the child is admitted."""
+    """The models an agent can reach are the ones its profile says, and a key the spawn
+    names is the parent's own choice, so it is refused rather than run elsewhere.
+    Sabotage: fall back to the parent's route for an unknown key, and the child is
+    admitted."""
     ctx, parent = await _parent(mount)
 
     with pytest.raises(SubagentSpawnError, match="it lists classify, main"):
         await _spawn(ctx, parent, model_key="summarize")
 
     assert ctx.require(SUBAGENTS).children(parent.session.id) == {}
+
+
+UNSERVED: JsonObject = {
+    "id": "models",
+    "config": {
+        "default": "main",
+        "models": {
+            "main": {"provider": "fake", "model": "fake-1"},
+            "classify": {"provider": "absent", "model": "sorter-2"},
+        },
+    },
+}
+"""A list holding a route that no adapter here serves."""
+
+
+@pytest.mark.parametrize(
+    ("models", "asked", "reason", "said"),
+    [
+        (MODELS, "summarize", "unlisted", 'this profile does not list "summarize"'),
+        (UNSERVED, "classify", "unserved", "lists it on a provider no adapter here serves"),
+    ],
+)
+async def test_a_skill_s_model_this_mount_cannot_run_falls_back_to_the_parent_s_route(
+    mount: MountProfile,
+    caplog: pytest.LogCaptureFixture,
+    models: JsonObject,
+    asked: str,
+    reason: str,
+    said: str,
+) -> None:
+    """The skill's author wrote the key without knowing this profile, so the parent's
+    own model does the work as well as it can until the person sets one up: graceful
+    degradation, said to the parent, logged, and recorded in the admission. Sabotage:
+    refuse it as a spawn's own key is refused, or drop the fallback from the run, the
+    admission or the log."""
+    ctx, parent = await _parent(mount, models=models)
+    ctx.require(SKILLS).register(Skill(name="sort", description="sorts things", model=asked))
+
+    with caplog.at_level("WARNING", logger="ph.seams.subagents"):
+        run = await _spawn(ctx, parent, skills=("sort",))
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert child.options == parent.options, "on the parent's route, with its settings"
+    fallback = {"key": asked, "reason": reason}
+    assert run.to_wire()["modelFallback"] == fallback
+    assert _admitted(ctx, parent)["modelFallback"] == fallback
+    [note] = admission_notes(run)
+    assert said in note and "your own model" in note
+    assert asked in caplog.text, "the person running it is not told"
 
 
 async def test_skills_that_name_different_models_are_refused(mount: MountProfile) -> None:

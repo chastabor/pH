@@ -677,6 +677,21 @@ nothing committed by Claude.
       `ph.seams.subagents.child_options` builds a child's options by one rule (a listed
       route's `ModelEntry.options()`, else its parent's), and the admission records the
       route so a readmitted child comes back with it.
+    - **A whole route resolves through the list too** (2026-10-11). A request naming
+      `provider`/`model` was left as it was, so its child kept its parent's settings on
+      another model. `resolve_model` now resolves it with `choose`: the listed entry it
+      matches, key and settings, else the route with none, and a provider no adapter
+      serves is refused there rather than at admission. No shipped tool names a whole
+      route; code that builds a `SubagentRequest` does.
+    - **A skill's key this mount cannot run degrades rather than refuses** (2026-10-11,
+      reversing the gate's "an unlisted key is refused" for a skill's key only). The
+      skill's author wrote the key without knowing the profile, so the child runs on
+      its parent's route, the graceful-degradation pattern, until the person lists the
+      key on a provider that is served. The request carries a `ModelFallback` (key,
+      `unlisted`/`unserved`), the admission records it, a warning is logged, and both
+      delegating tools tell the parent (`admission_notes`). A key the spawn names is
+      still refused: that one is the parent's own choice. Two skills naming different
+      models are still refused, since the parent can settle that with `model=` at once.
     - **An assigned profile is read, not mounted**, for what a child can hold less of:
       a row it runs that the parent does not is refused by name; the tools of rows it
       does not run are taken away; skills by the `skills-progressive` paths; its models

@@ -93,15 +93,30 @@ asking for more than it has gets an error it can act on.
 
 A spawn names a model by **key** (`model="classify"`, `SubagentRequest.model_key`),
 and a skill it gives the child may name the one it needs in its front matter
-(`model: classify`). `resolve_model` turns the key into a route through the
-parent's own `models` list (`ctx.models`, the profile as it runs); a key the list
-does not hold is refused, so the models an agent can reach are the ones its
-profile says. The child runs with that route's call settings (`reasoningEffort`,
-`temperature`, `maxTokens`) the way a root started on the key does, and none of its
-parent's: a temperature tuned for the parent's model is not one for this. A child on
-its parent's route runs with its parent's options. `child_options` states that rule
+(`model: classify`). Code that builds a request itself may also name a **whole
+route** (`provider`/`model`). `resolve_model` resolves all three through the parent's
+own `models` list (`ctx.models`, the profile as it runs) with `choose`:
+
+* **A whole route** is the listed entry it matches, key and settings, or else the
+  route as given with no settings, as a root started on it gets.
+* **A key the spawn names** that the list does not hold, or whose provider no
+  adapter here serves, is refused, naming why. It is the parent's own choice, and
+  running the child elsewhere would answer it on a model it did not choose.
+* **A key a skill names** that this mount cannot run **degrades instead**: the
+  skill's author wrote the key without knowing this profile, so the child runs on
+  its parent's route and does the work as well as that model can. The request
+  carries a `ModelFallback` (the key, and `unlisted` or `unserved`); the seam
+  stamps it on the run, the admission records it as `modelFallback`, a warning is
+  logged, and both delegating tools tell the parent in their `note`
+  (`admission_notes`, beside an access downgrade), so the parent and the person
+  learn what to set up.
+
+The child runs with its route's call settings (`reasoningEffort`, `temperature`,
+`maxTokens`) the way a root started on the key does, and none of its parent's: a
+temperature tuned for the parent's model is not one for this. A child on its
+parent's route runs with its parent's options. `child_options` states that rule
 once, for every provider. The child's `subagent/admitted` records the key and the
-whole listed route (`route`, a `ModelRoute`), so no route setting is carried
+whole resolved route (`route`, a `ModelRoute`), so no route setting is carried
 field by field.
 Two skills naming different models are refused — name one with `model=`.
 
@@ -224,7 +239,7 @@ that skipped one would miscount the retry ladder or bring back a deleted child.
 
 | record | carries | door | durable when |
 |---|---|---|---|
-| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`, `route`) and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
+| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`, `route`), any `modelFallback`, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
 | `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `notice`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
 | `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |
 
@@ -447,9 +462,9 @@ to restore work that was once allowed. Guards gate new work.
 is decided two different ways today:
 
 * **The route is pinned at admission, with its call settings.** The admission
-  records the provider and model the spawn resolved to, and a listed route whole
-  (`route`), and `resolve_model` leaves a request that already
-  carries a route as it is. So a readmitted child runs on the model and settings
+  records the provider and model the spawn resolved to, and the resolved route whole
+  (`route`), and a readmission rebuilds the request from that record without going
+  back through `resolve_model`. So a readmitted child runs on the model and settings
   it was admitted with, even if the skill that chose it (`model:` in its front
   matter) or the parent's `models` list has since moved to another.
 * **The reasoning effort is pinned only when something named it.** The admission

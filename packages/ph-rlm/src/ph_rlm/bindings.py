@@ -42,8 +42,8 @@ from ph.seams.subagents import (
     Access,
     SubagentRequest,
     SubagentRun,
+    admission_notes,
     admitted_by,
-    downgrade_text,
 )
 from ph.session import Session, SessionEvent
 from ph.tools import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -111,9 +111,10 @@ class SpawnHandle(WireModel):
     requested_access: Access
     granted_access: Access
     note: str | None = None
-    """The sentence for `SubagentRun.downgrade_reason`, rendered by the seam.
+    """How the child was admitted, in the seam's sentences (`admission_notes`): a
+    narrower access than asked, or a model its skill asked for that it runs without.
 
-    The model needs prose; the *log* keeps the code. One generator, so the two
+    The model needs prose; the *log* keeps the codes. One generator, so the two
     cannot disagree and neither goes stale when the workspace tier lands."""
 
 
@@ -127,7 +128,6 @@ class Config(WireModel):
 def _spawn_handle(run: SubagentRun) -> dict[str, Any]:
     """What a spawn hands back for the child `run` names, whether the spawn just
     admitted it or the child's own log says, on resume, that it did."""
-    reason = run.downgrade_reason
     return SpawnHandle(
         child_id=run.id,
         name=run.name,
@@ -135,7 +135,7 @@ def _spawn_handle(run: SubagentRun) -> dict[str, Any]:
         model=run.model,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
-        note=downgrade_text(reason) if reason is not None else None,
+        note=" ".join(admission_notes(run)) or None,
     ).to_wire()
 
 

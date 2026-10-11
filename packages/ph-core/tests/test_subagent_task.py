@@ -26,15 +26,19 @@ import pytest
 
 from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
-from ph.keys import AGENTS, SESSIONS, SUBAGENTS, TOOLS
+from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
+from ph.seams.skills import Skill
 from ph.seams.subagents import (
     ADMITTED,
     STATUS,
+    ModelFallback,
     SubagentRequest,
     SubagentResult,
+    SubagentRun,
     admission_payload,
 )
+from ph.session import Session
 from ph.testing import (
     FAKE_OPTIONS,
     MountProfile,
@@ -76,6 +80,15 @@ async def _mounted(
 
 def _agent(ctx: Context) -> Any:  # noqa: ANN401
     return ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s"), FAKE_OPTIONS)
+
+
+def _running(ctx: Context, run: SubagentRun, request: SubagentRequest) -> Session:
+    """`run`'s child as a crash leaves it: its admission and a `running` status in its
+    own log, the admission written by `admission_payload` as the seam writes it."""
+    child = not_none(ctx.require(SESSIONS).get(run.session_id))
+    log_event(child, ADMITTED, admission_payload(run, request))
+    log_event(child, STATUS, {"status": "running"})
+    return child
 
 
 async def test_no_provider_means_no_tool(mount: MountProfile) -> None:
@@ -133,6 +146,23 @@ async def test_a_downgrade_is_reported_to_the_parent(mount: MountProfile) -> Non
 
     assert result.value["granted_access"] == "read"
     assert result.value["note"], "the downgrade reached the value with no sentence"
+    assert result.value["note"] in text_of(result.content), "the model was not told"
+
+
+async def test_a_skill_s_model_the_profile_cannot_run_is_reported_to_the_parent(
+    mount: MountProfile,
+) -> None:
+    """The child does the work on its parent's model, and the parent is told beside the
+    answer, so it can weigh the answer and tell the person what to set up."""
+    ctx = await _mounted(mount, ("stub", StubSubagentProvider(answer="three kinds")))
+    ctx.require(SKILLS).register(Skill(name="sort", description="sorts", model="classify"))
+
+    result = await run_tool(
+        ctx, "task", {"prompt": "sort these", "skills": ["sort"]}, agent=_agent(ctx)
+    )
+
+    assert not result.is_error
+    assert 'rather than "classify"' in result.value["note"]
     assert result.value["note"] in text_of(result.content), "the model was not told"
 
 
@@ -329,10 +359,7 @@ async def test_a_task_call_a_crash_cut_short_is_answered_from_its_childs_log(
     agent = _agent(ctx)
     session = agent.session
     request = SubagentRequest(prompt="look", parent=agent, call_id="call-1")
-    run = await provider.start(request)
-    child = not_none(ctx.require(SESSIONS).get(run.session_id))
-    log_event(child, ADMITTED, admission_payload(run, request))
-    log_event(child, STATUS, {"status": "running"})
+    child = _running(ctx, await provider.start(request), request)
 
     async def reconciled(call_id: str) -> Any:  # noqa: ANN401
         return await reconciled_call(ctx, session, "task", {"prompt": "look"}, call_id=call_id)
@@ -344,3 +371,24 @@ async def test_a_task_call_a_crash_cut_short_is_answered_from_its_childs_log(
 
     log_event(child, STATUS, {"status": "error", "detail": "fell over"})
     assert await reconciled("call-1") is None, "an ended child is not an answer"
+
+
+async def test_a_reconciled_task_call_still_says_its_child_s_model_fell_back(
+    mount: MountProfile,
+) -> None:
+    """The answer a crash's reconcile builds from the child's log says what the live
+    call said. Sabotage: drop `model_fallback` from the admission or from the run a
+    record rebuilds, and it does not."""
+    provider = StubSubagentProvider()
+    ctx = await _mounted(mount, ("stub", provider))
+    agent = _agent(ctx)
+    request = SubagentRequest(prompt="look", parent=agent, call_id="call-1")
+    run = await provider.start(request)
+    # As the seam stamps it (`SubagentService.start`), which this stub admission skips.
+    run.model_fallback = ModelFallback(key="classify", reason="unlisted")
+    _running(ctx, run, request)
+
+    live = await reconciled_call(ctx, agent.session, "task", {"prompt": "look"}, call_id="call-1")
+
+    assert isinstance(live, tuple), "the live child was not found by its call"
+    assert 'rather than "classify"' in text_of(list(live))

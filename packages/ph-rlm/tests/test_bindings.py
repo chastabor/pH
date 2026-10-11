@@ -17,7 +17,8 @@ from runtime_helpers import run_python_cell
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
-from ph.keys import SESSIONS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.keys import SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.seams.skills import Skill
 from ph.seams.subagents import admitted_by
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
@@ -89,6 +90,26 @@ async def test_the_tools_are_not_directly_callable_under_code_mode(
 
 
 # -------------------------------------------------------------- the dispatch --
+
+
+async def test_a_spawn_s_handle_says_its_child_runs_without_its_skill_s_model(
+    delegating_runtime: MountedRuntime,
+) -> None:
+    """`rlm.run` tells the cell what `task` tells the model (`admission_notes`): the
+    child runs on its parent's model because this profile cannot run the one its skill
+    asked for. Sabotage: build the handle's note from the downgrade alone."""
+    ctx, session, agent = await delegating_runtime()
+    ctx.require(SKILLS).register(Skill(name="sort", description="sorts", model="classify"))
+
+    result = await run_python_cell(
+        ctx,
+        "handle = await rlm.run(prompt='sort these', skills=['sort'])\nhandle['note']",
+        agent=agent,
+        session=session,
+    )
+
+    assert result.is_error is False
+    assert 'rather than "classify"' in result.value["value"]
 
 
 async def test_a_spawn_from_a_cell_is_a_durable_dispatch(

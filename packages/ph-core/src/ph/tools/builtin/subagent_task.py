@@ -41,9 +41,9 @@ from ...seams.subagents import (
     SubagentResult,
     SubagentRun,
     SubagentStatus,
+    admission_notes,
     admitted_by,
     child_is_live,
-    downgrade_text,
 )
 from ...session import Session, SessionEvent
 from ...wire import WireModel
@@ -135,9 +135,10 @@ class TaskValue(ToolModel):
     granted_access: Access = "read"
     note: str | None = None
     """What the model should know beside the answer: for a child that outlived its
-    wait, where it is (`STILL_WORKING`); and why `granted_access` is narrower than
-    asked, rendered from the seam's code so the prose the model reads and the code
-    the log keeps cannot disagree."""
+    wait, where it is (`STILL_WORKING`); and how it was admitted (`admission_notes`),
+    why `granted_access` is narrower than asked and why it runs without the model its
+    skill asked for, rendered from the seam's codes so the prose the model reads and
+    the codes the log keeps cannot disagree."""
 
 
 class Config(WireModel):
@@ -166,8 +167,7 @@ def _task_value(run: SubagentRun, status: SubagentStatus, answer: str = "") -> d
     """The call's value for the child `run` names, however the call learned of it — its
     own wait, or the roster on resume. One builder, so the two cannot disagree."""
     notes = [] if status == "done" else [STILL_WORKING]
-    if run.downgrade_reason is not None:
-        notes.append(downgrade_text(run.downgrade_reason))
+    notes.extend(admission_notes(run))
     return TaskValue(
         child_id=run.id,
         name=run.name,

@@ -43,7 +43,7 @@ which is honest: the model was genuinely told something new.
 | `parameters` | declared inputs, validated before the body is rendered |
 | `steps` | the playbook, seeded into the todo list |
 | `allowed_tools` | what this skill may reach |
-| `model` | the listed model a child this skill directs runs on, by key (`model: classify`) |
+| `model` | the listed model a child this skill directs runs on, by key (`model: classify`); one the profile cannot run falls back to the parent's model, and the parent is told |
 | `hint` | |
 
 `parameters` and `steps` are what make a skill a *playbook* rather than a

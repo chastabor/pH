@@ -735,6 +735,9 @@ carried is gone (`test_exhaustive_dispatch`).
 - **"Fork from before this change"** as a second action in `/diff`: a fork is exact but
   discards everything after its boundary and cannot start inside an open turn, so it is a
   person's branch, not a model's restore (decision 3's option D).
+- **Exact record pairing and a git-style history for `/diff`**, with one diff helper for
+  `/diff` and `context_diff`: planned in `Typed_Results_Revision_History_Model_Kinds_Plan.md`,
+  section 2.
 
 **Found on the way:** an in-place rewrite of an assistant reply draws nothing in the
 transcript (`/diff` lists it); no test checks that a child agent gets a context file of its

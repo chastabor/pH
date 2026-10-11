@@ -33,7 +33,7 @@ import secrets
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import Literal, Protocol, TypeAlias, get_args, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, assert_never, get_args, runtime_checkable
 
 import anyio
 from pydantic import Field, ValidationError
@@ -100,7 +100,14 @@ from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
 from .credentials import hold_for_credential, missing_credential
 from .invariants import contribute_fold_cache
-from .models import ModelChoice, ModelChoiceError, ModelEntry, ModelRoute, choose
+from .models import (
+    ModelChoice,
+    ModelChoiceError,
+    ModelEntry,
+    ModelRoute,
+    UnrunnableReason,
+    choose,
+)
 from .skills import ORDER_SKILLS, Skill, SkillRestriction, SkillService, record_read
 from .subagent_profiles import narrowing
 from .token_meter import SPENDING_TYPES, event_tokens
@@ -126,6 +133,7 @@ __all__ = [
     "ChildNotice",
     "ChildState",
     "FamilyRole",
+    "ModelFallback",
     "ReadmittingProvider",
     "RehydratableProvider",
     "RevokingProvider",
@@ -142,6 +150,7 @@ __all__ = [
     "SubagentService",
     "SubagentSpawnError",
     "SubagentStatus",
+    "admission_notes",
     "admission_payload",
     "admitted_by",
     "apply",
@@ -152,7 +161,6 @@ __all__ = [
     "child_state",
     "child_state_of",
     "default_child_name",
-    "downgrade_text",
     "exhausted_detail",
     "extend_child_state",
     "family_reach",
@@ -340,7 +348,7 @@ def child_options(request: SubagentRequest) -> AgentOptions:
 
 def child_model_key(request: SubagentRequest) -> str:
     """The listed name of the route `child_route` gives a child (S7b): the key its
-    spawn resolved, none for a route named whole, else its parent's own."""
+    spawn resolved, none for a whole route no entry matches, else its parent's own."""
     if request.model_key is not None:
         return request.model_key
     if request.provider or request.model:
@@ -394,14 +402,50 @@ _DOWNGRADE_TEXT: dict[str, str] = {
 }
 
 
-def downgrade_text(reason: DowngradeReason | str) -> str:
-    """The sentence for one downgrade code, rendered in exactly one place.
-
-    The model, the card and the transcript all need this text; three copies of it
-    is three things to edit when the tier lands, and nothing that notices when
-    only two were.
-    """
+def _downgrade_text(reason: DowngradeReason | str) -> str:
+    """The sentence for one downgrade code, for `admission_notes`: one copy, so there
+    is one thing to edit when the tier lands."""
     return _DOWNGRADE_TEXT.get(reason, f"access was narrowed ({reason})")
+
+
+class ModelFallback(WireModel):
+    """A model a skill asked for that this mount cannot run, so its child ran on its
+    parent's route instead (`SubagentService.resolve_model`).
+
+    The key and a code rather than a sentence, for `downgrade_reason`'s reasons: the
+    admission is durable, and the profile a sentence would describe changes after it.
+    `admission_notes` renders the sentence."""
+
+    key: str
+    reason: UnrunnableReason
+
+
+def _fallback_text(fallback: ModelFallback) -> str:
+    """The sentence for a model fallback, for `admission_notes`."""
+    match fallback.reason:
+        case "unlisted":
+            why = f'this profile does not list "{fallback.key}"'
+        case "unserved":
+            why = "this profile lists it on a provider no adapter here serves"
+        case unknown:
+            assert_never(unknown)
+    return (
+        f'runs on your own model rather than "{fallback.key}", the model a skill it was '
+        f"given asks for, because {why}; it may do the work less well until the person "
+        "running you sets that model up"
+    )
+
+
+def admission_notes(run: SubagentRun) -> list[str]:
+    """What a parent is told about how its child was admitted, beside the facts: why
+    its access is narrower than asked, and why it runs on another model than its skill
+    asked for. One list, so the delegating tools cannot tell a parent different things."""
+    notes: list[str] = []
+    if run.downgrade_reason is not None:
+        notes.append(_downgrade_text(run.downgrade_reason))
+    if run.model_fallback is not None:
+        notes.append(_fallback_text(run.model_fallback))
+    return notes
 
 
 def _refused(reason: Deny | str) -> SubagentSpawnError:
@@ -522,8 +566,12 @@ class SubagentRequest:
     child on its parent's."""
     reasoning_effort: str | None = None
     route: ModelRoute | None = None
-    """The listed route `model_key` resolved to (`resolve_model`), whose settings a child
-    on it runs with (`child_options`). `None` runs the child with its parent's."""
+    """The route `resolve_model` resolved the spawn to, a key's or a whole route's, whose
+    settings a child on it runs with (`child_options`). `None` runs the child with its
+    parent's."""
+    model_fallback: ModelFallback | None = None
+    """The model a skill asked for and this mount could not run, so the child runs on
+    its parent's route instead (`resolve_model`)."""
     access: Access = "read"
     preset: str | None = None
     """A named kind of child the deployment configured (`subagent-presets`).
@@ -643,8 +691,11 @@ class SubagentRun(WireForm):
     A durable event carrying an English sentence is unparseable by the consumer
     that has to branch on it, and it goes stale silently: the reason a `write`
     was refused today stops being true when the workspace tier lands, in every
-    log already written. `downgrade_text()` renders the sentence from the code,
+    log already written. `admission_notes()` renders the sentence from the code,
     once."""
+    model_fallback: ModelFallback | None = None
+    """The model a skill asked for that this child runs without, stamped by the seam
+    from the resolved request, as it stamps `name`."""
     result: SubagentAwaiter | None = None
     """Awaits quiescence and reports the outcome. `None` from a provider whose
     children cannot be waited on."""
@@ -696,6 +747,8 @@ class SubagentRun(WireForm):
         }
         if self.downgrade_reason is not None:
             wire["downgradeReason"] = self.downgrade_reason
+        if self.model_fallback is not None:
+            wire["modelFallback"] = self.model_fallback.to_wire()
         return wire
 
 
@@ -748,9 +801,12 @@ class Admission(WireModel):
     """The key a spawn named beside the route it resolved to, for the audit (item 8)."""
     reasoning_effort: str | None = None
     route: ModelRoute | None = None
-    """The listed route a key resolved to, settings and all, because a restart rebuilds
-    the child from this record and nothing else, and the list may have changed since.
-    `None` on a child that ran on its parent's route, which inherits again."""
+    """The route the spawn resolved to, settings and all, because a restart rebuilds the
+    child from this record and nothing else, and the list may have changed since. `None`
+    on a child that ran on its parent's route, which inherits again."""
+    model_fallback: ModelFallback | None = None
+    """The model a skill asked for and the child ran without, for the audit: what the
+    person running the parent has to set up for the skill to get it."""
     requested_access: Access = "read"
     granted_access: Access = "read"
     downgrade_reason: DowngradeReason | None = None
@@ -788,6 +844,7 @@ def admission_payload(
         model_key=request.model_key,
         reasoning_effort=request.reasoning_effort,
         route=request.route,
+        model_fallback=run.model_fallback,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
         downgrade_reason=run.downgrade_reason,
@@ -1447,27 +1504,54 @@ class SubagentService:
         )
 
     def resolve_model(self, request: SubagentRequest) -> SubagentRequest:
-        """The route a spawn's model key names, from the parent's own list (S7b, item 8).
+        """The route a spawn runs on, resolved by the parent's own list (S7b, item 8).
 
-        The key is the request's, or the one a skill it names asks for in its front
-        matter (`model: classify`) — the skill directs the child, so it may say what
-        the child should think with. Resolved by the mount's `models` list, which is
-        the parent's profile as it runs, `/model` included: a key it does not hold is
-        refused, naming what it does. A request that already carries a route — a
-        readmitted child, fixed at its admission — is left as it is.
+        The list is the mount's `models`, the parent's profile as it runs, `/model`
+        included, and a child resolved onto an entry runs with that entry's settings
+        (`child_options`). A route is named one of three ways:
+
+        * **Whole** (`provider`/`model`): the listed entry it matches, key and settings,
+          else the route as given with no settings, as a root started on it gets
+          (`ModelList.resolve`).
+        * **By a key the spawn names**: the parent's own choice, so a key the list does
+          not hold, or whose provider nothing here serves, is refused, naming why.
+          Running the child elsewhere would answer the parent on a model it did not
+          choose.
+        * **By a key a skill names** in its front matter (`model: classify`): the skill
+          directs the child, so it may say what the child should think with, but its
+          author wrote the key without knowing this profile. One this mount cannot run
+          degrades rather than refuses: the child runs on its parent's route, and the
+          request carries a `ModelFallback` that the admission records and the spawn's
+          answer says, so the parent and the person both learn what to set up.
+
+        A readmitted child does not come through here: its route is fixed at its
+        admission (`_request_of`).
         """
+        skill_key = ""
         if request.provider or request.model:
-            return request
-        key = request.model_key or self._skill_model(request)
-        if not key:
+            provider, model = child_route(request)
+            if not (provider and model):
+                return request  # no route at all, which the provider refuses
+            choice = ModelChoice(provider=provider, model=model)
+        elif request.model_key:
+            choice = ModelChoice(key=request.model_key)
+        elif skill_key := self._skill_model(request):
+            choice = ModelChoice(key=skill_key)
+        else:
             return request
         try:
-            entry = choose(self.ctx, ModelChoice(key=key))
+            entry = choose(self.ctx, choice)
         except ModelChoiceError as error:
-            raise SubagentSpawnError(f"a child cannot run on {key!r}: {error}") from error
+            if not skill_key or error.reason is None:
+                raise SubagentSpawnError(
+                    f"a child cannot run on {choice.spelled!r}: {error}"
+                ) from error
+            log.warning("a child runs on its parent's route instead of %r: %s", skill_key, error)
+            fallback = ModelFallback(key=skill_key, reason=error.reason)
+            return replace(request, model_fallback=fallback)
         return replace(
             request,
-            model_key=key,
+            model_key=entry.key or None,
             provider=entry.route.provider,
             model=entry.route.model,
             reasoning_effort=request.reasoning_effort or entry.route.reasoning_effort,
@@ -1832,6 +1916,7 @@ class SubagentService:
                 raise parent_went_away(child_name) from gone
             # The seam's to give, and stamped as `_admit` stamps the owner.
             run.name = child_name
+            run.model_fallback = request.model_fallback
             admitted = await self._admit(
                 run, owner=name, grant=grant, held=held, boundary=boundary, request=request
             )
@@ -2661,6 +2746,7 @@ class ChildState:
             granted_access=record.granted_access,
             owner=record.owner,
             downgrade_reason=record.downgrade_reason,
+            model_fallback=record.model_fallback,
         )
 
     def to_wire(self) -> dict[str, JsonValue]:

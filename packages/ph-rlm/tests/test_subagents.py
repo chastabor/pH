@@ -464,11 +464,11 @@ async def test_a_sibling_name_collision_is_refused(delegating: MountedRuntime) -
 
 
 async def test_an_unroutable_provider_is_refused_at_admission(delegating: MountedRuntime) -> None:
-    """The preflight that exists today: no adapter, no child. Nothing is
+    """No adapter, no child, refused where the route is chosen (`choose`). Nothing is
     substituted — a child answering on a model the parent did not choose is a
     result the parent cannot interpret."""
     ctx, _session, parent = await delegating()
-    with pytest.raises(SubagentSpawnError, match="no registered adapter"):
+    with pytest.raises(SubagentSpawnError, match='no adapter here serves "nonexistent"'):
         await _spawn(ctx, parent, provider="nonexistent", model="m1")
 
 

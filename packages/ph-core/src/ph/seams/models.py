@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Literal, TypeAlias
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -67,6 +68,7 @@ __all__ = [
     "ModelEntry",
     "ModelList",
     "ModelRoute",
+    "UnrunnableReason",
     "apply",
     "choose",
     "models_row",
@@ -79,8 +81,23 @@ KEY_MAX = 32
 """The longest key a profile may name a model by — a word a person types."""
 
 
+UnrunnableReason: TypeAlias = Literal["unlisted", "unserved"]
+"""Why a well-formed choice cannot run here: the list does not hold its key, or no
+adapter here serves its route's provider."""
+
+
 class ModelChoiceError(ValueError):
-    """A choice that names nothing this profile can run, in a sentence that says why."""
+    """A choice that names nothing this profile can run, in a sentence that says why.
+
+    `reason` says it as a code for the two refusals a caller may degrade around rather
+    than surface: a skill's model that cannot run falls back to its parent's
+    (`ph.seams.subagents.ModelFallback`). `None` for a choice that is malformed, or a
+    list with no default to fall to.
+    """
+
+    def __init__(self, message: str, *, reason: UnrunnableReason | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class ModelRoute(WireModel):
@@ -285,7 +302,8 @@ class ModelList:
                 listed = ", ".join(sorted(self.routes)) or "nothing"
                 raise ModelChoiceError(
                     f'"{choice.key}" is not a model this profile lists (it lists {listed}); '
-                    "name a whole route as provider/model to run one it does not"
+                    "name a whole route as provider/model to run one it does not",
+                    reason="unlisted",
                 )
             return self.entry(choice.key, route)
         if choice.provider:
@@ -322,7 +340,8 @@ def choose(ctx: Context, choice: ModelChoice) -> ModelEntry:
     if chosen.route.provider not in served:
         raise ModelChoiceError(
             f'no adapter here serves "{chosen.route.provider}" '
-            f"(this profile serves {', '.join(served) or 'nothing'})"
+            f"(this profile serves {', '.join(served) or 'nothing'})",
+            reason="unserved",
         )
     return chosen
 

@@ -268,7 +268,8 @@ class Skill(WireModel):
     """The listed model a child this skill directs runs on, by key (session profiles,
     S7b) — `model: classify` for a skill that sorts rather than writes. Read when a
     spawn names this skill; the key is the parent's profile's to hold, and one it
-    does not list is refused at the spawn. Empty says nothing."""
+    cannot run degrades: the child runs on its parent's model, and the parent is told
+    (`ModelFallback`). Empty says nothing."""
     max_nudges: int | None = None
     """How many times `skill-steps` may steer toward this skill's steps without
     the plan moving, or `None` for the row's own `maxNudges` (D16).
