@@ -44,7 +44,7 @@ from ph.testing import (
 )
 from ph.testing.builders import reconciled_call, resume_stored
 from ph.tools.definition import NotDone
-from ph_clm.edits import REVISED
+from ph_clm.kinds import REVISED
 from ph_clm.sections import SectionMap, label
 
 pytestmark = pytest.mark.anyio

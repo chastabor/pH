@@ -13,11 +13,19 @@ from `PluginSource` — all already in the log because something else needed the
 That is what makes this view addable at zero cost and, more importantly, what
 makes it agree with the transcript by construction rather than by discipline.
 
-**The vocabulary is closed and total.** `RecordKind` is dsh's set, and
-`RECORDLESS` names the types that deliberately produce none. Together they must
-cover `KNOWN_SESSION_EVENT_TYPES` exactly — a test holds that, so a new event
-type cannot land unclassified. The transcript has the same rule for the same
-reason; this is the auditor's half of it.
+**The vocabulary is closed and total.** `RecordKind` is dsh's set, `HANDLERS` maps
+the types that have a record of their own, and `RECORDLESS` names the types that
+deliberately produce none. The rest are the auditor's records the vocabulary
+declares (`is_audit_only`), rendered from their payload. Together they must cover
+the vocabulary exactly — a test holds that, so a new event type cannot land
+unclassified. The transcript has the same rule for the same reason; this is the
+auditor's half of it.
+
+**A type this process does not know is rendered from its payload too.** It came
+from another build, or from a package this process never imported — a stored log
+read with nothing mounted — and it reached here only because it is ignorable, since
+the seed refuses an unknown required type. Skipping it would be the silent omission
+this view exists to prevent, and the app may not import a bundle to learn its types.
 
 **`sourceSeq` is the join.** Every record points back at the event that produced
 it, which is what lets the two views cross-navigate and what a fork aims at.
@@ -33,7 +41,14 @@ from typing import Any, Literal, TypeAlias
 
 from ph.json import as_int, as_obj, as_seq, as_str
 from ph.seams.skills import read_summary
-from ph.session import Session, SessionEvent, fork_boundaries, is_replacement_surface_event
+from ph.session import (
+    Session,
+    SessionEvent,
+    fork_boundaries,
+    is_audit_only,
+    is_replacement_surface_event,
+)
+from ph.session.known_event_types import is_known
 from ph.session.request_header import parse_request_header
 from ph.session_profile import EnvironmentFold, environment_listing, record_summary
 from ph.text import block_marker, count_of, one_line
@@ -80,13 +95,12 @@ RECORDLESS: frozenset[str] = frozenset(
 )
 """Types that deliberately produce no record.
 
-*Differently shaped* from the transcript's set, not a part of it — two of these
-are types the transcript renders. The difference is the point:
-`request/header`, `approval/policy`, `fs/observed` and `session/end-seed` are
-record-less for a *reader* and are exactly what an auditor came for, while
-`assistant/chunk` and the dispatch's opening half are rows in a conversation and
-duplicates in an audit. What stays out here is only what another record already
-carries, or bookkeeping so fine-grained it would bury what it describes."""
+The transcript's set and two more: `assistant/chunk` and the dispatch's opening half
+are rows in a conversation and duplicates in an audit. What stays out here is only
+what another record already carries, or bookkeeping so fine-grained it would bury
+what it describes. The types a reader has no row for and an auditor came for —
+`request/header`, `approval/policy` — are not here: the vocabulary declares them
+(`is_audit_only`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,12 +428,17 @@ HANDLERS: Mapping[str, Handler] = {
     "tool/call": lambda builder, event: builder.on_tool_call(event),
     "tool/result": lambda builder, event: builder.on_tool_result(event),
     "tool/code-dispatch": lambda builder, event: builder.on_sub_dispatch(event),
-    # Every remaining known type renders generically, and each is listed rather
-    # than caught by an `else`. The `else` is what made the completeness gate
-    # unfalsifiable: with a catch-all, a type added to the vocabulary silently
-    # got a generic row and no one ever decided whether it deserved a kind of
-    # its own. Explicit keys mean the *set* is checkable, which is the shape
-    # `adapter.py` uses for exactly this reason.
+    # Every remaining known type that draws a transcript row renders generically,
+    # and each is listed rather than caught by an `else`. The `else` is what made
+    # the completeness gate unfalsifiable: with a catch-all, a type added to the
+    # vocabulary silently got a generic row and no one ever decided whether it
+    # deserved a kind of its own. Explicit keys mean the *set* is checkable, which
+    # is the shape `adapter.py` uses for exactly this reason.
+    #
+    # A type the vocabulary declares an auditor's record (`is_audit_only`) needs no
+    # entry: it renders generically unless it has one above. That is a decision
+    # made where the type is declared, not a catch-all, so a type that is neither
+    # listed nor declared still fails the gate.
     "request/context": _on_harness_event,
     "approval/asked": _on_harness_event,
     "approval/decided": _on_harness_event,
@@ -427,17 +446,7 @@ HANDLERS: Mapping[str, Handler] = {
     "shell/result": _on_harness_event,
     "question/asked": _on_harness_event,
     "question/answered": _on_harness_event,
-    "approval/mode": _on_harness_event,
-    "approval/policy": _on_harness_event,
-    "workspace/acquiring": _on_harness_event,
-    "workspace/acquired": _on_harness_event,
-    "workspace/disposed": _on_harness_event,
-    "workspace/retained": _on_harness_event,
-    "workspace/provisioned": _on_harness_event,
-    "workspace/checkpoint": _on_harness_event,
-    "workspace/restoring": _on_harness_event,
     "workspace/restored": _on_harness_event,
-    "permission/preset": _on_harness_event,
     # The environment the session started in (session profiles, S3) — the first
     # thing an audit of a run asks, and nothing a conversation shows.
     "profile/base": _on_profile_record,
@@ -455,11 +464,9 @@ HANDLERS: Mapping[str, Handler] = {
     "profile/saved": _on_profile_record,
     # A skill's body read at runtime, hashed (S8, decision 12).
     "skill/read": _on_skill_read,
-    "sandbox/mode": _on_harness_event,
     "sandbox/denied": _on_harness_event,
     "command/run": _on_harness_event,
     "command/done": _on_harness_event,
-    "fs/observed": _on_harness_event,
     "llm/retry": _on_harness_event,
     # Records, never `RECORDLESS`: a reader that skipped these would find a
     # transcript resuming mid-thought with no account of why, and a session that
@@ -475,12 +482,8 @@ HANDLERS: Mapping[str, Handler] = {
     # one that simply went quiet read the same without them.
     "credential/needed": _on_harness_event,
     "credential/supplied": _on_harness_event,
-    "schedule/created": _on_harness_event,
-    "schedule/canceled": _on_harness_event,
     "schedule/tick": _on_harness_event,
     "goal/set": _on_harness_event,
-    "goal/continued": _on_harness_event,
-    "goal/gate": _on_harness_event,
     "goal/settled": _on_harness_event,
     # A record, not `RECORDLESS`: an auditor reading a transcript needs to know
     # where somebody else's work ends and this run's begins, and that the turn
@@ -491,61 +494,41 @@ HANDLERS: Mapping[str, Handler] = {
     # auditor who reaches the last row of a segment has reached the end of a
     # file rather than the end of the work.
     "session/segmented": _on_harness_event,
-    # A record: "who asked for this, and had they asked before" is exactly the
-    # provenance an auditor reading a daemon-driven run needs.
-    "client/command": _on_harness_event,
-    # And how it ended — `unknown` is the row an auditor looks for after a crash.
-    "client/command-settled": _on_harness_event,
-    # Which calls named their effect, and which were answered from the log.
-    "tool/effect": _on_harness_event,
-    "tool/effect-settled": _on_harness_event,
     "kernel/restored": _on_harness_event,
-    # A sub-agent's own story, in its own log (Phase 11): what it was asked, each
-    # start and wait and its ending, and its revocation. A child's log is read here
-    # and nowhere else (P11-08), and a root's log holds none of them.
-    "subagent/admitted": _on_harness_event,
-    "subagent/status": _on_harness_event,
-    "subagent/deleted": _on_harness_event,
     "harness/refined": _on_harness_event,
     "harness/refine-considered": _on_harness_event,
-    # What the harness ran as the agent to check a reference, and what it found (S21).
-    "harness/probe": _on_harness_event,
-    "harness/probed": _on_harness_event,
     "context/loaded": _on_harness_event,
     "agent/inbox/spliced": _on_harness_event,
     "todo/write": _on_harness_event,
-    # A record: when a run stopped being steered, this is why it stopped when it
-    # did — the skill's own budget rather than the profile's (D16).
-    "skill-steps/budget": _on_harness_event,
-    # A record: every model call a ceiling counts, and which row asked for it
-    # again — the one retry `llm/retry` cannot report is a compaction's (P1).
-    "step/retry": _on_harness_event,
     "offload/spilled": _on_harness_event,
     "offload/input-spilled": _on_harness_event,
-    # Both, and generically: an auditor came for exactly this — what a summary
-    # shadowed, what it cost, which model wrote it, and every attempt that
-    # decided not to. The transcript renders neither (the summary rides on its
-    # replacement `user/message`), which is the split this view exists for.
-    "compaction/summarized": _on_harness_event,
+    # Every compaction attempt that decided not to, and the arguments one elided.
+    # What a landed summary shadowed and cost is `compaction/summarized`, an
+    # auditor's record the vocabulary declares.
     "compaction/declined": _on_harness_event,
     "compaction/args-truncated": _on_harness_event,
-    # A model's own context edit (ph-clm), for compaction's reason: which sections
-    # it took off the surface, why, and what the re-read cost.
-    "clm/revised": _on_harness_event,
-    "clm/declined": _on_harness_event,
     "attachment/degraded": _on_harness_event,
     "attachment/oversized": _on_harness_event,
     "attachment/uploaded": _on_harness_event,
-    "attachment/uploading": _on_harness_event,
     "limits/exceeded": _on_harness_event,
     "limits/breaker-tripped": _on_harness_event,
-    "session/end-seed": _on_harness_event,
 }
-"""Event type → the record it produces.
+"""Event type → the record it produces, for every type but the auditor's records and
+the unknown types that render generically (`_handler_of`).
 
-Explicit, so `set(HANDLERS) | RECORDLESS` is a value a test can hold against
-`KNOWN_SESSION_EVENT_TYPES` — which is the only version of "no silent
-omissions" that fails when a type is added."""
+Explicit, so `set(HANDLERS) | RECORDLESS`, with the types the vocabulary declares
+audit-only, is a value a test can hold against the vocabulary — which is the only
+version of "no silent omissions" that fails when a type is added."""
+
+
+def _handler_of(event_type: str) -> Handler | None:
+    """The handler a type's events go to: its own; else the generic one, for a type
+    the vocabulary declares only an auditor reads, or one this process does not know
+    (the module docstring says why); else none, for `RECORDLESS`."""
+    handler = HANDLERS.get(event_type)
+    if handler is None and (is_audit_only(event_type) or not is_known(event_type)):
+        return _on_harness_event
+    return handler
 
 
 def build_trajectory(session: Session) -> list[TrajectoryRecord]:
@@ -565,11 +548,11 @@ def build_trajectory(session: Session) -> list[TrajectoryRecord]:
     log = session.events
     boundaries = fork_boundaries(log)
     for event in log:
-        handler = HANDLERS.get(event.type)
+        handler = _handler_of(event.type)
         if handler is None:
-            # Record-less, or a type from a newer build. Two of the record-less
-            # ones are still *read*: a step opens the clock and the first chunk
-            # marks time-to-first-token, which is why neither is a record.
+            # Record-less. Two of them are still *read*: a step opens the clock
+            # and the first chunk marks time-to-first-token, which is why neither
+            # is a record.
             if event.type == "step/start":
                 builder._step_started = event.time
                 builder._first_chunk = None

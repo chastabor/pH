@@ -30,6 +30,14 @@ changes, so an id read on one call is good on the next.
 Every edit reports what it costs: a provider's prefix cache cannot serve anything
 after the first change, so the sections *after* an edit are read again once.
 
+## Readouts
+
+When a tool result takes the context past a share of its window, that result ends
+with one line giving the context's size and how to free space. Each share is reported
+once, and again only after an edit brings the context back below it. The shares are
+the `clm-context` row's `remindAt`, `[0.5, 0.75]` by default, below compaction's
+0.85. `[]` turns readouts off.
+
 ## The context file
 
 The `clm-mirror` row writes the model's context to a file in the agent's workspace
@@ -46,12 +54,24 @@ use, in one batch, before the call's result. The result carries the receipt.
 | a message's text changed | a replacement (a reply is rewritten in place) |
 | no section lines left | one replacement for everything editable |
 
+A revised section's header line says what it stands for. The text under it is only
+what the model may edit.
+
 A reorder, a damaged header, an edit to a protected section, or a file written before
 the context was last revised is refused. The call's result says why, and the file is
 rewritten.
 
+The file is a whole conversation, so it is kept private and short-lived:
+- its directory is 0700 and the file 0600;
+- it is deleted when the session leaves the store;
+- a link put in its place is replaced, never read through.
+
+Only an edit a tool call makes is applied. A file changed outside any call (in an
+editor, or by another process) is recorded as declined and rewritten before the next
+request.
+
 ```bash
-phern --profile rlm --patch '{insert: [{id: clm-context, name: clm-context}]}'
+phern --profile rlm-clm
 ```
 
 [clm]: https://arxiv.org/abs/2609.37725

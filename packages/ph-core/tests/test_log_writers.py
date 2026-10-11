@@ -56,6 +56,7 @@ from ph.session.known_event_types import (
     declare_log_type,
 )
 from ph.session.writers import LogWriteError, LogWriter, log_writer, scaffolding_writer
+from ph.testing import isolated_log_types
 
 VARIABLE_SITES: dict[tuple[str, str], frozenset[str]] = {
     # One recorder for both media records, told which by its caller.
@@ -307,10 +308,15 @@ def test_no_new_write_takes_its_type_from_a_variable() -> None:
     assert WALK.variable == set(VARIABLE_SITES), sorted(WALK.variable ^ set(VARIABLE_SITES))
 
 
-def test_a_declared_type_is_written_only_by_its_owner() -> None:
-    """None ships today (decision 7); held here so the first one is checked."""
+def test_a_declared_type_is_written_by_its_owner_alone() -> None:
+    """A declaration's owner writes it and nobody else does, as `WRITERS` holds for
+    ph-core's — so a declaration nothing writes is removed rather than left behind.
+
+    Sabotage: point `ph_clm.kinds`' `clm/declined` at `ph_clm.edits`.
+    """
+    assert {"clm/revised", "clm/declined"} <= set(WALK.declared), "the walk lost them"
     for kind, owner in WALK.declared.items():
-        assert WALK.static.get(kind, set()) <= {owner}, (kind, owner, WALK.static.get(kind))
+        assert WALK.static.get(kind, set()) == {owner}, (kind, owner, WALK.static.get(kind))
 
 
 def test_the_walk_follows_an_imported_constant() -> None:
@@ -371,13 +377,15 @@ def test_the_scaffolding_writer_is_ph_testings_alone() -> None:
 
 
 def test_a_declared_type_is_written_by_its_owner_and_nobody_else() -> None:
-    """A package's own type: its owner's writer writes it; any other module's does not."""
-    declare_log_type("probe/declared", owner=__name__, ignorable=True)
-    session = Session("declared")
+    """A package's own type: its owner's writer writes it; any other module's does not.
+    Declared into a table of the test's own, so the type does not outlive it."""
+    with isolated_log_types():
+        declare_log_type("probe/declared", owner=__name__, ignorable=True, audit_only=False)
+        session = Session("declared")
 
-    log_writer(__name__).append(session, "probe/declared", {"n": 1})
-    with pytest.raises(LogWriteError, match='"probe/declared"'):
-        DRIVER.append(session, "probe/declared", {"n": 2})
+        log_writer(__name__).append(session, "probe/declared", {"n": 1})
+        with pytest.raises(LogWriteError, match='"probe/declared"'):
+            DRIVER.append(session, "probe/declared", {"n": 2})
     assert [event.type for event in session.events] == ["probe/declared"]
 
 

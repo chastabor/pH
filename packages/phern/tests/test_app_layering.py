@@ -65,6 +65,11 @@ below is the one that may name the package, and does.
 """
 
 
+BUNDLES = ("ph_rlm", "ph_stabilize", "ph_text_index", "ph_code_graph", "ph_clm")
+"""The bundles `phern` depends on and `ph_app` may not import (`pyproject.toml`): each
+reaches the app as a third-party wheel would, through the `ph.bundles` entry points."""
+
+
 def _dragged_in(entry: str, forbidden: tuple[str, ...]) -> str:
     """Import `entry` in a fresh interpreter and report which of `forbidden` came.
 
@@ -101,6 +106,18 @@ def test_a_front_end_imports_the_daemons_client_and_not_its_server() -> None:
     dragged = _dragged_in("ph_app.web.serve", FRONT_END_FORBIDS)
 
     assert dragged == "[]", f"ph_app.web.serve dragged in {dragged}"
+
+
+def test_the_app_imports_no_bundle() -> None:
+    """The rule `pyproject.toml` states, held where it was broken once: the trajectory
+    viewer reads a stored log with nothing mounted, and imported ph-clm's kinds leaf by
+    name to know its types. It renders a type it does not know from its payload now.
+
+    Sabotage: `from ph_clm import kinds` in `ph_app/__init__.py`.
+    """
+    dragged = _dragged_in("ph_app.cli, ph_app.daemon.server, ph_app.tui.trajectory_app", BUNDLES)
+
+    assert dragged == "[]", f"the app dragged in {dragged}"
 
 
 def test_the_human_door_needs_no_daemon_at_all() -> None:

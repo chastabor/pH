@@ -78,6 +78,7 @@ from ..session import (
     derive_event_message,
     freeze_json_value,
     intents,
+    known_event_types,
     unsettled_why,
 )
 from ..session import kinds as core_kinds
@@ -303,6 +304,20 @@ def isolated_intent_kinds(*, core: bool) -> Iterator[None]:
         intents._KINDS = real
 
 
+@contextmanager
+def isolated_log_types() -> Iterator[None]:
+    """Declare log types into a table of this block's own, starting from what the
+    process has declared so far, so a test's declarations do not outlive it — and a
+    front end's completeness check, in a suite run beside this one, never meets them.
+    """
+    real = known_event_types._DECLARED
+    known_event_types._DECLARED = dict(real)
+    try:
+        yield
+    finally:
+        known_event_types._DECLARED = real
+
+
 def boundary_for(scope: Boundary | None, agent: AgentHandle | None) -> Boundary:
     """What a test meant, when it did not say (P6-32).
 
@@ -358,6 +373,7 @@ async def run_tool(
     scope: Boundary | None = None,
     session: Session | None = None,
     call_id: str = "call-1",
+    parent: object | None = None,
 ) -> ToolExecutionResult:
     """Execute one tool the way the loop does, for a test that is not the loop.
 
@@ -374,6 +390,9 @@ async def run_tool(
     Its `None` is the *helper's* "you did not say", resolved by `boundary_for`
     below, and not the seam's — that one P6-32 deleted, because a seam given no
     boundary used to answer with the widest one it had.
+
+    `parent` makes it a dispatch inside a Code Mode cell, which a row reading back or
+    measuring the cell's own call must leave alone.
     """
     return await ctx.require(TOOLS).execute(
         ToolExecutionInput(
@@ -383,6 +402,7 @@ async def run_tool(
             scope=boundary_for(scope, agent),
             session=session,
             agent=agent,
+            parent=parent,
         )
     )
 

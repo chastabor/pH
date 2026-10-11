@@ -985,8 +985,12 @@ not there (`seams/spill.py`).
 `_readmit` requires `seq == index`, contiguous from 0, and refuses unknown
 non-ignorable types (`session/session.py`). **The write door refuses the same types
 on the way in** (`Session._append`, behind every writer), so no build writes a log it cannot read back; a package
-outside ph-core adds its own with `declare_log_type`, naming an owner and whether
-another build may skip it (`session/known_event_types.py`). And the JSONL reader
+outside ph-core adds its own with `declare_log_type`, naming an owner, whether
+another build may skip it, and whether only an auditor reads it — no conversation
+row, a record in the trajectory, which is how phern derives both of its tables
+rather than listing each type twice (`session/known_event_types.py`). It does so in
+its `kinds` leaf, which its `__init__` imports at module top. The trajectory renders a
+type it does not know from its payload, so the app names no bundle to show one. And the JSONL reader
 drops an unterminated final line — the one damage a death mid-write leaves,
 which no flush ever reported written — where it used to refuse the whole log.
 
@@ -1879,7 +1883,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
 | **A writer can be forged on purpose.** Every log write goes through a module's own writer, which refuses a type its row in `WRITERS` does not grant — a third-party row appending `sandbox/mode` is refused at the write (T6, closing F12). What the runtime cannot refuse is a module that imports another's writer, constructs a `LogWriter`, or calls `Session._append`: each is deliberate, and `test_log_writers.py` fails on all three | T6, by design (rule 6) |
 | **A workspace tree is not an intent kind.** Its openness is folded from `seed_length` and only over tiers with a fresh root (`workspace_survivors`), which a key-pair fold from seq 0 cannot express; `WorkspaceSeam.reconcile` stays its settler, and repair leaves it as it leaves an `owner-settles` kind | P10-11, by decision |
-| **A package's log type is known to a reader only once the package is imported.** `declare_log_type` has no entry-point group, so a stored log carrying a *required* plugin type is refused by a reader that never mounted the plugin; none ships today | P10-03, conditional on the first such type |
+| **A package's log type is known to a reader only once the package is imported.** `declare_log_type` has no entry-point group, so a stored log carrying a *required* plugin type is refused by a reader that never mounted the plugin. The first declared types, ph-clm's `clm/revised` and `clm/declined`, are ignorable: a build without ph-clm skips them, and phern's trajectory viewer renders any unknown ignorable type from its payload | P10-03 |
 | `phern attachments gc` is cited as precedent in two docstrings but **does not exist** | doc drift |
 | `DowngradeReason` has one member and one producer; tier-driven narrowing records none (§6.6) | incomplete |
 | `_enforce`'s containment refusal (a scope outside the parent's) has **no test**; the no-scope branch does | untested |

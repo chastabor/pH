@@ -33,10 +33,11 @@ dependencies = [
     #
     # **Naming them is not importing them, and the difference is the whole
     # architecture.** `ph_app` may not `import ph_rlm`, `ph_stabilize`,
-    # `ph_text_index`, `ph_code_graph` or `ph_clm` — `test_app_layering.py` walks the AST
-    # and fails if it ever does — because every one of them reaches the app the
-    # same way a *third-party* wheel would: through the `ph.bundles` entry-point
-    # group, resolved at `--profile` time by `available_profiles()`. Depending
+    # `ph_text_index`, `ph_code_graph` or `ph_clm` — `test_app_layering.py` imports the
+    # app's entry points in a fresh interpreter and fails if one drags a bundle in —
+    # because every one of them reaches the app the same way a *third-party* wheel
+    # would: through the `ph.bundles` entry-point group, resolved at `--profile`
+    # time by `available_profiles()`. Depending
     # on the wheels changes which ones are present by default; it does not give
     # the app a name it may write down.
     #

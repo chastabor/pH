@@ -128,6 +128,7 @@ event, or a child process.
 | `base` · `headless` | no model route at all — the fake adapter, for wiring work | — |
 | `tui` | `headless` plus a writable workspace: a person is present to answer approvals | — |
 | `rlm` · `rlm-stable` | Code Mode, and Code Mode with the stabilization gates on | — |
+| `rlm-clm` | `rlm` plus `ph-clm`: the model edits its own context, with the context tools or as a file | — |
 
 `phern doctor` prints the list this install can actually compose. Profiles compose,
 so `--profile llama` is `base` plus the llama route; the interactive profiles

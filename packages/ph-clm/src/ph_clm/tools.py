@@ -6,6 +6,12 @@ call returns, so the call's own result is the receipt — no notice is added to 
 context to say it happened. Under Code Mode they are `tools.context_*` like any
 other tool, so a cell can compute an edit in Python and make it.
 
+**Readouts ride on tool results** (`ph_clm.budget`): when a result takes the context
+past a share of its window (`remindAt`), that result ends with one line saying how
+large the context is and how to free space. The outermost listener on the result, so
+it measures what is logged: after the context file's read-back has landed the call's
+edit, and after any row that spills or trims the result.
+
 An edit lands inside the step that asked for it, on sections that step cannot be
 part of: the step in flight is protected (`SectionMap._protection`). A crash between
 the edit and its result is answered by `reconcile`: the edit and its `clm/revised`
@@ -18,23 +24,28 @@ from __future__ import annotations
 
 import difflib
 from collections.abc import Callable
-from typing import Any
+from dataclasses import replace
+from typing import Annotated, Any
 
 from pydantic import Field
 
-from ph.cordis import Context, plugin
+from ph.cordis import Context, Next, plugin
 from ph.json import JsonObject
 from ph.keys import TOKEN_METER, TOOLS
-from ph.llm.types import ContentBlock
+from ph.llm.types import ContentBlock, TextBlock, text_of
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SessionEvent, derive_event_message, originals
 from ph.text import thousands
 from ph.tools.definition import (
+    Accept,
     Done,
     NotDone,
+    PostToolDecision,
     Reconciled,
     ToolDefinition,
+    ToolExecution,
+    ToolExecutionResult,
     ToolModel,
     ToolOutput,
     ToolRunContext,
@@ -46,8 +57,9 @@ from ph.tools.definition import (
 from ph.tools.presentation import simple_views
 from ph.wire import WireModel
 
+from .budget import Readouts
 from .edits import Editor, Gate, Revision, receipt, revision_of
-from .keys import CLM
+from .keys import CLM, CLM_MIRROR
 from .sections import (
     EditRefused,
     Section,
@@ -75,6 +87,12 @@ class Config(WireModel):
     refuses any growth."""
     map_limit: int = Field(default=60, ge=1)
     """How many sections `context_sections` lists when the model does not say."""
+    remind_at: list[Annotated[float, Field(gt=0, lt=1)]] = Field(
+        default_factory=lambda: [0.5, 0.75]
+    )
+    """Shares of the context window at which a tool result carries a readout of the
+    context's size, once per crossing. Below compaction's 0.85 by default, so the model
+    is told before a summary is written for it. Empty turns readouts off."""
 
 
 # ------------------------------------------------------------------ schemas --
@@ -178,6 +196,48 @@ async def apply(ctx: Context, config: Config) -> None:
     # The map's per-event facts are a fold over the log, and every such cache gets
     # its own invariant row (`docs/seams/invariants.md`, "Fold caches get one row each").
     contribute_fold_cache(ctx, id="clm-section-map", subject="section map", stale=mapper.stale)
+    readouts = Readouts(tuple(config.remind_at))
+
+    def forget(session: Session) -> None:
+        mapper.forget(session.id)
+        readouts.forget(session.id)
+
+    ctx.on("session/disposed", forget)
+
+    async def after_call(
+        execution: ToolExecution, result: ToolExecutionResult, next_: Next[PostToolDecision]
+    ) -> PostToolDecision:
+        decision = await next_(execution, result)
+        session = execution.session
+        if execution.parent is not None or session is None or not isinstance(decision, Accept):
+            return decision
+        route = session.request_context()
+        window = None if route is None else route.context_window
+        if not window:
+            return decision
+        content = tools.projected_content(execution, decision, result)
+        if content is None:
+            return decision
+        text = text_of(content)
+        before = mapper.tokens(session)
+        # A token is at least a byte, so the result's UTF-8 length bounds its count, and
+        # it is tokenized only when that bound could cross a threshold.
+        crossed = readouts.crossed(
+            session.id,
+            before,
+            before + len(text.encode()),
+            window,
+            lambda: before + meter.measure_text(text),
+        )
+        if crossed is None:
+            return decision
+        level, after = crossed
+        line = readouts.line(after, window, level, _how(ctx, execution))
+        return replace(decision, content=[*content, TextBlock(text=line)])
+
+    if readouts.thresholds:
+        # Outermost, whatever order the rows mounted in (see the module docstring).
+        ctx.on("tools/post-execute", after_call, prepend=True)
 
     def sections_tool(args: SectionsArgs, run: ToolRunContext) -> JsonObject:
         session = _session(run)
@@ -357,6 +417,16 @@ async def _reconcile_edit(
 
 
 # ------------------------------------------------------------------ helpers --
+
+
+def _how(ctx: Context, execution: ToolExecution) -> str:
+    """How a readout says to free space: the context file when a row keeps one, and
+    the tools either way."""
+    verbs = "context_tombstone, context_replace or context_rewrite"
+    mirror = ctx.get(CLM_MIRROR)
+    if mirror is None or execution.session is None or execution.agent is None:
+        return f"use {verbs}"
+    return f"edit {mirror.path(execution.session, execution.agent)}, or use {verbs}"
 
 
 def _session(run: ToolRunContext) -> Session:

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import kinds as kinds
+
 BUNDLE = Path(__file__).parent / "bundle.yaml"
 """The rows the `clm` bundle layers over a profile."""
 
-__all__ = ["BUNDLE"]
+__all__ = ["BUNDLE", "kinds"]

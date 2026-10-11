@@ -502,6 +502,149 @@ a second map with its own cache and settings.
 - **Sections or spans in core.** Compaction cuts a prefix and does not need sections.
   Revisit if its planner wants the memoized sizes.
 
+## Phase 2b: records only an auditor reads
+
+**The problem, found by the Phase 2 review.** A log type that is pure accounting,
+with no row in the transcript and a record for the auditor, is listed by hand in
+five places:
+- the core vocabulary, with its ignorable set;
+- the writers table;
+- phern's TUI `RECORDLESS` set;
+- phern's trajectory `HANDLERS`;
+- phern's test list of auditor-only types.
+
+`clm/revised` and `clm/declined` each touched all five. The review counted 32
+existing types that sit in both phern tables the same way: no transcript row, and
+the trajectory's generic `_on_harness_event`.
+
+**The design: one declaration of the property, and phern derives both tables.**
+- **Core** gains `AUDIT_ONLY_SESSION_EVENT_TYPES`, the core types that are records
+  only an auditor reads. `declare_log_type(name, *, owner, ignorable, audit_only)` lets a package say
+  the same about its own type. This is a separate property from `ignorable`:
+  - some ignorable types draw a transcript row (`attachment/uploaded`);
+  - some required types draw none (`request/header`).
+- **phern's TUI** treats every audit-only type as having no row, and its own
+  `RECORDLESS` keeps only the types that are rowless for some other reason.
+- **phern's trajectory** renders every audit-only type through `_on_harness_event`,
+  unless a handler of its own is registered for it.
+- **The coverage tests** hold `known ∪ declared` against "rendered, or audit-only",
+  so a new type that is neither still fails.
+- **Then ph-clm declares its two types in its own package** with `declare_log_type`,
+  in its `kinds` leaf, and its core rows go. This reverses the "not advised" note under Phase 1b:
+  the generic fallback that note asked for now exists. ph-rlm's and ph-stabilize's
+  types can follow later; nothing here forces them.
+
+**Gate:**
+- a new audit-only type touches only its declaration and its writer's row;
+- the phern suites pass unchanged;
+- sabotage: a type that is neither rendered nor audit-only fails coverage, and so does
+  a declared type with no writer.
+
+No format change: the log's bytes don't move, only how readers classify them.
+
+## Phase 3 design: the context file, settled before building
+
+Built; "Phase 3 as built" says where the build departed from this.
+
+Three items skipped in the Phase 2 review turned out to be one question — what a
+section looks like in the file — plus the file's security and its change detection.
+They are settled here, and the first half of Phase 3 builds them.
+
+### What a section looks like in the file
+
+- **A body holds only text the model may edit; harness words go in the header.**
+  Today a replacement's text starts with `[revised context, standing for …]`, the
+  file shows that line, and when the model edits the section again, `_unlabeled`
+  strips the echoed line by regex.
+- **Instead, a replacement's message is two text blocks: the label, then the
+  body.**
+  - The model's context still shows both.
+  - The file shows only the body, and the section header carries
+    `stands-for=S412..S431`. *Built as the label's own words on the header.*
+  - A node is known to be a ph-clm replacement by its `clm/revised` record at
+    `seq + 1`, the same O(1) link `_removed_by` already uses. That is structure, not
+    a pattern. *Built from the message instead: a fold may read only its prefix.*
+  - A revision of a revision rebuilds its label from its own new record.
+  - `_unlabeled` and its regex go.
+  - Compaction summaries are not ph-clm's: they show whole, as now.
+- **The fold stores each node's escaped form instead of its plain text.**
+  - Memory stays at one copy per node.
+  - A render becomes a join, with no regex per line on every request.
+  - Read-back compares the file's raw body with the cached escaped body, and
+    unescapes only bodies that changed.
+
+### Security
+
+- **Content cannot create structure.**
+  - Every body line that could read as a header is escaped, so a tool output, a web
+    page or a pasted file cannot inject a `[[SECTION]]`.
+  - Validation refuses an id outside the base, a duplicate id, a reorder, a protected
+    section, another session's file and an older generation.
+  - The generation does what pi-clm's per-document nonce does. A file written before
+    the last revision is refused, and between revisions ids are stable, so a header
+    pasted from an earlier read still means the same section.
+- **The file is private.**
+  - The `clm/` directory is created 0700. That alone keeps other users out, whatever
+    the file's own mode.
+  - The file is 0600.
+  - Today `write_atomic` leaves the file 0644, readable by every account on a shared
+    machine.
+- **The file does not outlive its session.**
+  - It is deleted when the session closes.
+  - Directories a crashed process left behind are swept when the row mounts. *Not
+    built; see "Phase 3 as built".*
+  - Scratch itself stays, since it is the workspace's artifact; only the cache inside
+    it goes.
+- **A symlink at the path is refused.** Read-back `lstat`s the path, and a link
+  is rewritten, never followed.
+- **What remains, in pi-clm's words:** "editable memory is a prompt-injection surface".
+  A model can be talked into removing context it needed. The mitigations are all
+  existing pieces:
+  - protected sections;
+  - every original kept in the log;
+  - `context_recall` and `context_diff`;
+  - a receipt naming every edit.
+
+### Change detection and durability
+
+- **The stat is a skip, not a record.** The `(mtime, size)` per file lives in memory
+  and is never logged. It exists so a call that left the file alone costs a 1 µs
+  `stat`, not a read and parse of a file that can be a megabyte.
+- **The check stays synchronous, at the call boundary, rather than an inotify or
+  kqueue watcher.**
+  - The edit must land after the call that made it and before that call's result.
+    That is the durability rule and the attribution point.
+  - A watcher's event arrives asynchronously, possibly after that point, so the
+    boundary would still have to `stat` to be sure.
+  - A watcher would add a dependency, platform differences, coalesced or lost events,
+    and a watcher per file.
+  - It also cannot see writes made from a remote runtime.
+- **A file this process did not write is never applied.** Built with Phase 2 (see
+  "Phase 2 as built").
+  - With no record of having written it, read-back rewrites the file from the log
+    instead of compiling it.
+  - So after a crash, a leftover edit, possibly half written by a call the log
+    already shows as interrupted, is discarded, not credited to the next call.
+  - Before, the first request after a restart happened to rewrite the file first.
+    This makes that the rule instead of an accident of ordering.
+- **An edit made outside any call is caught before it is overwritten.**
+  - The render before each request first `stat`s the file.
+  - A change since the last write was made by no tool call: the person in an editor,
+    or another process.
+  - Today the render overwrites it silently. Decision 7 settles what to do
+    instead: discard it, and record it.
+- **Tests:**
+  - a restart leftover is discarded (built with Phase 2);
+  - an edit outside a call is caught;
+  - a symlink is refused;
+  - the directory and file modes are set.
+
+### Then the rest of Phase 3
+
+- budget readouts, as a `post-execute` trailer on tool results;
+- the refined protocol prompt;
+- the `rlm-clm` profile.
+
 ## Phases
 
 | phase | work | gate |
@@ -510,9 +653,214 @@ a second map with its own cache and settings.
 | **1. Sections and the door** ✅ | `sections.py`, `edits.py`, the six tools; `clm/revised` and the `ph_clm.edits` writers row | Each verb lands as a surface replace; `derive_messages` shows the replacement and `transcript` the original; a resumed session derives the same messages; refusals for an unbalanced or non-contiguous set, a stale seq, a protected section, or a result rewrite that touches more than content; `clm/revised` is in the same batch; the agent-loop invariant holds. Sabotage-check each refusal. |
 | **1b. One revision door** ✅ | `ph.session.revise`; `is_in_place_rewrite` by message identity; lineage in `ph.session.surface`; `one_line` in `ph.text`; compaction, input-offload and ph-clm moved onto the door; `ph_clm/keys.py`; the fold-cache invariant row | the door's own suite, sabotage-checked; the static walk shows no `SurfaceReplace` outside the door; compaction, input-offload and ph-clm suites green without asserting payload mechanics; `VerifyingFoldCache` over the section map |
 | **2. The mirror** ✅ | render through `ctx.fs`; read back in `tools/post-execute` of the writing call, with the receipt on its result; the diff compiler; `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and result; a crash between an edit and its result resumes with the edit landed and the call interrupted |
-| **3. Budget and prompt** | budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
+| **2b. Audit-only records** ✅ | `AUDIT_ONLY_SESSION_EVENT_TYPES` and `declare_log_type(audit_only=)`; phern's TUI and trajectory derive their tables from it; ph-clm's two types declared in their own package | a new audit-only type touches only its declaration and its writer; the phern suites unchanged; coverage still fails a type that is neither rendered nor audit-only |
+| **3. Budget and prompt** ✅ built; the real-provider gate is pending | first, the context file's design (above): label out of the body, escaped forms cached, private and short-lived files, symlinks refused, edits outside a call caught; then budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
 | **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
 | **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+
+### Phase 3 as built
+
+- **The label is its own block.**
+  - A replacement is `[label, body]`; a tombstone is a single label block.
+  - `edits.labeled(message)` splits a ph-clm substitution, found by
+    `PluginSource.plugin == "clm"`. The first text block is the label and the rest is
+    the body.
+  - *Departure:* not found through the `clm/revised` record at `seq + 1`. A
+    `SessionFoldCache` may read only its prefix: a batch publishes each member with
+    the log ending at that member, so a fold folding the replacement cannot see the
+    record. The message carries its own structure, and a compaction summary
+    (another plugin) shows whole.
+  - The file's section header ends with the label's words, `— revised context,
+    standing for S412..S431`. A tombstone's header says what it removed, and it has
+    no body. *Departure:* the label's own words, not `stands-for=`; the header is
+    read only for its id.
+  - `_unlabeled`, `_LABEL` and the regex are gone. A model that pastes a label into
+    `context_replace` text keeps it as text; that is cosmetic and visible to it.
+- **The fold caches the file form.**
+  - `Shown.text` is the escaped body and `Shown.label` the header words. A render
+    is a join.
+  - `parse` keeps bodies escaped, and `compile_drafts` compares them raw.
+    `_changed` and `_whole` unescape only what they land.
+- **Private.**
+  - `write_atomic(private=True)` is new in core: the temp is created 0600, so the
+    bytes are never readable by another account, not even until a `chmod`.
+  - `_write` makes the `clm/` directory 0700, and removes anything but a directory
+    at its path rather than `chmod` through a link.
+- **Links and pipes are refused unread.**
+  - Read-back `lstat`s the path, and `_read` opens with `O_NOFOLLOW | O_NONBLOCK`,
+    then `fstat`s for a regular file.
+  - A link, a pipe or non-UTF-8 bytes is a refusal whose reason quotes nothing from
+    the file. Before, a link to a file with a plausible first line would have had
+    its damaged header quoted into the model's context, and a pipe would have held
+    the read thread.
+- **Gone with the session.**
+  - On `session/disposed`, `MirrorService.forget` deletes each file and its
+    directory if empty, and drops `_written`, `_locks` and the fold.
+  - `SectionMap.forget` and `Readouts.forget` go the same way.
+  - Before this, all three grew for the life of the process.
+  - `session/disposed` also fires on passivation. The file is a cache and the next
+    request writes it again.
+- **No sweep at mount.** *Departure.*
+  - The workspace seam never collects scratch, and a sweep cannot tell a crashed
+    process's leftover from a live file of another process sharing the scratch
+    root (`phern -p` beside the daemon). Deleting that would break the other
+    process's next edit.
+  - What is left behind is the file of a session that crashed and was never
+    reopened. It is never applied (see "A file this process did not write"), it is
+    private, it holds what that session's own log holds, and it goes the next time
+    that session is opened and closed.
+- **Edits outside a call** (decision 7: discard and record).
+  - `MirrorService.refresh`, the request path, `lstat`s the file before writing. A
+    file that moved since this process last wrote it is recorded as `clm/declined`
+    with `via: "outside"`, then overwritten.
+  - The re-render inside read-back does not check: there the change is the call's
+    own.
+  - Known limit: an edit of the same size within the filesystem's mtime resolution
+    is invisible to `(mtime_ns, size)`. ext4 and APFS keep nanoseconds.
+- **Readouts** (`ph_clm/budget.py`).
+  - The `clm-context` row's `remindAt` (default `[0.5, 0.75]`, each in (0, 1);
+    `[]` turns readouts off).
+  - The row's `tools/post-execute` listener registers with `prepend=True`, so it
+    is the outermost whatever order the rows mounted in. It measures after the
+    file's edit lands and after a row that spills or trims the result (offload in
+    `rlm-stable`), and the readout is never spilled itself. *Changed in review:* it
+    first relied on mounting before the mirror, which offload, mounted earlier,
+    still wrapped.
+  - The result is tokenized only when its UTF-8 length, a bound on its tokens,
+    could cross a threshold, or when a readout fires. Most results cross nothing.
+  - Measured as the receipts measure: `SectionMap.tokens` plus the meter's estimate
+    of the projected result. The window is `session.request_context()`; with none,
+    there is no readout.
+  - `Readouts.crossed` keeps the level reached per session. Each reading sets it, so
+    an edit that frees space re-arms the shares below.
+  - The level is in memory: after a restart, the first reading sets it silently.
+  - Not calibrated against provider counts the way pi-clm's `EstimateCalibrator`
+    is. The meter's estimate (tiktoken when installed) undercounts dense content.
+    A later item.
+  - The line names the context file when a row keeps one, and the tools either way.
+- **The protocol prompt** now says that a revised section's header says what it
+  stands for, that `\[[` stands for `[[` in a body, and that only a call's edit is
+  applied.
+- **`rlm-clm`** is `(*RLM_LAYERS, Bundle("clm"))`. `tests/test_rlm_clm_profile.py`
+  checks it is offered, that it composes both bundles, and that it boots and runs a
+  turn with both rows active, the file written and the prompt naming it.
+- **Tests.**
+  - 7 new in `test_mirror.py`, 9 in the new `test_budget.py`, 3 for the profile,
+    and 1 in core for `private`.
+  - Sabotage, 16 mutations, all caught:
+    - the label left in the body;
+    - a replacement in one block;
+    - an escaped body landed;
+    - the file or the directory not private;
+    - a link followed;
+    - an outside edit unrecorded, and an untouched file declined;
+    - dispose keeping the file, or not heard;
+    - the readout measured before the edit;
+    - a cell's dispatch read out;
+    - no re-arm;
+    - a share reported every time;
+    - the last not said;
+    - `private` ignored.
+  - The earlier 37 (Phase 1, 1b, 2 and 2b) are still caught.
+- **What breaks.**
+  - A replacement written before this change is one block, and the file shows it as
+    all label with an empty body. ph-clm has not shipped.
+  - `MirrorService.render` no longer checks for outside edits; `refresh` is the
+    request path.
+- **Still open: the gate.** A recorded `rlm-clm` session on a real provider, showing
+  readouts at their thresholds and edits that land, with no notice message added to
+  the surface. This needs a provider key; see the summary.
+- **To check on that run:** the context file's receipt is still inside offload's
+  listener (only the readout is outermost). Offload's head-and-tail preview keeps a
+  trailer, but clips lines at `PREVIEW_LINE_CLIP`.
+- **Follow-ups the review raised, not done here:**
+  - **A revision-aware `TokenMeter.baseline`.** After a surface revision, `baseline`
+    still uses the usage from before it, which is why the readout measures with the
+    section map instead. That leaves the readout and compaction's 0.85 trigger (and
+    the `fit` gate) in different units. The section map leaves out the system
+    prompt and the tool schemas, large under RLM, so the readout's share runs low
+    against compaction's. The fix is in core: take the last usage, subtract what
+    replacements shadowed since then, add the replacements and `pending`. The
+    readout then becomes `baseline(session, pending=[result]).pressure`. It touches
+    compaction's trigger, the TUI pressure reading and ph-clm's gate. It would
+    also make calibration unnecessary.
+  - **Private roots, not one private file.** The session log the file caches is
+    0664 under 0775 directories, and scratch is created at the default mode. A
+    `ph.paths` helper making the store's roots 0700 (sessions, scratch, spill,
+    attachments) is the real fix for a shared machine. Once it exists, decide
+    whether `write_atomic(private=)` is still needed. The mirror's link handling
+    stays: that threat is the model's, in its own scratch.
+  - **Fold caches that forget by themselves.** `contribute_fold_cache` could take
+    the cache and wire both `stale` and `forget` on `session/disposed`. Today
+    `ph_stabilize.limits`, `ph_rlm.harness.state` and the sandbox command never
+    forget theirs.
+  - **The readout's order is not tested against a row that mounts before
+    `clm-context`.** `prepend=True` is held by its comment. A test needs a row
+    with a `post-execute` listener mounted earlier, such as offload, which ph-clm's
+    suite cannot depend on.
+
+### Phase 2b as built
+
+- **Core.** `AUDIT_ONLY_SESSION_EVENT_TYPES` lists 40 core types, each group with the
+  reason it draws no conversation row; those reasons moved from phern's
+  `RECORDLESS`.
+  - `LogTypeDeclaration.audit_only` is required: every declaration says who reads
+    its type. Changing it on a redeclaration is refused, like ignorability.
+  - `is_audit_only` and `known_log_types` (the whole vocabulary: core's and every
+    declared type) answer for core and declared types alike.
+  - `request/header`, the profile records and `skill/read` are audit-only and keep
+    their own trajectory handlers. Audit-only means no row and a record, not a
+    generic record.
+- **ph-clm.** `ph_clm/kinds.py` declares `clm/revised` (owner `ph_clm.edits`) and
+  `clm/declined` (owner `ph_clm.mirror`), both ignorable and audit-only.
+  - It is a `kinds` leaf with no intent kinds, as `ph_app.kinds` already foresaw.
+    `ph_clm/__init__.py` imports it at module top.
+  - The leaf may import `ph.session.known_event_types`, now on every leaf's list.
+  - The core vocabulary, ignorable set and writers table no longer name ph-clm.
+- **phern.**
+  - The transcript's `RECORDLESS` keeps 3 types: `step/start`, `step/end`,
+    `kernel/snapshot`.
+  - The trajectory's `HANDLERS` loses its 32 generic audit-only entries.
+    `_handler_of` sends to `_on_harness_event` an audit-only type with no handler
+    of its own, and **a type this process does not know**. Only an ignorable
+    unknown type reaches a viewer, since the seed refuses an unknown required one.
+    So the trajectory viewer, reading a stored log with nothing mounted, shows
+    ph-clm's records, and any third-party bundle's, without importing a bundle.
+    Before, an unknown type was skipped silently.
+  - *Changed in review:* `ph_app/__init__.py` first imported `ph_clm.kinds`. That
+    broke the rule in phern's `pyproject.toml` that `ph_app` names no bundle. The
+    AST test that comment cited did not exist, so nothing caught it.
+    `test_app_layering.py` now imports the app's entry points in a fresh
+    interpreter and fails if one pulls in a bundle.
+- **Gates.**
+  - Both phern coverage gates hold `known ∪ declared` against "listed, record-less,
+    or audit-only". An audit-only type may draw no transcript row, and needs no
+    generic trajectory entry.
+  - Every audit-only type without a handler is driven through `build_trajectory`
+    and must give exactly one `event` record. That covers ph-clm's two.
+  - `test_intent_kinds.py`: every `declare_log_type` is in a kinds leaf.
+  - phern's suites import `ph_clm.kinds` themselves (the app may not), so the gates
+    see ph-clm's declarations. A type declared, logged and then undeclared renders
+    from its payload.
+  - `test_log_writers.py`: a declared type is written by its owner alone. Its
+    declaration test now uses a table of its own, so `probe/declared` no longer
+    outlives it and breaks phern's gate when the suites share a process
+    (`ph.testing.isolated_log_types`, beside `isolated_intent_kinds`).
+  - Sabotage, all caught:
+    - a core type that is neither listed nor audit-only;
+    - a declared type that is not audit-only;
+    - a declared type its owner does not write;
+    - the app or the package not importing the leaf;
+    - no generic fallback;
+    - a redundant generic entry;
+    - `audit_only` allowed to change;
+    - `is_audit_only` blind to declarations.
+- **What breaks.**
+  - `declare_log_type` requires `audit_only=`.
+  - `REVISED` moved from `ph_clm.edits`, and `DECLINED` from `ph_clm.mirror`, to
+    `ph_clm.kinds`.
+  - phern's `RECORDLESS` no longer lists the auditor's records.
+  - The log's bytes are unchanged.
 
 ### Phase 2 as built
 
@@ -533,6 +881,12 @@ a second map with its own cache and settings.
   read-back, a render is never remembered, and read-back is right after a restart.
   The only state kept is a `(mtime, size)` per file, so a call that left the file
   alone costs a `stat`.
+- **A file this process did not write is never applied.** With no `(mtime, size)`
+  recorded for the path, read-back rewrites the file from the log and returns
+  nothing. So a leftover from before a restart, possibly half written by a call the
+  log shows interrupted, is discarded rather than credited to the first call that
+  ends. Tested with a second `MirrorService` standing in for the restarted process,
+  and sabotage-checked.
 - **The render runs on `agent/request`**, after the rest of the chain, so a paste
   input-offload replaced on the way to the request is already in the file.
 - **Read-back runs in `tools/post-execute` of every top-level call.** A dispatch
@@ -877,3 +1231,20 @@ Nothing enforces the value, so only the comment is stale.
 
 **Recommendation: count every step for now,** since limits are unset by default. Add CLM's
 split as a `limits` option only if a deployment with ceilings asks for it.
+
+### 7. An edit to the context file made outside any call
+
+The render before a request finds the file changed since it was last written, with
+no tool call to credit: the person edited it in an editor, or another process
+touched it.
+
+| option | pros | cons |
+|---|---|---|
+| **Discard it, with a `clm/declined` record** (`via: "outside"`) | The model's context changes only through the model's own calls or the person's commands, both of which are in the log. Nothing lands that no turn can account for. | A person who meant to edit the model's context this way has to use a command instead. |
+| **Apply it as `via: "person"`** | A person can curate the model's context in their own editor, which pi-clm's panel suggests people want. | The file proves nothing about who wrote it: another process, or a stray tool writing outside the pipeline, would be credited to the person. Applying it also needs its own receipt channel, since there is no call result to carry one. |
+
+**Recommendation: discard and record.** If person edits are wanted, add them as an
+explicit command that opens the file and applies it on save, so the person's
+authorship comes from the command and not from a guess.
+
+**Settled: discard and record**, built in Phase 3.

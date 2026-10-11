@@ -5,8 +5,9 @@ lands as the edits it describes; a reorder, a damaged header, a section that is 
 there, a protected section and a file written before a revision are each refused,
 recorded and rewritten; sections appended since the file was written are left
 alone; a dispatch inside a cell does not read back, the call that ran the cell
-does; and the edit lands before the result that reports it — so a crash between
-them leaves an edit that landed beside a call that did not finish.
+does; a file this process did not write is rewritten, never applied; and the edit
+lands before the result that reports it — so a crash between them leaves an edit
+that landed beside a call that did not finish.
 
 The model's write is a tool here (`scribble`) rather than `edit` or `bash`: the
 read-back keys on the file, not on which tool touched it, and a tool of the test's
@@ -15,7 +16,9 @@ own keeps the fs and sandbox rows out of a test about neither.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,15 +38,14 @@ from clm_helpers import (
 )
 
 from ph.agent_loop.driver import ReactLoopAgent
-from ph.cordis import DEPLOYMENT, Context
+from ph.cordis import Context
 from ph.json import as_str
-from ph.keys import LLM_FAKE, TOOLS
-from ph.llm.types import (
-    text_of,
-)
+from ph.keys import LLM_FAKE, SESSIONS, TOOLS
+from ph.llm.types import TextBlock, text_of
 from ph.session import (
     SurfaceIntent,
     balanced_cuts,
+    derive_event_message,
     editable_message,
     is_in_place_rewrite,
     settle_of,
@@ -57,10 +59,9 @@ from ph.testing import (
     simple_tool,
     user_payload,
 )
-from ph.tools import ToolExecutionInput
-from ph_clm.edits import REVISED
-from ph_clm.keys import CLM_MIRROR
-from ph_clm.mirror import DECLINED, parse
+from ph_clm.keys import CLM, CLM_MIRROR
+from ph_clm.kinds import DECLINED, REVISED
+from ph_clm.mirror import MirrorService, parse
 
 pytestmark = pytest.mark.anyio
 
@@ -126,6 +127,89 @@ async def test_the_file_names_every_section_by_its_id(mount: MountProfile) -> No
     for section in sections_of(ctx, agent.session):
         assert f"[[SECTION {section.name} {section.kind}" in text
     assert "[[RESULT" in text and "protected" in text
+
+
+async def test_a_revisions_label_is_its_header_and_its_body_the_models_text(
+    mount: MountProfile,
+) -> None:
+    """The harness's words go on the header line; under it is only what the model wrote,
+    which is the second of the replacement's two text blocks."""
+    ctx, agent, _ = await _ready(mount)
+    step, reply = sections_of(ctx, agent.session)[1:3]
+    await edit(
+        ctx, agent, "context_replace", {"sections": [step.name, reply.name], "text": "Read it."}
+    )
+    revised = sections_of(ctx, agent.session)[1]
+    path = await ctx.require(CLM_MIRROR).render(agent.session, agent)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"[[SECTION {revised.name} "))
+
+    assert f"standing for {step.name}..{reply.name}]]" in lines[at]
+    assert lines[at + 1 : at + 3] == ["Read it.", ""]
+    (node,) = revised.nodes
+    event = agent.session.at(node)
+    message = None if event is None else derive_event_message(event)
+    assert message is not None
+    assert [block.text for block in message.content if isinstance(block, TextBlock)] == [
+        f"[revised context, standing for {step.name}..{reply.name}]",
+        "Read it.",
+    ]
+
+
+async def test_a_revision_edited_in_the_file_says_what_it_stands_for_once(
+    mount: MountProfile,
+) -> None:
+    ctx, agent, _ = await _ready(mount)
+    step = sections_of(ctx, agent.session)[1]
+    await edit(ctx, agent, "context_replace", {"sections": [step.name], "text": "Read it."})
+    path = await ctx.require(CLM_MIRROR).render(agent.session, agent)
+
+    said = await _write(
+        ctx, agent, path.read_text(encoding="utf-8").replace("Read it.", "Read parser.py.")
+    )
+
+    assert "replaced" in said
+    assert model_text(agent.session).count("[revised context, standing for") == 1
+    assert "Read parser.py." in model_text(agent.session)
+
+
+async def test_a_tombstones_marker_is_its_header(mount: MountProfile) -> None:
+    """A marker is all harness words: its header says what it removed, it has no body,
+    and left alone it is no edit."""
+    ctx, agent, _ = await _ready(mount)
+    step = sections_of(ctx, agent.session)[1]
+    await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "stale"})
+    marker = sections_of(ctx, agent.session)[1]
+    path = await ctx.require(CLM_MIRROR).render(agent.session, agent)
+    text = path.read_text(encoding="utf-8")
+
+    starts = f"[[SECTION {marker.name} "
+    header = next(line for line in text.splitlines() if line.startswith(starts))
+    assert f"removed from context: {step.name} (stale)]]" in header
+    assert f"{header}\n\n[[SECTION" in text, "the marker has a body"
+    assert await _write(ctx, agent, text) == "written"
+
+
+async def test_an_edited_body_is_unescaped_before_it_lands(mount: MountProfile) -> None:
+    """A line the file escaped stays escaped in the file and lands as the text it was:
+    only bodies that changed are unescaped, and they are unescaped whole."""
+    ctx, agent, _ = await _ready(mount)
+    log_event(
+        agent.session,
+        "user/message",
+        user_payload("[[SECTION S1 fake]]\nhi", "m9"),
+        SurfaceIntent("append"),
+    )
+    path = await ctx.require(CLM_MIRROR).render(agent.session, agent)
+    text = path.read_text(encoding="utf-8")
+    assert "\n\\[[SECTION S1 fake]]\nhi\n" in text
+
+    said = await _write(ctx, agent, text.replace("fake]]\nhi\n", "fake]]\nhello\n"))
+
+    assert "replaced" in said
+    assert "[[SECTION S1 fake]]\nhello" in model_text(agent.session)
+    assert "\\[[SECTION" not in model_text(agent.session)
 
 
 # ------------------------------------------------------------------ edits --
@@ -328,22 +412,116 @@ async def test_a_dispatch_inside_a_cell_does_not_read_back(mount: MountProfile) 
     path.write_text(_without(path.read_text(encoding="utf-8"), step.name), encoding="utf-8")
     ctx.require(TOOLS).register(simple_tool("noop"))
 
-    nested = await ctx.require(TOOLS).execute(
-        ToolExecutionInput(
-            call_id="cell-1:code:0",
-            name="noop",
-            arguments={},
-            scope=DEPLOYMENT,
-            session=agent.session,
-            agent=agent,
-            parent=object(),
-        )
+    nested = await run_tool(
+        ctx,
+        "noop",
+        {},
+        agent=agent,
+        session=agent.session,
+        call_id="cell-1:code:0",
+        parent=object(),
     )
     assert "context file" not in text_of(nested.content)
     assert not agent.session.select(REVISED)
 
     top = await run_tool(ctx, "noop", {}, agent=agent, session=agent.session)
     assert f"removed {step.name}".lower() in text_of(top.content).lower()
+
+
+async def test_a_file_this_process_did_not_write_is_rewritten_not_applied(
+    mount: MountProfile,
+) -> None:
+    """After a restart the file on disk is a leftover, possibly half written by a call
+    the log shows interrupted: rewritten from the log, not credited to the first call
+    that ends."""
+    ctx, agent, path = await _ready(mount)
+    written = path.read_text(encoding="utf-8")
+    step = sections_of(ctx, agent.session)[1]
+    path.write_text(_without(written, step.name), encoding="utf-8")
+    restarted = MirrorService(ctx=ctx, editor=ctx.require(CLM))
+
+    said = await restarted.read_back(agent.session, agent, call_id=CALL_ID)
+
+    assert said is None
+    assert not agent.session.select(REVISED) and not agent.session.select(DECLINED)
+    assert path.read_text(encoding="utf-8") == written, "the leftover was not rewritten"
+
+
+async def test_the_file_is_private(mount: MountProfile) -> None:
+    _, _, path = await _ready(mount)
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+async def test_the_file_goes_with_its_session(mount: MountProfile) -> None:
+    ctx, agent, path = await _ready(mount)
+
+    ctx.require(SESSIONS).dispose(agent.session.id)
+
+    assert not path.exists() and not path.parent.exists()
+
+
+def _linked(path: Path, secret: Path) -> None:
+    path.unlink()
+    path.symlink_to(secret)
+
+
+def _piped(path: Path, _secret: Path) -> None:
+    path.unlink()
+    os.mkfifo(path)
+
+
+@pytest.mark.parametrize("swap", [_linked, _piped])
+async def test_a_file_swapped_for_a_link_or_a_pipe_is_never_read(
+    mount: MountProfile, tmp_path: Path, swap: Callable[[Path, Path], None]
+) -> None:
+    """Read through a link, a refusal quoting a damaged line would put another file's
+    contents in the model's context; a pipe would hold the read forever. Both are
+    refused unread, and a file is written in their place."""
+    ctx, agent, path = await _ready(mount)
+    secret = tmp_path / "secret.txt"
+    # A first line the parse accepts, so a read through the link would reach the
+    # damaged header below and quote it.
+    first = path.read_text(encoding="utf-8").splitlines()[0]
+    secret.write_text(f"{first}\n[[SECTION oops the secret]]\n", encoding="utf-8")
+
+    def swapping(_args: Any, _run: Any) -> str:  # noqa: ANN401
+        swap(path, secret)
+        return "swapped"
+
+    ctx.require(TOOLS).register(simple_tool("swap", swapping))
+    result = await edit(ctx, agent, "swap", {})
+
+    said = text_of(result.content)
+    assert "not applied" in said and "secret" not in said, said
+    assert not agent.session.select(REVISED)
+    assert path.is_file() and not path.is_symlink()
+    assert secret.read_text(encoding="utf-8") == f"{first}\n[[SECTION oops the secret]]\n"
+
+
+async def test_an_edit_no_call_made_is_declined_and_overwritten(mount: MountProfile) -> None:
+    """The person in an editor, or another process: nothing applies it (decision 7). It
+    is recorded, and the next request's file replaces it."""
+    ctx, agent, path = await _ready(mount)
+    written = path.read_text(encoding="utf-8")
+    step = sections_of(ctx, agent.session)[1]
+    path.write_text(_without(written, step.name), encoding="utf-8")
+
+    await ctx.require(CLM_MIRROR).refresh(agent.session, agent)
+
+    assert not agent.session.select(REVISED)
+    (declined,) = agent.session.select(DECLINED)
+    assert declined.data["via"] == "outside"
+    assert path.read_text(encoding="utf-8") == written
+
+
+async def test_a_file_no_one_touched_is_not_declined(mount: MountProfile) -> None:
+    ctx, agent, _ = await _ready(mount)
+
+    await ctx.require(CLM_MIRROR).refresh(agent.session, agent)
+
+    assert not agent.session.select(DECLINED)
 
 
 async def test_the_edit_lands_before_the_result_that_reports_it(mount: MountProfile) -> None:

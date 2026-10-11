@@ -40,7 +40,7 @@ from ph.llm.types import (
 from ph.persistence import interrupted_turn_closers, repaired
 from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.session.kinds import DISPATCH_INTERRUPTED, restore_settled
-from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
+from ph.session.known_event_types import is_audit_only, known_log_types
 from ph.testing import (
     MountProfile,
     assistant_payload,
@@ -52,6 +52,7 @@ from ph.testing import (
 from ph_app.shell import INTERRUPTED
 from ph_app.tui.adapter import HANDLERS, RECORDLESS, REPLAY, RULES, TuiEventAdapter
 from ph_app.tui.state import Surface, TuiState
+from ph_clm.kinds import DECLINED, REVISED
 
 pytestmark = pytest.mark.anyio
 
@@ -877,15 +878,23 @@ async def test_a_corpus_is_a_row_only_when_it_changed(mount: MountProfile) -> No
 def test_every_known_event_type_is_rendered_or_classified() -> None:
     """The adapter's vocabulary equals the log's — no silent omissions.
 
-    A new event type has to land in `HANDLERS` or be named in `RECORDLESS`.
-    Strict equality: `todo/write` was carried as a declared forward reference
-    from Phase 2 until its producer landed (P4-01), and the subtraction that
-    allowed it went with it — the next type rendered ahead of the vocabulary
-    should fail here loudly and be argued for, not slip through a standing
-    exemption.
+    A new event type has to land in `HANDLERS`, be declared an auditor's record
+    (`is_audit_only`), or be named in `RECORDLESS`. Strict equality: `todo/write`
+    was carried as a declared forward reference from Phase 2 until its producer
+    landed (P4-01), and the subtraction that allowed it went with it — the next
+    type rendered ahead of the vocabulary should fail here loudly and be argued
+    for, not slip through a standing exemption.
+
+    The vocabulary includes the types packages declare: ph-clm's, which this suite
+    imports (the app may not), are checked here without this front end listing them.
     """
+    vocabulary = known_log_types()
+    assert {REVISED, DECLINED} <= vocabulary, "ph-clm's declarations did not run"
+    audit_only = {kind for kind in vocabulary if is_audit_only(kind)}
     assert set(HANDLERS) & RECORDLESS == set()
-    assert set(HANDLERS) | RECORDLESS == KNOWN_SESSION_EVENT_TYPES
+    assert set(HANDLERS) & audit_only == set(), "an auditor's record draws a row"
+    assert RECORDLESS & audit_only == set()
+    assert set(HANDLERS) | RECORDLESS | audit_only == vocabulary
 
 
 def test_every_declared_child_status_has_a_glyph() -> None:

@@ -47,12 +47,15 @@ from .intents import (
 from .journal import Claim, IntentJournal, IntentNotDurable, Prior, intents_of
 from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import (
+    AUDIT_ONLY_SESSION_EVENT_TYPES,
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
     LogTypeDeclaration,
     LogTypeError,
     UnknownEventTypeError,
     declare_log_type,
+    is_audit_only,
+    known_log_types,
 )
 from .request_header import (
     EpochHeader,
@@ -100,6 +103,7 @@ from .surface import (
 )
 
 __all__ = [
+    "AUDIT_ONLY_SESSION_EVENT_TYPES",
     "IGNORABLE_SESSION_EVENT_TYPES",
     "KNOWN_SESSION_EVENT_TYPES",
     "SESSION_FORMAT_VERSION",
@@ -167,6 +171,7 @@ __all__ = [
     "header_equals",
     "intents_of",
     "is_append_surface_event",
+    "is_audit_only",
     "is_child_id",
     "is_fork_boundary",
     "is_in_place_rewrite",
@@ -176,6 +181,7 @@ __all__ = [
     "is_surface_event",
     "key_of",
     "kinds",
+    "known_log_types",
     "new_session_id",
     "now_ms",
     "open_call_delta",

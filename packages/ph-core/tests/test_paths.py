@@ -404,6 +404,24 @@ def test_an_atomic_write_replaces_the_file_rather_than_truncating_it(tmp_path: P
     assert list(tmp_path.iterdir()) == [target], "the scratch file outlived the call"
 
 
+def test_a_private_write_is_its_owners_alone_from_the_start(tmp_path: Path) -> None:
+    """`private` creates the temp 0600, so the bytes are never readable by another
+    account, whatever the umask — not 0644 until a `chmod` after the fact.
+
+    Sabotage: create the temp 0o666 whatever `private` says.
+    """
+    target = tmp_path / "context.md"
+    previous = os.umask(0o022)
+    try:
+        write_atomic(target, "a whole conversation", durable=False, private=True)
+        write_atomic(tmp_path / "shared.md", "anything", durable=False)
+    finally:
+        os.umask(previous)
+
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "shared.md").stat().st_mode & 0o777 == 0o644
+
+
 def test_a_content_addressed_write_does_not_rewrite_what_is_there(tmp_path: Path) -> None:
     """`skip_if_present` — the half the content-addressed callers need.
 

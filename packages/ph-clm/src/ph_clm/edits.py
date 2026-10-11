@@ -8,7 +8,9 @@ one `Session.batch()` so the record never lands without the edit it describes:
   decision 1): the model keeps knowing that work happened there. A tombstone next
   to an earlier one absorbs it, so a run of deletions reads as one marker.
 * **replace** — a run of whole sections becomes text the model wrote: a summary, or
-  a rewrite of the span.
+  a rewrite of the span. Two text blocks, the harness's label saying what it stands
+  for and then the model's text, so a front end that shows only what the model may
+  edit can tell them apart without reading the words (`labeled`).
 * **rewrite** — one passage inside one tool result or one assistant reply changes,
   in place. The call ids and the message id stay, so nothing about the pairing or
   the row moves.
@@ -38,7 +40,6 @@ window, `shrink` refuses any growth. ph's limits ship unset for the reason the
 from __future__ import annotations
 
 import dataclasses
-import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, assert_never, cast
@@ -69,12 +70,12 @@ from ph.session import (
 from ph.session.writers import log_writer
 from ph.text import NO_OUTPUT, one_line, thousands
 
+from .kinds import REVISED
 from .sections import EditRefused, Section, SectionMap, label, resolve_one, resolve_run, span_label
 
 _LOG = log_writer(__name__)
 
 __all__ = [
-    "REVISED",
     "Editor",
     "Gate",
     "Pending",
@@ -82,6 +83,7 @@ __all__ = [
     "Revision",
     "Verb",
     "Via",
+    "labeled",
     "node_text",
     "receipt",
     "revision_of",
@@ -90,15 +92,10 @@ __all__ = [
 PLUGIN = "clm"
 """The plugin name a substitution's `PluginSource` carries."""
 
-REVISED = "clm/revised"
-
 Verb = Literal["tombstone", "replace", "rewrite"]
 Gate = Literal["none", "fit", "shrink"]
 Via = Literal["tool", "mirror"]
 """Which front end an edit came through: a context tool, or the context file."""
-
-_LABEL = re.compile(r"^\[revised context, standing for [^\]]*\]$")
-"""The first line a replacement carries, which a re-revision does not repeat."""
 
 _UNLANDED = -1
 """A draft revision's `replacement` before `Editor.land` knows the seq."""
@@ -229,6 +226,24 @@ def node_text(message: Message) -> str:
     return "\n".join(text for text in map(_block_text, message.content) if text is not None)
 
 
+def labeled(message: Message) -> tuple[str, str] | None:
+    """A ph-clm substitution's label and the text the model may edit, apart — `None`
+    for any other message, a compaction summary's included.
+
+    The label is the first text block, the harness's words (`Editor._substituting`
+    writes it first), given without its brackets; the rest is the model's. A tombstone
+    is all label. Read off the message alone, so a fold of the log may ask it of each
+    node as the node lands.
+    """
+    source = message.source
+    if not (isinstance(source, PluginSource) and source.plugin == PLUGIN):
+        return None
+    texts = [block.text for block in message.content if isinstance(block, TextBlock)]
+    if not texts:
+        return None
+    return texts[0].removeprefix("[").removesuffix("]"), "\n".join(texts[1:])
+
+
 @dataclass(frozen=True, slots=True)
 class Pending:
     """One edit validated and drafted, not yet written — `Editor.land` writes several
@@ -323,7 +338,7 @@ class Editor:
         removed = tuple(_removals(session, sections[start:stop], reason.strip()))
         text = "removed from context: " + "; ".join(one.describe() for one in removed)
         return self._substituting(
-            sections, start, stop, text=f"[{text}]", summary=text, verb="tombstone", removed=removed
+            sections, start, stop, (f"[{text}]",), summary=text, verb="tombstone", removed=removed
         )
 
     def tombstoning_runs(
@@ -360,7 +375,7 @@ class Editor:
 
     def replacing(self, sections: Sequence[Section], start: int, stop: int, text: str) -> Pending:
         """Text the model wrote, standing in for `sections[start:stop]`."""
-        body = _unlabeled(text)
+        body = text.strip()
         if not body:
             raise EditRefused("a replacement needs text; to drop the sections, tombstone them")
         span = span_label(sections[start].id, sections[stop - 1].id)
@@ -368,7 +383,7 @@ class Editor:
             sections,
             start,
             stop,
-            text=f"[revised context, standing for {span}]\n{body}",
+            (f"[revised context, standing for {span}]", body),
             summary=f"revised {span}",
             verb="replace",
         )
@@ -415,15 +430,17 @@ class Editor:
         sections: Sequence[Section],
         start: int,
         stop: int,
+        texts: Sequence[str],
         *,
-        text: str,
         summary: str,
         verb: Verb,
         removed: tuple[Removed, ...] = (),
     ) -> Pending:
+        """A user message standing for `sections[start:stop]`: the label, then any text
+        of the model's, each its own block (`labeled`)."""
         span = sections[start:stop]
         message = create_user_message(
-            content=[{"type": "text", "text": text}],
+            content=[{"type": "text", "text": text} for text in texts],
             source=PluginSource(
                 plugin=PLUGIN,
                 form="compaction",
@@ -545,15 +562,6 @@ def _removals(session: Session, span: Sequence[Section], reason: str) -> Iterato
         yield from earlier
     if run:
         yield Removed(run[0].id, run[-1].id, reason)
-
-
-def _unlabeled(text: str) -> str:
-    """`text` without the label a replacement already carries, so a revision of a
-    revision says what it stands for once."""
-    lines = text.strip().splitlines()
-    while lines and _LABEL.match(lines[0].strip()):
-        lines = lines[1:]
-    return "\n".join(lines).strip()
 
 
 def _block_text(block: ContentBlock) -> str | None:

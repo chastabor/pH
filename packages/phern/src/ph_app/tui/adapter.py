@@ -35,10 +35,11 @@ and in the mirror `Session` a remote front end admits into.
 
 `RULES` is the closed list of what this front end reacts to: one row per event
 type, holding the handler that folds it and the surfaces that folding moves.
-`HANDLERS` is derived from it — the rows that render — and together with
-`RECORDLESS`, the known types that are an auditor's records rather than a
-reader's (P3-24), it covers the log's whole vocabulary. A test holds that
-equality so a new event type cannot go silently unrendered.
+`HANDLERS` is derived from it — the rows that render. Together with the types
+the vocabulary declares an auditor's records rather than a reader's
+(`is_audit_only`, P3-24), and `RECORDLESS`, the few that are neither, it covers the
+log's whole vocabulary. A test holds that equality so a new event type cannot go
+silently unrendered.
 
 @module ph_app.tui.adapter
 """
@@ -144,7 +145,8 @@ class TuiEventAdapter:
         """Fold one event in, with what traveled beside it."""
         rule = RULES.get(event.type)
         if rule is None:
-            # Not ours: `RECORDLESS`, or a type this build has never heard of.
+            # Not ours: an auditor's record, `RECORDLESS`, or a type this build
+            # has never heard of.
             # Either way nothing moved, so nothing is redrawn for it.
             return
         self.touched |= rule.surfaces
@@ -1185,115 +1187,21 @@ rule to answer it."""
 
 RECORDLESS: frozenset[str] = frozenset(
     {
-        # Creating and canceling a schedule are not events in the conversation —
-        # the *tick* is what a reader needs, and it has a row.
-        "schedule/created",
-        "schedule/canceled",
-        # The loop's own bookkeeping. `goal/set` and `goal/settled` are rows —
-        # they bracket the run — while a continuation and a gate result are
-        # accounting the transcript already shows as turns and tool output.
-        "goal/continued",
-        "goal/gate",
-        "request/header",
-        # Both change a *reading* rather than the transcript: the posture is
-        # contributed by the row that owns it, so there is nothing to fold
-        # here, and the rule's surfaces are what say the footer must redraw.
-        "permission/preset",
-        "sandbox/mode",
-        # The session's base profile (S3): the environment, recorded for the audit
-        # and a rebuild, not a moment in the conversation.
-        "profile/base",
-        # A deviation from it (S4): the command that asked already has its own row,
-        # and the posture it moved is a reading.
-        "profile/override",
-        # A named profile that moved (S6): a version accepted, declined or taken
-        # back, and an override that stops applying — the decision was a modal or a
-        # start, not a message.
-        "profile/adopted",
-        "profile/declined",
-        "profile/override-cleared",
-        "profile/withdrawn",
-        # A change the log could not hold: the command that asked already says it
-        # was refused.
-        "profile/refused",
-        # `/profile save` (S7): the command's own row says what it wrote.
-        "profile/saved",
-        # A skill's body read, hashed for the audit (S8): the `skill` call that read
-        # it is already the transcript's row.
-        "skill/read",
+        # Folded into what they time: the step's own rows, and the trajectory's
+        # `Timing`.
         "step/start",
         "step/end",
-        # A model call made again (P1). The transcript shows the answer, and
-        # `llm/retry` already tells a reader that a transient failure was retried.
-        "step/retry",
-        "approval/mode",
-        "approval/policy",
-        "fs/observed",
-        "workspace/acquiring",
-        "workspace/acquired",
-        "workspace/disposed",
-        "workspace/retained",
-        "workspace/provisioned",
-        "workspace/checkpoint",
-        "session/end-seed",
-        # Protocol bookkeeping: which client asked for which turn, and that it
-        # finished. The turn itself renders; who deduplicated it is not
-        # conversation.
-        "client/command",
-        "client/command-settled",
-        # An upload about to happen (S9). Its settle, `attachment/uploaded`, is the
-        # row a person reads — including repair's "it may have been sent".
-        "attachment/uploading",
-        # A restore about to run (S12). Its settle, `workspace/restored`, draws the
-        # row — whether the seam wrote it or repair did.
-        "workspace/restoring",
-        # H1's probe and what it found (S21). The refinement's own row says which
-        # references were refused and why; the probe is the auditor's.
-        "harness/probe",
-        "harness/probed",
-        # A keyed call's effect record (P10-12). The call and its result render as
-        # the tool card; that it was deduplicated rides on the result's meta.
-        "tool/effect",
-        "tool/effect-settled",
+        # One per changed variable per cell, so rendering them would bury the
+        # conversation in its own bookkeeping. Its companion `kernel/restored` is
+        # rendered, but only when a variable failed to come back.
         "kernel/snapshot",
-        "compaction/summarized",
-        # A model's own context edit (ph-clm): the replacement it describes renders
-        # as the revision row, as a compaction summary does; the account is the
-        # trajectory's.
-        "clm/revised",
-        # Its refusals: the call's own result already says why.
-        "clm/declined",
-        # A skill's nudge budget (D16). The nudges it bounds each render as
-        # their own row; the number behind them is the auditor's.
-        "skill-steps/budget",
-        # A sub-agent's own records (Phase 11), which only its own log holds: a
-        # root's log has none, so a transcript drawn from one never meets them.
-        # Its spawn and its revocation are the root's tool calls, whose cards
-        # already say so; the family is the daemon's `session.children`, drawn by
-        # the panel; and a child's own log is read in the trajectory view (P11-08),
-        # which renders every one of them.
-        "subagent/admitted",
-        "subagent/status",
-        "subagent/deleted",
     }
 )
-"""Known types that produce no transcript row on purpose — the auditor's records
-(the prompt snapshot, step timings, policy changes), which belong to the
-trajectory view (P3-24) rather than the conversation.
+"""Known types that draw no transcript row, and are not records only an auditor reads
+either — another record carries them, or they are too fine-grained to read.
 
-Three entries are here for reasons of their own:
-
-* `kernel/snapshot` — one per changed variable per cell, so rendering them would
-  bury the conversation in its own bookkeeping. Its companion `kernel/restored`
-  *is* rendered, but only when a variable failed to come back.
-* `compaction/summarized` — the *accounting* for a compaction, where the
-  compaction itself already produced a row: the replacement `user/message` the
-  summary rides on. Its sibling `compaction/declined` is **not** record-less,
-  because a compaction that did not happen leaves no row of its own and the
-  reader is about to hit the limit it would have relieved.
-* `subagent/*` — a sub-agent's own records, in its own log and never in a
-  root's (Phase 11). The panel that used to fold them is fed by the daemon's
-  `session.children` instead, read from each child's log; the "Delegated to …"
-  and "Revoked child …" rows they drew are the spawning and revoking tool calls'
-  own cards now, which already said the same thing from the root's own log.
+The auditor's records — the prompt snapshot, policy changes, a compaction's accounting
+— draw no row either, but are not listed here: the vocabulary declares them
+(`is_audit_only`), and a package's own types with them, so this front end needs no
+entry for a type it cannot import.
 """

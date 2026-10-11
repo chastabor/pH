@@ -19,6 +19,11 @@ write it and leave the log unopenable at the next resume. A type that belongs to
 package outside ph-core is added with `declare_log_type`, at import, the way a bus
 event is declared with `EventRegistry.declare`.
 
+**Whether only an auditor reads a type is declared here too**
+(`AUDIT_ONLY_SESSION_EVENT_TYPES`, `declare_log_type(audit_only=)`): a front end draws no
+conversation row for one, and the auditor's view records it. So a front end derives both
+of its tables from the vocabulary, rather than each type being listed again in each.
+
 @module ph.session.known_event_types
 """
 
@@ -30,6 +35,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 __all__ = [
+    "AUDIT_ONLY_SESSION_EVENT_TYPES",
     "IGNORABLE_SESSION_EVENT_TYPES",
     "INTENT_PAIRS",
     "KNOWN_SESSION_EVENT_TYPES",
@@ -40,8 +46,10 @@ __all__ = [
     "UnknownEventTypeError",
     "declare_log_type",
     "declared_owner",
+    "is_audit_only",
     "is_ignorable",
     "is_known",
+    "known_log_types",
     "written_by",
 ]
 
@@ -385,14 +393,6 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # about, and the digest of the sources it was built from. Ignorable — a
         # reader that skips it loses the note, not the conversation.
         "context/loaded",
-        # A model's own context edit (ph-clm): which sections it took off the
-        # surface, the node standing for them, and what that cost. Ignorable — the
-        # edit itself is the surface `replace` beside it, a core event any build
-        # folds, so a reader that skips this loses the account and not the context.
-        "clm/revised",
-        # A context-file edit ph-clm refused, and why. Ignorable: nothing changed, and
-        # the call's own result already told the model so.
-        "clm/declined",
     }
 )
 
@@ -406,8 +406,6 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "harness/probe",
         "harness/probed",
         "context/loaded",
-        "clm/declined",
-        "clm/revised",
         "offload/spilled",
         "offload/input-spilled",
         "skill-steps/budget",
@@ -493,6 +491,94 @@ The set is deliberately small: an unrecognized *required* event must still
 refuse the seed, because skipping one can change how everything after it reads.
 Only purely informational records — kernel state, subagent status, usage
 attribution — belong here.
+"""
+
+AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        # The prompt snapshot each request was built from: the conversation is the
+        # messages, and this is how they were assembled.
+        "request/header",
+        # A model call made again (P1). The transcript shows the answer, and
+        # `llm/retry` already tells a reader a transient failure was retried.
+        "step/retry",
+        # Postures: a reading the owning row contributes to the footer, not a moment
+        # in the conversation. The auditor wants each move, and who made it.
+        "approval/mode",
+        "approval/policy",
+        "permission/preset",
+        "sandbox/mode",
+        # The environment (S3 to S7): the base, each deviation, and what a person
+        # decided about a named profile that moved. The command or the modal that
+        # asked is already the conversation's row.
+        "profile/base",
+        "profile/override",
+        "profile/adopted",
+        "profile/declined",
+        "profile/override-cleared",
+        "profile/withdrawn",
+        "profile/refused",
+        "profile/saved",
+        # Which text of a skill was read, by hash (S8): the `skill` call is the row.
+        "skill/read",
+        "fs/observed",
+        "session/end-seed",
+        # Where an agent's writes land and what happened to the tree: why it was
+        # kept (P6-28), what did not reach it, its restore points, and a restore
+        # about to run (S12), whose settle `workspace/restored` is the row.
+        "workspace/acquiring",
+        "workspace/acquired",
+        "workspace/disposed",
+        "workspace/retained",
+        "workspace/provisioned",
+        "workspace/checkpoint",
+        "workspace/restoring",
+        # A schedule created or canceled (P5-06): the tick is the row.
+        "schedule/created",
+        "schedule/canceled",
+        # The goal loop's accounting: `goal/set` and `goal/settled` bracket the run as
+        # rows, while a continuation and a gate result show as turns and tool output.
+        "goal/continued",
+        "goal/gate",
+        # Which client asked for a turn and how it ended (P5-02, P10-10): provenance
+        # to an auditor, deduplication a reader never sees.
+        "client/command",
+        "client/command-settled",
+        # A keyed call's effect record (P10-12): the call renders as its tool card,
+        # and that it was answered from the log rides on the result.
+        "tool/effect",
+        "tool/effect-settled",
+        # Bytes about to leave for a provider (S9): `attachment/uploaded` is the row.
+        "attachment/uploading",
+        # H1's probe and what it found (S21): the refinement's row says what it
+        # refused.
+        "harness/probe",
+        "harness/probed",
+        # A skill's nudge budget (D16): each nudge is a row; the number behind them
+        # is the auditor's.
+        "skill-steps/budget",
+        # The accounting for a compaction, whose summary already draws a row as the
+        # replacement `user/message` it rides on. `compaction/declined` is not here:
+        # a compaction that did not happen leaves no row of its own.
+        "compaction/summarized",
+        # A sub-agent's own records (Phase 11), in its own log and never a root's:
+        # its spawn and revocation are the root's tool cards, and its log is read in
+        # the auditor's view.
+        "subagent/admitted",
+        "subagent/status",
+        "subagent/deleted",
+    }
+)
+"""Types only an auditor reads: a front end draws no row for one in the conversation,
+and the auditor's view records it — from its payload, unless that view has a handler of
+its own for the type.
+
+**A property beside ignorability, not inside it.** `attachment/uploaded` is ignorable
+and draws a row; `request/header` is required and draws none. Ignorability is a promise
+to other builds about skipping a record; this says who reads one.
+
+Not every type without a row is here: `step/start` and `kernel/snapshot` draw no row and
+no record either, since another record carries them or they are too fine-grained to
+read, and each front end lists those for its own reasons.
 """
 
 
@@ -629,10 +715,6 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "supervisor/violated",
             }
         ),
-        # A model's context edits, written through `ph.session.revise`; the record of
-        # each is ph-clm's own.
-        "ph_clm.edits": frozenset({"clm/revised"}),
-        "ph_clm.mirror": frozenset({"clm/declined"}),
         "ph_rlm.context_loader": frozenset({"context/loaded"}),
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
         "ph_rlm.harness.service": frozenset({"harness/refined"}),
@@ -707,8 +789,12 @@ class LogTypeDeclaration:
 
     name: str
     owner: str
-    """The declaring module — the type's producer of record, as for a bus event."""
+    """The module that appends it — the type's producer of record, as for a bus
+    event. Usually the declaring module; a package's leaf may declare for the
+    modules that write."""
     ignorable: bool
+    audit_only: bool
+    """Only an auditor reads it, as for `AUDIT_ONLY_SESSION_EVENT_TYPES`."""
 
 
 _NAME = re.compile(r"[a-z][a-z0-9-]*(?:/[a-z0-9-]+)+")
@@ -719,7 +805,9 @@ _DECLARED: dict[str, LogTypeDeclaration] = {}
 ignorable are asked of the frozen sets first, then of this."""
 
 
-def declare_log_type(name: str, *, owner: str, ignorable: bool) -> LogTypeDeclaration:
+def declare_log_type(
+    name: str, *, owner: str, ignorable: bool, audit_only: bool
+) -> LogTypeDeclaration:
     """Add a type to the vocabulary this build writes and reads. Call at import.
 
     For a package outside ph-core, whose types this frozen set cannot list
@@ -732,11 +820,16 @@ def declare_log_type(name: str, *, owner: str, ignorable: bool) -> LogTypeDeclar
     of the log reads. So `ignorable=False` means a log carrying the type opens
     only where the package is installed — which is the point of required.
 
+    **Audit-only says who reads it**, as `AUDIT_ONLY_SESSION_EVENT_TYPES` does for
+    ph-core's: no conversation row, and a record in the auditor's view, derived from
+    the payload. A front end can have no handler of its own for a type it cannot
+    import, so a declared type that is not audit-only is one no front end shows.
+
     Refused, the way `EventRegistry.declare` refuses a bus event:
 
     * a name ph-core already owns — one type, one home;
-    * a second owner, or the same owner changing its ignorability — two
-      statements of one type that disagree are a log two builds read two ways;
+    * a second owner, or the same owner changing its ignorability or who reads it
+      — two statements of one type that disagree are a log two builds read two ways;
     * a name that is not `namespace/type`.
 
     Declaring the same thing twice returns the first, so a module imported
@@ -760,8 +853,15 @@ def declare_log_type(name: str, *, owner: str, ignorable: bool) -> LogTypeDeclar
                 f'"{name}" is already declared ignorable={existing.ignorable}; '
                 "a type's ignorability cannot change"
             )
+        if existing.audit_only != audit_only:
+            raise LogTypeError(
+                f'"{name}" is already declared audit_only={existing.audit_only}; '
+                "who reads a type cannot change"
+            )
         return existing
-    declaration = LogTypeDeclaration(name=name, owner=owner, ignorable=ignorable)
+    declaration = LogTypeDeclaration(
+        name=name, owner=owner, ignorable=ignorable, audit_only=audit_only
+    )
     _DECLARED[name] = declaration
     return declaration
 
@@ -780,6 +880,21 @@ def declared_owner(event_type: str) -> str | None:
 def is_known(event_type: str) -> bool:
     """Whether this build writes and reads `event_type`: ph-core's, or declared."""
     return event_type in KNOWN_SESSION_EVENT_TYPES or event_type in _DECLARED
+
+
+def known_log_types() -> frozenset[str]:
+    """The whole vocabulary this process writes and reads: ph-core's, and every type a
+    package has declared so far — what a front end's completeness check holds."""
+    return KNOWN_SESSION_EVENT_TYPES | frozenset(_DECLARED)
+
+
+def is_audit_only(event_type: str) -> bool:
+    """Whether only an auditor reads `event_type`: no conversation row, a record in the
+    auditor's view."""
+    if event_type in AUDIT_ONLY_SESSION_EVENT_TYPES:
+        return True
+    declared = _DECLARED.get(event_type)
+    return declared is not None and declared.audit_only
 
 
 def is_ignorable(event_type: str) -> bool:

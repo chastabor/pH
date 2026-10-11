@@ -165,6 +165,16 @@ class SectionMap:
         the delegate `contribute_fold_cache` polls."""
         return self._nodes.stale(sessions)
 
+    def forget(self, session_id: str) -> None:
+        """A session left the store: its facts go with it, rather than staying for a
+        session nobody can reach."""
+        self._nodes.forget(session_id)
+
+    def tokens(self, session: Session) -> int:
+        """What every section adds up to, without cutting the surface into them."""
+        known = self._nodes.read(session)
+        return sum(known[seq].tokens for seq in session.surface.nodes)
+
     def __call__(self, session: Session) -> tuple[Section, ...]:
         """The session's current surface, as sections, oldest first."""
         known = self._nodes.read(session)

@@ -12,6 +12,7 @@ listener for exactly this reason, and persistence depends on it.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -29,11 +30,20 @@ from ph.session import (
     SurfaceReplace,
     UnknownEventTypeError,
     declare_log_type,
+    is_audit_only,
+    known_log_types,
 )
 from ph.session import surface as surface_module
 from ph.session.json import InvalidJsonValueError
 from ph.session.store import SessionStore
-from ph.testing import check_fold_laws, log_event, prefix_of, raising, user_payload
+from ph.testing import (
+    check_fold_laws,
+    isolated_log_types,
+    log_event,
+    prefix_of,
+    raising,
+    user_payload,
+)
 
 
 def test_seq_always_equals_log_length() -> None:
@@ -234,16 +244,15 @@ def test_events_snapshot_does_not_grow_under_a_holder() -> None:
 
 
 @pytest.fixture
-def vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
+def vocabulary() -> Iterator[None]:
     """A registry of declared types this test can add to without leaking.
 
     The table is module-level because a declaration is an import-time fact
     about a package, which is exactly what makes a test's declarations outlive
     the test unless it is swapped out here.
     """
-    from ph.session import known_event_types
-
-    monkeypatch.setattr(known_event_types, "_DECLARED", {})
+    with isolated_log_types():
+        yield
 
 
 def test_the_write_door_refuses_a_type_the_read_door_would() -> None:
@@ -267,15 +276,17 @@ def test_a_declared_type_is_written_stamped_and_read_back(vocabulary: None) -> N
 
     Ignorability comes from the declaration, the way it comes from
     `IGNORABLE_SESSION_EVENT_TYPES` for ph-core's, so a build without the package
-    skips the record rather than refusing the whole log.
+    skips the record rather than refusing the whole log; and so does who reads it.
     """
-    declare_log_type("sample/note", owner="sample.plugin", ignorable=True)
-    declare_log_type("sample/state", owner="sample.plugin", ignorable=False)
+    declare_log_type("sample/note", owner="sample.plugin", ignorable=True, audit_only=True)
+    declare_log_type("sample/state", owner="sample.plugin", ignorable=False, audit_only=False)
 
     session = Session("s")
     note = log_event(session, "sample/note", {"n": 1})
     state = log_event(session, "sample/state", {"n": 2})
     assert (note.ignorable, state.ignorable) == (True, False)
+    assert (is_audit_only("sample/note"), is_audit_only("sample/state")) == (True, False)
+    assert {"sample/note", "sample/state"} <= known_log_types()
 
     reopened = Session("s", seed=list(session.events))
     assert [event.type for event in reopened.events][:2] == ["sample/note", "sample/state"]
@@ -287,7 +298,7 @@ def test_a_required_declared_type_opens_only_where_it_is_declared(vocabulary: No
     change how the rest of it reads."""
     from ph.session import known_event_types
 
-    declare_log_type("sample/state", owner="sample.plugin", ignorable=False)
+    declare_log_type("sample/state", owner="sample.plugin", ignorable=False, audit_only=False)
     session = Session("s")
     log_event(session, "sample/state", {"n": 1})
 
@@ -301,19 +312,24 @@ def test_a_declaration_cannot_disagree_with_itself_or_ph_core(vocabulary: None) 
 
     Two statements of one type that disagree are a log two builds read two ways.
     """
-    first = declare_log_type("sample/note", owner="sample.plugin", ignorable=True)
-    assert declare_log_type("sample/note", owner="sample.plugin", ignorable=True) is first
+    first = declare_log_type("sample/note", owner="sample.plugin", ignorable=True, audit_only=False)
+    assert (
+        declare_log_type("sample/note", owner="sample.plugin", ignorable=True, audit_only=False)
+        is first
+    )
 
     with pytest.raises(LogTypeError, match="ph-core type"):
-        declare_log_type("tool/call", owner="sample.plugin", ignorable=True)
+        declare_log_type("tool/call", owner="sample.plugin", ignorable=True, audit_only=False)
     with pytest.raises(LogTypeError, match="already declared by"):
-        declare_log_type("sample/note", owner="another.plugin", ignorable=True)
+        declare_log_type("sample/note", owner="another.plugin", ignorable=True, audit_only=False)
     with pytest.raises(LogTypeError, match="ignorability cannot change"):
-        declare_log_type("sample/note", owner="sample.plugin", ignorable=False)
+        declare_log_type("sample/note", owner="sample.plugin", ignorable=False, audit_only=False)
+    with pytest.raises(LogTypeError, match="who reads a type cannot change"):
+        declare_log_type("sample/note", owner="sample.plugin", ignorable=True, audit_only=True)
     with pytest.raises(LogTypeError, match="namespace/type"):
-        declare_log_type("SampleNote", owner="sample.plugin", ignorable=True)
+        declare_log_type("SampleNote", owner="sample.plugin", ignorable=True, audit_only=False)
     with pytest.raises(LogTypeError, match="needs an owner"):
-        declare_log_type("sample/other", owner="", ignorable=True)
+        declare_log_type("sample/other", owner="", ignorable=True, audit_only=False)
 
 
 # ------------------------------------------------------------- fold caches --

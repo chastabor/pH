@@ -34,18 +34,31 @@ from ph.keys import SESSIONS
 from ph.llm.types import PluginSource
 from ph.persistence import read_session
 from ph.session import Session, SurfaceIntent, SurfaceReplace, is_fork_boundary
-from ph.session.known_event_types import KNOWN_SESSION_EVENT_TYPES
+from ph.session.known_event_types import (
+    KNOWN_SESSION_EVENT_TYPES,
+    declare_log_type,
+    is_audit_only,
+    known_log_types,
+)
 from ph.testing import (
     MountProfile,
     assistant_payload,
+    isolated_log_types,
     log_event,
     store_root,
     stored_log,
     user_payload,
 )
 from ph_app.tui.adapter import RECORDLESS as TRANSCRIPT_RECORDLESS
-from ph_app.tui.trajectory import HANDLERS, RECORDLESS, TrajectoryRecord, build_trajectory
+from ph_app.tui.trajectory import (
+    HANDLERS,
+    RECORDLESS,
+    TrajectoryRecord,
+    _on_harness_event,
+    build_trajectory,
+)
 from ph_app.wire import describe
+from ph_clm.kinds import DECLINED, REVISED
 
 pytestmark = pytest.mark.anyio
 
@@ -61,6 +74,10 @@ def by_kind(records: list[TrajectoryRecord], kind: str) -> list[TrajectoryRecord
 # ---------------------------------------------------------------- the gate --
 
 
+def _audit_only() -> set[str]:
+    return {kind for kind in known_log_types() if is_audit_only(kind)}
+
+
 def test_every_known_event_type_produces_a_record_or_is_classified() -> None:
     """A11: no silent omissions, as a claim that can fail.
 
@@ -68,13 +85,25 @@ def test_every_known_event_type_produces_a_record_or_is_classified() -> None:
     checked whether a record appeared — which a catch-all `else` branch made a
     tautology: everything outside `RECORDLESS` produced one *because* the
     fallback produced one, so a type added to the vocabulary could never fail
-    here. It is a set equality now, the shape `adapter.py` has used all along,
-    and the dispatch table has no `else` for it to hide behind.
+    here. It is a set equality now, the shape `adapter.py` has used all along.
+    The auditor's records the vocabulary declares render generically without an
+    entry, which is a decision made where each type is declared — so a type that
+    is neither listed nor declared still fails.
     """
-    assert set(HANDLERS) | RECORDLESS == KNOWN_SESSION_EVENT_TYPES, (
+    vocabulary = known_log_types()
+    assert {REVISED, DECLINED} <= vocabulary, "ph-clm's declarations did not run"
+    assert set(HANDLERS) | RECORDLESS | _audit_only() == vocabulary, (
         "a known event type has neither a handler nor a record-less classification"
     )
     assert not set(HANDLERS) & RECORDLESS, "a type cannot both produce a record and not"
+    assert not RECORDLESS & _audit_only(), "an auditor's record cannot be record-less"
+
+
+def test_an_auditors_record_needs_no_entry_of_its_own() -> None:
+    """The table names a type an auditor's record only to give it a handler of its
+    own; a generic entry would be the declaration said twice."""
+    generic = {kind for kind, handler in HANDLERS.items() if handler is _on_harness_event}
+    assert not generic & _audit_only()
 
 
 def test_the_gate_fails_when_a_type_goes_unclassified() -> None:
@@ -84,8 +113,8 @@ def test_the_gate_fails_when_a_type_goes_unclassified() -> None:
     so — the same way P3-23's diff triage could not fail. A gate that has never
     been shown to reject anything is a gate nobody has tested.
     """
-    invented = KNOWN_SESSION_EVENT_TYPES | {"future/thing"}
-    assert set(HANDLERS) | RECORDLESS != invented
+    invented = known_log_types() | {"future/thing"}
+    assert set(HANDLERS) | RECORDLESS | _audit_only() != invented
 
 
 def test_recordless_is_a_subset_of_the_vocabulary() -> None:
@@ -94,102 +123,41 @@ def test_recordless_is_a_subset_of_the_vocabulary() -> None:
 
 
 def test_the_auditor_renders_what_the_transcript_does_not() -> None:
-    """The types P3-24 exists for.
+    """The types P3-24 exists for: every record only an auditor reads is a record
+    here, ph-clm's included, drawn from its payload when the view has no handler of
+    its own for it. `request/header` and the profile records have their own.
 
-    Record-less in the *conversation* view on purpose — they are not transcript
-    defects — and rendering them is the whole reason this projection is
-    separate. Stated as the names rather than as a set difference with
-    `RECORDLESS` subtracted from both sides, which canceled two of them and
-    read as six.
-
-    `compaction/summarized` is the newest of them and the clearest case: the
-    transcript already shows a compaction as the summary row its replacement
-    produces, so the accounting beside it would be the same event twice — while
-    an auditor came for exactly that accounting.
+    And the reverse: what this view skips that the transcript renders — a stream's
+    chunks and a dispatch's opening half, which another record already carries.
     """
-    assert {
-        "request/header",
-        "approval/mode",
-        "approval/policy",
-        # Both postures are `StatusField`s their own rows contribute and the
-        # picker asks the seam for, so the conversation view folds nothing for
-        # either — while an auditor wants the moment each moved, and who moved
-        # it.
-        "sandbox/mode",
-        "permission/preset",
-        # S3: which environment the run was in is where an audit starts, and the
-        # conversation has no row for it.
-        "profile/base",
-        "profile/override",
-        # S6: what a person decided about a named profile that moved — a modal,
-        # which the conversation has no row for either.
-        "profile/adopted",
-        "profile/declined",
-        "profile/override-cleared",
-        # And a version a start took back because it would not mount, with why.
-        "profile/withdrawn",
-        # And a change the log could not hold: the command's reply says so.
-        "profile/refused",
-        "profile/saved",
-        # S8: which text of a skill was read, by hash.
-        "skill/read",
-        "fs/observed",
-        "session/end-seed",
-        "compaction/summarized",
-        # ph-clm's account of a model's own edit, for compaction's reason: the
-        # transcript draws the revision, the auditor wants why and what it cost.
-        "clm/revised",
-        "clm/declined",
-        "workspace/acquiring",
-        "workspace/acquired",
-        "workspace/disposed",
-        # P6-28: why a tree survived is the auditor's question exactly — a
-        # transcript that ends in a failure says nothing about the checkout the
-        # failure left behind, and the reason is the only thing that separates
-        # evidence somebody kept from a directory nobody meant to leave.
-        "workspace/retained",
-        # P5-06: creating and canceling a schedule are not conversation — the
-        # *tick* is, and it has a transcript row. An auditor asking "why did this
-        # wake at 3am" wants all three.
-        "schedule/created",
-        "schedule/canceled",
-        "goal/continued",
-        "goal/gate",
-        "workspace/provisioned",
-        "workspace/checkpoint",
-        # Who asked for a turn, and whether they had asked before: bookkeeping
-        # to a reader, provenance to an auditor of a daemon-driven run (P5-02).
-        # And how it ended, `unknown` after a crash (P10-10).
-        "client/command",
-        "client/command-settled",
-        # P10-12: which calls named their effect, and which were answered from
-        # the log instead of run — the question an auditor of a retry asks.
-        "tool/effect",
-        "tool/effect-settled",
-        # D16: the nudges render; the budget that stopped them is the auditor's.
-        "skill-steps/budget",
-        # P1: a retried call is accounting to a reader, evidence to an auditor.
-        "step/retry",
-        # S9: bytes about to leave for a provider. The transcript draws the
-        # upload once it settles; the auditor wants the moment it was attempted.
-        "attachment/uploading",
-        # S12: a restore about to rewrite the tree. The transcript draws its settle.
-        "workspace/restoring",
-        # S21: code the harness ran as the agent. The transcript draws the
-        # refinement, which says what was refused; the auditor wants each probe.
-        "harness/probe",
-        "harness/probed",
-        # Phase 11: a sub-agent's own story, which only its own log holds — a
-        # root's transcript never meets them, and this is where a child is read.
-        "subagent/admitted",
-        "subagent/status",
-        "subagent/deleted",
-    } == TRANSCRIPT_RECORDLESS - RECORDLESS
-    # And the reverse: what this view skips that the transcript renders.
-    assert {
-        "assistant/chunk",
-        "tool/code-dispatch-start",
-    } == RECORDLESS - TRANSCRIPT_RECORDLESS
+    unrendered = []
+    for kind in sorted(_audit_only() - set(HANDLERS)):
+        session = Session("audit")
+        log_event(session, kind, {})
+        records = build_trajectory(session)
+        if [(record.kind, record.type) for record in records] != [("event", kind)]:
+            unrendered.append(kind)
+    assert not unrendered, unrendered
+    assert {"assistant/chunk", "tool/code-dispatch-start"} == RECORDLESS - TRANSCRIPT_RECORDLESS
+    assert TRANSCRIPT_RECORDLESS <= RECORDLESS
+
+
+def test_a_type_this_process_does_not_know_is_rendered_from_its_payload() -> None:
+    """Another build's type, or a package's this process never imported — a stored log
+    read with nothing mounted. It reached the viewer because it is ignorable, and it is
+    shown rather than skipped, with no bundle imported to know it.
+
+    Sabotage: drop `not is_known(event_type)` from `_handler_of`.
+    """
+    with isolated_log_types():
+        declare_log_type("sample/note", owner="sample.plugin", ignorable=True, audit_only=False)
+        session = Session("elsewhere")
+        log_event(session, "sample/note", {"n": 1})
+    stored = Session("elsewhere", seed=list(session.events))
+
+    (record,) = build_trajectory(stored)
+
+    assert (record.kind, record.type) == ("event", "sample/note")
 
 
 # ------------------------------------------------------------- the records --

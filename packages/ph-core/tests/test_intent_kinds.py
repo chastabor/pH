@@ -8,6 +8,8 @@ resume that goes wrong:
 
 * every `IntentKind(...)` in shipped code is in a package's `kinds` leaf, and the
   vocabulary's `INTENT_PAIRS` names exactly those pairs and leaves;
+* so is every `declare_log_type(...)`, so loading any part of a package declares
+  its log types too;
 * a leaf imports nothing a cycle could run through;
 * each leaf is imported, at module top, by the package that holds it — so any
   process that loaded any part of a package has its kinds;
@@ -36,7 +38,14 @@ from ph.session.known_event_types import INTENT_PAIRS, IntentPair
 from ph.testing import MountProfile, isolated_intent_kinds, log_event, resume_stored, stored_types
 
 LEAF_MAY_IMPORT = frozenset(
-    {"__future__", "ph.session.intents", "ph.session.events", "ph.session.writers", "ph.json"}
+    {
+        "__future__",
+        "ph.session.intents",
+        "ph.session.events",
+        "ph.session.writers",
+        "ph.session.known_event_types",
+        "ph.json",
+    }
 )
 """What a leaf may import beyond the standard library: nothing above `ph.session`'s
 declarations, so importing a leaf can never cycle back through a seam."""
@@ -86,7 +95,7 @@ def _declared_pairs() -> dict[str, tuple[str, str]]:
 
 def test_the_walk_finds_every_leaf() -> None:
     """A walk that silently found nothing would pass every gate below."""
-    assert LEAVES == ["ph.session.kinds", "ph_app.kinds", "ph_rlm.kinds"]
+    assert LEAVES == ["ph.session.kinds", "ph_app.kinds", "ph_clm.kinds", "ph_rlm.kinds"]
 
 
 def test_every_intent_kind_is_declared_in_a_kinds_leaf() -> None:
@@ -97,6 +106,19 @@ def test_every_intent_kind_is_declared_in_a_kinds_leaf() -> None:
         if module not in LEAVES
     )
     assert not strays, strays
+
+
+def test_every_log_type_declaration_is_in_a_kinds_leaf() -> None:
+    """A package's types are declared where its kinds are, so loading any part of the
+    package declares them. Sabotage: declare `clm/declined` in `ph_clm.mirror`."""
+    declaring = {
+        module
+        for module, found in SHIPPED.items()
+        for node in ast.walk(found.tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "declare_log_type"
+    }
+    assert "ph_clm.kinds" in declaring, "the walk found no declaration"
+    assert declaring <= set(LEAVES), sorted(declaring - set(LEAVES))
 
 
 def test_the_vocabulary_names_exactly_the_pairs_the_leaves_declare() -> None:

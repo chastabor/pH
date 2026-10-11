@@ -418,6 +418,7 @@ def write_atomic(
     skip_if_present: bool = False,
     durable: bool = True,
     preserve: bool = False,
+    private: bool = False,
 ) -> None:
     """Write `payload` to `path` so a reader sees all of it or none of it (L7), and so
     what a reader saw survives a power loss (S6).
@@ -475,6 +476,10 @@ def write_atomic(
     after any editor that saves by rename. Off by default, because a runtime or blob
     writer must not follow a link somebody planted at its path.
 
+    `private` makes the file its owner's alone, 0600, from the moment it exists: the
+    temp is created with that mode, so there is no instant the bytes are readable by
+    another account (ph-clm's context file, which is a whole conversation).
+
     Parents are created at the default mode, and **durably when the file is**
     (`make_directories`, S20): a blob synced inside a directory whose own name was
     never synced is lost with it. A path under a directory whose mode matters —
@@ -482,7 +487,12 @@ def write_atomic(
     still the one place that happens.
     """
     written = _write_file(
-        path, payload, skip_if_present=skip_if_present, durable=durable, preserve=preserve
+        path,
+        payload,
+        skip_if_present=skip_if_present,
+        durable=durable,
+        preserve=preserve,
+        private=private,
     )
     if written is not None and durable:
         sync_directory(written.parent)
@@ -547,6 +557,7 @@ def _write_file(
     skip_if_present: bool,
     durable: bool = True,
     preserve: bool = False,
+    private: bool = False,
 ) -> Path | None:
     """`write_atomic` up to its directory's sync, which is the caller's: the path it
     wrote, through a link for `preserve`, or `None` when `skip_if_present` left the
@@ -567,7 +578,7 @@ def _write_file(
         path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{secrets.token_hex(_TEMP_SUFFIX_BYTES)}.tmp")
     try:
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o666)
         try:
             write_all(fd, data)
             if mode is not None:
