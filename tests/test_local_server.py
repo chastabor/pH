@@ -42,34 +42,30 @@ more than one.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from local_server import (
+    LIVE,
+    PROBE_TIMEOUT,
+    local_model,
+    server_root,
+)
+from local_server import answer as answer_of
+from local_server import get as get_json
+from local_server import props as server_props
 
 from ph.agent.types import AgentOptions
 from ph.json import as_int, as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
-from ph.llm.types import text_of
 from ph.session import Session
 from ph.testing import MountProfile
 from ph_app.attach import ingest, prompt_message
 from ph_app.profiles import resolve_profile
 
-pytestmark = [
-    pytest.mark.anyio,
-    pytest.mark.skipif(
-        not os.environ.get("LLAMA_BASE_URL"),
-        reason="LLAMA_BASE_URL is not set; the live local-server gate is opt-in",
-    ),
-]
-
-BASE_URL = os.environ.get("LLAMA_BASE_URL", "")
-PROBE_TIMEOUT = 30.0
-"""For the two metadata endpoints only. Generation gets the adapter's own
-timeout, which is minutes — a 27B model on a laptop takes them."""
+pytestmark = [pytest.mark.anyio, LIVE]
 
 CAT = Path(__file__).parents[1] / "samples" / "CatPic.jpg"
 """The picture the vision test attaches — a photograph, deliberately.
@@ -81,72 +77,10 @@ fixture step, and skipped rather than failed when absent, since a clone that
 omitted it is not a defect in pH."""
 
 
-def _get(url: str) -> Any:  # noqa: ANN401
-    """One metadata read, or a failure that names the URL.
-
-    A failure and not a skip: the person who set `LLAMA_BASE_URL` asked whether
-    the server is reachable, and answering "skipped" to that question is how a
-    hookup test comes to be green against nothing at all. The one endpoint whose
-    absence is genuinely inconclusive is handled by its own reader below.
-    """
-    try:
-        reply = httpx.get(url, timeout=PROBE_TIMEOUT)
-        reply.raise_for_status()
-        return reply.json()
-    except httpx.HTTPError as error:
-        pytest.fail(f"{url} did not answer: {error}")
-
-
-def _server_root() -> str:
-    """The server's own root, which is *not* the OpenAI base URL.
-
-    llama.cpp serves the compatible wire under `/v1` and its own endpoints —
-    `/props`, `/slots`, `/health` — beside it rather than under it, so one
-    variable cannot address both without this. Derived rather than asked for as a
-    second variable: two URLs for one server is how a gate comes to probe a
-    different process than it prompts.
-    """
-    base = BASE_URL.rstrip("/")
-    return base.removesuffix("/v1").rstrip("/")
-
-
-def _props() -> Any | None:  # noqa: ANN401
-    """llama.cpp's `/props`, or `None` when this server does not publish it.
-
-    The one inconclusive answer in the file: a 404 here means "not llama.cpp, or
-    started with the endpoint off", which is a fact about the server rather than a
-    defect. Anything else — a refused connection, a 500 — is still a failure,
-    because `/models` just answered and something is wrong if this cannot.
-    """
-    url = f"{_server_root()}/props"
-    try:
-        reply = httpx.get(url, timeout=PROBE_TIMEOUT)
-        if reply.status_code == httpx.codes.NOT_FOUND:
-            return None
-        reply.raise_for_status()
-        return reply.json()
-    except httpx.HTTPError as error:
-        pytest.fail(f"{url} did not answer: {error}")
-
-
 @pytest.fixture
 def route(monkeypatch: pytest.MonkeyPatch) -> str:
-    """The profile's credential, defaulted — and the model to ask for.
-
-    `LLAMA_API_KEY` is a formality llama.cpp ignores unless it was started with
-    `--api-key`, but the route resolves it at the request edge like any other, so
-    unset means `MISSING_CREDENTIAL` rather than an anonymous request. Defaulted
-    here rather than required of the person, who already said which server.
-    """
-    if not os.environ.get("LLAMA_API_KEY"):
-        monkeypatch.setenv("LLAMA_API_KEY", "local")
-    configured = os.environ.get("LLAMA_MODEL")
-    if configured:
-        return configured
-    models = _get(f"{BASE_URL.rstrip('/')}/models").get("data") or []
-    if not models:
-        pytest.fail(f"{BASE_URL} has no model loaded; /models listed none")
-    return str(models[0]["id"])
+    """The model to ask for, with the route's credential defaulted (`local_model`)."""
+    return local_model(monkeypatch)
 
 
 def _options(model: str, *, max_tokens: int = 32) -> AgentOptions:
@@ -231,7 +165,7 @@ async def test_a_tool_call_comes_back_parsed(
 
     await agent.prompt("Use the read tool to read the file note.txt, then say what it contains.")
 
-    answer = _answer(session)
+    answer = answer_of(session)
     leaked = [marker for marker in UNPARSED_CALL if marker in answer]
     assert not leaked, (
         f"the server returned a tool call as text, not as `tool_calls`: {leaked} appears in "
@@ -245,7 +179,7 @@ async def test_a_tool_call_comes_back_parsed(
     )
 
 
-async def test_thinking_does_not_arrive_as_the_answer(mount: MountProfile, route: str) -> None:
+async def test_thinking_does_not_arrive_as_theanswer(mount: MountProfile, route: str) -> None:
     """A reasoning block is a block, not prose with a close tag in it.
 
     pH maps `reasoning_content` to a `ReasoningBlock` — the adapter has done so
@@ -265,7 +199,7 @@ async def test_thinking_does_not_arrive_as_the_answer(mount: MountProfile, route
 
     await agent.prompt("Say ok.")
 
-    answer = _answer(session)
+    answer = answer_of(session)
     assert "</think>" not in answer, (
         "the model's thinking arrived as the answer: the server is not separating it into "
         "`reasoning_content`, so the tag is now in the transcript and will be replayed to "
@@ -309,7 +243,7 @@ async def test_the_second_turn_reads_the_prefix_cache(mount: MountProfile, route
     usage = _usage(session)
     assert len(usage) >= 2, f"expected two answered turns, got {usage}"
     if not any("cacheReadTokens" in turn for turn in usage):
-        pytest.skip(f"{_server_root()} reports no cached-token count on any turn; nothing to read")
+        pytest.skip(f"{server_root()} reports no cached-token count on any turn; nothing to read")
     assert usage[1].get("cacheReadTokens", 0) > 0, (
         "the second turn re-read no prefix: the server is reprocessing the whole "
         "conversation every turn. Either prompt caching is off, or something "
@@ -333,10 +267,10 @@ async def test_the_configured_window_fits_one_slot(mount: MountProfile, route: s
     """
     # `or {}` so the skip below is the only place "no /props" is spelled: an
     # absent document and a document without the field are one answer here.
-    props = _props() or {}
+    props = server_props() or {}
     per_slot = (props.get("default_generation_settings") or {}).get("n_ctx")
     if not isinstance(per_slot, int):
-        pytest.skip(f"{_server_root()} publishes no per-slot n_ctx; not a llama.cpp server")
+        pytest.skip(f"{server_root()} publishes no per-slot n_ctx; not a llama.cpp server")
 
     ctx = await mount(profile=resolve_profile("llama"))
     model = ctx.require(LLM).resolve_model("llama", route)
@@ -385,15 +319,15 @@ async def test_the_two_llama_endpoints_answer_different_questions(
     that arithmetic turned a correct 262 144 into 131 072: `/v1/models` never
     reported a total to divide.
     """
-    props = _props()
+    props = server_props()
     if props is None:
-        pytest.skip(f"{_server_root()} publishes no /props; not a llama.cpp server")
+        pytest.skip(f"{server_root()} publishes no /props; not a llama.cpp server")
 
     per_slot = (props.get("default_generation_settings") or {}).get("n_ctx")
     if not isinstance(per_slot, int):
-        pytest.skip(f"{_server_root()} publishes no per-slot n_ctx; not a llama.cpp server")
+        pytest.skip(f"{server_root()} publishes no per-slot n_ctx; not a llama.cpp server")
 
-    meta = as_obj(_get(f"{_server_root()}/v1/models")["data"][0].get("meta") or {})
+    meta = as_obj(get_json(f"{server_root()}/v1/models")["data"][0].get("meta") or {})
     assert "n_ctx" in meta, "`/v1/models` stopped carrying `meta.n_ctx`; the third probe is dead"
     assert {"n_ctx_train", "n_vocab", "n_embd"} <= meta.keys(), (
         f"`meta` no longer looks like the GGUF header ({sorted(meta)}) — it may now "
@@ -414,7 +348,7 @@ async def test_the_two_llama_endpoints_answer_different_questions(
 
     slots = _slots()
     if slots is None:
-        pytest.skip(f"{_server_root()} does not publish /slots; cannot confirm the allocation")
+        pytest.skip(f"{server_root()} does not publish /slots; cannot confirm the allocation")
     assert slots, "/slots answered with no slots"
     held = {as_int(slot.get("n_ctx")) for slot in slots}
     assert held == {per_slot}, (
@@ -431,7 +365,7 @@ def _slots() -> list[dict[str, Any]] | None:
     turns it off, and a server that declines to describe its own scheduling is
     not a defect in pH.
     """
-    url = f"{_server_root()}/slots"
+    url = f"{server_root()}/slots"
     try:
         reply = httpx.get(url, timeout=PROBE_TIMEOUT)
         if reply.status_code in (httpx.codes.NOT_FOUND, httpx.codes.NOT_IMPLEMENTED):
@@ -442,19 +376,6 @@ def _slots() -> list[dict[str, Any]] | None:
     answer = reply.json()
     rows = answer.get("slots", answer) if isinstance(answer, dict) else answer
     return [dict(as_obj(row)) for row in rows] if isinstance(rows, list) else None
-
-
-def _answer(session: Session) -> str:
-    """What the person was shown — `print_mode`'s own extraction.
-
-    The transcript rather than the model surface, and joined across messages
-    because a model that thinks out loud lands more than one.
-    """
-    return "\n".join(
-        text_of(message.content)
-        for message in session.transcript()
-        if message.role == "assistant" and text_of(message.content)
-    )
 
 
 async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
@@ -484,10 +405,10 @@ async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
     """
     if not CAT.is_file():
         pytest.skip(f"{CAT} is not in this checkout")
-    modalities = (_props() or {}).get("modalities") or {}
+    modalities = (server_props() or {}).get("modalities") or {}
     if not modalities.get("vision"):
         vision = modalities.get("vision")
-        pytest.skip(f"{_server_root()} reports vision={vision!r}; start it with --mmproj")
+        pytest.skip(f"{server_root()} reports vision={vision!r}; start it with --mmproj")
 
     ctx = await mount(profile=resolve_profile("llama"))
     session = ctx.require(SESSIONS).create("local-vision")
@@ -504,7 +425,7 @@ async def test_the_model_sees_the_cat(mount: MountProfile, route: str) -> None:
         "the attachment never reached the model as media: "
         f"{[dict(event.data) for event in degraded]}"
     )
-    answer = _answer(session)
+    answer = answer_of(session)
     assert any(word in answer.lower() for word in ("cat", "kitten", "feline")), (
         f"nothing in the answer names the animal in {CAT.name}, so the picture "
         f"probably did not arrive as one: {answer!r}"

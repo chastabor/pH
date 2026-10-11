@@ -748,11 +748,17 @@ class ToolRuntime:
             for name, factory in layer.code_namespaces.items():
                 if name not in code_namespaces:
                     code_namespaces[name] = factory
-        schemas = (
-            ()
-            if resolved_mode == "code"
-            else tuple(visible[name].schema() for name in sorted(visible))
-        )
+        if resolved_mode == "code":
+            # One callable: the transport, under the name this scope presents it as.
+            # Everything else is reached through the SDK the prompt lists, so its
+            # schemas stay out — but the transport's must be offered, or a real
+            # provider is sent a request with no tool to call and the model can run
+            # nothing. The fake adapter never asked for a schema, which is how this
+            # went unseen.
+            offered = visible.get(transport_name)
+            schemas: tuple[ToolSchema, ...] = () if offered is None else (offered.schema(),)
+        else:
+            schemas = tuple(visible[name].schema() for name in sorted(visible))
         return _View(
             visible=visible,
             by=by,

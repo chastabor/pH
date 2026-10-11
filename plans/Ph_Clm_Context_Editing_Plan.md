@@ -654,10 +654,109 @@ They are settled here, and the first half of Phase 3 builds them.
 | **1b. One revision door** ✅ | `ph.session.revise`; `is_in_place_rewrite` by message identity; lineage in `ph.session.surface`; `one_line` in `ph.text`; compaction, input-offload and ph-clm moved onto the door; `ph_clm/keys.py`; the fold-cache invariant row | the door's own suite, sabotage-checked; the static walk shows no `SurfaceReplace` outside the door; compaction, input-offload and ph-clm suites green without asserting payload mechanics; `VerifyingFoldCache` over the section map |
 | **2. The mirror** ✅ | render through `ctx.fs`; read back in `tools/post-execute` of the writing call, with the receipt on its result; the diff compiler; `clm/declined` | `sed` and a Code Mode cell each produce the expected ops; a reorder, a damaged header, or a moved `base=` are each refused with a receipt; an edit-only step leaves no trace beyond its own call and result; a crash between an edit and its result resumes with the edit landed and the call interrupted |
 | **2b. Audit-only records** ✅ | `AUDIT_ONLY_SESSION_EVENT_TYPES` and `declare_log_type(audit_only=)`; phern's TUI and trajectory derive their tables from it; ph-clm's two types declared in their own package | a new audit-only type touches only its declaration and its writer; the phern suites unchanged; coverage still fails a type that is neither rendered nor audit-only |
-| **3. Budget and prompt** ✅ built; the real-provider gate is pending | first, the context file's design (above): label out of the body, escaped forms cached, private and short-lived files, symlinks refused, edits outside a call caught; then budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
+| **3. Budget and prompt** ✅ built; the live gate passes (see "Phase 3's gate, run live") | first, the context file's design (above): label out of the body, escaped forms cached, private and short-lived files, symlinks refused, edits outside a call caught; then budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
 | **3b. One baseline** ✅ | `TokenMeter.baseline` follows the surface from the last reported usage: what was appended since is added, what a replacement shadowed is taken off; readouts and receipts read it | the baseline's own tests and 9 sabotage mutations; compaction's suite with the elision now moving the baseline; readouts counting what the provider counted |
 | **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
 | **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+
+### Phase 3's gate, run live
+
+Run against llama.cpp on localhost: Qwen3.8-27B, 16,384 tokens per slot, 5 slots.
+
+**A Code Mode defect found first.**
+- Under Code Mode the registry's view offered *no* tool schemas. The design is "one
+  callable", the transport (`ipython` under `rlm`). A real provider was therefore
+  sent a request with no tools, and the model could run nothing: it reasoned its way
+  to "looking at the tool list again" and answered without code.
+- The line dates from the registry's first commit. The fake adapter never asks for
+  a schema, and three tests had pinned the empty list while their comments said
+  "one callable".
+- Fixed in `ToolRuntime._build_view`: under Code Mode the schemas are the
+  transport's alone, under the name the scope presents it as. The three tests now
+  expect that.
+- `test_code_mode.py::test_a_request_offers_the_transport_and_nothing_else` holds it
+  at the prompt assembly. Sabotage: `()` back, and three tests fail.
+- The schema costs about 290 prompt tokens.
+
+**The automated gate** (`tests/test_local_clm.py`, opt-in by `LLAMA_BASE_URL`, run by
+`./test.sh smoke` beside `test_local_server.py`):
+- History is seeded and sized from the probed window and the first reply's count.
+- A result past half the window ends with a readout at 50–74%, naming the context
+  file. Nothing joins the context after the cell, and compaction does not run.
+- Told how from a cell, the model tombstones a section through
+  `tools.context_tombstone`. The edit lands `via: tool`, and the listing leaves what
+  the model is sent.
+- Told where the file is, the model deletes a section's block in a cell. The edit
+  lands `via: mirror`, and the cell's result carries "[context file applied."
+- The shared opt-in, server probes and model discovery moved to `tests/local_server.py`.
+- Three runs, 3 of 3 each, 1–2 minutes a run. `./test.sh smoke`: 10 passed.
+- The profile is resolved inside each test. Resolved at import, it read the person's
+  real `$PH_HOME/profiles/rlm-clm.yaml`, before the suite's home was pinned.
+
+**ph-rlm's own live gate** (`tests/test_local_rlm.py`, the same opt-in, run by
+`./test.sh smoke`), on `rlm` over the llama route:
+- every loop request offers exactly `ipython`, and a cell runs;
+- the kernel keeps a variable from one turn's cell to the next;
+- `await tools.read(...)` from a cell is a `tool/code-dispatch` of `read`, and its
+  value reaches the cell;
+- a shell command from a cell is a governed `tools.bash` call;
+- `rlm.run(...)` from a cell admits a child on the same model, which runs in its own
+  log and settles `done`, and its answer reaches the parent's next turn through the
+  inbox.
+
+Each test looks at every cell of the turn: a model may look around in a cell of its
+own before the one it was told to run, and an earlier version that read only the
+first cell failed once that way. `./test.sh smoke` (route, ph-rlm and ph-clm, 15
+tests) passed twice clean after that, in 2–3 minutes a pass.
+
+**A finding for ph-rlm, not changed:** the `ipython` tool's description, ported
+verbatim from prime-agent, offers "`%%bash` shell cells", but pH runs plain Python
+and refuses the magic. The refusal points the model at `await tools.bash(command=...)`.
+A model that believes the description spends a call learning otherwise. Correcting
+the description would depart from the port's "verbatim" rule, so that is ph-rlm's
+call.
+
+**Unscripted runs**, on the installed `rlm-clm` profile with a scratch `PH_HOME`. Notes
+files of about 1.4k tokens each; the model read them one per cell. The task never
+mentioned editing.
+- **Seven files.**
+  - The 50% readout came at 57%, and read "~9.3k". The provider counted the next
+    request at 9,292, so the baseline's estimate met the real count.
+  - The run ended at 73%, with no 75% readout and no compaction. The model did not
+    edit after "free space when it suits you", and the prefix cache held throughout.
+- **Ten files.**
+  - Readouts at 54%, then 78% ("This is the last reminder").
+  - The model reacted: it called `tools.context_sections()`, then
+    `tools.context_tombstone([...five sections...], reason=...)`. That failed with
+    `TypeError: takes 0 positional arguments`: the SDK bindings are keyword-only and
+    the model passed the list positionally.
+  - That spent the one step it had: compaction fired at 86% and summarized those
+    sections.
+  - Its retry with keywords was refused, correctly: "S173 has been revised; S2447
+    stands for it now".
+
+**Findings, for decision:**
+- **On a small window the last reminder comes too late.** Between 75% and
+  compaction's 85% there are about 1.6k tokens on a 16k slot: one file read. Options:
+  - defaults relative to compaction's trigger, say 0.5 and 0.7 of the window;
+  - a reserve in tokens, as pi-clm has;
+  - the last reminder fixed at a set distance below compaction.
+- **A keyword-only binding cost the model's one edit.** Options:
+  - the readout's how-to line names the call with keywords, e.g.
+    `tools.context_tombstone(sections=[...], reason=...)`;
+  - Code Mode accepts a binding's first parameter positionally;
+  - the refusal says to pass keywords.
+- **The 75% readout and compaction raced within one step.** The model's response
+  to the reminder was one cell; compaction runs before the next step. Nothing is
+  wrong, but on a window this small the reminder needs room to act on.
+
+**Profiles installed** in `$PH_HOME/profiles/`, each `extends:` plus the local box's
+llama and vLLM routes, from `tui.yaml`:
+- `rlm.yaml`, over the shipped `rlm`;
+- `rlm-clm.yaml`, over `rlm-clm`;
+- `rlm-stable-clm.yaml`, a new name: `rlm-stable` plus ph-clm's two rows.
+
+`phern doctor` shows every row active, and the llama window 16,384 from `/props`.
 
 ### Phase 3b as built: one baseline
 

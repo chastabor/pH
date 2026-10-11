@@ -47,6 +47,7 @@ from ph.llm.types import text_of
 from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
+from ph.tools.registry import RUN_CODE
 from ph.workspace_caches import WORKSPACE_FILE
 from ph_code_graph import CODE_GRAPH
 from ph_code_graph._extract import (
@@ -895,7 +896,9 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
 
     view = ctx.require(TOOLS).view(scope=agent.ctx)
     assert view.mode == "code"
-    assert view.schemas == (), "Code Mode offers one callable, not schemas"
+    assert [schema.name for schema in view.schemas] == [RUN_CODE], (
+        "Code Mode offers one callable, the transport, not a schema per tool"
+    )
     assert {"code_index", "code_graph"} <= set(view.visible)
 
     prompt = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)

@@ -396,7 +396,7 @@ async def test_the_sdk_section_lists_the_bindings_and_the_code_only_rule(
     assert "async def tools.touch(" in prompt
     assert f"only\n`{RUN_CODE}` is callable" in prompt or RUN_CODE in prompt
     # Under Code Mode the model is offered one callable, not a schema list.
-    assert ctx.require(TOOLS).schemas(scope=agent.ctx) == []
+    assert [one.name for one in ctx.require(TOOLS).schemas(scope=agent.ctx)] == [RUN_CODE]
 
 
 async def test_the_transport_name_cannot_be_shadowed(mount: MountProfile) -> None:
@@ -511,6 +511,31 @@ async def test_a_profile_can_present_the_transport_under_its_own_name(mount: Mou
     assert ipython is not None
     assert ctx.require(TOOLS).get(RUN_CODE, scope=DEPLOYMENT) is None
     assert ipython.description == "Python cells."
+
+
+async def test_a_request_offers_the_transport_and_nothing_else(mount: MountProfile) -> None:
+    """One callable (C1): the request's tools are the transport's schema alone, under
+    the name the profile presents it as.
+
+    Offered none, a real provider is sent a request with no tool to call, and the
+    model can run nothing — a live llama.cpp session reasoned its way to "looking at
+    the tool list again" and answered without code. The fake adapter never asks for
+    a schema, which is how a view that offered nothing in Code Mode went unseen.
+
+    Sabotage: offer `()` under Code Mode again.
+    """
+    ctx = await _code_ctx(mount)
+    tools = ctx.require(TOOLS)
+    tools.register(_recorder("touch", []))
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("s-offer"), FAKE_OPTIONS)
+    tools.present_as("code", scope=agent.ctx)
+
+    plain = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
+    tools.present_transport(_as_ipython())
+    presented = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
+
+    assert [schema.name for schema in plain.tools] == [RUN_CODE]
+    assert [schema.name for schema in presented.tools] == ["ipython"]
 
 
 async def test_renaming_the_transport_keeps_what_it_declares_about_itself(

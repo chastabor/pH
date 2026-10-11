@@ -116,9 +116,10 @@ async def test_the_shipped_profile_offers_exactly_one_callable(
 
     assert view.mode == "code"
     assert view.transport_name == IPYTHON
-    # Under Code Mode the model is handed no schema list at all; everything other
-    # than the transport is reached as a binding (P1-04, C6).
-    assert ctx.require(TOOLS).schemas(scope=agent.ctx) == []
+    # Under Code Mode the model is handed one schema, the transport's, under the
+    # name the profile presents; everything else is reached as a binding (P1-04,
+    # C6). Handed none, a real provider has no tool for the model to call.
+    assert [one.name for one in ctx.require(TOOLS).schemas(scope=agent.ctx)] == [IPYTHON]
     assert ctx.require(TOOLS).get(RUN_CODE, scope=agent.ctx) is None
     # And the base tool rows are still mounted — not directly callable, but
     # present, which is what makes them bindings rather than absences.

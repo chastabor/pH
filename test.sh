@@ -373,8 +373,10 @@ EOF
 
 # ------------------------------------------------------------------- the smoke gate --
 #
-# `tests/test_local_server.py` is the one file in this suite that talks to a real
-# model, and it skips itself unless `LLAMA_BASE_URL` is set. That is right for
+# `tests/test_local_server.py`, `test_local_rlm.py` and `test_local_clm.py` are the
+# files in this suite that talk to a real model — the route, Code Mode over it, and a
+# model editing its own context — and they skip themselves unless `LLAMA_BASE_URL` is
+# set. That is right for
 # `./test.sh` — a suite must not depend on a server somebody happens to have
 # running — and useless as a way to *run* it: exporting a variable to un-skip four
 # tests is a step nobody remembers, and it is not discoverable from `--help`.
@@ -386,7 +388,7 @@ EOF
 # are stripped first: that document carries a worked overlay example with a
 # `baseUrl` in it, and matching the example instead of the setting would be the
 # same bug one layer down.
-SMOKE_TESTS="tests/test_local_server.py"
+SMOKE_TESTS=(tests/test_local_server.py tests/test_local_rlm.py tests/test_local_clm.py)
 SMOKE_PROFILE="packages/phern/src/ph_app/profiles/llama.yaml"
 
 profile_base_url() {
@@ -425,7 +427,7 @@ gate_smoke() {
     return
   fi
   ok "$root answers /health"
-  gate_test "$SMOKE_TESTS" "$@"
+  gate_test "${SMOKE_TESTS[@]}" "$@"
 }
 
 # ------------------------------------------------------------------------ driver --

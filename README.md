@@ -577,7 +577,7 @@ phern attachments gc         # media no stored session references
 ```bash
 ./test.sh                 # lint, format, types, tests — CI's four gates, in CI's order
 ./test.sh test -k prefix  # anything after the gate goes to pytest
-./test.sh smoke           # the live local-server gate; needs llama-server running
+./test.sh smoke           # the live local-server gate: the route, ph-rlm and ph-clm on it; needs llama-server
 ./test.sh --help
 ```
 
