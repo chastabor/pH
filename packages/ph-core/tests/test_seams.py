@@ -822,6 +822,9 @@ async def test_only_one_engine_may_hold_the_seam() -> None:
         async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> None:
             return None
 
+        def trigger_fraction(self) -> float | None:
+            return None
+
         async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> None:
             return None
 
@@ -830,6 +833,25 @@ async def test_only_one_engine_may_hold_the_seam() -> None:
         seam.register(Engine())
     release()
     seam.register(Engine())
+
+
+async def test_the_seam_reports_its_engines_trigger_and_nothing_without_one() -> None:
+    """A profile that compacts nothing has no share for a warning to land ahead of."""
+    seam = CompactionSeam(ctx=Context())
+    assert seam.trigger_fraction() is None
+
+    class Engine:
+        async def compact_if_needed(self, agent: AgentHandle, trigger: object) -> None:
+            return None
+
+        def trigger_fraction(self) -> float | None:
+            return 0.8
+
+        async def compact_now(self, agent: AgentHandle, *, instructions: str = "") -> None:
+            return None
+
+    seam.register(Engine())
+    assert seam.trigger_fraction() == 0.8
 
 
 async def test_notes_render_in_order_and_an_empty_one_contributes_nothing() -> None:

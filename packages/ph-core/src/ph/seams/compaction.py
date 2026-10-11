@@ -121,6 +121,16 @@ class CompactionEngine(Protocol):
         """
         ...
 
+    def trigger_fraction(self) -> float | None:
+        """The share of the context window at which this engine compacts on its own,
+        or `None` when it does not compact on pressure.
+
+        Asked by a row that warns the model before a summary is written for it — ph-clm's
+        readouts — so the warning can land ahead of the summary on any window size,
+        rather than at a share written down a second time beside this one.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class CompactionNote:
@@ -201,6 +211,12 @@ class CompactionSeam:
             return None
         with running(self.engine_by):
             return await self.engine.compact_if_needed(agent, trigger)
+
+    def trigger_fraction(self) -> float | None:
+        """The engine's own (`CompactionEngine.trigger_fraction`), or `None` when no
+        engine is registered — a profile that compacts nothing has no share to warn
+        ahead of."""
+        return None if self.engine is None else self.engine.trigger_fraction()
 
     async def compact_now(
         self, agent: AgentHandle, *, instructions: str = ""

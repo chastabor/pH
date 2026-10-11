@@ -17,12 +17,18 @@ Unknown attributes and unknown keyword arguments fail loudly, with the available
 names in the message. The reader is a model, and a silent `None` is how a cell
 spends a turn discovering that a capability it invented does not exist.
 
+**One positional argument is read as the first parameter.** The SDK listing shows
+keyword-only signatures, and a live model passed `tools.context_tombstone(['S12'],
+reason=...)` anyway — the list positionally — and lost the step it had to edit in
+before compaction summarized the sections. So the first parameter may come
+positionally; anything more is refused with the call spelled out by keyword.
+
 @module ph_runtime.proxies
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 __all__ = ["Namespace", "RlmNamespace", "build_namespaces"]
@@ -42,10 +48,18 @@ that should not have written costs a review of every diff it produced."""
 class Namespace:
     """A group of governed callables — `tools`, `agent_message`, `agent_observe`."""
 
-    def __init__(self, name: str, bindings: Sequence[str], dispatch: Dispatch) -> None:
+    def __init__(
+        self,
+        name: str,
+        bindings: Sequence[str],
+        dispatch: Dispatch,
+        parameters: Mapping[str, Sequence[str]] | None = None,
+    ) -> None:
         self._name = name
         self._bindings = tuple(bindings)
         self._dispatch = dispatch
+        self._parameters = {binding: tuple(names) for binding, names in (parameters or {}).items()}
+        """Each binding's parameter names, in order, as the host declared them."""
 
     def __repr__(self) -> str:
         return f"<{self._name}: {', '.join(self._bindings)}>"
@@ -60,7 +74,11 @@ class Namespace:
                 f"{', '.join(sorted(self._bindings)) or '(none)'}"
             )
 
-        async def call(**arguments: object) -> Any:  # noqa: ANN401
+        parameters = self._parameters.get(name, ())
+
+        async def call(*positional: object, **arguments: object) -> Any:  # noqa: ANN401
+            if positional:
+                arguments = _keyword(f"{self._name}.{name}", parameters, positional, arguments)
             return await self._dispatch(self._name, name, arguments)
 
         call.__name__ = name
@@ -83,6 +101,26 @@ class RlmNamespace(Namespace):
         return await self._dispatch(self._name, self.RUN, {"prompt": prompt, **kwargs})
 
 
+def _keyword(
+    call: str,
+    parameters: Sequence[str],
+    positional: Sequence[object],
+    arguments: dict[str, object],
+) -> dict[str, object]:
+    """`arguments`, with one positional argument read as the first parameter — or a
+    refusal that spells the call out by keyword."""
+    spelled = ", ".join(f"{name}=..." for name in parameters)
+    if len(positional) > 1 or not parameters:
+        raise TypeError(
+            f"{call}() takes its arguments by keyword"
+            + (f": {call}({spelled})" if parameters else "")
+        )
+    first = parameters[0]
+    if first in arguments:
+        raise TypeError(f"{call}() got {first} both positionally and as {first}=")
+    return {first: positional[0], **arguments}
+
+
 def build_namespaces(
     declared: Sequence[dict[str, Any]], dispatch: Dispatch
 ) -> dict[str, Namespace]:
@@ -96,11 +134,18 @@ def build_namespaces(
         name = namespace.get("name")
         if not isinstance(name, str) or not name:
             continue
-        bindings = [
-            binding["name"]
+        declared_bindings = [
+            binding
             for binding in namespace.get("bindings") or ()
             if isinstance(binding, dict) and isinstance(binding.get("name"), str)
         ]
+        bindings = [binding["name"] for binding in declared_bindings]
+        parameters = {
+            binding["name"]: [
+                one for one in binding.get("parameters") or () if isinstance(one, str)
+            ]
+            for binding in declared_bindings
+        }
         factory = RlmNamespace if name == "rlm" else Namespace
-        built[name] = factory(name, bindings, dispatch)
+        built[name] = factory(name, bindings, dispatch, parameters)
     return built

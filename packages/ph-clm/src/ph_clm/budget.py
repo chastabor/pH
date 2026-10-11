@@ -10,9 +10,14 @@ is (pi-clm's `sizeTrailer` does the same). Everything the model is shown is logg
 **Measured as compaction measures** (`TokenMeter.baseline`): the provider's count of
 the last request — system prompt and tool schemas included — moved by what the
 surface did since, plus the result about to be logged, against the window that request
-was routed with. So the shares sit below compaction's in the same units, and a
-receipt's context figures are the same number. No window, no readouts: there is no
-share to report.
+was routed with. A receipt's context figures are the same number. No window, no
+readouts: there is no share to report.
+
+**The last reminder comes a margin below compaction's trigger**, read from the engine
+(`CompactionSeam.trigger_fraction`), so the model always has room to act before a
+summary is written for it. A fixed last share did not: on a 16k slot, 75% left one
+file read before compaction's 85%, and a live run spent it on a malformed call and
+lost the sections it meant to edit to the summary (`Shares.of`).
 
 **Once per crossing, and again after an edit brings the context back down.** Per
 session, `Readouts` keeps how many thresholds the context had reached; a readout fires
@@ -31,22 +36,69 @@ from dataclasses import dataclass, field
 
 from ph.text import thousands
 
-__all__ = ["Readouts"]
+__all__ = ["Readouts", "Shares"]
+
+
+@dataclass(frozen=True, slots=True)
+class Shares:
+    """The thresholds one reading is judged against, ascending, and the share at which
+    compaction summarizes on its own, when an engine says."""
+
+    thresholds: tuple[float, ...]
+    compacts_at: float | None = None
+
+    @classmethod
+    def of(cls, remind_at: Sequence[float], margin: float, compacts_at: float | None) -> Shares:
+        """`remind_at`, with the last reminder moved to `margin` below compaction's
+        trigger: any configured share at or past that point gives way to it. Unchanged
+        with no engine, or a margin that would put it at or below zero; empty stays
+        empty, which is readouts off."""
+        shares = sorted(remind_at)
+        # Rounded, so 0.85 - 0.2 is the 0.65 it means rather than 0.6499999999999999.
+        last = None if compacts_at is None else round(compacts_at - margin, 6)
+        if not shares or last is None or last <= 0:
+            return cls(tuple(shares), compacts_at)
+        earlier = (share for share in shares if share < last)
+        return cls(tuple(sorted({*earlier, last})), compacts_at)
+
+    def reached(self, tokens: int, window: int) -> int:
+        """How many thresholds, as shares of `window`, `tokens` is at or past."""
+        return sum(1 for share in self.thresholds if tokens >= share * window)
+
+    def line(self, tokens: int, window: int, level: int, how: str) -> str:
+        """What a result carries when the context reached `level` thresholds: its size,
+        what to do, and when the next reminder comes — or that this is the last, and
+        what happens after it."""
+        share = tokens * 100 // window
+        head = f"[context: ~{thousands(tokens)} of {thousands(window)} tokens ({share}%)."
+        if level >= len(self.thresholds):
+            after = (
+                ""
+                if self.compacts_at is None
+                else f" At {round(self.compacts_at * 100)}% older context is summarized for you."
+            )
+            return f"{head} This is the last reminder: free space now — {how}.{after}]"
+        following = round(self.thresholds[level] * 100)
+        return (
+            f"{head} Free space when it suits you — {how}. "
+            f"The next reminder comes at {following}%.]"
+        )
 
 
 @dataclass(slots=True)
 class Readouts:
     """Which thresholds each session's context has reached, and when that rises."""
 
-    thresholds: tuple[float, ...]
-    """Shares of the window, ascending — sorted here, since `line` counts on it."""
     _reached: dict[str, int] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        self.thresholds = tuple(sorted(self.thresholds))
-
     def crossed(
-        self, session_id: str, before: int, most: int, window: int, measure: Callable[[], int]
+        self,
+        session_id: str,
+        shares: Shares,
+        before: int,
+        most: int,
+        window: int,
+        measure: Callable[[], int],
     ) -> tuple[int, int] | None:
         """When a result takes the context from `before` tokens to at most `most`: the
         level reached and the tokens after, if this session had not reached that level;
@@ -57,32 +109,14 @@ class Readouts:
         readout fires. Tokenizing a long result is the costly part, and most results
         cross nothing.
         """
-        floor = _reached(before, window, self.thresholds)
+        floor = shares.reached(before, window)
         known = self._reached.get(session_id, floor)
-        after = measure() if _reached(most, window, self.thresholds) > floor else None
-        level = floor if after is None else _reached(after, window, self.thresholds)
+        after = measure() if shares.reached(most, window) > floor else None
+        level = floor if after is None else shares.reached(after, window)
         self._reached[session_id] = level
         if level <= known:
             return None
         return level, measure() if after is None else after
 
-    def line(self, tokens: int, window: int, level: int, how: str) -> str:
-        """What a result carries when the context reached `level` thresholds: its size,
-        what to do, and when the next reminder comes — or that this is the last."""
-        share = tokens * 100 // window
-        head = f"[context: ~{thousands(tokens)} of {thousands(window)} tokens ({share}%)."
-        if level >= len(self.thresholds):
-            return f"{head} This is the last reminder: free space now — {how}.]"
-        following = round(self.thresholds[level] * 100)
-        return (
-            f"{head} Free space when it suits you — {how}. "
-            f"The next reminder comes at {following}%.]"
-        )
-
     def forget(self, session_id: str) -> None:
         self._reached.pop(session_id, None)
-
-
-def _reached(tokens: int, window: int, thresholds: Sequence[float]) -> int:
-    """How many of `thresholds`, as shares of `window`, `tokens` is at or past."""
-    return sum(1 for share in thresholds if tokens >= share * window)

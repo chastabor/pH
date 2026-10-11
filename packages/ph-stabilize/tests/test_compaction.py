@@ -425,6 +425,23 @@ def _engine(ctx: Context) -> SummarizeEngine:
     return engine
 
 
+async def test_the_engine_reports_its_trigger_and_none_when_it_does_not_compact(
+    mount: MountProfile,
+) -> None:
+    """What ph-clm's readouts warn ahead of: the share this engine compacts at on its
+    own, through the core seam — and nothing when automatic compaction is off, since
+    then no summary is coming to warn about."""
+    armed = await mount(
+        {"id": "compaction-summarize", "config": {"triggerFraction": 0.8}}, profile=PROFILE
+    )
+    disarmed = await mount(
+        {"id": "compaction-summarize", "config": {"auto": False}}, profile=PROFILE
+    )
+
+    assert armed.require(COMPACTION).trigger_fraction() == 0.8
+    assert disarmed.require(COMPACTION).trigger_fraction() is None
+
+
 def _truncate(ctx: Context, session: Session) -> tuple[int, ...]:
     """The truncation pass with the baseline its caller now computes once.
 

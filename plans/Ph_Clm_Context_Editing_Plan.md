@@ -656,8 +656,63 @@ They are settled here, and the first half of Phase 3 builds them.
 | **2b. Audit-only records** ✅ | `AUDIT_ONLY_SESSION_EVENT_TYPES` and `declare_log_type(audit_only=)`; phern's TUI and trajectory derive their tables from it; ph-clm's two types declared in their own package | a new audit-only type touches only its declaration and its writer; the phern suites unchanged; coverage still fails a type that is neither rendered nor audit-only |
 | **3. Budget and prompt** ✅ built; the live gate passes (see "Phase 3's gate, run live") | first, the context file's design (above): label out of the body, escaped forms cached, private and short-lived files, symlinks refused, edits outside a call caught; then budget readouts as a `post-execute` trailer on tool results, from `ctx.token_meter`; the protocol section; the profiles | a recorded `rlm-clm` session on a real provider shows readouts at their thresholds and edits that land, with no notice message added to the surface |
 | **3b. One baseline** ✅ | `TokenMeter.baseline` follows the surface from the last reported usage: what was appended since is added, what a replacement shadowed is taken off; readouts and receipts read it | the baseline's own tests and 9 sabotage mutations; compaction's suite with the elision now moving the baseline; readouts counting what the provider counted |
+| **3c. Live-gate fixes** ✅ | the last reminder a margin below compaction's trigger (`CompactionEngine.trigger_fraction`); a readout that spells the call out under Code Mode, and a positional first argument accepted; `fit` gating a batch as one change | each by unit test and 8 sabotage mutations; the ten-file run repeated live |
 | **4. Caching** | `after=` costs; the floor breakpoint hint as a request-config field, so `request/header` records each move, plus the Anthropic adapter; optional 1 h TTL | `prefix_bench` with an edit scenario: cache reads after an edit, floor against the two quantized checkpoints; a replay reproduces the markers |
 | **5. Later** | a restore op (format 4); a revisions diff panel in the TUI; sub-agent briefs as files (CLM's `SUBCTX`) | — |
+
+### Phase 3c as built: what the live gate found
+
+The three findings, decided as: the last reminder anchored below compaction's
+trigger; positional calls both spelled out and accepted; and `fit` gating a batch.
+
+- **The last reminder lands before compaction.**
+  - Core's `CompactionEngine` protocol gains `trigger_fraction()`: the share at which
+    the engine compacts on its own, or `None` when it does not compact on pressure.
+    `CompactionSeam.trigger_fraction()` answers for the registered engine, `None`
+    without one.
+  - ph-stabilize's `SummarizeEngine` returns its configured `trigger_fraction` while
+    `auto` is on.
+  - ph-clm's `Shares.of` moves the last reminder to `lastMargin` below that
+    trigger; a configured share at or past that point gives way to it.
+  - `lastMargin` defaults to 0.2, not the 0.1 first floated, because 0.1 puts the
+    reminder back at 75% under the default trigger: the point that came too late.
+    0.2 is 65%, about 3,000 tokens on a 16k slot.
+  - The last reminder says what comes next: "At 85% older context is summarized for
+    you."
+  - `Readouts` no longer holds the thresholds. Each reading builds a `Shares` from
+    the config and the engine.
+- **A positional call.**
+  - Under Code Mode the readout's how-to line is the call a cell writes:
+    `await tools.context_tombstone(sections=['S12'], reason='...')`.
+  - The kernel's boot frame now carries each binding's parameter names in order
+    (`_parameter_names`). The guest's proxy reads one positional argument as the
+    first parameter.
+  - Anything more is refused with the call spelled out by keyword:
+    `tools.tombstone(sections=..., reason=...)`.
+  - The frame field is additive; an older guest ignores it.
+- **`fit` gates the batch.** `Editor.land` admits the batch's summed change once,
+  against the one baseline it holds. Two drafts that each fit can no longer land
+  together past the window.
+- **Tests:**
+  - core: the seam's trigger;
+  - ph-stabilize: the engine's trigger, and `None` when `auto` is off;
+  - ph-rlm: one positional argument is the first parameter, and two are refused
+    with the call spelled out;
+  - ph-clm: `Shares.of`; the last reminder at 65% saying compaction comes next; the
+    Code Mode how-to line; the batch gate.
+  - Sabotage, 8 mutations, all caught.
+- **Live, the ten-file run repeated** on the installed `rlm-clm` profile.
+  - Readouts at 57%, then 65% ("This is the last reminder"). The keyword call was
+    in both.
+  - Three file reads remained before compaction, where there had been one.
+  - This time the model read on as its task said, and compaction summarized at
+    about 86%. The run before, it had reacted to the reminder.
+  - So the mechanism now gives it room and the right call; whether it edits is the
+    model's choice. Stronger wording would be a separate decision.
+- **What breaks:**
+  - `CompactionEngine` implementations need `trigger_fraction()`.
+  - `Readouts(...)` takes no thresholds; `Shares` carries them.
+  - A batch under `fit` that grew past the window in total is now refused.
 
 ### Phase 3's gate, run live
 
@@ -735,7 +790,7 @@ mentioned editing.
   - Its retry with keywords was refused, correctly: "S173 has been revised; S2447
     stands for it now".
 
-**Findings, for decision:**
+**Findings, for decision** (decided and built in Phase 3c):
 - **On a small window the last reminder comes too late.** Between 75% and
   compaction's 85% there are about 1.6k tokens on a 16k slot: one file read. Options:
   - defaults relative to compaction's trigger, say 0.5 and 0.7 of the window;

@@ -46,6 +46,7 @@ ctx.compaction.register(engine)          -> Disposer
 ctx.compaction.require()                 # the engine, or a refusal
 await ctx.compaction.compact_now(...)    # /compact
 await ctx.compaction.compact_if_needed(...)  # the pressure path
+ctx.compaction.trigger_fraction()        # where the engine compacts on its own, or None
 ```
 
 ## Providing an engine
@@ -60,7 +61,15 @@ class CompactionEngine(Protocol):
     async def compact_now(
         self, agent: Any, *, instructions: str = ""
     ) -> CompactionResult | None: ...
+
+    def trigger_fraction(self) -> float | None: ...
 ```
+
+`trigger_fraction` is the share of the context window at which the engine compacts
+on its own, or `None` when it does not compact on pressure (`auto: false`). ph-clm's
+readouts put their last reminder a margin below it, so a model warned about its
+context has room to act before a summary is written for it — on any window size,
+without a second copy of the share.
 
 `None` from either means *there was nothing worth compacting* — not a failure.
 

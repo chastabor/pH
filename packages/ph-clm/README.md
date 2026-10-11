@@ -35,8 +35,10 @@ after the first change, so the sections *after* an edit are read again once.
 When a tool result takes the context past a share of its window, that result ends
 with one line giving the context's size and how to free space. Each share is reported
 once, and again only after an edit brings the context back below it. The shares are
-the `clm-context` row's `remindAt`, `[0.5, 0.75]` by default, below compaction's
-0.85. `[]` turns readouts off.
+the `clm-context` row's `remindAt`, `[0.5, 0.75]` by default; `[]` turns readouts off.
+With compaction mounted, the last reminder comes `lastMargin` (0.2) below its trigger
+instead, 65% under the default 0.85, so the model has room to act before a summary is
+written for it. Under Code Mode the readout spells the call out, keywords and all.
 
 ## The context file
 

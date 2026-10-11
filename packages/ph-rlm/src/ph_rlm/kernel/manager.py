@@ -55,7 +55,7 @@ from pydantic import PositiveFloat
 from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, first_of, is_canceled
 from ph.cordis import Context, Disposer, plugin
-from ph.json import as_str, thaw_json
+from ph.json import as_obj, as_str, thaw_json
 from ph.keys import CODE_RUNTIME
 from ph.orphans import OrphanJournal, host_journal
 from ph.paths import resolve_roots
@@ -1724,15 +1724,27 @@ class PythonCodeRuntime:
 
 
 def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
-    """What the guest needs to build a proxy: names, not dispatch closures."""
+    """What the guest needs to build a proxy: names, not dispatch closures — and each
+    binding's parameter names in order, so a call that passes the first one
+    positionally can be read as the keyword it meant (`ph_runtime.proxies`)."""
     return {
         "name": namespace.name,
         "description": namespace.description,
         "bindings": [
-            {"name": binding.name, "description": binding.description}
+            {
+                "name": binding.name,
+                "description": binding.description,
+                "parameters": _parameter_names(binding),
+            }
             for binding in namespace.bindings
         ],
     }
+
+
+def _parameter_names(binding: CodeBinding) -> list[str]:
+    """A binding's parameter names, in the order its schema declares them."""
+    properties = as_obj(binding.parameters.get("properties"))
+    return [*properties]
 
 
 class Config(KernelLimits):

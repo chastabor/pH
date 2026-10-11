@@ -651,6 +651,53 @@ async def test_an_unknown_binding_says_what_exists(make_kernel: MakeKernel) -> N
     assert "read" in result.error, "the message names the available bindings"
 
 
+def _tombstone(received: list[dict[str, object]]) -> CodeBindingNamespace:
+    """A `tools.tombstone(sections, reason)` binding that records what it was given."""
+
+    async def record(**arguments: object) -> str:
+        received.append(arguments)
+        return "ok"
+
+    schema = {"type": "object", "properties": {"sections": {}, "reason": {}}}
+    return CodeBindingNamespace(
+        name="tools",
+        bindings=(
+            CodeBinding(name="tombstone", description="", parameters=schema, dispatch=record),
+        ),
+    )
+
+
+async def test_one_positional_argument_is_the_first_parameter(make_kernel: MakeKernel) -> None:
+    """A live model wrote `tools.context_tombstone(['S12'], reason=...)` against a
+    keyword-only listing and lost the step it had to edit in. The first parameter may
+    come positionally; what reaches the host is keywords.
+
+    Sabotage: drop the parameter names from `_declare`, and the call is refused.
+    """
+    received: list[dict[str, object]] = []
+    namespace = _tombstone(received)
+    kernel = await make_kernel(namespaces=(namespace,))
+
+    result = await kernel.run("await tools.tombstone(['S12'], reason='done')", (namespace,), None)
+
+    assert result.error is None, result.error
+    assert received == [{"sections": ["S12"], "reason": "done"}]
+
+
+async def test_more_positional_arguments_are_refused_with_the_call_spelled_out(
+    make_kernel: MakeKernel,
+) -> None:
+    received: list[dict[str, object]] = []
+    namespace = _tombstone(received)
+    kernel = await make_kernel(namespaces=(namespace,))
+
+    result = await kernel.run("await tools.tombstone(['S12'], 'done')", (namespace,), None)
+
+    assert result.error is not None
+    assert "tools.tombstone(sections=..., reason=...)" in result.error, result.error
+    assert received == [], "a refused call reached the host"
+
+
 async def test_rlm_rejects_an_unknown_keyword_in_the_cell(make_kernel: MakeKernel) -> None:
     """Prime-agent's contract: unknown kwargs fail loudly (§6.0)."""
     namespace = CodeBindingNamespace(

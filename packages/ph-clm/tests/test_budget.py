@@ -19,10 +19,19 @@ from clm_helpers import MIRROR_ROW, agent_in, converse, edit, mounted, sections_
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.json import as_str
-from ph.keys import TOKEN_METER, TOOLS
+from ph.keys import CODE_RUNTIME_STUB, COMPACTION, TOKEN_METER, TOOLS
 from ph.llm.types import TokenUsage, text_of
 from ph.session import SurfaceIntent
-from ph.testing import MountProfile, assistant_payload, log_event, run_tool, simple_tool
+from ph.testing import (
+    MountProfile,
+    assistant_payload,
+    code_mode_stub,
+    log_event,
+    run_tool,
+    simple_tool,
+)
+from ph.tools.registry import RUN_CODE
+from ph_clm.budget import Shares
 from ph_clm.keys import CLM_MIRROR
 
 pytestmark = pytest.mark.anyio
@@ -191,3 +200,60 @@ async def test_the_readout_counts_what_the_provider_counted(mount: MountProfile)
     assert said is not None
     share = re.search(r"tokens \((\d+)%\)", said)
     assert share is not None and 55 <= int(share.group(1)) < 75, said
+
+
+class _Compacting:
+    """A compaction engine that only says where it would compact."""
+
+    def __init__(self, share: float) -> None:
+        self.share = share
+
+    async def compact_if_needed(self, agent: object, trigger: object) -> None:
+        return None
+
+    def trigger_fraction(self) -> float | None:
+        return self.share
+
+    async def compact_now(self, agent: object, *, instructions: str = "") -> None:
+        return None
+
+
+def test_the_last_reminder_gives_way_below_compactions_trigger() -> None:
+    """A margin below the engine's trigger, so the model has room to act before a summary;
+    a share at or past that point gives way to it. Nothing moves without an engine, and
+    no shares stays no readouts."""
+    assert Shares.of([0.5, 0.75], 0.2, 0.85).thresholds == (0.5, 0.65)
+    assert Shares.of([0.5, 0.75], 0.2, None).thresholds == (0.5, 0.75)
+    assert Shares.of([], 0.2, 0.85).thresholds == ()
+    assert Shares.of([0.5], 0.9, 0.85).thresholds == (0.5,)
+
+
+async def test_the_last_reminder_comes_before_compaction_and_says_so(
+    mount: MountProfile,
+) -> None:
+    """With an engine compacting at 85%, the last reminder is at 65% — and it says what
+    happens if the model does nothing.
+
+    Sabotage: ignore the engine's trigger, and 70% is no last reminder at all.
+    """
+    ctx, agent, window = await _filled(mount, 0.55)
+    ctx.require(COMPACTION).register(_Compacting(0.85))
+
+    said = _readout(await _emit(ctx, agent, window * 15 // 100))
+
+    assert said is not None and "last reminder" in said, said
+    assert "At 85% older context is summarized for you." in said
+
+
+async def test_under_code_mode_the_readout_spells_the_call(mount: MountProfile) -> None:
+    """The keywords and all, as a cell writes it: a live model passed the sections
+    positionally and lost its one chance to edit to the error."""
+    ctx, agent, window = await _filled(mount, 0.4, code_mode_stub())
+    ctx.require(TOOLS).present_as("code", scope=agent.ctx)
+    ctx.require(CODE_RUNTIME_STUB).register_program("big", lambda _b, _emit: "word " * window)
+
+    result = await run_tool(ctx, RUN_CODE, {"program": "big"}, agent=agent, session=agent.session)
+
+    said = _readout(text_of(result.content))
+    assert said is not None, text_of(result.content)[-300:]
+    assert "await tools.context_tombstone(sections=['S12'], reason='...')" in said, said

@@ -31,7 +31,7 @@ from pydantic import Field
 
 from ph.cordis import Context, Next, plugin
 from ph.json import JsonObject
-from ph.keys import TOKEN_METER, TOOLS
+from ph.keys import COMPACTION, TOKEN_METER, TOOLS
 from ph.llm.types import ContentBlock, TextBlock, text_of
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.token_meter import TokenMeter
@@ -57,7 +57,7 @@ from ph.tools.definition import (
 from ph.tools.presentation import simple_views
 from ph.wire import WireModel
 
-from .budget import Readouts
+from .budget import Readouts, Shares
 from .edits import Editor, Gate, Revision, receipt, revision_of
 from .keys import CLM, CLM_MIRROR
 from .sections import (
@@ -91,8 +91,15 @@ class Config(WireModel):
         default_factory=lambda: [0.5, 0.75]
     )
     """Shares of the context window at which a tool result carries a readout of the
-    context's size, once per crossing. Below compaction's 0.85 by default, so the model
-    is told before a summary is written for it. Empty turns readouts off."""
+    context's size, once per crossing. Empty turns readouts off. With a compaction
+    engine mounted, the last reminder is `lastMargin` below its trigger instead of any
+    share here at or past that point."""
+    last_margin: float = Field(default=0.2, gt=0, lt=1)
+    """How far below compaction's trigger, as a share of the window, the last reminder
+    comes — room for the model to act before a summary is written for it. 0.2 puts it
+    at 65% under compaction's default 0.85: about 3,000 tokens on a 16k slot, two or
+    three steps, where 0.1 left one file read and a live run lost its edit to the
+    summary."""
 
 
 # ------------------------------------------------------------------ schemas --
@@ -196,7 +203,7 @@ async def apply(ctx: Context, config: Config) -> None:
     # The map's per-event facts are a fold over the log, and every such cache gets
     # its own invariant row (`docs/seams/invariants.md`, "Fold caches get one row each").
     contribute_fold_cache(ctx, id="clm-section-map", subject="section map", stale=mapper.stale)
-    readouts = Readouts(tuple(config.remind_at))
+    readouts = Readouts()
 
     def forget(session: Session) -> None:
         mapper.forget(session.id)
@@ -220,10 +227,14 @@ async def apply(ctx: Context, config: Config) -> None:
             return decision
         text = text_of(content)
         before = baseline.tokens
+        compaction = ctx.get(COMPACTION)
+        compacts_at = None if compaction is None else compaction.trigger_fraction()
+        shares = Shares.of(config.remind_at, config.last_margin, compacts_at)
         # A token is at least a byte, so the result's UTF-8 length bounds its count, and
         # it is tokenized only when that bound could cross a threshold.
         crossed = readouts.crossed(
             session.id,
+            shares,
             before,
             before + len(text.encode()),
             window,
@@ -232,10 +243,10 @@ async def apply(ctx: Context, config: Config) -> None:
         if crossed is None:
             return decision
         level, after = crossed
-        line = readouts.line(after, window, level, _how(ctx, execution))
+        line = shares.line(after, window, level, _how(ctx, execution))
         return replace(decision, content=[*content, TextBlock(text=line)])
 
-    if readouts.thresholds:
+    if config.remind_at:
         # Outermost, whatever order the rows mounted in (see the module docstring).
         ctx.on("tools/post-execute", after_call, prepend=True)
 
@@ -421,12 +432,20 @@ async def _reconcile_edit(
 
 def _how(ctx: Context, execution: ToolExecution) -> str:
     """How a readout says to free space: the context file when a row keeps one, and
-    the tools either way."""
-    verbs = "context_tombstone, context_replace or context_rewrite"
+    the tools either way — under Code Mode as the call a cell writes, keywords and all,
+    since a live model passed the sections positionally and lost its one chance to
+    edit to the error."""
+    if ctx.require(TOOLS).mode_for(execution.scope) == "code":
+        verbs = (
+            "in a cell, await tools.context_tombstone(sections=['S12'], reason='...') "
+            "or tools.context_replace(sections=['S12..S20'], text='...')"
+        )
+    else:
+        verbs = "use context_tombstone, context_replace or context_rewrite"
     mirror = ctx.get(CLM_MIRROR)
     if mirror is None or execution.session is None or execution.agent is None:
-        return f"use {verbs}"
-    return f"edit {mirror.path(execution.session, execution.agent)}, or use {verbs}"
+        return verbs
+    return f"edit {mirror.path(execution.session, execution.agent)}, or {verbs}"
 
 
 def _session(run: ToolRunContext) -> Session:

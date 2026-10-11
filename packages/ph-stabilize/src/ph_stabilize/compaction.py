@@ -579,6 +579,11 @@ class SummarizeEngine:
 
     # ------------------------------------------------------------- the seam --
 
+    def trigger_fraction(self) -> float | None:
+        """The configured `trigger_fraction` while automatic compaction is on; `None`
+        when it is off, since then nothing compacts on pressure."""
+        return self.config.trigger_fraction if self.config.auto else None
+
     async def compact_if_needed(
         self, agent: AgentHandle, trigger: CompactionTrigger
     ) -> CompactionResult | None:

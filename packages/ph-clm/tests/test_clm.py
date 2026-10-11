@@ -43,8 +43,9 @@ from ph.testing import (
 from ph.testing.builders import reconciled_call, resume_stored
 from ph.text import thousands
 from ph.tools.definition import NotDone
+from ph_clm.keys import CLM
 from ph_clm.kinds import REVISED
-from ph_clm.sections import SectionMap, label
+from ph_clm.sections import EditRefused, SectionMap, label
 
 pytestmark = pytest.mark.anyio
 
@@ -505,3 +506,33 @@ async def test_a_receipt_counts_the_context_as_compaction_does(mount: MountProfi
     (record,) = agent.session.select(REVISED)
     assert record.data["contextBefore"] == before
     assert f"Context ~{thousands(before)} →" in text_of(result.content)
+
+
+async def test_fit_gates_a_batch_as_one_change(mount: MountProfile) -> None:
+    """Two replacements in one batch that each fit the window can together overflow it:
+    the batch is gated as the one change its receipt reports.
+
+    Sabotage: gate each draft on its own again, and the batch lands.
+    """
+    ctx = await mounted(mount, gate="fit")
+    agent = agent_in(ctx)
+    converse(agent.session)
+    editor = ctx.require(CLM)
+    meter = ctx.require(TOKEN_METER)
+    room = 1_000
+    window = meter.baseline(agent.session).tokens + room
+    log_event(
+        agent.session,
+        "request/context",
+        {"provider": "fake", "model": "m", "contextWindow": window},
+    )
+    text = "word " * 100
+    while meter.measure_text(text) < room * 6 // 10:
+        text += "word " * 100
+    sections = editor.sections(agent.session)
+    drafts = [editor.replacing(sections, position, position + 1, text) for position in (2, 3)]
+
+    with pytest.raises(EditRefused, match="window"):
+        editor.land(agent.session, drafts, call_id=None)
+    assert not agent.session.select(REVISED), "part of a refused batch landed"
+    assert editor.land(agent.session, drafts[:1], call_id=None), "one alone should fit"

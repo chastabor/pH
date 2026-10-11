@@ -408,8 +408,13 @@ class Editor:
         """Gate every draft, then write them all, each followed by its record, in one
         batch — for one call, through one front end."""
         baseline = self.sections.meter.baseline(session)
-        for draft in drafts:
-            self._admit(baseline, draft.draft.tokens_before, draft.draft.tokens_after)
+        # The batch as one change: two drafts that each fit can together not, and the
+        # receipt reports them together.
+        self._admit(
+            baseline,
+            sum(draft.draft.tokens_before for draft in drafts),
+            sum(draft.draft.tokens_after for draft in drafts),
+        )
         landed: list[Revision] = []
         with session.batch() as batch:
             for draft in drafts:
