@@ -15,7 +15,7 @@ sees it, so a consumer never handles two shapes for the same failure.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -23,15 +23,18 @@ from ..cordis import Context, Running, events, plugin, running
 from ..keys import LLM
 from .types import (
     FIELD_OF,
+    CallSetting,
     Finish,
     FinishReason,
     GenerateOptions,
+    LlmCallConfig,
     LlmFailure,
     SamplingSetting,
     StreamChunk,
     sampling_fields,
     sampling_of,
     uncarried,
+    unmapped_effort,
 )
 
 __all__ = [
@@ -89,7 +92,6 @@ class ResolvedModel:
 
     context_window: int | None = None
     default_max_tokens: int | None = None
-    reasoning: tuple[str, ...] = ()
     accepts: frozenset[str] = frozenset()
     """MIME types this route takes as message *content* (P7-01).
 
@@ -271,8 +273,8 @@ class LlmRuntime:
     ctx: Context
     _registrations: list[AdapterHandle] = field(default_factory=list)
     _routes: dict[str, AdapterHandle] = field(default_factory=dict)
-    _dropped: set[tuple[str, str, SamplingSetting]] = field(default_factory=set)
-    """Each `(provider, model, setting)` already warned about, so a session warns once
+    _warned: set[str] = field(default_factory=set)
+    """Each warning about a withheld setting already given, so a session warns once
     rather than on every request."""
 
     def register_adapter(self, providers: Sequence[str], adapter: LlmAdapter) -> AdapterHandle:
@@ -328,6 +330,37 @@ class LlmRuntime:
             resolved = resolver(provider, model)
         return resolved if isinstance(resolved, ResolvedModel) else ResolvedModel()
 
+    def withhold(
+        self, config: LlmCallConfig, route: ResolvedModel, efforts: Collection[str]
+    ) -> tuple[LlmCallConfig, dict[CallSetting, float | int | str]]:
+        """`config` as `route` can carry it, and what it withholds, by the values asked:
+        a sampling setting its API does not take (`uncarried`), and a reasoning effort
+        its profile's `efforts` do not define (`unmapped_effort`). Each with a warning the
+        first time, since someone asked for it.
+
+        The agent loop's, before it logs the header of the request it sends, so the log
+        says what was sent and what was asked and not (`EpochHeader.withheld`). A request
+        that reaches the seam another way is held to the sampling half at the edge
+        (`_carried`), and sends an effort only as the `effort_fields` it is given."""
+        withheld: dict[CallSetting, float | int | str] = {}
+        if route.sampling is not None:
+            asked = sampling_of(config)
+            for setting in uncarried(config, route.sampling):
+                withheld[setting] = asked[setting]
+                self._uncarried(config.provider, config.model, setting, route.sampling)
+        effort = config.reasoning_effort
+        if unmapped_effort(effort, efforts):
+            withheld["reasoningEffort"] = effort
+            self._warn_once(
+                "ph.llm: reasoning effort %s is not sent to %s/%s, so the provider's default "
+                "applies: its profile says how to send %s",
+                effort,
+                config.provider,
+                config.model,
+                ", ".join(efforts) or "none",
+            )
+        return (_without(config, withheld) if withheld else config), withheld
+
     def _carried(self, request: GenerateOptions) -> GenerateOptions:
         """`request` as its route can carry it: a sampling setting its API does not take
         is dropped, with a warning the first time (`ResolvedModel.sampling`)."""
@@ -338,17 +371,29 @@ class LlmRuntime:
             return request
         request, dropped = _carried_by(request, carried)
         for setting in dropped:
-            seen = (request.provider, request.model, setting)
-            if seen not in self._dropped:
-                self._dropped.add(seen)
-                log.warning(
-                    "ph.llm: %s/%s does not take %s, so it is not sent; it takes %s",
-                    request.provider,
-                    request.model,
-                    setting,
-                    ", ".join(sorted(carried)) or "none",
-                )
+            self._uncarried(request.provider, request.model, setting, carried)
         return request
+
+    def _uncarried(
+        self,
+        provider: str,
+        model: str,
+        setting: SamplingSetting,
+        carried: frozenset[SamplingSetting],
+    ) -> None:
+        self._warn_once(
+            "ph.llm: %s/%s does not take %s, so it is not sent; it takes %s",
+            provider,
+            model,
+            setting,
+            ", ".join(sorted(carried)) or "none",
+        )
+
+    def _warn_once(self, message: str, *args: object) -> None:
+        said = message % args
+        if said not in self._warned:
+            self._warned.add(said)
+            log.warning("%s", said)
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
         """Dispatch one request through the `llm/stream` waterfall."""
@@ -379,6 +424,14 @@ def _carried_by(
     for setting in dropped:
         fields[FIELD_OF[setting]] = None
     return replace(request, **fields), dropped
+
+
+def _without(config: LlmCallConfig, withheld: Iterable[CallSetting]) -> LlmCallConfig:
+    """`config` without the settings `withheld`, which `CallSetting` names by alias."""
+    data = config.model_dump(by_alias=True)
+    for setting in withheld:
+        data[setting] = None
+    return LlmCallConfig.model_validate(data)
 
 
 async def _normalized(

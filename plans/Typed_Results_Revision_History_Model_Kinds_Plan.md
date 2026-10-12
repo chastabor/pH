@@ -407,8 +407,11 @@ two of them as proposed, and Charles settled the third.
   sends only those, under its wire's names.
 - The `llm` seam drops any other before the request (so `llm/send` sees what is
   sent) and warns once per route and setting; the `models` row adds a "Model
-  settings" section to `phern doctor` naming each listed key that drops one.
-- *Found:* no adapter sends `reasoningEffort`; see "Recorded, not planned".
+  settings" section to `phern doctor` naming each listed key that drops one. *Since
+  moved* ahead of the logged header, which now records what it withheld; see
+  "Recorded, not planned".
+- *Found:* no adapter sends `reasoningEffort`; see "Recorded, not planned" (since
+  built as a route's `efforts`).
 - **A2.** `MODEL_KINDS` (`ph.seams.models`) names the shared kinds, `classify` and
   `light`, with the job each is for; the `models` row adds a "Model kinds" section to
   `phern doctor` naming the route each is listed on, or that a skill asking for it runs
@@ -467,15 +470,68 @@ two of them as proposed, and Charles settled the third.
 
 ## Recorded, not planned here
 
-- **No adapter sends `reasoningEffort`** (found building A1, 2026-10-12). A route's or a
-  spawn's effort reaches `GenerateOptions` and the footer (`reasoning_reading`), and
-  stops there: none of the three adapters puts it in a body. Each API spells it
-  differently (OpenAI's `reasoning_effort`, Anthropic's `thinking.budget_tokens`,
-  Google's `thinkingConfig.thinkingBudget`, llama.cpp's `chat_template_kwargs`), so
-  sending it means mapping an effort onto a budget per wire, which is a design of its
-  own.
-  - *Cost of waiting:* a person who sets an effort sees it in the footer and gets the
-    server's default.
+- **No adapter sent `reasoningEffort`: built 2026-10-12 as a route's `efforts`** (found
+  building A1). A route's or a spawn's effort reached `GenerateOptions` and the footer
+  (`reasoning_reading`) and stopped there: none of the three adapters put it in a body,
+  and nothing warned. Each API spells it differently (OpenAI's `reasoning_effort`,
+  Anthropic's `thinking.budget_tokens`, Google's `thinkingConfig.thinkingBudget`,
+  llama.cpp's `chat_template_kwargs`), and the spelling is the model's as much as the
+  wire's.
+  - *What was built* (Charles asked for the warning and a profile field per model):
+    `ModelRoute.efforts` maps each effort name to request body fields, per model in the
+    `models` row. The agent loop looks them up for the route it sends on, after the
+    `agent/request` waterfall, in the session's own list (`ModelList.efforts_for`: the
+    agent's key where it names that route, else the first key that does), sets the
+    chosen effort's fields on `GenerateOptions.effort_fields`, and each adapter merges
+    them into its body key by key after its own (`wire_effort`). An effort the route's
+    `efforts` do not define, its own or one a spawn asks of a child, is not sent: a
+    warning once per route and effort, the header's `withheld` (below), and a line under
+    "Model settings" in `phern doctor`. A route a plugin moved the request to is
+    answered as the list holds it, and one it does not list has no efforts. An
+    `llm/stream` listener that moves the route owns the `effort_fields` it passes on, as
+    it owns `max_tokens`, since the request names no effort to look up there.
+    `ResolvedModel.reasoning`, a field nothing read, is gone, and so are
+    `GenerateOptions.reasoning_effort` (the fields say what is sent; the header keeps
+    the name) and `EpochHeader.adapter_defaults` with `LlmCallConfigAdapterDefaults`
+    (no adapter ever reported a default).
+  - *The provider's default* (Charles, the same day): leaving the field out is how
+    each API falls back to its own default, so an effort nobody asked for sends nothing
+    and warns of nothing, and `default` (`DEFAULT_EFFORT`) asks for it by name, over an
+    effort the route sets: a route's `reasoningEffort`, a spawn's effort (rlm's
+    `thinking`, whose description now says so) or a skill's new `effort` front matter
+    may name it. It sends nothing, is not withheld or warned about, and `efforts` cannot
+    define it, since it is the provider's and not pH's. The warning stays for an effort
+    someone asked for that the route has no mapping for. A child runs at the spawn's
+    effort, else one its skills agree on (`SubagentRequest.skill_effort`, resolved by
+    `resolve_model` at a spawn and a readmission), else its route's; skills that
+    disagree leave it to the route, with a warning. Effort names are words, as model
+    keys are.
+  - *Not built:* any default per wire. No shipped profile defines `efforts`; the
+    `llama.yaml` comment shows a Qwen3 overlay. A spawn's parent is not told that the
+    effort it asked of a child was withheld; the child's header and the warning say so.
+    A route no `models` list holds (a mount without the row, or a whole route a spawn
+    named that the list does not match) has no efforts, so its effort is withheld.
+  - *What breaks:* a route that sets `reasoningEffort` without `efforts` no longer shows
+    the effort in the footer or the logged header (it never reached the server); it
+    shows under `withheld` instead. A profile whose `efforts` define `default`, or name
+    an effort by anything but a word, is refused; so is a skill whose `effort` is not a
+    word. rlm's spawn tool schema gains a description for `thinking`, so prompts that
+    carry it gain a sentence. A plugin reading `GenerateOptions.reasoning_effort`, or
+    building an `EpochHeader` with `adapter_defaults`, fails; a header logged before
+    reads as before, since nothing ever wrote the field.
+
+- **A dropped sampling setting left no record, and the header claimed it was sent:
+  fixed 2026-10-12.** The `llm` seam dropped it at the edge, after the agent loop had
+  logged `request/header` with it, so the log said it was sent.
+  - *What was built:* the loop asks the route before it logs the header
+    (`LlmRuntime.withhold`), so `config` is what was sent and `EpochHeader.withheld`
+    holds each sampling setting or effort asked for and not sent, by value. The next
+    request asks for them again (`_request_proposal`) and checks them against the route
+    then, so a route that comes to carry one sends it. The seam's edge drop stays for
+    requests that do not come through the loop, and both warn through one set, once.
+  - *What breaks:* a logged header no longer holds a setting its route cannot carry;
+    readers of `config` see what was sent, and `withheld` is a new optional field, so a
+    log from before reads as it did.
 
 - **A request larger than the window was sent before it was shrunk: fixed 2026-10-12**
   (found by section 1's live gate). On the local llama slot (16,384 tokens), one cell's

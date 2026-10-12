@@ -123,6 +123,19 @@
 # A local server serves whatever was loaded, so the one route's model is
 # `LLAMA_MODEL` — the variable the live gate already reads — and a server that
 # ignores the name answers with its loaded model either way.
+#
+# **No `efforts`, because the loaded model is not known here.** They say what each
+# reasoning effort sends to the model (`ModelRoute.efforts`), and without them an
+# effort asked for is not sent, with a warning; no effort, or `default`, sends none
+# and the server's own default applies. A Qwen3 model takes its thinking switch
+# through llama.cpp's `chat_template_kwargs`, so an overlay serving one writes:
+#
+#       main:
+#         provider: llama
+#         model: "${env:LLAMA_MODEL:-default}"
+#         efforts:
+#           none: {chat_template_kwargs: {enable_thinking: false}}
+#           high: {chat_template_kwargs: {enable_thinking: true}}
 - id: models
   config:
     default: main

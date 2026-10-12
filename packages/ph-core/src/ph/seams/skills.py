@@ -233,7 +233,8 @@ the screen ids that are the same kind of token."""
 MODEL_KEY = slug_pattern(KEY_MAX)
 """What a `model:` may name: a key of a profile's `models` list, by that list's own
 rule (`ph.seams.models.Config`), so a key no list could hold is refused at discovery
-rather than at the spawn that reads it."""
+rather than at the spawn that reads it. An `effort:` is held to it too, the rule a
+route's `efforts` name theirs by (`ModelRoute`)."""
 
 
 class Skill(WireModel):
@@ -278,6 +279,10 @@ class Skill(WireModel):
     spawn names this skill; the key is the parent's profile's to hold, and one it
     cannot run degrades: the child runs on its parent's model, and the parent is told
     (`ModelFallback`). Empty says nothing."""
+    effort: str = ""
+    """The reasoning effort a child this skill directs runs at: a name its route's
+    `efforts` define, or `default` (`DEFAULT_EFFORT`). Over the effort its route sets,
+    and under one the spawn names (`child_options`). Empty says nothing."""
     accepts: list[str] = Field(default_factory=list)
     """The media this skill hands a child it directs, as media types or families
     (`image/*`): what the child's model has to take for it to see them (A3). Stated
@@ -734,10 +739,11 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         log.warning("ph.seams.skills: %s max-nudges is not a non-negative integer", path)
         return None
 
-    model = as_str(front.get("model"))
-    if model and not MODEL_KEY.match(model):
-        # A key of a profile's `models` list, and held to that list's own rule.
-        log.warning("ph.seams.skills: %s names a model %r that is not a key", path, model)
+    model = _key(front, "model", path)
+    if model is None:
+        return None
+    effort = _key(front, "effort", path)
+    if effort is None:
         return None
 
     accepts = _string_list(front, "accepts", path, cap=MAX_ACCEPTS)
@@ -751,6 +757,7 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
     return {
         "version": version,
         "model": model,
+        "effort": effort,
         "accepts": accepts,
         "argument_hint": hint,
         "allowed_tools": tools,
@@ -759,6 +766,16 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         "steps": steps,
         "max_nudges": nudges,
     }
+
+
+def _key(front: dict[str, Any], key: str, path: Path) -> str | None:
+    """A name a profile defines, held to its `models` list's own rule (`MODEL_KEY`): a
+    `model`, or an `effort` a route's `efforts` define. Absent is `""`."""
+    value = as_str(front.get(key))
+    if value and not MODEL_KEY.match(value):
+        log.warning("ph.seams.skills: %s %s %r is not a key", path, key, value)
+        return None
+    return value
 
 
 def _string_list(front: dict[str, Any], key: str, path: Path, *, cap: int) -> list[str] | None:

@@ -63,7 +63,7 @@ from ..agent.types import (
 from ..cancel import Canceled, CancelToken
 from ..cordis import Context, settled, settled_or_none
 from ..json import as_int
-from ..keys import LLM, SYSTEM_PROMPT
+from ..keys import LLM, MODELS, SYSTEM_PROMPT
 from ..llm.adapter import LlmError
 from ..llm.assembler import BlockAssembler, named_call
 from ..llm.types import (
@@ -644,8 +644,26 @@ class ReactLoopAgent:
                 "and AgentOptions.model, or supply both via the agent/request waterfall"
             )
 
+        # What the route cannot carry is withheld before the header is logged, so the
+        # header says what was sent and, under `withheld`, what was asked and not.
+        llm = self.ctx.require(LLM)
+        resolved = llm.resolve_model(proposed.provider, proposed.model)
+        # What each effort sends on the route sent, wherever the waterfall moved it, by
+        # the session's own list; the entry these options came from first.
+        listed = self.ctx.get(MODELS)
+        efforts = (
+            listed.efforts_for(proposed.provider, proposed.model, key=self.options.model_key)
+            if listed is not None
+            else {}
+        )
+        sent, withheld = llm.withhold(proposed, resolved, efforts)
         header = canonical_header(
-            EpochHeader(config=proposed, system=system or None, tools=list(assembly.tools) or None)
+            EpochHeader(
+                config=sent,
+                withheld=withheld,
+                system=system or None,
+                tools=list(assembly.tools) or None,
+            )
         )
         baseline = session.request_header()
         if not self._request_header_logged:
@@ -661,7 +679,6 @@ class ReactLoopAgent:
         # canceled in the waterfall would otherwise take the reroute with it.
         self._rerouted = False
 
-        resolved = self.ctx.require(LLM).resolve_model(proposed.provider, proposed.model)
         request_context = RequestContext(
             provider=proposed.provider, model=proposed.model, context_window=resolved.context_window
         )
@@ -669,13 +686,16 @@ class ReactLoopAgent:
             _LOG.append(session, "request/context", request_context.to_wire())
         self._throw_if_canceled()
 
+        # What was not withheld is unset, `default` or an effort the route defines, and
+        # `default` is no key of `efforts` (`ModelRoute`): it sends none.
+        effort = header.config.reasoning_effort
         return GenerateOptions(
             provider=header.config.provider,
             model=header.config.model,
             messages=session.derive_messages(),
             system=header.system,
             tools=tuple(header.tools or ()),
-            reasoning_effort=header.config.reasoning_effort,
+            effort_fields=None if effort is None else efforts.get(effort),
             **sampling_fields(header.config),
             max_tokens=header.config.max_tokens,
             stop=tuple(header.config.stop or ()),
@@ -684,19 +704,16 @@ class ReactLoopAgent:
 
 
 def _request_proposal(header: EpochHeader) -> LlmCallConfig:
-    """Strip adapter-materialized values before plugins propose the next config.
-
-    A default the adapter chose is re-resolved per step against the exact model;
-    freezing one into the conversation would outlive the route that produced it.
+    """The config the last request was asked with, for plugins to propose the next from:
+    what was sent, and what was withheld asked for again. Whether a route carries a
+    setting is its answer at the time, so a profile that learns to carry one sends it
+    without a person setting it twice.
     """
-    defaults = header.adapter_defaults
-    if defaults is None:
+    if not header.withheld:
         return header.config
     data = header.config.model_dump(by_alias=True, exclude_none=True)
-    if defaults.reasoning_effort is True:
-        data.pop("reasoningEffort", None)
-    if defaults.max_tokens is True:
-        data.pop("maxTokens", None)
+    for setting, value in header.withheld.items():
+        data[setting] = value
     return LlmCallConfig.model_validate(data)
 
 

@@ -25,7 +25,7 @@ from ph.seams.models import (
     ModelRoute,
     choose,
 )
-from ph.testing import MountProfile
+from ph.testing import MountProfile, models_overlay, report_section
 
 pytestmark = pytest.mark.anyio
 
@@ -179,7 +179,7 @@ async def test_doctor_names_a_setting_a_route_cannot_carry(mount: MountProfile) 
     doctor` says which it drops, so the person learns before reading a warning in a
     log. Sabotage: leave the section out, or name a setting the route carries."""
     route = {"provider": "fake", "model": "fake-1", "temperature": 0.6, "topK": 20}
-    ctx = await mount({"id": "models", "config": {"default": "main", "models": {"main": route}}})
+    ctx = await mount(models_overlay(main=route))
     ctx.require(LLM_FAKE).route = ResolvedModel(sampling=frozenset({"temperature"}))
 
     report = dict(ctx.require(DIAGNOSTICS).report())
@@ -189,15 +189,88 @@ async def test_doctor_names_a_setting_a_route_cannot_carry(mount: MountProfile) 
     assert (entry.options().temperature, entry.options().top_k) == (0.6, 20)
 
 
+async def test_doctor_names_an_effort_a_route_does_not_define(mount: MountProfile) -> None:
+    """A route's `efforts` say what each effort sends on its API; one that runs at an
+    effort they do not define works, sends none, and `phern doctor` says so, whether or
+    not its adapter said what sampling it takes. One that runs at `default`, the
+    provider's own, is not named. Sabotage: skip the check where no sampling is dropped,
+    or name `default`."""
+    low = {"chat_template_kwargs": {"enable_thinking": False}}
+    ctx = await mount(
+        models_overlay(
+            main={
+                "provider": "fake",
+                "model": "fake-1",
+                "reasoningEffort": "high",
+                "efforts": {"low": low},
+            },
+            bare={"provider": "fake", "model": "fake-2", "reasoningEffort": "low"},
+            set={
+                "provider": "fake",
+                "model": "fake-3",
+                "reasoningEffort": "low",
+                "efforts": {"low": {}},
+            },
+            theirs={"provider": "fake", "model": "fake-4", "reasoningEffort": "default"},
+        )
+    )
+
+    applies = "not sent, so the provider's default applies"
+    assert report_section(ctx, "Model settings") == {
+        "bare": f"reasoningEffort low {applies}: its efforts define none",
+        "main": f"reasoningEffort high {applies}: its efforts define low",
+    }
+
+
+def test_a_route_s_efforts_are_its_listed_entry_s_its_own_key_first() -> None:
+    """What each effort sends on a route is the entry the list holds it under: the key
+    an agent runs under where two keys list one route, else the first, as `resolve`
+    matches a whole route; nothing for a route it does not list. Sabotage: ignore the
+    key, or answer an unlisted route with another's efforts."""
+    off, on = {"think": False}, {"think": True}
+    models = ModelList(
+        Config.model_validate(
+            {
+                "default": "quick",
+                "models": {
+                    "quick": {"provider": "p", "model": "m", "efforts": {"x": off}},
+                    "deep": {"provider": "p", "model": "m", "efforts": {"x": on}},
+                    "plain": {"provider": "p", "model": "n"},
+                },
+            }
+        )
+    )
+
+    assert models.efforts_for("p", "m") == {"x": off}
+    assert models.efforts_for("p", "m", key="deep") == {"x": on}
+    assert models.efforts_for("p", "m", key="plain") == {"x": off}
+    assert models.efforts_for("p", "n") == {}
+    assert models.efforts_for("p", "unlisted", key="quick") == {}
+
+
+@pytest.mark.parametrize(
+    ("efforts", "said"),
+    [
+        ({"default": {}}, "it is the provider's own default"),
+        ({"Very High": {}}, "effort"),
+    ],
+    ids=["the-provider-s-default", "not-a-word"],
+)
+def test_a_route_cannot_define_the_provider_s_default_or_an_unnamed_effort(
+    efforts: dict[str, object], said: str
+) -> None:
+    """`default` is the provider's, which sends nothing, so a profile cannot make it
+    send something; and an effort is named by a word, as a skill names one. Sabotage:
+    drop either check from `ModelRoute`."""
+    with pytest.raises(ValidationError, match=said):
+        ModelRoute.model_validate({"provider": "p", "model": "m", "efforts": efforts})
+
+
 async def test_doctor_lists_which_shared_kinds_a_profile_serves(mount: MountProfile) -> None:
     """A2: the cue to set a kind up. A shared kind the list holds names its route, and one
     it does not says a skill asking for it runs on its parent's model. Sabotage: leave
     the section out, or call an unlisted kind served."""
-    listed = {
-        "main": {"provider": "fake", "model": "fake-1"},
-        "classify": {"provider": "fake", "model": "fake-9"},
-    }
-    ctx = await mount({"id": "models", "config": {"default": "main", "models": listed}})
+    ctx = await mount(models_overlay(classify={"provider": "fake", "model": "fake-9"}))
 
     kinds = dict(dict(ctx.require(DIAGNOSTICS).report())["Model kinds"])
 

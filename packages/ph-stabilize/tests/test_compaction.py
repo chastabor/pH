@@ -55,6 +55,7 @@ from ph.testing import (
     StubAgent,
     assistant_payload,
     log_event,
+    models_overlay,
     not_none,
     plugin_payload,
     simple_tool,
@@ -1002,7 +1003,9 @@ async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: MountProfil
     neither costs the cache hit — which is exactly why they are the two things
     worth departing on.
     """
-    ctx = await mount(profile=PROFILE)
+    budget = {"thinking": {"type": "enabled", "budget_tokens": 4096}}
+    route = {"provider": "fake", "model": "fake-1", "efforts": {"high": budget}}
+    ctx = await mount(models_overlay(main=route), profile=PROFILE)
     _route(ctx)
     session = ctx.require(SESSIONS).create("thinking")
     options = AgentOptions(provider="fake", model="fake-1", reasoning_effort="high")
@@ -1013,8 +1016,8 @@ async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: MountProfil
     await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (summary,) = _summary_requests(ctx)
-    assert _loop_requests(ctx)[-1].reasoning_effort == "high", "the fixture proves nothing"
-    assert summary.reasoning_effort is None
+    assert _loop_requests(ctx)[-1].effort_fields == budget, "the fixture proves nothing"
+    assert summary.effort_fields is None
     assert summary.max_tokens == SUMMARY_MAX_TOKENS
 
 

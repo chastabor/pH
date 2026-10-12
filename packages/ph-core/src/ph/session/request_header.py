@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from ..llm.types import LlmCallConfig, LlmCallConfigAdapterDefaults, ToolSchema
+from ..llm.types import CallSetting, LlmCallConfig, ToolSchema
 from ..wire import WireModel
 from .events import SessionEvent
 
@@ -33,7 +33,13 @@ class EpochHeader(WireModel):
     """Logged request state outside derived history."""
 
     config: LlmCallConfig
-    adapter_defaults: LlmCallConfigAdapterDefaults | None = None
+    """The call configuration as sent: a setting the route cannot carry is not in it."""
+    withheld: dict[CallSetting, float | int | str] | None = None
+    """The settings asked for that the route cannot carry, so the request went without
+    them (`LlmRuntime.withhold`): a sampling setting its API does not take, or a
+    reasoning effort its profile does not say how to send. By value, so the next request
+    asks for them again and is checked against the route then, and a reader of the log
+    sees what was asked and not sent."""
     system: str | None = None
     tools: list[ToolSchema] | None = None
 
@@ -54,17 +60,13 @@ class RequestContext(WireModel):
 def canonical_header(header: EpochHeader) -> EpochHeader:
     """Normalize to the one representation logging and comparison both use.
 
-    An empty system prompt and an empty tool list become absent, matching how
-    requests are actually built — otherwise `[]` and `None` would compare
-    unequal and append a header on every step.
+    An empty system prompt, an empty tool list and nothing withheld become absent,
+    matching how requests are actually built — otherwise `[]` and `None` would
+    compare unequal and append a header on every step.
     """
-    defaults = header.adapter_defaults
-    keep_defaults = defaults is not None and (
-        defaults.reasoning_effort is True or defaults.max_tokens is True
-    )
     return EpochHeader(
         config=header.config,
-        adapter_defaults=defaults if keep_defaults else None,
+        withheld=header.withheld or None,
         system=header.system if header.system else None,
         tools=list(header.tools) if header.tools else None,
     )

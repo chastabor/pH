@@ -189,7 +189,7 @@ period pH stops trusting its own teardown — a shutdown path that can hang will
 | `ctx.workspace` | P4-07/P4-08 | `ctx.fs` roots at cwd; per-agent worktrees are Phase 4 |
 | Compaction, offload, limits, HITL modes, todo | Phase 4 | The seams they attach to (`tools/post-execute`, `agent/pre-step`, `ctx.approval`, `ctx.spill_store`) all exist |
 | `session-query-sqlite`, OTel sink | P5-08/P5-09 | One `SessionPersistence` contract; a backend is a row swap |
-| `adapter_defaults` re-resolution | later | `_request_proposal` is in place; no adapter reports defaults yet |
+| `adapter_defaults` re-resolution | removed | No adapter ever reported a default; the field was deleted 2026-10-12 |
 | MCP tools | Phase 6 | The raw-JSON-Schema path in `ToolOutput`/`ToolDefinition` exists for them |
 
 ### 10. Things the `/simplify` pass moved to the right layer

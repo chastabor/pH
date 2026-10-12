@@ -94,7 +94,7 @@ async def test_a_skill_naming_a_listed_model_starts_its_child_on_that_route(
     """The gate's first half. The skill directs the child, so it says what the child
     thinks with; the key is resolved by the parent's own list, and the admission
     records both the key and the route, but not as the spawn's choice: a restart asks
-    the skill again. Sabotage: drop `_skill_models` from `resolve_model`, and the child
+    the skill again. Sabotage: ask no skill's model in `_resolve_route`, and the child
     runs on its parent's `fake-1`; record the skill's key as the choice, and a restart
     keeps it after the skill names another."""
     ctx, parent = await _parent(mount)
@@ -195,6 +195,29 @@ async def test_a_child_on_its_parent_s_route_runs_with_its_parent_s_settings(
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == parent.options
+
+
+async def test_a_child_runs_at_the_spawn_s_effort_else_its_skills_else_its_route_s(
+    mount: MountProfile,
+) -> None:
+    """`child_options`' order: the effort the spawn names, else one its skills agree on
+    (`default` for the provider's own among them), else its route's; skills that name
+    different efforts leave it to the route. Sabotage: drop `_with_effort` from
+    `resolve_model`, put the skills' effort over the spawn's, or let one of two
+    disagreeing skills win."""
+    ctx, parent = await _tuned_parent(mount)
+    skills = ctx.require(SKILLS)
+    skills.register(skill("quick", effort="default"))
+    skills.register(skill("deep", effort="high"))
+
+    async def effort(**kwargs: Any) -> str | None:  # noqa: ANN401
+        run = await _spawn(ctx, parent, **kwargs)
+        return not_none(ctx.require(AGENTS).get(run.session_id)).options.reasoning_effort
+
+    assert await effort() == "low", "the parent's route, at the parent's effort"
+    assert await effort(skills=("quick",)) == "default"
+    assert await effort(skills=("quick",), reasoning_effort="medium") == "medium"
+    assert await effort(skills=("quick", "deep")) == "low"
 
 
 async def test_a_whole_route_the_list_holds_runs_as_its_entry(mount: MountProfile) -> None:

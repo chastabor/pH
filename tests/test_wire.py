@@ -254,7 +254,6 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "TokenUsage": {"inputTokens": 3, "outputTokens": 4},
         "LlmFailure": {"message": "nope", "code": "UNKNOWN"},
         "LlmCallConfig": {"provider": "fake", "model": "fake-1"},
-        "LlmCallConfigAdapterDefaults": {"maxTokens": True},
         "ToolSchema": {"name": "read", "description": "read a file", "parameters": {}},
         "ContextSnapshotSection": {"name": "workspace", "text": "cwd: /x"},
         "ProvisionEntry": {"source": ".env"},

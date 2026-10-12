@@ -112,6 +112,7 @@ __all__ = [
     "isolated_intent_kinds",
     "live_settles",
     "logged_events",
+    "models_overlay",
     "parked_gate",
     "plugin_payload",
     "raising",
@@ -137,6 +138,14 @@ __all__ = [
 
 FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
 """The options every test that drives the fake adapter uses."""
+
+
+def models_overlay(**routes: Mapping[str, object]) -> dict[str, Any]:
+    """An overlay `models` row listing `routes` by key, its default `main`, which runs on
+    `FAKE_OPTIONS`' route unless `routes` lists another under it. A row as `mount` takes
+    one."""
+    listed = {"main": {"provider": "fake", "model": "fake-1"}, **routes}
+    return {"id": "models", "config": {"default": "main", "models": listed}}
 
 
 async def settled(check: Callable[[], object], what: str) -> None:

@@ -698,6 +698,27 @@ def test_a_skill_may_name_the_model_a_child_it_directs_runs_on(tmp_path: Path) -
     assert found.model == "classify"
 
 
+@pytest.mark.parametrize(
+    ("effort", "read"),
+    [("effort: default", "default"), ("effort: low", "low"), ("effort: Very High", None)],
+    ids=["the-provider-s-default", "a-named-effort", "not-a-word"],
+)
+def test_a_skill_may_name_the_effort_a_child_it_directs_runs_at(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, effort: str, read: str | None
+) -> None:
+    """`effort:` in the front matter, a word as a route's `efforts` name it, or `default`
+    for the provider's own; anything else refuses the skill, as every malformed field
+    does. Sabotage: leave it out of `_optional_front`, or drop the word check."""
+    write_skill(tmp_path, "sort", extra=effort)
+
+    with caplog.at_level("WARNING", logger="ph.seams.skills"):
+        found = discover_skills([str(tmp_path)])
+
+    assert [one.effort for one in found] == ([] if read is None else [read])
+    if read is None:
+        assert "effort" in caplog.text
+
+
 KIND_OUTPUT = """output:
   type: object
   properties:

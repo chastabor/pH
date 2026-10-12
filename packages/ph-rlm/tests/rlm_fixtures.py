@@ -34,7 +34,7 @@ from ph.persistence.lease import LEASES
 from ph.seams.subagents import FamilyRole
 from ph.seams.workspace import Workspace
 from ph.session import Session
-from ph.testing import FAKE_OPTIONS, MountProfile, log_event
+from ph.testing import FAKE_OPTIONS, MountProfile, log_event, models_overlay
 from ph_rlm import BUNDLE
 from ph_rlm.harness import HarnessEdit, HarnessReference
 from ph_rlm.kernel.manager import Kernel, KernelLimits, _declare
@@ -94,16 +94,7 @@ DOCTRINE_ROW: dict[str, Any] = {"id": "rlm-prompt", "name": "rlm-prompt"}
 """The delegation rows, here rather than re-spelled in four test modules — a row
 set that drifts between them tests different things while appearing to test one."""
 
-MODELS_ROW: dict[str, Any] = {
-    "id": "models",
-    "config": {
-        "default": "main",
-        "models": {
-            "main": {"provider": "fake", "model": "fake-1"},
-            "classify": {"provider": "fake", "model": "fake-9"},
-        },
-    },
-}
+MODELS_ROW = models_overlay(classify={"provider": "fake", "model": "fake-9"})
 """A parent's models list: `main` on its own route, and `classify`, the model a sorting
 skill asks for."""
 

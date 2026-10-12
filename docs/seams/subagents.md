@@ -133,8 +133,12 @@ and a provider builds only a child that has a route, served by an adapter here.
 The child runs with its route's call settings (`reasoningEffort`, `maxTokens` and its
 sampling settings, `temperature` among them) the way a root started on the key does, and none of its parent's: a
 temperature tuned for the parent's model is not one for this. A child on its
-parent's route runs with its parent's options. An effort the spawn names is the
-child's either way. `child_options` states that rule once, for every provider. The
+parent's route runs with its parent's options. Its reasoning effort is the one the
+spawn names, else one its skills agree on (`Skill.effort`, resolved by `resolve_model`;
+skills that disagree leave it to the route), else its route's, either way; `default`
+among them asks for the provider's own and sends nothing. An effort is sent where the
+child's route's `efforts` define it, and one they do not is withheld with a warning
+([models](models.md)). `child_options` states that rule once, for every provider. The
 child's `subagent/admitted` records what the spawn named (`choice`, and
 `reasoningEffort`) apart from what it resolved to (`modelKey`, and the whole route as
 `route`, a `ModelRoute`): the first is what a readmission resolves again, the second is

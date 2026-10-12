@@ -60,6 +60,7 @@ from ph.llm.types import (
     ToolResultBlock,
     UsageChunk,
     is_error_finish,
+    wire_effort,
     wire_sampling,
 )
 from ph.seams.uploads import FileHandle
@@ -373,6 +374,7 @@ class AnthropicAdapter:
         body.update(wire_sampling(options, SAMPLING_WIRE))
         if options.stop:
             body["stop_sequences"] = list(options.stop)
+        wire_effort(body, options)
         return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:

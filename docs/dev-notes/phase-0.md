@@ -169,7 +169,7 @@ oversight.
 | Crash repair (`interruptedTurnClosers`) | P1-12 | Needs the tool vocabulary it synthesizes results in |
 | The other two flush barriers (before tool dispatch, at step end) | P1-11 | Both are tool-pipeline positions |
 | SQLite persistence | P5-08 | The `SessionPersistence` contract is already one Protocol; a backend is a row swap |
-| `adapter_defaults` re-resolution | P1-15 | The plumbing is in place (`_request_proposal`); no adapter reports defaults yet |
+| `adapter_defaults` re-resolution | removed | No adapter ever reported a default; the field was deleted 2026-10-12 |
 | Token metering | P1-13 | The fake adapter reports usage; nothing consumes it |
 | `ph session import` | later | `populate_by_name` already makes every reader tolerant of both casings |
 | A registry for third-party session event types | Phase 1+ | `KNOWN_SESSION_EVENT_TYPES` is a frozenset; a plugin appending its own type must mark it `ignorable` until the vocabulary is declared the way events are |

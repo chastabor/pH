@@ -783,6 +783,36 @@ async def test_each_wire_carries_the_sampling_settings_its_api_takes_and_nothing
     )
 
 
+async def test_each_wire_merges_an_effort_s_fields_into_its_own_body() -> None:
+    """An effort reaches each wire as the fields its route's profile gives it, merged key
+    by key after the adapter's own, so Google's `thinkingConfig` sits beside the
+    sampling in `generationConfig`; an effort named without fields sends nothing.
+    Sabotage: replace rather than merge, merge before the adapter's own fields, or send
+    an effort's name."""
+    root = Context()
+    llama = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+    anthropic = AnthropicAdapter(ctx=root, config=AnthropicConfig())
+    google = GoogleAdapter(ctx=root, config=GoogleConfig())
+    off = {"chat_template_kwargs": {"enable_thinking": False}}
+    budget = {"thinking": {"type": "enabled", "budget_tokens": 2048}}
+    thought = {"generationConfig": {"thinkingConfig": {"thinkingBudget": 1024}}}
+
+    def effort(provider: str, fields: dict[str, Any] | None) -> GenerateOptions:
+        return replace(_sampled(provider), effort_fields=fields)
+
+    llama_body, _ = await llama._body(effort("p", off))
+    named_body, _ = await llama._body(effort("p", None))
+    anthropic_body, _ = await anthropic._body(effort("anthropic", budget))
+    google_body, _ = await google._body(effort("google", thought))
+
+    assert llama_body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert named_body.keys() == (await llama._body(_sampled("p")))[0].keys()
+    assert anthropic_body["thinking"] == budget["thinking"]
+    generation = google_body["generationConfig"]
+    assert generation["thinkingConfig"] == {"thinkingBudget": 1024}
+    assert generation["temperature"] == 0.6, "the effort replaced the adapter's own fields"
+
+
 @pytest.mark.parametrize(
     ("body", "overflow"),
     [

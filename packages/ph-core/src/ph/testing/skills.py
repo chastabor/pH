@@ -65,12 +65,14 @@ def skill(
     description: str = "does a thing",
     hint: str = "",
     model: str = "",
+    effort: str = "",
     output: dict[str, Any] | None = None,
     accepts: Sequence[str] = (),
 ) -> Skill:
     """One registered skill, with no file behind it; `model` is the key it asks a child
-    it directs to run on, `output` the shape of the value that child returns, and
-    `accepts` the media it hands that child.
+    it directs to run on, `effort` the reasoning effort it asks that child to run at,
+    `output` the shape of the value that child returns, and `accepts` the media it hands
+    that child.
 
     For the tests that care about the *registry* — visibility, narrowing, the
     catalog — rather than about the format on disk. Written out in three modules
@@ -81,6 +83,7 @@ def skill(
         description=description,
         hint=hint,
         model=model,
+        effort=effort,
         output=output or {},
         accepts=list(accepts),
     )

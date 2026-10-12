@@ -1130,7 +1130,7 @@ class SummarizeEngine:
 
         Two deliberate departures from byte-identical. `max_tokens` is the
         summary cap rather than the conversation's, because this generates a
-        summary and not a turn. And `reasoning_effort` is dropped — a reasoning
+        summary and not a turn. And the effort's fields are not sent — a reasoning
         model would otherwise spend a thinking budget on an extraction, which
         the harness planner declines for the same reason. Neither is part of the
         token prefix, so neither costs the cache hit.

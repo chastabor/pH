@@ -72,6 +72,7 @@ from ph.llm.types import (
     UsageChunk,
     is_error_finish,
     text_of,
+    wire_effort,
     wire_sampling,
 )
 from ph.seams.uploads import FileHandle
@@ -493,6 +494,7 @@ class GoogleAdapter:
             generation["responseMimeType"] = "application/json"
         if generation:
             body["generationConfig"] = generation
+        wire_effort(body, options)
         return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:

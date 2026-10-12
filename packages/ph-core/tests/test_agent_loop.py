@@ -11,6 +11,7 @@ So the check runs at runtime, on the request the adapter is about to receive.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
@@ -32,6 +33,7 @@ from ph.agent_loop.invariant import ModelVisibleNotLoggedError
 from ph.cordis import Context, plugin
 from ph.json import as_int, as_obj, as_str, thaw_json
 from ph.keys import AGENTS, LLM, LLM_FAKE, SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.llm.adapter import ResolvedModel
 from ph.llm.replay import RecordedStep, ReplayAdapter, text_chunks, tool_call_chunks
 from ph.llm.types import (
     BlockEnd,
@@ -54,6 +56,7 @@ from ph.testing import (
     MountProfile,
     block_text,
     log_event,
+    models_overlay,
     plugin_payload,
     simple_tool,
     stored_events,
@@ -201,6 +204,158 @@ async def test_a_route_s_sampling_settings_reach_the_request_and_its_header(
             "minP": 0.0,
             "presencePenalty": 1.5,
         }
+
+
+async def test_a_setting_the_route_cannot_carry_is_withheld_in_the_header_it_logs(
+    mount: MountProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The header says what was sent, and under `withheld` what was asked and not, by
+    value: logged once, warned about once, and asked for again on each request, so a
+    route that comes to carry it sends it. Sabotage: withhold after logging the header,
+    leave `withheld` out, or stop restoring it in `_request_proposal`."""
+    ctx = await mount()
+    fake = ctx.require(LLM_FAKE)
+    fake.route = ResolvedModel(sampling=frozenset({"temperature"}))
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, replace(FAKE, temperature=0.6, top_k=20))
+
+    with caplog.at_level(logging.WARNING, logger="ph.llm"):
+        await agent.prompt("first")
+        await agent.prompt("second")
+
+    header = session.request_header()
+    assert header is not None
+    assert sampling_of(header.config) == {"temperature": 0.6}
+    assert header.withheld == {"topK": 20}
+    assert [e.type for e in session.events].count("request/header") == 1
+    warned = [record for record in caplog.records if "does not take topK" in record.getMessage()]
+    assert len(warned) == 1
+
+    fake.route = ResolvedModel(sampling=frozenset({"temperature", "topK"}))
+    await agent.prompt("third")
+
+    assert fake.requests[-1].top_k == 20, "a withheld setting was not asked for again"
+    header = session.request_header()
+    assert header is not None and (header.config.top_k, header.withheld) == (20, None)
+
+
+OFF = {"chat_template_kwargs": {"enable_thinking": False}}
+"""What `none` sends on a Qwen route."""
+
+QWEN = {"provider": "fake", "model": "fake-1", "efforts": {"none": OFF}}
+"""The fake route, listed with what `none` sends on it."""
+
+
+async def test_an_effort_its_route_defines_is_sent_as_its_fields_and_another_is_withheld(
+    mount: MountProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A route's profile says what each effort sends (`ModelRoute.efforts`), read from
+    the session's `models` list: one it defines reaches the adapter as those fields, and
+    one it does not is withheld like a sampling setting, its warning naming what the
+    route defines. Sabotage: send no fields for an effort the route defines, or send an
+    effort it does not."""
+    ctx = await mount(models_overlay(main=QWEN))
+    fake = ctx.require(LLM_FAKE)
+    options = replace(FAKE, reasoning_effort="none")
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, options)
+
+    await agent.prompt("first")
+
+    assert fake.requests[-1].effort_fields == OFF
+    header = session.request_header()
+    assert header is not None and (header.config.reasoning_effort, header.withheld) == (
+        "none",
+        None,
+    )
+
+    agent.reroute(replace(options, reasoning_effort="high"))
+    with caplog.at_level(logging.WARNING, logger="ph.llm"):
+        await agent.prompt("second")
+
+    assert fake.requests[-1].effort_fields is None
+    header = session.request_header()
+    assert header is not None and header.config.reasoning_effort is None
+    assert header.withheld == {"reasoningEffort": "high"}
+    said = (
+        "reasoning effort high is not sent to fake/fake-1, so the provider's default "
+        "applies: its profile says how to send none"
+    )
+    assert [record.getMessage() for record in caplog.records].count(f"ph.llm: {said}") == 1
+
+
+async def test_the_provider_s_default_and_no_effort_send_none_and_warn_of_nothing(
+    mount: MountProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`default` asks for the provider's own effort: nothing is sent, nothing withheld,
+    nothing warned about, on a route whose profile defines other efforts; and an agent
+    that asks for no effort sends none as quietly. Sabotage: hold `default` to the
+    route's `efforts`."""
+    ctx = await mount(models_overlay(main=QWEN))
+    sessions, agents = ctx.require(SESSIONS), ctx.require(AGENTS)
+    chosen, plain = sessions.create("chosen"), sessions.create("plain")
+
+    with caplog.at_level(logging.WARNING, logger="ph.llm"):
+        await agents.create(chosen, replace(FAKE, reasoning_effort="default")).prompt("first")
+        await agents.create(plain, FAKE).prompt("first")
+
+    sent = {request.session_id: request.effort_fields for request in ctx.require(LLM_FAKE).requests}
+    assert sent == {chosen.id: None, plain.id: None}
+    header = chosen.request_header()
+    assert header is not None and (header.config.reasoning_effort, header.withheld) == (
+        "default",
+        None,
+    )
+    assert [record.getMessage() for record in caplog.records] == []
+
+
+async def test_an_agent_runs_at_its_own_key_s_efforts_where_two_keys_list_its_route(
+    mount: MountProfile,
+) -> None:
+    """Two keys may list one route with different efforts, and an agent started under
+    one sends that one's. Sabotage: look the route up without the agent's key."""
+    on = {"chat_template_kwargs": {"enable_thinking": True}}
+    ctx = await mount(models_overlay(main=QWEN, deep={**QWEN, "efforts": {"none": on}}))
+    session = ctx.require(SESSIONS).create("s")
+    options = replace(FAKE, reasoning_effort="none", model_key="deep")
+
+    await ctx.require(AGENTS).create(session, options).prompt("hello")
+
+    assert ctx.require(LLM_FAKE).requests[-1].effort_fields == on
+
+
+async def test_an_effort_is_sent_as_the_route_a_waterfall_moved_to_defines_it(
+    mount: MountProfile,
+) -> None:
+    """What an effort sends is the route's the request is sent on, wherever an
+    `agent/request` listener moved it: the session's list says it for a route it lists,
+    and a route it does not list has none, so its effort is withheld. Sabotage: read
+    the efforts of the route the agent was started on."""
+    other = {"chat_template_kwargs": {"reasoning": "off"}}
+    ctx = await mount(
+        models_overlay(main=QWEN, other={**QWEN, "model": "fake-2", "efforts": {"none": other}})
+    )
+    moved_to = "fake-2"
+
+    async def elsewhere(
+        proposal: RequestProposal, next_: Callable[..., Awaitable[Any]]
+    ) -> LlmCallConfig:
+        config: LlmCallConfig = await next_()
+        return config.model_copy(update={"model": moved_to})
+
+    ctx.on("agent/request", elsewhere)
+    session = ctx.require(SESSIONS).create("s")
+    agent = ctx.require(AGENTS).create(session, replace(FAKE, reasoning_effort="none"))
+    fake = ctx.require(LLM_FAKE)
+
+    await agent.prompt("listed")
+    assert fake.requests[-1].effort_fields == other
+
+    moved_to = "fake-3"
+    await agent.prompt("unlisted")
+    assert fake.requests[-1].effort_fields is None
+    header = session.request_header()
+    assert header is not None and header.withheld == {"reasoningEffort": "none"}
 
 
 async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:

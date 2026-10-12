@@ -10,9 +10,19 @@ now lists them by name (`plans/Session_Profiles_Plan.md`, item 8):
   config:
     default: main
     models:
-      main: {provider: anthropic, model: claude-sonnet-5, reasoningEffort: medium}
+      main: {provider: anthropic, model: claude-sonnet-5}
       fast: {provider: anthropic, model: claude-haiku-4-5-20251001}
+      local:
+        provider: llama
+        model: qwen3
+        reasoningEffort: none
+        efforts:
+          none: {chat_template_kwargs: {enable_thinking: false}}
+          high: {chat_template_kwargs: {enable_thinking: true}}
 ```
+
+A route's `efforts` say what each reasoning effort sends on its API (`ModelRoute.efforts`);
+an effort they do not define is not sent, with a warning.
 
 A root runs on `default` unless a person chose otherwise, and `ModelList.resolve`
 is the one rule for what a choice means — the command line, `/model` and rpc all
@@ -39,7 +49,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -55,7 +65,13 @@ from ..cordis import (
     plugin,
 )
 from ..keys import LLM, MODELS, MOUNT
-from ..llm.types import sampling_fields, uncarried
+from ..llm.types import (
+    DEFAULT_EFFORT,
+    EffortFields,
+    sampling_fields,
+    uncarried,
+    unmapped_effort,
+)
 from ..session import Session
 from ..session_profile import OverrideSource, override
 from ..wire import WireModel
@@ -135,6 +151,24 @@ class ModelRoute(WireModel):
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     reasoning_effort: str | None = None
+    """The effort this route runs at, by a name its `efforts` defines, or `default`
+    (`DEFAULT_EFFORT`); a spawn or a skill may ask a child for another. Unset sends
+    none."""
+    efforts: dict[str, dict[str, Any]] | None = None
+    """What each reasoning effort sends on this model's API, by the effort's name: request
+    body fields the adapter merges into its own (`wire_effort`), an object key by key.
+
+    **Per model, and stated by the profile**, because the spelling is the model's as much
+    as the wire's: Qwen on llama.cpp turns its thinking off with `chat_template_kwargs`,
+    an OpenAI reasoning model takes `reasoning_effort`, Anthropic a `thinking` budget,
+    Gemini 2.5 `generationConfig.thinkingConfig.thinkingBudget`. No adapter guesses one.
+    An effort asked for that this does not name (the route's own, or one a spawn or a
+    skill asks for) is not sent, with a warning, the request header's record
+    (`EpochHeader.withheld`) and a line in `phern doctor`. `DEFAULT_EFFORT` is not pH's
+    to define, so it is refused here. Absent rather than empty when unset, so a route's
+    wire form is as it was.
+
+    `dict[str, Any]` rather than `JsonObject`, which pydantic cannot build (`ph.json`)."""
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -147,6 +181,17 @@ class ModelRoute(WireModel):
     def label(self) -> str:
         """`provider/model`, the spelling the picker and the footer use."""
         return f"{self.provider}/{self.model}"
+
+    @model_validator(mode="after")
+    def _efforts_are_named_and_not_the_provider_s(self) -> ModelRoute:
+        for name in self.efforts or {}:
+            require_slug(name, maximum=KEY_MAX, kind="effort")
+        if self.efforts and DEFAULT_EFFORT in self.efforts:
+            raise ValueError(
+                f'efforts cannot define "{DEFAULT_EFFORT}": it is the provider\'s own '
+                "default, which sends nothing"
+            )
+        return self
 
 
 class Config(WireModel):
@@ -341,14 +386,7 @@ class ModelList:
                 )
             return self.entry(choice.key, route)
         if choice.provider:
-            matched = next(
-                (
-                    key
-                    for key, route in self.routes.items()
-                    if (route.provider, route.model) == (choice.provider, choice.model)
-                ),
-                None,
-            )
+            matched = self.listed_as(choice.provider, choice.model)
             if matched is not None:
                 return self.entry(matched, self.routes[matched])
             return self.entry("", ModelRoute(provider=choice.provider, model=choice.model))
@@ -358,6 +396,30 @@ class ModelList:
                 "or name a route with --provider and --model"
             )
         return self.entry(self.default, self.routes[self.default])
+
+    def listed_as(self, provider: str, model: str, *, key: str = "") -> str | None:
+        """The key this list holds the route `provider/model` under: `key` where that is
+        the route it names, else the first that is, else `None` for a route it does not
+        list."""
+        return next(
+            (
+                name
+                for name in (key, *self.routes)
+                if (route := self.routes.get(name)) is not None
+                and (route.provider, route.model) == (provider, model)
+            ),
+            None,
+        )
+
+    def efforts_for(
+        self, provider: str, model: str, *, key: str = ""
+    ) -> Mapping[str, EffortFields]:
+        """What each reasoning effort sends on the route `provider/model`, by the entry
+        this list holds it under (`listed_as`, `key` first, since two keys may list one
+        route with different efforts). Nothing for a route it does not list."""
+        listed = self.listed_as(provider, model, key=key)
+        efforts = self.routes[listed].efforts if listed is not None else None
+        return efforts or {}
 
 
 def choose(ctx: Context, choice: ModelChoice) -> ModelEntry:
@@ -445,21 +507,27 @@ def narrows(mounted: Config, asked: Config, _reach: ChildReach) -> ChildLimit:
 
 
 def dropped_settings(ctx: Context, models: ModelList) -> list[tuple[str, str]]:
-    """`phern doctor`'s rows for each listed route that sets a sampling setting its API
-    does not take, which every request on it drops with a warning (A1). Nothing for a
-    route whose adapter has not said what it takes."""
+    """`phern doctor`'s rows for each listed route that sets what it cannot send, which
+    every request on it goes without, with a warning: a sampling setting its API does
+    not take (A1, `uncarried`), where its adapter has said what it takes, and a
+    reasoning effort its `efforts` do not define (`unmapped_effort`)."""
     llm = ctx.get(LLM)
-    if llm is None:
-        return []
     rows: list[tuple[str, str]] = []
     for key, route in models.routes.items():
-        carried = llm.resolve_model(route.provider, route.model).sampling
-        if carried is None:
-            continue
-        dropped = uncarried(route, carried)
-        if dropped:
+        carried = llm.resolve_model(route.provider, route.model).sampling if llm else None
+        if carried is not None and (dropped := uncarried(route, carried)):
             takes = ", ".join(sorted(carried)) or "none"
             rows.append((key, f"{', '.join(dropped)} dropped: {route.label} takes {takes}"))
+        effort, efforts = route.reasoning_effort, route.efforts or {}
+        if unmapped_effort(effort, efforts):
+            defined = ", ".join(efforts) or "none"
+            rows.append(
+                (
+                    key,
+                    f"reasoningEffort {effort} not sent, so the provider's default applies: "
+                    f"its efforts define {defined}",
+                )
+            )
     return rows
 
 

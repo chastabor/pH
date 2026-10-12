@@ -15,9 +15,9 @@ messages, and only `source` distinguishes them.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Protocol, TypeAlias, TypedDict
+from typing import Annotated, Any, Final, Literal, Protocol, TypeAlias, TypedDict, TypeGuard
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -25,20 +25,22 @@ from ..json import JsonObject, thaw_json
 from ..wire import WireDataclass, WireModel, validation_errors, wire_alias
 
 __all__ = [
+    "DEFAULT_EFFORT",
     "FIELD_OF",
     "AssistantMessage",
     "AttachmentRef",
     "BlockEnd",
     "BlockStart",
+    "CallSetting",
     "ContentBlock",
     "ContextForm",
     "ContextSnapshotSection",
+    "EffortFields",
     "Finish",
     "FinishKind",
     "FinishReason",
     "GenerateOptions",
     "LlmCallConfig",
-    "LlmCallConfigAdapterDefaults",
     "LlmFailure",
     "MediaBlock",
     "Message",
@@ -78,6 +80,8 @@ __all__ = [
     "sampling_of",
     "text_of",
     "uncarried",
+    "unmapped_effort",
+    "wire_effort",
     "wire_sampling",
 ]
 
@@ -567,6 +571,23 @@ FIELD_OF: Mapping[SamplingSetting, SamplingField] = {
 }
 """Each setting's attribute on everything `Sampled`."""
 
+DEFAULT_EFFORT: Final = "default"
+"""The reasoning effort that asks for the provider's own: nothing is sent, so the
+provider's default applies. Not a setting of pH's, so no profile defines it
+(`ModelRoute.efforts`) and nothing warns about it; a route, a spawn or a skill names it
+to run at the provider's default over an effort its route sets."""
+
+EffortFields: TypeAlias = JsonObject
+"""The request body fields one reasoning effort sends on a route's API, as its profile
+wrote them (`ModelRoute.efforts`): opaque to all but the adapter that merges them
+(`wire_effort`)."""
+
+CallSetting: TypeAlias = SamplingSetting | Literal["reasoningEffort"]
+"""A call setting a route may be unable to carry, spelled as a route sets it: a
+sampling setting its API does not take, or a reasoning effort its profile does not say
+how to send (`ModelRoute.efforts`). What `EpochHeader.withheld` is keyed by, and each
+one's alias on `LlmCallConfig`."""
+
 
 def sampling_fields(settings: Sampled) -> SamplingFields:
     """`settings`' sampling settings, as keyword arguments for another carrier."""
@@ -597,6 +618,13 @@ def uncarried(settings: Sampled, carried: frozenset[SamplingSetting]) -> list[Sa
     return [setting for setting in sampling_of(settings) if setting not in carried]
 
 
+def unmapped_effort(effort: str | None, efforts: Collection[str]) -> TypeGuard[str]:
+    """Whether `effort` is asked for and a route whose profile defines `efforts` cannot
+    send it: what the `llm` seam withholds and `phern doctor` names, by one rule. Unset
+    and `DEFAULT_EFFORT` ask for nothing to be sent, so neither is."""
+    return effort is not None and effort != DEFAULT_EFFORT and effort not in efforts
+
+
 def wire_sampling(settings: Sampled, wire: Mapping[SamplingSetting, str]) -> dict[str, float | int]:
     """The settings `settings` sets that a wire names, under its names: an adapter's
     request fields, from its own map of what its API takes."""
@@ -624,17 +652,6 @@ class LlmCallConfig(WireModel):
     frequency_penalty: float | None = None
     max_tokens: int | None = None
     stop: list[str] | None = None
-
-
-class LlmCallConfigAdapterDefaults(WireModel):
-    """Which config fields the adapter materialized rather than the caller.
-
-    Recorded so a later step re-resolves them against the exact model instead of
-    freezing one adapter's default into the conversation forever.
-    """
-
-    reasoning_effort: bool | None = None
-    max_tokens: bool | None = None
 
 
 class ToolSchema(WireModel):
@@ -816,7 +833,13 @@ class GenerateOptions:
     messages: tuple[Message, ...]
     system: str | None = None
     tools: tuple[ToolSchema, ...] = ()
-    reasoning_effort: str | None = None
+    effort_fields: EffortFields | None = None
+    """The reasoning effort asked for, as this route's API spells it: the request body
+    fields its profile gives that effort (`ModelRoute.efforts`), which the adapter merges
+    into its body (`wire_effort`). No adapter spells an effort of its own, so `None`
+    sends none and the provider's default applies. Request body like any other, so an
+    `llm/stream` listener that moves a request to another route owns them, as it owns
+    `max_tokens`: the request names no effort to look up on the new one."""
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -859,3 +882,21 @@ class GenerateOptions:
     @property
     def is_loop_request(self) -> bool:
         return self.session_id is not None and self.purpose is None
+
+
+def wire_effort(body: dict[str, Any], options: GenerateOptions) -> None:
+    """Merge into an adapter's request `body` the fields `options`' reasoning effort
+    means on its route (`GenerateOptions.effort_fields`), after the adapter's own: an
+    object merges key by key, so a profile can reach into `generationConfig` beside the
+    fields the adapter put there, and anything else replaces what was there."""
+    if options.effort_fields is not None:
+        _merge(body, options.effort_fields)
+
+
+def _merge(into: dict[str, Any], fields: EffortFields) -> None:
+    for key, value in fields.items():
+        here = into.get(key)
+        if isinstance(value, Mapping) and isinstance(here, dict):
+            _merge(here, value)
+        else:
+            into[key] = thaw_json(value)

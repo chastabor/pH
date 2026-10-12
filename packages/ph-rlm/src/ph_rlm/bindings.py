@@ -84,6 +84,9 @@ class RunArgs(ToolModel):
     matching it, which reaches you in its ending message and its roster row, or it
     fails. A skill you give it may declare one; this overrides it."""
     thinking: str | None = None
+    """A reasoning effort for the child, by a name its model's profile defines, or
+    `default` for its provider's own. `None` runs it at what its skills or its model
+    name."""
     access: Access = "read"
     """`read` | `write`. Defaults to `read` (E4): a child that only needs to read
     must not be handed a writable repo because nobody said otherwise. Typed, so

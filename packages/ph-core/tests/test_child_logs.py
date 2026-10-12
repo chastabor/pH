@@ -51,6 +51,7 @@ from ph.testing import (
     admitted_child,
     assistant_payload,
     log_event,
+    models_overlay,
     not_none,
     raising,
     skill,
@@ -251,12 +252,6 @@ async def test_readmission_finds_the_provider_that_admitted_the_child(
     assert (first.asked, second.asked) == ([], ["r1"])
 
 
-def _listing(**models: JsonValue) -> dict[str, JsonValue]:
-    """A `models` row listing `models` by key, `main` on the parent's own route."""
-    listed: dict[str, JsonValue] = {"main": {"provider": "fake", "model": "fake-1"}, **models}
-    return {"id": "models", "config": {"default": "main", "models": listed}}
-
-
 async def test_a_readmitted_child_resolves_what_its_spawn_named_as_its_list_is_now(
     mount: MountProfile,
 ) -> None:
@@ -268,7 +263,9 @@ async def test_a_readmitted_child_resolves_what_its_spawn_named_as_its_list_is_n
     Sabotage: read the route back from the admission in `_request_of`, and the child
     comes back on `fake-7` at 0.2.
     """
-    ctx = await mount(_listing(careful={"provider": "fake", "model": "fake-8", "temperature": 0.5}))
+    ctx = await mount(
+        models_overlay(careful={"provider": "fake", "model": "fake-8", "temperature": 0.5})
+    )
     provider = _Readmitting(StubSubagentProvider(root=ctx))
     ctx.require(SUBAGENTS).register_provider("stub", provider)
     parent = _parent(ctx)
@@ -323,7 +320,7 @@ async def test_a_readmitted_child_runs_on_its_parent_s_route_where_a_spawn_is_re
     Sabotage: resolve without `readmitting`, and each child is ended instead of asked
     back; drop the fallback from the request, and nothing says why it moved.
     """
-    ctx = await mount(_listing())
+    ctx = await mount(models_overlay())
     for name, key in (("sort", "classify"), ("write", "main")):
         ctx.require(SKILLS).register(skill(name, model=key))
     provider = _Readmitting(StubSubagentProvider(root=ctx))
@@ -516,7 +513,7 @@ async def test_a_readmitted_child_with_no_route_anywhere_is_ended(mount: MountPr
     Sabotage: leave the fallback on its parent's route unchecked in `resolve_model`, and
     the provider is asked for a child with no route.
     """
-    ctx = await mount(_listing())
+    ctx = await mount(models_overlay())
     provider = _Readmitting(StubSubagentProvider(root=ctx))
     ctx.require(SUBAGENTS).register_provider("stub", provider)
     parent = _parent(ctx, AgentOptions())

@@ -366,10 +366,12 @@ def child_options(request: SubagentRequest) -> AgentOptions:
     started on it does (`ModelEntry.options`), and none of its parent's: a temperature
     tuned for the parent's model is not one for this. A child on its parent's route runs
     with its parent's options. A reasoning effort the spawn asked for is the child's
-    either way. Here once, for every provider that builds a child.
+    either way, else one its skills name, else its route's; `default` among them asks
+    for the provider's own. Here once, for every provider that builds a child.
     """
     resolved = request.entry.options() if request.entry is not None else request.parent.options
-    return replace(resolved, reasoning_effort=request.reasoning_effort or resolved.reasoning_effort)
+    effort = request.reasoning_effort or request.skill_effort or resolved.reasoning_effort
+    return replace(resolved, reasoning_effort=effort)
 
 
 class _Standing(Protocol):
@@ -640,6 +642,9 @@ class SubagentRequest:
     media_shortfall: MediaShortfall | None = None
     """Media its skills hand it that neither its route nor its parent's can take
     (`resolve_model`)."""
+    skill_effort: str | None = None
+    """The reasoning effort the skills it is given name (`Skill.effort`), where they
+    agree (`resolve_model`): over its route's, under the spawn's own (`child_options`)."""
     output: dict[str, Any] | None = None
     """The JSON Schema object the child's value must match: the spawn's own, else the
     one the skills it is given declare (`resolve_output`). A child with one is given
@@ -1863,16 +1868,33 @@ class SubagentService:
         parent's route where that one can, and where neither can the child runs and
         sees a placeholder for each, its parent told (`MediaShortfall`). A route the
         spawn named itself is refused instead, by the rule above.
+
+        **And the effort its skills name** (`Skill.effort`), which `child_options` puts
+        under the spawn's own and over its route's (`_with_effort`).
         """
-        return self._with_media(
+        routed = self._with_media(
             self._resolve_route(request, readmitting=readmitting), readmitting=readmitting
         )
+        return self._with_effort(routed)
+
+    def _with_effort(self, request: SubagentRequest) -> SubagentRequest:
+        """`request` with the effort its skills name, where they agree. Skills that name
+        different efforts name none, so the child runs at its route's: an effort is a
+        setting to degrade around, not a contract the parent must settle."""
+        named = self._named_by_skills(request, lambda skill: skill.effort)
+        efforts = set(named.values())
+        if len(efforts) > 1:
+            log.warning(
+                "a child's skills name different efforts (%s), so it runs at its route's",
+                ", ".join(f"{name}: {effort}" for name, effort in sorted(named.items())),
+            )
+        return replace(request, skill_effort=efforts.pop() if len(efforts) == 1 else None)
 
     def _resolve_route(self, request: SubagentRequest, *, readmitting: bool) -> SubagentRequest:
         """`resolve_model`'s route, before the media are asked about."""
         choice = request.choice
         by_skills = choice.is_default
-        named = self._skill_models(request) if by_skills else {}
+        named = self._named_by_skills(request, lambda skill: skill.model) if by_skills else {}
         keys = tuple(sorted(set(named.values())))
         if len(keys) > 1:
             said = ", ".join(f"{name} names {key}" for name, key in sorted(named.items()))
@@ -1985,11 +2007,7 @@ class SubagentService:
             if warning is not None:
                 log.warning("a child's output: %s", warning)
             return replace(request, output=output)
-        declared = {
-            name: skill.output
-            for name, skill in self._given_skills(request).items()
-            if skill.output
-        }
+        declared = self._named_by_skills(request, lambda skill: skill.output)
         outputs = list(declared.values())
         if any(output != outputs[0] for output in outputs[1:]):
             raise SubagentSpawnError(
@@ -1998,10 +2016,14 @@ class SubagentService:
             )
         return replace(request, output=outputs[0] if outputs else None)
 
-    def _skill_models(self, request: SubagentRequest) -> dict[str, str]:
-        """The model each skill a spawn names asks for, by skill, for those that ask."""
+    def _named_by_skills[T](
+        self, request: SubagentRequest, read: Callable[[Skill], T]
+    ) -> dict[str, T]:
+        """What each skill a spawn names asks for by `read`, by skill, for those that ask."""
         return {
-            name: skill.model for name, skill in self._given_skills(request).items() if skill.model
+            name: value
+            for name, skill in self._given_skills(request).items()
+            if (value := read(skill))
         }
 
     def _given_skills(self, request: SubagentRequest) -> dict[str, Skill]:

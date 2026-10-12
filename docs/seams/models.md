@@ -12,11 +12,11 @@ nowhere a profile could say. The row lists them by key:
   config:
     default: main
     models:
-      main: {provider: anthropic, model: claude-sonnet-5, reasoningEffort: medium}
+      main: {provider: anthropic, model: claude-sonnet-5}
       fast: {provider: anthropic, model: claude-haiku-4-5-20251001}
 ```
 
-Each route may carry `reasoningEffort`, `maxTokens` and the sampling settings model
+Each route may carry `reasoningEffort`, its `efforts`, `maxTokens` and the sampling settings model
 makers recommend (`temperature`, `topP`, `topK`, `minP`, `presencePenalty`,
 `frequencyPenalty`), which a root started on it gets as its agent settings, and so does a child an agent starts
 on it, by key or as the whole route (`child_options`), rather than its parent's. A
@@ -45,6 +45,49 @@ its server does (`samplingExtras`, as llama.cpp and vLLM do); Anthropic takes
 before the request and warns once per route and setting, and `phern doctor` names it
 under "Model settings". An unset setting is never sent, so the server's own flags
 decide it.
+
+**A route's `efforts` say what each reasoning effort sends on its API.** No adapter
+sends an effort of its own, because each API spells it differently and the spelling
+belongs to the model as much as to the wire: Qwen on llama.cpp turns its thinking off
+with `chat_template_kwargs`, an OpenAI reasoning model takes `reasoning_effort`,
+Anthropic a `thinking` budget, Gemini 2.5 `generationConfig.thinkingConfig`. So a
+profile says it per model, as request body fields by effort name, and the adapter
+merges the chosen effort's fields into its body key by key, after its own
+(`wire_effort`):
+
+```yaml
+      local:
+        provider: llama
+        model: qwen3
+        reasoningEffort: none
+        efforts:
+          none: {chat_template_kwargs: {enable_thinking: false}}
+          high: {chat_template_kwargs: {enable_thinking: true}}
+```
+
+**Unset is the provider's default, and so is `default`.** Leaving the field out of the
+request is how each of these APIs falls back to its own default, so an effort nobody
+asked for sends nothing and warns of nothing. `default` (`DEFAULT_EFFORT`) asks for
+that by name, over an effort the route sets: a route's `reasoningEffort`, a spawn's
+effort or a skill's `effort` may name it, it sends nothing and warns of nothing, and
+since it is the provider's and not pH's, `efforts` cannot define it.
+
+**An effort asked for that the route has no mapping for is warned about.** One its
+`efforts` do not define, its own or one a spawn or a skill asks of a child on it, is
+not sent, so the provider's default applies, with a warning once per route and effort
+and a line under "Model settings". An effort defined as `{}` sends nothing on purpose
+and is not warned about. The fields are the route's the request is sent on, looked up
+in the session's own list after any plugin moved it (`ModelList.efforts_for`, the
+agent's key first where two keys list one route), so a route the list does not hold has
+none and its effort is withheld.
+
+**The request header records what was sent.** The agent loop withholds what a route
+cannot carry, a sampling setting or an effort, before it logs `request/header`, so
+the header's `config` is what went to the provider and its `withheld` holds each
+setting asked for and not sent, by value. The next request asks for them again and
+checks them against the route as it is then, so a route that comes to carry one sends
+it without anyone setting it twice. The footer's effort is the header's, so it shows
+none when the effort was withheld.
 
 ## One rule for a choice
 

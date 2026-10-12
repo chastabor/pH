@@ -58,6 +58,7 @@ from ph.llm.types import (
     UsageChunk,
     is_error_finish,
     text_of,
+    wire_effort,
     wire_sampling,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
@@ -429,6 +430,7 @@ class OpenAiCompatibleAdapter:
                     "strict": True,
                 },
             }
+        wire_effort(body, options)
         return body, handles
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:

@@ -925,6 +925,7 @@ def test_the_full_profile_resolves_every_row_through_its_model() -> None:
         "provider": "fake",
         "model": "fake-1",
         "reasoningEffort": None,
+        "efforts": None,
         "temperature": None,
         "topP": None,
         "topK": None,
