@@ -28,7 +28,6 @@ from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, SKILLS, SUBAGENTS, TOOLS
 from ph.llm.types import text_of
-from ph.seams.skills import Skill
 from ph.seams.subagents import (
     ADMITTED,
     STATUS,
@@ -47,6 +46,7 @@ from ph.testing import (
     not_none,
     reconciled_call,
     run_tool,
+    skill,
 )
 from ph.tools.definition import Deny, NotDone, ToolExecutionInput
 from ph.tools.errors import SPAWN_REFUSED, TOOL_BUDGET_SPENT
@@ -155,7 +155,7 @@ async def test_a_skill_s_model_the_profile_cannot_run_is_reported_to_the_parent(
     """The child does the work on its parent's model, and the parent is told beside the
     answer, so it can weigh the answer and tell the person what to set up."""
     ctx = await _mounted(mount, ("stub", StubSubagentProvider(answer="three kinds")))
-    ctx.require(SKILLS).register(Skill(name="sort", description="sorts", model="classify"))
+    ctx.require(SKILLS).register(skill("sort", model="classify"))
 
     result = await run_tool(
         ctx, "task", {"prompt": "sort these", "skills": ["sort"]}, agent=_agent(ctx)
@@ -384,8 +384,8 @@ async def test_a_reconciled_task_call_still_says_its_child_s_model_fell_back(
     agent = _agent(ctx)
     request = SubagentRequest(prompt="look", parent=agent, call_id="call-1")
     run = await provider.start(request)
-    # As the seam stamps it (`SubagentService.start`), which this stub admission skips.
-    run.model_fallback = ModelFallback(key="classify", reason="unlisted")
+    # As the seam stamps it (`SubagentService._admit`), which this stub admission skips.
+    run.model_fallback = ModelFallback(asked=("classify",), reason="unlisted")
     _running(ctx, run, request)
 
     live = await reconciled_call(ctx, agent.session, "task", {"prompt": "look"}, call_id="call-1")

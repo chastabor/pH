@@ -47,6 +47,7 @@ from ph.llm.types import (
     StreamChunk,
     ToolCallBlock,
 )
+from ph.seams.models import ModelChoice
 from ph.seams.subagents import SubagentRequest
 from ph.session.kinds import SHELL_COMMAND
 from ph.testing import simple_tool
@@ -134,11 +135,12 @@ async def main(project: Path, children_on: str) -> None:
                 )
             )
         )
-        provider, model = ("keyed", "k1") if children_on == "keyed" else (None, None)
+        choice = (
+            ModelChoice(provider="keyed", model="k1") if children_on == "keyed" else ModelChoice()
+        )
         first, second = [
             await ctx.require(SUBAGENTS).start(
-                PROVIDER_NAME,
-                SubagentRequest(prompt=prompt, parent=agent, provider=provider, model=model),
+                PROVIDER_NAME, SubagentRequest(prompt=prompt, parent=agent, choice=choice)
             )
             for prompt in ("research the first thing", "research the second thing")
         ]

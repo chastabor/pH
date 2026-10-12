@@ -68,6 +68,7 @@ __all__ = [
     "ModelEntry",
     "ModelList",
     "ModelRoute",
+    "UnrunnableChoice",
     "UnrunnableReason",
     "apply",
     "choose",
@@ -87,15 +88,16 @@ adapter here serves its route's provider."""
 
 
 class ModelChoiceError(ValueError):
-    """A choice that names nothing this profile can run, in a sentence that says why.
+    """A choice that names nothing this profile can run, in a sentence that says why."""
 
-    `reason` says it as a code for the two refusals a caller may degrade around rather
-    than surface: a skill's model that cannot run falls back to its parent's
-    (`ph.seams.subagents.ModelFallback`). `None` for a choice that is malformed, or a
-    list with no default to fall to.
-    """
 
-    def __init__(self, message: str, *, reason: UnrunnableReason | None = None) -> None:
+class UnrunnableChoice(ModelChoiceError):
+    """A well-formed choice this mount cannot run, with `reason` as a code: the one
+    refusal a caller may degrade around rather than surface. A child whose skill's model
+    cannot run, or any readmitted child whose model cannot, falls back to its parent's
+    (`ph.seams.subagents.ModelFallback`)."""
+
+    def __init__(self, message: str, *, reason: UnrunnableReason) -> None:
         super().__init__(message)
         self.reason = reason
 
@@ -300,7 +302,7 @@ class ModelList:
             route = self.routes.get(choice.key)
             if route is None:
                 listed = ", ".join(sorted(self.routes)) or "nothing"
-                raise ModelChoiceError(
+                raise UnrunnableChoice(
                     f'"{choice.key}" is not a model this profile lists (it lists {listed}); '
                     "name a whole route as provider/model to run one it does not",
                     reason="unlisted",
@@ -338,7 +340,7 @@ def choose(ctx: Context, choice: ModelChoice) -> ModelEntry:
     llm = ctx.get(LLM)
     served = llm.list_providers() if llm is not None else []
     if chosen.route.provider not in served:
-        raise ModelChoiceError(
+        raise UnrunnableChoice(
             f'no adapter here serves "{chosen.route.provider}" '
             f"(this profile serves {', '.join(served) or 'nothing'})",
             reason="unserved",

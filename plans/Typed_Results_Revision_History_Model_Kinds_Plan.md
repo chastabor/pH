@@ -23,6 +23,13 @@ order they will be built. Each is its own change with its own gate.
   a warning** rather than refusing (`ModelFallback`): the graceful-degradation pattern.
   The parent's model does the work as well as it can until the person sets up a profile
   and a provider for the key. Sections 1 and 3 build on that rule.
+- **A readmitted child's route is worked out again**, not read back from its admission
+  (the readmission open question in `docs/seams/subagents.md`, decided). The request
+  carries what the spawn asked for (`choice: ModelChoice`) apart from what it resolved to
+  (`entry: ModelEntry | None`), and so does the admission. A readmission degrades every
+  choice that cannot run, the spawn's own and skills that disagree (`contested`)
+  included, since nobody is there to choose again. So a model set up after a fallback
+  reaches the child at its next start.
 
 **Why this order:**
 
@@ -240,7 +247,7 @@ docstrings are rewritten along with the reader.
   `reasoningEffort`, `temperature` and `maxTokens`. A skill asks for a key (`model: classify`),
   a spawn names one, and a child runs with its route's settings (`child_options`).
 - **The fallback already exists** (see Status): a skill's key that cannot run gives a
-  `ModelFallback` whose reason is the code `choose` refused with (`ModelChoiceError.reason`).
+  `ModelFallback` whose reason is the code `choose` refused with (`UnrunnableChoice.reason`).
 - **Media is declared per provider row** (`accepts`) and reported per route as
   `ResolvedModel.accepts`. Only the Google adapter accepts video. `choose` never asks
   whether a child's route can take what it will be handed.
@@ -315,18 +322,20 @@ docstrings are rewritten along with the reader.
   a model fallback reaches the parent's tool result and the log, but not the panel.
 - **"Fork from before this change" in `/diff`:** recorded in
   `Ph_Clm_Context_Editing_Plan.md`, Phase 5 as built.
-- **A spawn request that carries a `ModelChoice` instead of loose model fields.**
-  `SubagentRequest`'s `provider`, `model`, `model_key` and `route` mean both "what was
-  asked" and "what it resolved to". So `child_route`, `child_model_key`, `child_options`
-  and `resolve_model` each work out which case they are in, and a half-named route needs
-  a guard that `ModelChoice` would refuse when built.
-  - *The change:* the request carries `choice: ModelChoice` and `entry: ModelEntry | None`,
-    plus `model_fallback`.
-  - *Blocked on a decision:* a readmitted child on its parent's route is rebuilt as a
-    pinned model with its parent's settings as they are now. Neither type can say that
-    without pinning the parent's settings at admission, which reverses the documented
-    "inherits again" (the open question on readmission in `docs/seams/subagents.md`).
-  - *Cost of waiting:* none a user sees. No shipped tool names a whole route.
-- **A readmitted run's handle has no `model_fallback`.** The admission keeps it, and a
-  crash's reconcile reads it from there, but `_request_of` and `_readmit_one` do not
-  carry it onto the run a readmission builds.
+- **A record of what each readmission resolved to.** A readmission writes no admission,
+  so its fallback reaches the warning and the readmitted run, and the child's own
+  `request/header` records each request's route; but the roster (`ChildState.to_wire`)
+  still shows the admission's model and fallback.
+  - *The change:* the resolved route (`modelKey`, `route`, `modelFallback`, the run's
+    model) rides on the `resumed` status every restart already writes
+    (`record_started`), and the fold reads the latest. That door is called by the
+    provider, so the seam would hand it the facts on the run rather than the provider
+    spelling them.
+  - *Cost of waiting:* a roster row can name the model a restarted child was admitted on
+    after the person changed the list. Nothing reads a readmission's fallback yet; the
+    TUI badge above would.
+- **An assigned profile's model key is fixed at admission.** `resolve_profile` folds the
+  profile's key into the spawn's `choice`, so a readmission resolves that key again but
+  does not read the profile again, while it does ask the skills again. Reading the named
+  profile at each start would make it follow the profile as it does the skills; it would
+  need the profile composed again at readmission.

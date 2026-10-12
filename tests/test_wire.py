@@ -232,7 +232,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "Goal": {"id": "g1", "objective": "make the tests pass"},
         "Admission": {"runId": "r1", "name": "scout", "owner": "rlm-child", "prompt": "look"},
         "ChildNotice": {"text": "[the child finished]", "summary": "finished", "id": "n1"},
-        "ModelFallback": {"key": "classify", "reason": "unlisted"},
+        "ModelFallback": {"asked": ["classify"], "reason": "unlisted"},
         "Budget": {},
         "ReasoningBlock": {"text": "thinking"},
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},

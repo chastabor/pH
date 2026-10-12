@@ -35,6 +35,7 @@ from ...cordis import Context, maybe_await, plugin
 from ...json import JsonObject, as_str
 from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
+from ...seams.models import ModelChoice
 from ...seams.subagents import (
     Access,
     SubagentRequest,
@@ -213,7 +214,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 access=args.access,
                 preset=args.preset,
                 profile=args.profile,
-                model_key=args.model,
+                choice=ModelChoice(key=args.model or ""),
                 skills=args.skills,
                 tools=args.tools,
                 call_id=run.call_id,

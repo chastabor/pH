@@ -18,11 +18,10 @@ from runtime_helpers import run_python_cell
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
 from ph.keys import SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
-from ph.seams.skills import Skill
 from ph.seams.subagents import admitted_by
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
-from ph.testing import not_none
+from ph.testing import not_none, skill
 from ph.tools import Deny, ToolExecution
 from ph.tools.registry import ToolRestriction
 from ph_rlm.bindings import DELETE_TOOL, LIST_TOOL, NAMESPACE, RUN_TOOL
@@ -99,7 +98,7 @@ async def test_a_spawn_s_handle_says_its_child_runs_without_its_skill_s_model(
     child runs on its parent's model because this profile cannot run the one its skill
     asked for. Sabotage: build the handle's note from the downgrade alone."""
     ctx, session, agent = await delegating_runtime()
-    ctx.require(SKILLS).register(Skill(name="sort", description="sorts", model="classify"))
+    ctx.require(SKILLS).register(skill("sort", model="classify"))
 
     result = await run_python_cell(
         ctx,

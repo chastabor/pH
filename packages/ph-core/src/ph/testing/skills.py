@@ -48,11 +48,14 @@ def write_skill(
     return directory
 
 
-def skill(name: str, *, description: str = "does a thing", hint: str = "") -> Skill:
-    """One registered skill, with no file behind it.
+def skill(
+    name: str, *, description: str = "does a thing", hint: str = "", model: str = ""
+) -> Skill:
+    """One registered skill, with no file behind it; `model` is the key it asks a child
+    it directs to run on.
 
     For the tests that care about the *registry* — visibility, narrowing, the
     catalog — rather than about the format on disk. Written out in three modules
     before it moved here, which is the same road `write_skill` took.
     """
-    return Skill(name=name, description=description, hint=hint)
+    return Skill(name=name, description=description, hint=hint, model=model)

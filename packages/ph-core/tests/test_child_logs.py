@@ -20,13 +20,14 @@ import pytest
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
 from ph.json import JsonValue, as_obj, as_seq, as_str
-from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SUBAGENTS
+from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SKILLS, SUBAGENTS
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
     PARENT_TEARDOWN,
     STATUS,
     ChildNotice,
+    ModelFallback,
     SubagentRequest,
     SubagentRun,
     SubagentSpawnError,
@@ -45,6 +46,7 @@ from ph.testing import (
     log_event,
     not_none,
     raising,
+    skill,
     stored_events,
     stored_types,
     write_skill,
@@ -240,29 +242,34 @@ async def test_readmission_finds_the_provider_that_admitted_the_child(
     assert (first.asked, second.asked) == ([], ["r1"])
 
 
-async def test_a_readmitted_child_keeps_its_listed_route_s_settings(mount: MountProfile) -> None:
-    """A restart rebuilds a child from its admission and nothing else, and the parent's
-    list may have changed since: a listed route's temperature and token budget are
-    recorded with the route, and the child comes back with them.
+def _listing(**models: JsonValue) -> dict[str, JsonValue]:
+    """A `models` row listing `models` by key, `main` on the parent's own route."""
+    listed: dict[str, JsonValue] = {"main": {"provider": "fake", "model": "fake-1"}, **models}
+    return {"id": "models", "config": {"default": "main", "models": listed}}
 
-    Sabotage: leave them out of `_request_of`, and the child comes back with none.
+
+async def test_a_readmitted_child_resolves_what_its_spawn_named_as_its_list_is_now(
+    mount: MountProfile,
+) -> None:
+    """A restart works a child's route out again from what its spawn named, against its
+    parent's list as it is then, so a model the person moved since is the one it runs
+    on: its route and that route's settings, with the effort the spawn named over the
+    route's.
+
+    Sabotage: read the route back from the admission in `_request_of`, and the child
+    comes back on `fake-7` at 0.2.
     """
-    ctx = await mount()
+    ctx = await mount(_listing(careful={"provider": "fake", "model": "fake-8", "temperature": 0.5}))
     provider = _Readmitting(StubSubagentProvider(root=ctx))
     ctx.require(SUBAGENTS).register_provider("stub", provider)
     parent = _parent(ctx)
     assert parent.session is not None
-    route: dict[str, JsonValue] = {
-        "provider": "fake",
-        "model": "fake-7",
-        "temperature": 0.2,
-        "maxTokens": 777,
-    }
     admission: dict[str, JsonValue] = {
         "model": "fake-7",
-        "modelKey": "careful",
+        "choice": {"key": "careful"},
         "reasoningEffort": "high",
-        "route": route,
+        "modelKey": "careful",
+        "route": {"provider": "fake", "model": "fake-7", "temperature": 0.2},
     }
     await _from_an_earlier_process(ctx, parent.session, admission=admission)
 
@@ -271,12 +278,58 @@ async def test_a_readmitted_child_keeps_its_listed_route_s_settings(mount: Mount
     (request,) = provider.requests
     assert child_options(request) == AgentOptions(
         provider="fake",
-        model="fake-7",
-        max_tokens=777,
-        temperature=0.2,
+        model="fake-8",
+        temperature=0.5,
         reasoning_effort="high",
         model_key="careful",
     )
+    assert request.model_fallback is None
+
+
+@pytest.mark.parametrize(
+    ("admission", "fallback"),
+    [
+        ({"choice": {"key": "careful"}}, ModelFallback(asked=("careful",), reason="unlisted")),
+        (
+            {"choice": {"provider": "absent", "model": "m"}},
+            ModelFallback(asked=("absent/m",), reason="unserved"),
+        ),
+        (
+            {"skills": ["sort", "write"]},
+            ModelFallback(asked=("classify", "main"), reason="contested"),
+        ),
+    ],
+    ids=["key-gone", "provider-gone", "skills-disagree"],
+)
+async def test_a_readmitted_child_runs_on_its_parent_s_route_where_a_spawn_is_refused(
+    mount: MountProfile,
+    caplog: pytest.LogCaptureFixture,
+    admission: dict[str, JsonValue],
+    fallback: ModelFallback,
+) -> None:
+    """A spawn's own choice that cannot run is refused, because the parent is there to
+    choose again. Nobody is at a restart, and a refusal there ends the child, so its
+    route degrades to its parent's with a warning, whichever way it was named.
+
+    Sabotage: resolve without `readmitting`, and each child is ended instead of asked
+    back; drop the fallback from the request, and nothing says why it moved.
+    """
+    ctx = await mount(_listing())
+    for name, key in (("sort", "classify"), ("write", "main")):
+        ctx.require(SKILLS).register(skill(name, model=key))
+    provider = _Readmitting(StubSubagentProvider(root=ctx))
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
+    parent = _parent(ctx)
+    assert parent.session is not None
+    await _from_an_earlier_process(ctx, parent.session, admission=admission)
+
+    with caplog.at_level("WARNING", logger="ph.seams.subagents"):
+        await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    (request,) = provider.requests
+    assert child_options(request) == parent.options
+    assert request.model_fallback == fallback
+    assert "runs on its parent's route" in caplog.text
 
 
 async def test_a_child_settled_by_an_earlier_process_can_be_deleted(mount: MountProfile) -> None:

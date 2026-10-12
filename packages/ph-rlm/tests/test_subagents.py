@@ -55,6 +55,7 @@ import anyio
 import pytest
 from rlm_fixtures import (
     BINDINGS_ROW,
+    MODELS_ROW,
     PROVIDER_ROW,
     ModelGate,
     MountedRuntime,
@@ -82,6 +83,7 @@ from ph.llm.fake import FakeAdapter, text_script
 from ph.llm.types import text_of, user_text
 from ph.persistence import SessionBusy, open_session
 from ph.seams.credentials import waiting_for
+from ph.seams.models import ModelChoice
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
@@ -90,6 +92,7 @@ from ph.seams.subagents import (
     SUSPENDED_DETAIL,
     UNRECOVERABLE_DETAIL,
     ChildState,
+    ModelFallback,
     StatusCause,
     SubagentRequest,
     SubagentRun,
@@ -469,7 +472,7 @@ async def test_an_unroutable_provider_is_refused_at_admission(delegating: Mounte
     result the parent cannot interpret."""
     ctx, _session, parent = await delegating()
     with pytest.raises(SubagentSpawnError, match='no adapter here serves "nonexistent"'):
-        await _spawn(ctx, parent, provider="nonexistent", model="m1")
+        await _spawn(ctx, parent, choice=ModelChoice(provider="nonexistent", model="m1"))
 
 
 async def test_the_default_shapes_the_request_and_the_tier_answers_it(
@@ -1279,6 +1282,7 @@ async def _restart(
     *,
     skills: tuple[str, ...] = (),
     concurrent: int = 1,
+    rows: tuple[dict[str, Any], ...] = (),
     prepare: Callable[[Context], None] | None = None,
 ) -> Any:  # noqa: ANN401
     """A second harness resuming one root from its log, as a restarted process would.
@@ -1296,12 +1300,14 @@ async def _restart(
     not against what it held then — so a skill this deployment no longer mounts
     is a child refused rather than one quietly readmitted without it.
 
-    `prepare` sets up the restarted deployment before anything is resumed, as a
-    daemon's profile would be: a route of its own, say.
+    `rows` are the restarted deployment's own beside those: a `models` row, say. And
+    `prepare` sets it up before anything is resumed, as a daemon's profile would be: a
+    route of its own, say.
     """
     ctx = await mount(
         dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}),
         {"id": "session-persistence", "config": {"root": str(logs_after_a_crash())}},
+        *rows,
     )
     for name in skills:
         ctx.require(SKILLS).register(skill(name))
@@ -1343,7 +1349,9 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     id, so the parent gains no second child it never asked for.
 
     Reaching the model is the proof of "re-driven": the gate counts arrivals, and
-    the readmitted child is the only one the second harness can run.
+    the readmitted child is the only one the second harness can run. Its log keeps
+    the one admission it was rebuilt from. Sabotage: have `_readmit_one` pass
+    `record=True`, and the readmission writes a second.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     await _spawn(ctx, parent, "first")
@@ -1369,6 +1377,8 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     assert _state(revived_ctx, second).resumes == 0, (
         "a child that never ran is a first attempt, not a retry"
     )
+    admissions = [event for event in _log_of(revived_ctx, second) if event.type == ADMITTED]
+    assert len(admissions) == 1, "a readmission is not a second admission"
 
 
 async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presented(
@@ -1840,7 +1850,8 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
     monkeypatch.delenv(GRANDCHILD_KEY, raising=False)
     ctx, session, parent = await delegating(maxConcurrent=1)
     _keyed(ctx)
-    middle, leaf = await _grandchild(ctx, parent, gate, provider="keyed", model="k1")
+    keyed = ModelChoice(provider="keyed", model="k1")
+    middle, leaf = await _grandchild(ctx, parent, gate, choice=keyed)
 
     revived_ctx, _revived, revived_parent = await _restart(mount, session.id, prepare=_keyed)
     middle_log = not_none(revived_ctx.require(SESSIONS).get(middle.session_id))
@@ -1893,6 +1904,63 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     assert back.grant.skills == ("review",)
     assert back.grant.tools == ("read",)
     assert back.grant.paths == ("/srv/cache",)
+
+
+def _sorting(ctx: Context) -> None:
+    """The `sort` skill, which asks for `classify` (`MODELS_ROW`)."""
+    ctx.require(SKILLS).register(skill("sort", model="classify"))
+
+
+async def test_a_model_set_up_since_reaches_a_readmitted_child(
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+) -> None:
+    """A child runs on its parent's model only until the person sets up the one its
+    skill names, and a restart is when that reaches a child already at work: its route
+    is worked out again, so it comes back on `classify`.
+
+    Sabotage: read the route back from the admission in `_request_of`, and it comes back
+    on its parent's `fake-1`, still falling back.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    _sorting(ctx)
+    child = await _spawn(ctx, parent, "sort these", skills=("sort",))
+    assert child.model_fallback == ModelFallback(asked=("classify",), reason="unlisted")
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await _persisted(ctx, session)
+
+    revived_ctx, _revived, _parent = await _restart(
+        mount, session.id, rows=(MODELS_ROW,), prepare=_sorting
+    )
+
+    back = not_none(revived_ctx.require(SUBAGENTS).get(child.id))
+    assert (back.model, back.model_fallback) == ("fake-9", None)
+    assert not_none(revived_ctx.require(AGENTS).get(child.session_id)).options.model_key == (
+        "classify"
+    )
+
+
+async def test_a_readmitted_child_whose_model_is_gone_runs_on_its_parent_s_and_says_so(
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+) -> None:
+    """The other way round: listed at its spawn, gone at its restart. Ending it would
+    throw its work away over a setting, so it runs on its parent's route, and the run
+    its readmission hands back says so, as a spawn's does.
+
+    Sabotage: drop the stamp in `_readmit_one`, and the readmitted run says nothing.
+    """
+    ctx, session, parent = await delegating(dict(MODELS_ROW), maxConcurrent=1)
+    _sorting(ctx)
+    child = await _spawn(ctx, parent, "sort these", skills=("sort",))
+    assert (child.model, child.model_fallback) == ("fake-9", None)
+    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await _persisted(ctx, session)
+
+    revived_ctx, _revived, revived_parent = await _restart(mount, session.id, prepare=_sorting)
+
+    back = not_none(revived_ctx.require(SUBAGENTS).get(child.id))
+    assert back.model_fallback == ModelFallback(asked=("classify",), reason="unlisted")
+    assert back.model == revived_parent.options.model
+    assert child_is_live(_state(revived_ctx, child)), "readmitted, not ended"
 
 
 async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(

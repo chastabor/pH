@@ -692,6 +692,17 @@ nothing committed by Claude.
       delegating tools tell the parent (`admission_notes`). A key the spawn names is
       still refused: that one is the parent's own choice. Two skills naming different
       models are still refused, since the parent can settle that with `model=` at once.
+    - **A readmitted child's route is worked out again** (2026-10-11, reversing "keeps
+      the route it was admitted on" above). The request carries what the spawn asked for
+      (`choice: ModelChoice`, its own key or its assigned profile's, or a whole route)
+      apart from what it resolved to (`entry: ModelEntry | None`), replacing `provider`,
+      `model`, `model_key` and `route`. The admission records `choice` and a named
+      `reasoningEffort` for a readmission to resolve again, and keeps `modelKey` and
+      `route` for the audit. A readmission degrades every choice this mount cannot run,
+      skills that have come to disagree included (`contested`), because nobody is there
+      to choose again and a refusal would end the child. The seam stamps the fallback on
+      the readmitted run, and `ph_rlm`'s own adapter check went, since every route not
+      inherited from the parent now comes through `choose`.
     - **An assigned profile is read, not mounted**, for what a child can hold less of:
       a row it runs that the parent does not is refused by name; the tools of rows it
       does not run are taken away; skills by the `skills-progressive` paths; its models

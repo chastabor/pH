@@ -102,9 +102,9 @@ from .credentials import hold_for_credential, missing_credential
 from .invariants import contribute_fold_cache
 from .models import (
     ModelChoice,
-    ModelChoiceError,
     ModelEntry,
     ModelRoute,
+    UnrunnableChoice,
     UnrunnableReason,
     choose,
 )
@@ -132,6 +132,7 @@ __all__ = [
     "ChildCounts",
     "ChildNotice",
     "ChildState",
+    "FallbackReason",
     "FamilyRole",
     "ModelFallback",
     "ReadmittingProvider",
@@ -155,9 +156,7 @@ __all__ = [
     "admitted_by",
     "apply",
     "child_is_live",
-    "child_model_key",
     "child_options",
-    "child_route",
     "child_state",
     "child_state_of",
     "default_child_name",
@@ -310,50 +309,17 @@ as live, forever, which is most of what passivation exists to do.
 """
 
 
-def child_route(request: SubagentRequest) -> tuple[str, str]:
-    """The route a child runs on: its request's selector, else its parent's.
-
-    **No fallback on an explicit selector**: a child asked for a model runs on that
-    model or not at all, since falling back would answer the parent's question on a
-    model it did not choose. Stated here, once, for the provider that builds the
-    child and for the resume check that asks whether its credential is here (T5).
-    Empty where neither says; a provider refuses that.
-    """
-    options = request.parent.options
-    return request.provider or options.provider or "", request.model or options.model or ""
-
-
 def child_options(request: SubagentRequest) -> AgentOptions:
     """The options a child's agent runs with.
 
-    **A child on a listed route runs with that route's settings**, the way a root started
-    on its key does (`ModelEntry.options`), and none of its parent's: a temperature tuned
-    for the parent's model is not one for this. A child on its parent's route runs with
-    its parent's options. A reasoning effort the spawn asked for is the child's either
-    way. Here once, for every provider that builds a child.
+    **A child on a resolved route runs with that route's settings**, the way a root
+    started on it does (`ModelEntry.options`), and none of its parent's: a temperature
+    tuned for the parent's model is not one for this. A child on its parent's route runs
+    with its parent's options. A reasoning effort the spawn asked for is the child's
+    either way. Here once, for every provider that builds a child.
     """
-    if request.route is not None:
-        listed = ModelEntry(key=child_model_key(request), route=request.route).options()
-        return replace(listed, reasoning_effort=request.reasoning_effort or listed.reasoning_effort)
-    parent = request.parent.options
-    provider, model = child_route(request)
-    return replace(
-        parent,
-        provider=provider,
-        model=model,
-        reasoning_effort=request.reasoning_effort or parent.reasoning_effort,
-        model_key=child_model_key(request),
-    )
-
-
-def child_model_key(request: SubagentRequest) -> str:
-    """The listed name of the route `child_route` gives a child (S7b): the key its
-    spawn resolved, none for a whole route no entry matches, else its parent's own."""
-    if request.model_key is not None:
-        return request.model_key
-    if request.provider or request.model:
-        return ""
-    return request.parent.options.model_key
+    resolved = request.entry.options() if request.entry is not None else request.parent.options
+    return replace(resolved, reasoning_effort=request.reasoning_effort or resolved.reasoning_effort)
 
 
 class _Standing(Protocol):
@@ -408,31 +374,45 @@ def _downgrade_text(reason: DowngradeReason | str) -> str:
     return _DOWNGRADE_TEXT.get(reason, f"access was narrowed ({reason})")
 
 
+FallbackReason: TypeAlias = UnrunnableReason | Literal["contested"]
+"""Why a child runs on its parent's route rather than the model it was asked onto: the
+list does not hold the key, no adapter here serves its provider, or the skills it was
+given name different models."""
+
+
 class ModelFallback(WireModel):
-    """A model a skill asked for that this mount cannot run, so its child ran on its
-    parent's route instead (`SubagentService.resolve_model`).
+    """A model a child was asked onto that this mount cannot run, so it runs on its
+    parent's route instead (`SubagentService.resolve_model`): one a skill names, or, on
+    a readmission, any.
 
-    The key and a code rather than a sentence, for `downgrade_reason`'s reasons: the
-    admission is durable, and the profile a sentence would describe changes after it.
-    `admission_notes` renders the sentence."""
+    What was asked and a code rather than a sentence, for `downgrade_reason`'s reasons:
+    the admission is durable, and the profile a sentence would describe changes after
+    it. `admission_notes` renders the sentence."""
 
-    key: str
-    reason: UnrunnableReason
+    asked: tuple[str, ...] = Field(min_length=1)
+    """The model asked for, a key or `provider/model` for a whole route; for skills
+    that disagree, each key they name."""
+    reason: FallbackReason
 
 
 def _fallback_text(fallback: ModelFallback) -> str:
     """The sentence for a model fallback, for `admission_notes`."""
+    asked = ", ".join(f'"{model}"' for model in fallback.asked)
     match fallback.reason:
         case "unlisted":
-            why = f'this profile does not list "{fallback.key}"'
+            why = f"rather than {asked}, which this profile does not list"
         case "unserved":
-            why = "this profile lists it on a provider no adapter here serves"
+            why = (
+                f"rather than {asked}, which this profile lists on a provider no adapter "
+                "here serves"
+            )
+        case "contested":
+            why = f"because the skills it was given name different models ({asked})"
         case unknown:
             assert_never(unknown)
     return (
-        f'runs on your own model rather than "{fallback.key}", the model a skill it was '
-        f"given asks for, because {why}; it may do the work less well until the person "
-        "running you sets that model up"
+        f"runs on your own model {why}; it may do the work less well until the person "
+        "running you sets up the model it should run on"
     )
 
 
@@ -553,24 +533,20 @@ class SubagentRequest:
     """A stable label among its siblings, which is how they are addressed. Made from
     the task when omitted, and unique either way: the seam names every child before
     its provider is asked (`SubagentService.start`)."""
-    provider: str | None = None
-    model: str | None = None
-    """Exact selector. A provider must not silently fall back to another model —
-    a child that answered on a cheaper model than the parent asked for is a
-    result the parent cannot interpret."""
-    model_key: str | None = None
-    """A model the parent's profile lists, by key (session profiles, S7b) — what a
-    spawn names, where `provider` and `model` are the route it resolves to. A key the
-    list does not hold is refused, so the models an agent can reach are the ones its
-    profile says (`SubagentService.resolve_model`). `None` with no route runs the
-    child on its parent's."""
+    choice: ModelChoice = field(default_factory=ModelChoice)
+    """The model the spawn names (session profiles, S7b): a key the parent's profile
+    lists, its own or its assigned profile's, or a whole route. Neither leaves it to
+    the skills it is given, else its parent's route. What its admission records, and
+    what a readmission resolves again (`SubagentService.resolve_model`)."""
     reasoning_effort: str | None = None
-    route: ModelRoute | None = None
-    """The route `resolve_model` resolved the spawn to, a key's or a whole route's, whose
-    settings a child on it runs with (`child_options`). `None` runs the child with its
-    parent's."""
+    """An effort the spawn names, over the one its route carries (`child_options`)."""
+    entry: ModelEntry | None = None
+    """What `resolve_model` resolved the spawn to: the listed entry, or a whole route no
+    entry matches under no key, whose settings a child on it runs with
+    (`child_options`). `None` runs the child on its parent's route, with its parent's
+    options."""
     model_fallback: ModelFallback | None = None
-    """The model a skill asked for and this mount could not run, so the child runs on
+    """The model the child was asked onto and this mount could not run, so it runs on
     its parent's route instead (`resolve_model`)."""
     access: Access = "read"
     preset: str | None = None
@@ -694,8 +670,8 @@ class SubagentRun(WireForm):
     log already written. `admission_notes()` renders the sentence from the code,
     once."""
     model_fallback: ModelFallback | None = None
-    """The model a skill asked for that this child runs without, stamped by the seam
-    from the resolved request, as it stamps `name`."""
+    """The model this child was asked onto and runs without, stamped by the seam from
+    the resolved request, at a spawn and at a readmission."""
     result: SubagentAwaiter | None = None
     """Awaits quiescence and reports the outcome. `None` from a provider whose
     children cannot be waited on."""
@@ -797,16 +773,20 @@ class Admission(WireModel):
     prompt: str = ""
     model_provider: str = ""
     model: str = ""
-    model_key: str | None = None
-    """The key a spawn named beside the route it resolved to, for the audit (item 8)."""
+    choice: ModelChoice | None = None
+    """The model the spawn named (`SubagentRequest.choice`), `None` for none. With
+    `skills` and `reasoning_effort` it is all a readmission resolves the child's route
+    from, against its parent's list as it is then (`_request_of`)."""
     reasoning_effort: str | None = None
+    """The effort the spawn named, `None` for none."""
+    model_key: str | None = None
+    """The key the spawn resolved to, for the audit (item 8)."""
     route: ModelRoute | None = None
-    """The route the spawn resolved to, settings and all, because a restart rebuilds the
-    child from this record and nothing else, and the list may have changed since. `None`
-    on a child that ran on its parent's route, which inherits again."""
+    """The route the spawn resolved to, settings and all, for the audit. `None` on its
+    parent's route. A readmission works it out again rather than reading it back."""
     model_fallback: ModelFallback | None = None
-    """The model a skill asked for and the child ran without, for the audit: what the
-    person running the parent has to set up for the skill to get it."""
+    """The model the child was asked onto and ran without, for the audit: what the
+    person running the parent has to set up for it to run there."""
     requested_access: Access = "read"
     granted_access: Access = "read"
     downgrade_reason: DowngradeReason | None = None
@@ -834,6 +814,7 @@ def admission_payload(
 ) -> dict[str, JsonValue]:
     """The `subagent/admitted` payload for `run`, admitted on `request` — an `Admission`,
     in the log's spelling."""
+    entry = request.entry
     admission = Admission(
         run_id=run.id,
         name=run.name,
@@ -841,9 +822,10 @@ def admission_payload(
         prompt=request.prompt.strip(),
         model_provider=run.model_provider,
         model=run.model,
-        model_key=request.model_key,
+        choice=None if request.choice.is_default else request.choice,
         reasoning_effort=request.reasoning_effort,
-        route=request.route,
+        model_key=(entry.key or None) if entry is not None else None,
+        route=entry.route if entry is not None else None,
         model_fallback=run.model_fallback,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
@@ -1485,7 +1467,7 @@ class SubagentService:
         widen past the parent whatever it names, because `check_grant` runs on
         the *resolved* request. An unknown name is refused rather than ignored —
         a spawn that asked for a `reviewer` and silently got a generic child is
-        the failure `_resolve_model` refuses for the same reason one field over.
+        the failure `resolve_model` refuses for the same reason one field over.
         """
         if request.preset is None:
             return request
@@ -1503,79 +1485,75 @@ class SubagentService:
             tools=request.tools if request.tools is not None else preset.tools,
         )
 
-    def resolve_model(self, request: SubagentRequest) -> SubagentRequest:
-        """The route a spawn runs on, resolved by the parent's own list (S7b, item 8).
+    def resolve_model(
+        self, request: SubagentRequest, *, readmitting: bool = False
+    ) -> SubagentRequest:
+        """The route a child runs on, resolved by its parent's own list (S7b, item 8): at
+        its spawn, and again at each readmission.
 
         The list is the mount's `models`, the parent's profile as it runs, `/model`
         included, and a child resolved onto an entry runs with that entry's settings
         (`child_options`). A route is named one of three ways:
 
-        * **Whole** (`provider`/`model`): the listed entry it matches, key and settings,
-          else the route as given with no settings, as a root started on it gets
-          (`ModelList.resolve`).
-        * **By a key the spawn names**: the parent's own choice, so a key the list does
-          not hold, or whose provider nothing here serves, is refused, naming why.
-          Running the child elsewhere would answer the parent on a model it did not
-          choose.
-        * **By a key a skill names** in its front matter (`model: classify`): the skill
-          directs the child, so it may say what the child should think with, but its
-          author wrote the key without knowing this profile. One this mount cannot run
-          degrades rather than refuses: the child runs on its parent's route, and the
-          request carries a `ModelFallback` that the admission records and the spawn's
-          answer says, so the parent and the person both learn what to set up.
+        * **By the spawn** (`SubagentRequest.choice`): a key, its own or its assigned
+          profile's, or a whole route, which runs as the entry it matches, else as given
+          with no settings, as a root started on it does (`ModelList.resolve`).
+        * **By the skills it is given**, when the spawn names none (`model: classify` in
+          their front matter).
+        * **By neither**: its parent's route, with its parent's options.
 
-        A readmitted child does not come through here: its route is fixed at its
-        admission (`_request_of`).
+        **A spawn is refused only where whoever chose can choose again at once.** A route
+        the spawn named that this mount cannot run is refused, naming why: the parent is
+        right there, and running the child elsewhere would answer it on a model it did
+        not pick. So are skills that name different models, which the parent settles with
+        `model=`. A skill's model this mount cannot run degrades instead, since its author
+        wrote the key without knowing this profile: the child runs on its parent's route,
+        and the request carries a `ModelFallback` that the admission records and the
+        spawn's answer says, so the parent and the person both learn what to set up.
+
+        **A readmission degrades all of them** (`readmitting`): nobody is there to choose
+        again, and a refusal would end the child. Worked out again rather than read back
+        from its admission, so a model the person has set up since reaches a readmitted
+        child as it reaches a new one, and so does a skill that now names another.
         """
-        skill_key = ""
-        if request.provider or request.model:
-            provider, model = child_route(request)
-            if not (provider and model):
-                return request  # no route at all, which the provider refuses
-            choice = ModelChoice(provider=provider, model=model)
-        elif request.model_key:
-            choice = ModelChoice(key=request.model_key)
-        elif skill_key := self._skill_model(request):
-            choice = ModelChoice(key=skill_key)
+        choice = request.choice
+        by_skills = choice.is_default
+        named = self._skill_models(request) if by_skills else {}
+        keys = tuple(sorted(set(named.values())))
+        if len(keys) > 1:
+            said = ", ".join(f"{name} names {key}" for name, key in sorted(named.items()))
+            fallback = ModelFallback(asked=keys, reason="contested")
+            why = f"the skills this child is given name different models ({said})"
+            refusal = f"{why}; name the one it should run on with `model=`"
         else:
-            return request
-        try:
-            entry = choose(self.ctx, choice)
-        except ModelChoiceError as error:
-            if not skill_key or error.reason is None:
-                raise SubagentSpawnError(
-                    f"a child cannot run on {choice.spelled!r}: {error}"
-                ) from error
-            log.warning("a child runs on its parent's route instead of %r: %s", skill_key, error)
-            fallback = ModelFallback(key=skill_key, reason=error.reason)
-            return replace(request, model_fallback=fallback)
-        return replace(
-            request,
-            model_key=entry.key or None,
-            provider=entry.route.provider,
-            model=entry.route.model,
-            reasoning_effort=request.reasoning_effort or entry.route.reasoning_effort,
-            route=entry.route,
-        )
+            if keys:
+                choice = ModelChoice(key=keys[0])
+            elif by_skills:
+                return request
+            try:
+                return replace(request, entry=choose(self.ctx, choice))
+            except UnrunnableChoice as error:
+                fallback = ModelFallback(asked=(choice.spelled,), reason=error.reason)
+                why = f"{choice.spelled!r} cannot run here: {error}"
+                refusal = f"a child cannot run on {choice.spelled!r}: {error}"
+        # Refused only where whoever chose can choose again at once: a spawn, about its
+        # own choice or about skills that disagree.
+        if not readmitting and (fallback.reason == "contested" or not by_skills):
+            raise SubagentSpawnError(refusal)
+        log.warning("a child runs on its parent's route, since %s", why)
+        return replace(request, model_fallback=fallback)
 
-    def _skill_model(self, request: SubagentRequest) -> str:
-        """The model the skills a spawn names ask for, or `""` when none does."""
+    def _skill_models(self, request: SubagentRequest) -> dict[str, str]:
+        """The model each skill a spawn names asks for, by skill, for those that ask."""
         service = self.ctx.get(SKILLS)
         if not request.skills or service is None:
-            return ""
+            return {}
         boundary = self._delegating_boundary(request)
-        asked = {
+        return {
             name: skill.model
             for name in request.skills
             if (skill := service.get(name, boundary)) is not None and skill.model
         }
-        if len(set(asked.values())) > 1:
-            said = ", ".join(f"{name} names {key}" for name, key in sorted(asked.items()))
-            raise SubagentSpawnError(
-                f"the skills this child is given name different models ({said}); "
-                "name the one it should run on with `model=`"
-            )
-        return next(iter(asked.values()), "")
 
     async def resolve_profile(self, request: SubagentRequest) -> SubagentRequest:
         """A profile the parent assigns, as the narrowing it is (S7b, item 9).
@@ -1626,7 +1604,9 @@ class SubagentService:
             request,
             tools=request.tools if request.tools is not None else narrowed.tools,
             skills=request.skills if request.skills is not None else narrowed.skills,
-            model_key=request.model_key or narrowed.limit.model_key,
+            choice=request.choice
+            if not request.choice.is_default
+            else ModelChoice(key=narrowed.limit.model_key or ""),
             paths=narrowed.limit.writable_paths,
         )
 
@@ -1735,14 +1715,15 @@ class SubagentService:
     async def _admit(
         self,
         run: SubagentRun,
+        request: SubagentRequest,
         *,
+        record: bool,
         owner: str,
         grant: Grant,
         held: tuple[tuple[str, ...], tuple[str, ...]],
         boundary: Context,
-        request: SubagentRequest | None = None,
     ) -> SubagentRun:
-        """Bind a child a provider has already started, or release it (K3, L6).
+        """Bind a child a provider has already started on `request`, or release it (K3, L6).
 
         **The sequence, in one place, because both spawners need all of it.**
         `_enforce` reads `run.scope`, which only the provider can produce, so the
@@ -1758,7 +1739,7 @@ class SubagentService:
         K4 had already been written for. Two spawners with one admission each
         was the defect; one admission both call is the fix.
 
-        `request` is `start`'s, and with it **the seam writes the child's admission,
+        With `record`, which is `start`'s, **the seam writes the child's admission,
         into the child's own log** (S2, Phase 11) — the one record a resume finds a
         child by. The seam rather than the provider, because it holds both halves:
         the resolved request and the provider's run, and `owner`, which is how a
@@ -1766,7 +1747,7 @@ class SubagentService:
         gate opens, fail-closed as a durable intent is: one that cannot be written is
         a refusal like the ceiling's. A provider that opened no log for its child is
         refused too, since that log is the child's only record. A readmit writes no
-        admission — the one it was rebuilt from is already there — and passes none.
+        admission — the one it was rebuilt from is already there.
 
         `start`'s spawn comes off its parent's list in the step that writes its
         admission, which is the step it starts counting as a child in (`child_counts`).
@@ -1776,14 +1757,16 @@ class SubagentService:
         """
         # Stamped here rather than trusted from the provider: the service is what
         # knows which name the caller asked for, and `rehydrate` has to be able
-        # to find its way back to the same provider.
+        # to find its way back to the same provider. The fallback is what this
+        # start resolved (`resolve_model`), a readmission's as much as a spawn's.
         run.owner = owner
+        run.model_fallback = request.model_fallback
         child = self.ctx.require(SESSIONS).get(run.session_id)
         # A parent with no log of its own has nothing a child could be found by, and
         # nothing is recorded for its child: the one case a spawn is not durable.
-        parent = request.parent.session if request is not None else None
+        parent = request.parent.session if record else None
         try:
-            if request is not None and parent is not None:
+            if parent is not None:
                 if child is None or not _names_parent(child, parent.id):
                     # Its log is how its parent finds it after a restart
                     # (`SessionArchive.descendants_of`), so a child with no log, or one
@@ -1916,9 +1899,8 @@ class SubagentService:
                 raise parent_went_away(child_name) from gone
             # The seam's to give, and stamped as `_admit` stamps the owner.
             run.name = child_name
-            run.model_fallback = request.model_fallback
             admitted = await self._admit(
-                run, owner=name, grant=grant, held=held, boundary=boundary, request=request
+                run, request, record=True, owner=name, grant=grant, held=held, boundary=boundary
             )
         finally:
             self._landed(parent, child_name)
@@ -2334,26 +2316,23 @@ class SubagentService:
             run.ready.set()
 
     def _request_of(self, parent: AgentDriver, state: ChildState) -> SubagentRequest:
-        """The request a child was admitted with, rebuilt from its own admission."""
+        """The request a child was admitted with, rebuilt from its own admission, with
+        its route worked out again from what the spawn asked for (`resolve_model`)."""
         admission = state.admission or Admission(run_id=state.run_id)
-        return self.resolve_preset(
-            SubagentRequest(
-                prompt=admission.prompt,
-                parent=parent,
-                name=admission.name or None,
-                provider=admission.model_provider or None,
-                model=admission.model or None,
-                model_key=admission.model_key,
-                reasoning_effort=admission.reasoning_effort,
-                route=admission.route,
-                access=admission.requested_access,
-                preset=admission.preset,
-                skills=admission.skills,
-                tools=admission.tools,
-                paths=admission.paths,
-                call_id=admission.call_id,
-            )
+        request = SubagentRequest(
+            prompt=admission.prompt,
+            parent=parent,
+            name=admission.name or None,
+            choice=admission.choice or ModelChoice(),
+            reasoning_effort=admission.reasoning_effort,
+            access=admission.requested_access,
+            preset=admission.preset,
+            skills=admission.skills,
+            tools=admission.tools,
+            paths=admission.paths,
+            call_id=admission.call_id,
         )
+        return self.resolve_model(self.resolve_preset(request), readmitting=True)
 
     async def _held_for_credential(self, state: ChildState, request: SubagentRequest) -> bool:
         """Whether this child waits for a credential, with its own log made to say so.
@@ -2364,12 +2343,14 @@ class SubagentService:
         ends opens the child's log to record it. A held child that was interrupted
         mid-turn is marked `queued` beside the hold, since it is not running.
         """
-        name = missing_credential(self.ctx, *child_route(request))
+        options = child_options(request)
+        route = (options.provider, options.model)
+        name = missing_credential(self.ctx, *route)
         if name == state.awaiting:
             return name is not None
 
         async def record(child: Session) -> None:
-            await hold_for_credential(self.ctx, child, SESSION_HOLDER, *child_route(request))
+            await hold_for_credential(self.ctx, child, SESSION_HOLDER, *route)
             if name is not None and state.status == "running":
                 record_waiting(child, detail=INTERRUPTED_DETAIL)
 
@@ -2400,7 +2381,13 @@ class SubagentService:
         if run is None:
             return None
         admitted = await self._admit(
-            run, owner=readmitter.name, grant=grant, held=held, boundary=boundary
+            run,
+            request,
+            record=False,
+            owner=readmitter.name,
+            grant=grant,
+            held=held,
+            boundary=boundary,
         )
         grant.record_brief(request.parent.session)
         return admitted

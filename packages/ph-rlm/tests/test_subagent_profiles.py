@@ -4,7 +4,8 @@ The gate: a skill naming `classify` starts its child on that route; a key the sp
 names that the list does not hold is refused, while a skill's key this mount cannot run
 falls back to the parent's route and says so; and an assigned profile wider than the
 parent is refused, naming the row. Around it: a spawn names a key or a whole route
-itself, the admission records the key and the route, and an assigned profile narrows
+itself, the admission records what it named apart from what that resolved to (a restart
+resolves it again, `test_child_logs`), and an assigned profile narrows
 what a child holds — its tools, its model, its access, its skills and its writable
 directories — on the parent's own mount, each row by the narrower its plugin declares.
 """
@@ -18,9 +19,8 @@ from typing import Any
 
 import pytest
 from pydantic import Field
-from rlm_fixtures import PROVIDER_ROW
+from rlm_fixtures import MODELS_ROW, PROVIDER_ROW
 
-from ph.agent.types import AgentOptions
 from ph.cordis import ChildLimit, ChildReach, Context, Profile, ProfileDocument, plugin
 from ph.json import JsonObject, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SANDBOX, SESSIONS, SKILLS, SUBAGENTS
@@ -29,22 +29,11 @@ from ph.seams.models import ModelChoice, choose
 from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
 from ph.seams.skills import Skill
 from ph.seams.subagents import SubagentRequest, SubagentSpawnError, admission_notes
-from ph.testing import FAKE_OPTIONS, MountProfile, not_none, write_skill
+from ph.testing import FAKE_OPTIONS, MountProfile, not_none, skill, write_skill
 from ph.wire import WireModel
 from ph_rlm.subagents import PROVIDER_NAME
 
 pytestmark = pytest.mark.anyio
-
-MODELS: JsonObject = {
-    "id": "models",
-    "config": {
-        "default": "main",
-        "models": {
-            "main": {"provider": "fake", "model": "fake-1"},
-            "classify": {"provider": "fake", "model": "fake-9"},
-        },
-    },
-}
 
 
 class _Profiles:
@@ -64,15 +53,14 @@ class _Profiles:
 async def _parent(
     mount: MountProfile,
     *rows: JsonObject,
-    models: JsonObject = MODELS,
-    options: AgentOptions = FAKE_OPTIONS,
+    models: JsonObject = MODELS_ROW,
     **profiles: list[JsonObject],
 ) -> tuple[Context, Any]:
-    """A parent on `options`, under `models`, with `profiles` it may assign by name."""
+    """A parent under `models`, with `profiles` it may assign by name."""
     ctx = await mount(dict(PROVIDER_ROW), dict(models), *rows)
     ctx.provide(NAMED_PROFILES, _Profiles(ctx.require(MOUNT).profile, **profiles))
     session = ctx.require(SESSIONS).create("parent")
-    return ctx, ctx.require(AGENTS).create(session, options)
+    return ctx, ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
 
 async def _spawn(ctx: Context, parent: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -93,28 +81,33 @@ async def test_a_skill_naming_a_listed_model_starts_its_child_on_that_route(
 ) -> None:
     """The gate's first half. The skill directs the child, so it says what the child
     thinks with; the key is resolved by the parent's own list, and the admission
-    records both the key and the route. Sabotage: drop `_skill_model` from
-    `resolve_model`, and the child runs on its parent's `fake-1`."""
+    records both the key and the route, but not as the spawn's choice: a restart asks
+    the skill again. Sabotage: drop `_skill_models` from `resolve_model`, and the child
+    runs on its parent's `fake-1`; record the skill's key as the choice, and a restart
+    keeps it after the skill names another."""
     ctx, parent = await _parent(mount)
-    ctx.require(SKILLS).register(
-        Skill(name="sort", description="sorts things into kinds", model="classify")
-    )
+    ctx.require(SKILLS).register(skill("sort", model="classify"))
 
     run = await _spawn(ctx, parent, skills=("sort",))
 
     assert (run.model_provider, run.model) == ("fake", "fake-9")
     admitted = _admitted(ctx, parent)
     assert admitted["modelKey"] == "classify" and admitted["model"] == "fake-9"
+    assert "choice" not in admitted
     child = ctx.require(AGENTS).get(run.session_id)
     assert child is not None and child.options.model_key == "classify"
 
 
 async def test_a_spawn_names_a_listed_model_by_key(mount: MountProfile) -> None:
+    """And the admission records the key as what the spawn named, which a restart
+    resolves again. Sabotage: record the resolved key only, and a restart has nothing
+    to resolve."""
     ctx, parent = await _parent(mount)
 
-    run = await _spawn(ctx, parent, model_key="classify")
+    run = await _spawn(ctx, parent, choice=ModelChoice(key="classify"))
 
     assert run.model == "fake-9"
+    assert as_obj(_admitted(ctx, parent)["choice"])["key"] == "classify"
 
 
 TUNED: JsonObject = {
@@ -155,11 +148,11 @@ async def test_a_child_on_a_listed_route_runs_with_that_route_s_settings(
     mount: MountProfile,
 ) -> None:
     """Its temperature, token budget and effort, as a root started on the key has them,
-    and recorded with the route, since a restart rebuilds the child from its admission.
-    Sabotage: drop the settings from `resolve_model`, and the child runs with none."""
+    and recorded with the route for the audit. Sabotage: drop the entry from
+    `resolve_model`, and the child runs with its parent's."""
     ctx, parent = await _tuned_parent(mount)
 
-    run = await _spawn(ctx, parent, model_key="careful")
+    run = await _spawn(ctx, parent, choice=ModelChoice(key="careful"))
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == choose(ctx, ModelChoice(key="careful")).options()
@@ -175,7 +168,7 @@ async def test_a_listed_route_that_sets_nothing_takes_nothing_from_the_parent(
     did, and it runs at its parent's 0.9 on a 64-token budget."""
     ctx, parent = await _tuned_parent(mount)
 
-    run = await _spawn(ctx, parent, model_key="plain")
+    run = await _spawn(ctx, parent, choice=ModelChoice(key="plain"))
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == choose(ctx, ModelChoice(key="plain")).options()
@@ -198,7 +191,7 @@ async def test_a_whole_route_the_list_holds_runs_as_its_entry(mount: MountProfil
     route unresolved, and the child runs `fake-7` at its parent's 0.9."""
     ctx, parent = await _tuned_parent(mount)
 
-    run = await _spawn(ctx, parent, provider="fake", model="fake-7")
+    run = await _spawn(ctx, parent, choice=ModelChoice(provider="fake", model="fake-7"))
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == choose(ctx, ModelChoice(key="careful")).options()
@@ -213,23 +206,12 @@ async def test_a_whole_route_the_list_does_not_hold_takes_nothing_from_the_paren
     its parent's 0.9 on a 64-token budget."""
     ctx, parent = await _tuned_parent(mount)
 
-    run = await _spawn(ctx, parent, provider="fake", model="fake-unlisted")
+    unlisted = ModelChoice(provider="fake", model="fake-unlisted")
+    run = await _spawn(ctx, parent, choice=unlisted)
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
-    assert (
-        child.options == choose(ctx, ModelChoice(provider="fake", model="fake-unlisted")).options()
-    )
+    assert child.options == choose(ctx, unlisted).options()
     assert (child.options.temperature, child.options.model_key) == (None, "")
-
-
-async def test_half_a_route_with_nothing_to_complete_it_is_refused(mount: MountProfile) -> None:
-    """A provider with no model, under a parent that has none either, is no route: a
-    refused spawn, not a malformed choice raised from the resolver. Sabotage: build
-    the choice without asking whether the route is whole."""
-    ctx, parent = await _parent(mount, options=AgentOptions(provider="fake"))
-
-    with pytest.raises(SubagentSpawnError):
-        await _spawn(ctx, parent, provider="fake")
 
 
 async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(
@@ -242,7 +224,7 @@ async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(
     ctx, parent = await _parent(mount)
 
     with pytest.raises(SubagentSpawnError, match="it lists classify, main"):
-        await _spawn(ctx, parent, model_key="summarize")
+        await _spawn(ctx, parent, choice=ModelChoice(key="summarize"))
 
     assert ctx.require(SUBAGENTS).children(parent.session.id) == {}
 
@@ -263,8 +245,8 @@ UNSERVED: JsonObject = {
 @pytest.mark.parametrize(
     ("models", "asked", "reason", "said"),
     [
-        (MODELS, "summarize", "unlisted", 'this profile does not list "summarize"'),
-        (UNSERVED, "classify", "unserved", "lists it on a provider no adapter here serves"),
+        (MODELS_ROW, "summarize", "unlisted", '"summarize", which this profile does not list'),
+        (UNSERVED, "classify", "unserved", "lists on a provider no adapter here serves"),
     ],
 )
 async def test_a_skill_s_model_this_mount_cannot_run_falls_back_to_the_parent_s_route(
@@ -281,15 +263,15 @@ async def test_a_skill_s_model_this_mount_cannot_run_falls_back_to_the_parent_s_
     refuse it as a spawn's own key is refused, or drop the fallback from the run, the
     admission or the log."""
     ctx, parent = await _parent(mount, models=models)
-    ctx.require(SKILLS).register(Skill(name="sort", description="sorts things", model=asked))
+    ctx.require(SKILLS).register(skill("sort", model=asked))
 
     with caplog.at_level("WARNING", logger="ph.seams.subagents"):
         run = await _spawn(ctx, parent, skills=("sort",))
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == parent.options, "on the parent's route, with its settings"
-    fallback = {"key": asked, "reason": reason}
-    assert run.to_wire()["modelFallback"] == fallback
+    fallback = {"asked": [asked], "reason": reason}
+    assert as_obj(thaw_json(run.to_wire()))["modelFallback"] == fallback
     assert _admitted(ctx, parent)["modelFallback"] == fallback
     [note] = admission_notes(run)
     assert said in note and "your own model" in note
@@ -299,7 +281,7 @@ async def test_a_skill_s_model_this_mount_cannot_run_falls_back_to_the_parent_s_
 async def test_skills_that_name_different_models_are_refused(mount: MountProfile) -> None:
     ctx, parent = await _parent(mount)
     for name, key in (("sort", "classify"), ("write", "main")):
-        ctx.require(SKILLS).register(Skill(name=name, description=f"{name}s", model=key))
+        ctx.require(SKILLS).register(skill(name, model=key))
 
     with pytest.raises(SubagentSpawnError, match="name different models"):
         await _spawn(ctx, parent, skills=("sort", "write"))
@@ -328,7 +310,7 @@ async def test_an_assigned_profile_narrows_the_child_s_tools_model_and_access(
         mount,
         sorter=[
             {"id": "tool-bash", "disabled": True},
-            {"id": "models", "config": {**MODELS["config"], "default": "classify"}},  # type: ignore[dict-item]
+            {"id": "models", "config": {**MODELS_ROW["config"], "default": "classify"}},
         ],
     )
 
@@ -338,6 +320,7 @@ async def test_an_assigned_profile_narrows_the_child_s_tools_model_and_access(
     tools = as_seq(admitted["tools"])
     assert "bash" not in tools and "read" in tools
     assert run.model == "fake-9" and admitted["profile"] == "sorter"
+    assert as_obj(admitted["choice"])["key"] == "classify", "a restart resolves it again"
     assert run.requested_access == "read"
 
 
@@ -386,7 +369,7 @@ async def test_a_skill_given_to_a_child_is_recorded_as_read_into_its_prompt(
     write_skill(tmp_path, "sort", body="Sort by kind.")
     ctx = await mount(
         dict(PROVIDER_ROW),
-        dict(MODELS),
+        dict(MODELS_ROW),
         {"id": "skills-progressive", "config": {"paths": [str(tmp_path)]}},
     )
     session = ctx.require(SESSIONS).create("parent")

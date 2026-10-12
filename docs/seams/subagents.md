@@ -91,34 +91,42 @@ asking for more than it has gets an error it can act on.
 
 ## A model from the list, and a profile a parent assigns (S7b)
 
-A spawn names a model by **key** (`model="classify"`, `SubagentRequest.model_key`),
-and a skill it gives the child may name the one it needs in its front matter
-(`model: classify`). Code that builds a request itself may also name a **whole
-route** (`provider`/`model`). `resolve_model` resolves all three through the parent's
-own `models` list (`ctx.models`, the profile as it runs) with `choose`:
+A spawn names a model by **key** (`model="classify"`), its own or its assigned
+profile's, and code that builds a request itself may name a **whole route**: either is
+the request's `choice` (a `ModelChoice`). A spawn that names neither leaves it to the
+skills it gives the child, which may name the model they need in their front matter
+(`model: classify`), and else to its parent's route. `resolve_model` resolves the one
+that applies through the parent's own `models` list (`ctx.models`, the profile as it
+runs) with `choose`, into the request's `entry` (`None` on the parent's route):
 
 * **A whole route** is the listed entry it matches, key and settings, or else the
   route as given with no settings, as a root started on it gets.
-* **A key the spawn names** that the list does not hold, or whose provider no
-  adapter here serves, is refused, naming why. It is the parent's own choice, and
-  running the child elsewhere would answer it on a model it did not choose.
+* **A key or route the spawn names** that this mount cannot run (the list does not
+  hold the key, or no adapter here serves the provider) is refused, naming why. The
+  parent is right there to choose again, and running the child elsewhere would
+  answer it on a model it did not choose.
 * **A key a skill names** that this mount cannot run **degrades instead**: the
   skill's author wrote the key without knowing this profile, so the child runs on
   its parent's route and does the work as well as that model can. The request
-  carries a `ModelFallback` (the key, and `unlisted` or `unserved`); the seam
+  carries a `ModelFallback` (what was asked, and `unlisted` or `unserved`); the seam
   stamps it on the run, the admission records it as `modelFallback`, a warning is
   logged, and both delegating tools tell the parent in their `note`
   (`admission_notes`, beside an access downgrade), so the parent and the person
   learn what to set up.
+* **Skills that name different models** are refused: the parent settles it with
+  `model=`.
+
+A readmission degrades every one of these instead (below).
 
 The child runs with its route's call settings (`reasoningEffort`, `temperature`,
 `maxTokens`) the way a root started on the key does, and none of its parent's: a
 temperature tuned for the parent's model is not one for this. A child on its
-parent's route runs with its parent's options. `child_options` states that rule
-once, for every provider. The child's `subagent/admitted` records the key and the
-whole resolved route (`route`, a `ModelRoute`), so no route setting is carried
-field by field.
-Two skills naming different models are refused — name one with `model=`.
+parent's route runs with its parent's options. An effort the spawn names is the
+child's either way. `child_options` states that rule once, for every provider. The
+child's `subagent/admitted` records what the spawn named (`choice`, and
+`reasoningEffort`) apart from what it resolved to (`modelKey`, and the whole route as
+`route`, a `ModelRoute`): the first is what a readmission resolves again, the second is
+for the audit.
 
 `profile="reviewer"` assigns the child a named profile, composed by the host
 (`ctx.named_profiles`, which `ph_app.runtime.mounted` provides) and read by
@@ -239,7 +247,7 @@ that skipped one would miscount the retry ladder or bring back a deleted child.
 
 | record | carries | door | durable when |
 |---|---|---|---|
-| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `modelKey`, `skills`, `tools`, `paths`, `reasoningEffort`, `route`), any `modelFallback`, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
+| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `skills`, `tools`, `paths`), the model the spawn named (`choice`, `reasoningEffort`) and what it resolved to (`modelKey`, `route`), any `modelFallback`, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
 | `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `notice`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
 | `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |
 
@@ -458,33 +466,31 @@ delegation happen", and this one already did — its admission is in its log, so
 asking again would count the child against a cap its own record fills and refuse
 to restore work that was once allowed. Guards gate new work.
 
-**Open question: which model and reasoning effort a readmitted child runs on.** It
-is decided two different ways today:
+**The route is worked out again, not restored either** (decided 2026-10-11). What a
+child runs on is its parent's and its skills' to say at each start, so the admission
+records what the spawn *asked* for (`choice`, the skills, a named `reasoningEffort`)
+and a readmission resolves it again through `resolve_model`, against the parent's list
+and the skills as they are then. A skill updated to fix or improve a delegation, or a
+model the person has set up since, reaches a readmitted child as it reaches a new one,
+and a child on its parent's route follows its parent's model and options. The resolved
+`modelKey` and `route` on the admission are for the audit and are never read back. The
+cost is that a task begun on one model may be finished on another, which the
+re-presented task already tells the child is a new attempt (`restarts`).
 
-* **The route is pinned at admission, with its call settings.** The admission
-  records the provider and model the spawn resolved to, and the resolved route whole
-  (`route`), and a readmission rebuilds the request from that record without going
-  back through `resolve_model`. So a readmitted child runs on the model and settings
-  it was admitted with, even if the skill that chose it (`model:` in its front
-  matter) or the parent's `models` list has since moved to another.
-* **The reasoning effort is pinned only when something named it.** The admission
-  records the effort the spawn asked for, or the one the route a model key
-  resolved to carries (`Admission.reasoning_effort`). On its parent's route, an
-  effort nothing named was the parent's, and a readmitted child takes its parent's
-  options as they are at the restart (`child_options`), not the ones it first ran
-  on. On a listed route, an effort neither the spawn nor the route named is none.
+**A readmission degrades where a spawn refuses** (`resolve_model(readmitting=True)`).
+A spawn refuses a choice the parent made that this mount cannot run, and skills that
+name different models, because the parent is there to choose again. Nobody is at a
+restart, and a refusal there would end the child and throw its work away over a
+setting. So a key the list has dropped, a provider no adapter serves now, and skills
+that have come to disagree (`contested`) all run the child on its parent's route, with
+a warning and a `ModelFallback` the seam stamps on the readmitted run, as `start` does.
+The credential check that may hold a child (T5) asks about the route it resolved to.
 
-The direction to decide: whether what a child runs on is the **parent's and the
-skill's to say at each start**, rather than something the child's record fixes. A
-skill updated to fix or improve a delegation — a better model, another reasoning
-level — would then reach a child readmitted after it, as it reaches a child
-spawned after it. The admission would keep recording what was *asked* (the model
-key, the skills, a named effort), and a readmit would resolve the route and effort
-again from the parent and the skills as they are then. What it would cost: a task
-begun on one model could be finished on another, which the re-presented task
-already tells the child is a new attempt (`restarts`). Until this is decided, a
-readmitted child keeps its admitted route and that route's settings, and a child on
-its parent's route follows its parent.
+Not yet recorded: a readmission writes no admission, so its fallback reaches the
+warning and the run, and the child's own `request/header` records the route each of its
+requests ran on, but the roster still shows the admission's model and fallback. The
+resolved route riding on the `resumed` status each restart writes would close that
+(`plans/Typed_Results_Revision_History_Model_Kinds_Plan.md`).
 
 A provider opts in by implementing `ReadmittingProvider.readmit(request, *,
 run_id, session_id, restarts)` — its own Protocol, like `RehydratableProvider`, because

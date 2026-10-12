@@ -52,8 +52,7 @@ from pydantic import Field
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, InactiveScopeError, plugin
 from ph.json import JsonValue
-from ph.keys import AGENTS, FS, JOBS, LLM, SESSIONS, SUBAGENTS, WORKSPACE
-from ph.llm.adapter import LlmError
+from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.types import PluginSource, create_user_message, text_of
 from ph.seams.subagents import (
     PARENT_TEARDOWN,
@@ -284,7 +283,13 @@ class RlmChildProvider:
         parent = request.parent
         parent_session = self._parent_session(parent)
         prompt = request.prompt.strip()
-        options = self._child_options(request)
+        # Whether an adapter serves the route is the seam's to ask as it resolves one
+        # (`resolve_model`); a child on its parent's route runs on its parent's.
+        options = child_options(request)
+        if not options.provider or not options.model:
+            raise SubagentSpawnError(
+                "a subagent needs a provider and a model; the parent has none to inherit"
+            )
 
         child_session = await self._child_session(parent_session, run_id)
         # Created before the seam writes the admission, so the ways `agents.create`
@@ -395,33 +400,6 @@ class RlmChildProvider:
         `SessionBusy`, which a readmission settles as one it could not resume.
         """
         return await open_child_log(self.ctx, parent_session, run_id, agentPreset="rlm")
-
-    def _child_options(self, request: SubagentRequest) -> AgentOptions:
-        """The child's options (`child_options`), with **no fallback** on an explicit
-        selector.
-
-        Falling back would answer the parent's question on a model it did not
-        choose, and the parent has no way to tell from the reply.
-        """
-        options = child_options(request)
-        provider_name = options.provider
-        if not provider_name or not options.model:
-            raise SubagentSpawnError(
-                "a subagent needs a provider and a model; the parent has none to inherit"
-            )
-        # The preflight that exists: the route must resolve to an adapter. There
-        # is no model *catalog* on `ctx.llm` yet — `rlm.find_models` needs one
-        # and will bring it — so an unknown model name is caught at its first
-        # request rather than at admission. What matters either way is that
-        # nothing substitutes a different model.
-        try:
-            self.ctx.require(LLM).adapter_for(provider_name)
-        except LlmError as error:
-            raise SubagentSpawnError(
-                f'provider "{provider_name}" has no registered adapter, so a child cannot '
-                f"run on it: {error}"
-            ) from error
-        return options
 
     # ------------------------------------------------------------- lifecycle --
 
@@ -956,7 +934,7 @@ def _last_assistant_text(session: Session | None) -> str:
     "rlm-subagent-provider",
     affects="environment",
     config=Config,
-    inject=[SUBAGENTS, AGENTS, SESSIONS, JOBS, LLM],
+    inject=[SUBAGENTS, AGENTS, SESSIONS, JOBS],
 )
 async def apply(ctx: Context, config: Config) -> None:
     """Register the `rlm-child` provider and expose it for the bindings row."""

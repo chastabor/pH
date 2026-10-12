@@ -38,6 +38,7 @@ from ph.json import JsonObject, as_str
 from ph.keys import SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.seams.code_runtime import CodeBindingNamespace
+from ph.seams.models import ModelChoice
 from ph.seams.subagents import (
     Access,
     SubagentRequest,
@@ -173,7 +174,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 scope=run.scope,
                 name=args.name,
                 reasoning_effort=args.thinking,
-                model_key=args.model,
+                choice=ModelChoice(key=args.model or ""),
                 profile=args.profile,
                 access=args.access,
                 preset=args.preset,

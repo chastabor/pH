@@ -20,9 +20,10 @@ Each route may carry `reasoningEffort`, `temperature` and `maxTokens`, which a
 root started on it gets as its agent settings, and so does a child an agent starts
 on it, by key or as the whole route (`child_options`), rather than its parent's. A
 child whose skill names a key this mount cannot run falls back to its parent's route
-and says so (`ModelFallback`, in [subagents](subagents.md)). `default` must be a listed key; a
-list may be empty, which is `ph-base`'s: it registers no adapter, so there is
-nothing to list.
+and says so (`ModelFallback`, in [subagents](subagents.md)), and a readmitted child
+resolves its route again against the list as it is then, falling back the same way
+whatever named it. `default` must be a listed key; a list may be empty, which is
+`ph-base`'s: it registers no adapter, so there is nothing to list.
 
 ## One rule for a choice
 
@@ -52,10 +53,11 @@ ctx.models.routes            # -> key -> ModelRoute
 `--provider`/`--model` (`--model` alone is a key) and `ModelChoice.parse` reads
 `/model`'s argument (a `/` means a route, split at the first one).
 
-A `ModelChoiceError` is a sentence for a person, and for the two refusals a caller
-may degrade around it also carries `reason`: `unlisted` (the list does not hold the
-key) or `unserved` (no adapter here serves the route's provider). A child whose skill
-names such a key reads it to fall back to its parent's route
+A `ModelChoiceError` is a sentence for a person. The refusal a caller may degrade
+around is its subclass `UnrunnableChoice`, a well-formed choice this mount cannot run,
+which also carries `reason`: `unlisted` (the list does not hold the key) or `unserved`
+(no adapter here serves the route's provider). A child whose skill names such a key,
+and any readmitted child, catches it to fall back to its parent's route
 ([subagents](subagents.md)).
 
 ## Changing the route of a running root
