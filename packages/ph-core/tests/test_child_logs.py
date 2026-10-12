@@ -55,8 +55,8 @@ from ph.testing import (
 pytestmark = pytest.mark.anyio
 
 
-def _parent(ctx: Context) -> AgentDriver:
-    return ctx.require(AGENTS).create(ctx.require(SESSIONS).create("lead"), FAKE_OPTIONS)
+def _parent(ctx: Context, options: AgentOptions = FAKE_OPTIONS) -> AgentDriver:
+    return ctx.require(AGENTS).create(ctx.require(SESSIONS).create("lead"), options)
 
 
 @dataclass(slots=True)
@@ -330,6 +330,51 @@ async def test_a_readmitted_child_runs_on_its_parent_s_route_where_a_spawn_is_re
     assert child_options(request) == parent.options
     assert request.model_fallback == fallback
     assert "runs on its parent's route" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "options", [AgentOptions(), AgentOptions(provider="fake")], ids=["none", "half"]
+)
+async def test_a_child_with_no_route_anywhere_is_refused_by_the_seam(
+    mount: MountProfile, options: AgentOptions
+) -> None:
+    """A child runs on a route, and one that names none under a parent with none, or
+    with half of one, has nothing to fall back to, so the seam refuses it before any
+    provider is asked: this stub needs no route, so a refusal can only be the seam's.
+
+    Sabotage: return the request unchecked from `resolve_model` where nothing is named,
+    or accept a provider with no model, and the stub admits a child with no route.
+    """
+    ctx = await mount()
+    provider = StubSubagentProvider(root=ctx)
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
+    parent = _parent(ctx, options)
+
+    with pytest.raises(SubagentSpawnError, match="the parent has none to inherit"):
+        await ctx.require(SUBAGENTS).start("stub", SubagentRequest(prompt="go", parent=parent))
+
+    assert provider.requests == []
+
+
+async def test_a_readmitted_child_with_no_route_anywhere_is_ended(mount: MountProfile) -> None:
+    """The one model refusal a readmission keeps, since degrading needs a route to
+    degrade to: the child is ended, saying why, rather than handed to its provider.
+
+    Sabotage: leave the fallback on its parent's route unchecked in `resolve_model`, and
+    the provider is asked for a child with no route.
+    """
+    ctx = await mount(_listing())
+    provider = _Readmitting(StubSubagentProvider(root=ctx))
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
+    parent = _parent(ctx, AgentOptions())
+    assert parent.session is not None
+    await _from_an_earlier_process(ctx, parent.session, admission={"choice": {"key": "gone"}})
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    assert provider.asked == []
+    state = ctx.require(SUBAGENTS).children(parent.session.id)["r1"]
+    assert state.status == "error" and "none to inherit" in not_none(state.detail)
 
 
 async def test_a_child_settled_by_an_earlier_process_can_be_deleted(mount: MountProfile) -> None:

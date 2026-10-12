@@ -702,7 +702,9 @@ nothing committed by Claude.
       skills that have come to disagree included (`contested`), because nobody is there
       to choose again and a refusal would end the child. The seam stamps the fallback on
       the readmitted run, and `ph_rlm`'s own adapter check went, since every route not
-      inherited from the parent now comes through `choose`.
+      inherited from the parent now comes through `choose`. Its check for a child with
+      no route at all moved into the seam too (`_require_parents_route`), so the seam owns
+      the whole route rule and a provider builds only a child that has one.
     - **An assigned profile is read, not mounted**, for what a child can hold less of:
       a row it runs that the parent does not is refused by name; the tools of rows it
       does not run are taken away; skills by the `skills-progressive` paths; its models

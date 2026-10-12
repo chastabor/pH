@@ -336,7 +336,7 @@ async def test_a_preset_cannot_grant_past_the_parent(mount: MountProfile) -> Non
 
 async def test_an_unknown_preset_is_refused_rather_than_ignored(mount: MountProfile) -> None:
     """A spawn that asked for a `reviewer` and silently got a generic child is
-    the failure `_resolve_model` refuses one field over, for the same reason."""
+    the failure `resolve_model` refuses one field over, for the same reason."""
     ctx, parent = await _granted(mount, rows=[PRESET_ROW])
 
     with pytest.raises(SubagentSpawnError) as refused:

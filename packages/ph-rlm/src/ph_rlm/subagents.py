@@ -283,13 +283,9 @@ class RlmChildProvider:
         parent = request.parent
         parent_session = self._parent_session(parent)
         prompt = request.prompt.strip()
-        # Whether an adapter serves the route is the seam's to ask as it resolves one
-        # (`resolve_model`); a child on its parent's route runs on its parent's.
+        # A route, served by an adapter here: the seam's to see to as it resolves one
+        # (`resolve_model`), on a spawn and a readmission alike.
         options = child_options(request)
-        if not options.provider or not options.model:
-            raise SubagentSpawnError(
-                "a subagent needs a provider and a model; the parent has none to inherit"
-            )
 
         child_session = await self._child_session(parent_session, run_id)
         # Created before the seam writes the admission, so the ways `agents.create`

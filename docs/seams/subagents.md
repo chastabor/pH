@@ -116,7 +116,10 @@ runs) with `choose`, into the request's `entry` (`None` on the parent's route):
 * **Skills that name different models** are refused: the parent settles it with
   `model=`.
 
-A readmission degrades every one of these instead (below).
+A readmission degrades every one of these instead (below). What neither refuses nor
+degrades is a child left on its parent's route under a parent with none: there is
+nothing to fall back to, so the seam refuses it at a spawn and ends it at a restart,
+and a provider builds only a child that has a route, served by an adapter here.
 
 The child runs with its route's call settings (`reasoningEffort`, `temperature`,
 `maxTokens`) the way a root started on the key does, and none of its parent's: a

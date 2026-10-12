@@ -1500,7 +1500,9 @@ class SubagentService:
           with no settings, as a root started on it does (`ModelList.resolve`).
         * **By the skills it is given**, when the spawn names none (`model: classify` in
           their front matter).
-        * **By neither**: its parent's route, with its parent's options.
+        * **By neither**: its parent's route, with its parent's options; refused when the
+          parent has none (`_require_parents_route`), at a readmission too, since there is
+          nothing to fall back to.
 
         **A spawn is refused only where whoever chose can choose again at once.** A route
         the spawn named that this mount cannot run is refused, naming why: the parent is
@@ -1529,6 +1531,7 @@ class SubagentService:
             if keys:
                 choice = ModelChoice(key=keys[0])
             elif by_skills:
+                self._require_parents_route(request)
                 return request
             try:
                 return replace(request, entry=choose(self.ctx, choice))
@@ -1540,8 +1543,18 @@ class SubagentService:
         # own choice or about skills that disagree.
         if not readmitting and (fallback.reason == "contested" or not by_skills):
             raise SubagentSpawnError(refusal)
+        self._require_parents_route(request)
         log.warning("a child runs on its parent's route, since %s", why)
         return replace(request, model_fallback=fallback)
+
+    @staticmethod
+    def _require_parents_route(request: SubagentRequest) -> None:
+        """Refuse a child left on its parent's route when the parent has none."""
+        options = request.parent.options
+        if not (options.provider and options.model):
+            raise SubagentSpawnError(
+                "a subagent needs a provider and a model; the parent has none to inherit"
+            )
 
     def _skill_models(self, request: SubagentRequest) -> dict[str, str]:
         """The model each skill a spawn names asks for, by skill, for those that ask."""
