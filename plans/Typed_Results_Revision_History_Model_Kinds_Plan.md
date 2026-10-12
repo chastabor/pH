@@ -14,7 +14,8 @@ order they will be built. Each is its own change with its own gate.
    kind names a skill can ask for on any profile, and a check that a child's model can take
    the media it is handed.
 
-**Status:** not started. **Done first, 2026-10-11** (recorded under S7b in
+**Status:** section 1 under way: B1 to B3 built 2026-10-11, B4 and the live gate
+open (see its Status). **Done first, 2026-10-11** (recorded under S7b in
 `Session_Profiles_Plan.md`):
 
 - A child named onto a whole route (`provider`/`model`) resolves through the list like a
@@ -108,6 +109,33 @@ and it decides what to do.
 parameters, so a keyword it does not support is unsupported everywhere at once
 (`CONSTRAINING_KEYWORDS`).
 
+### Status (2026-10-11)
+
+B1 to B3 are built, as `docs/seams/subagents.md` ("A value in a set shape") describes.
+What changed from the design above, decided in the building:
+
+- **A value also comes back as JSON text** (decided by Charles). A child that ends
+  without calling the tool has its last reply read as the object (`validated_shape`, a
+  fence allowed), since a JSON value is text in the end; only a child with neither, after
+  the one reminder, fails.
+- **The value has a record of its own, not a field on the ending.** `subagent/returned`
+  (`record_returned`), written by the tool or by `settle_value`, so one reader serves a
+  native call, a Code Mode dispatch and a text reply alike. The fold carries it to
+  `ChildState.value` and the roster row; the notice carries it as text.
+- **An `output` is an object at its root, with only keywords pH checks**
+  (`object_schema_problems`), refused otherwise, at a skill's load and at a spawn, because
+  the value is also a tool's arguments and a half-checked contract is none.
+- **The tool is registered on the child's own scope**, which its own filter cannot mask,
+  and `held_by` keeps it out of what that child can hand its own children.
+- **The shape is read back at a readmission, not worked out again** (unlike the model):
+  the parent was promised it.
+- **The one reminder is an `agent/turn-stopping` steer**, the door a listener objects to
+  a stop through, rather than the seam running the child's agent again; so
+  `settle_value` only reads the log.
+
+Still open: **B4** (a pydantic class as the shape, and an instance back; an rlm cell reads
+the value from the notice or `rlm_list_subagents` today) and the **live gate**.
+
 ### Steps and gates
 
 - **B1: Declared.** Skill `output:`, the spawn argument, the request and the admission.
@@ -125,21 +153,22 @@ parameters, so a keyword it does not support is unsupported everywhere at once
 - **Live gate:** a categorizing skill over a text and an image, on the local Qwen, added to
   `./test.sh smoke`.
 
-### Decisions to make
+### Decisions (made 2026-10-11)
 
-- The tool's name. It must not collide with any shipped tool, and should read as "this is
-  my answer".
-- A child that never returns a value: an error with its text kept (proposed), or `done`
-  with a note.
-- Two skills given to one child that declare different `output` schemas: refuse, as two
-  different models are refused (proposed), or require the spawn to pass `output`.
-- How an rlm cell gets the value: a binding that waits for it, or a field on the roster row.
+- **The tool's name:** `submit_result`.
+- **A child that never returns a value** fails, with its text kept (decided by Charles:
+  the value is a contract the skill may require).
+- **Two skills that declare different `output` schemas** are refused at the spawn, and the
+  parent passes `output` to settle it.
+- **How an rlm cell gets the value:** from the ending notice and the roster row for now; a
+  binding that waits for it belongs to B4.
 
 ### What breaks
 
-The admission gains `output`, the ending record and `ChildNotice` gain `value`, and `task`'s
-value and the rlm reply gain `value`. All are new fields. A log written before this opens
-as it did.
+The admission gains `output`; a child's log gains `subagent/returned`, which the state and
+the roster row read as `value`; `task` takes `output` and its value gains `value`; and
+`rlm.run` takes `output`. All are new. A log written before this opens as it did. A
+failed `task` now carries the child's last text in its error.
 
 ## 2. Revision history, like `git log` for the context
 

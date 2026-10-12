@@ -50,6 +50,7 @@ from ..cordis import (
 )
 from ..json import JsonValue, as_str, dumps
 from ..keys import SKILLS, SYSTEM_PROMPT, TOOLS
+from ..llm.structured import structural_warning
 from ..session import Session
 from ..session.writers import log_writer
 from ..system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
@@ -61,7 +62,7 @@ from ..tools.definition import (
     define_tool,
     text_content,
 )
-from ..tools.json_schema import validate_json_schema_value
+from ..tools.json_schema import checked_object_schema, validate_json_schema_value
 from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
@@ -279,6 +280,16 @@ class Skill(WireModel):
     few more model calls finishing, while a survey that stops early has still
     produced something — `0` says so, and seeds the steps without ever steering.
     Declared here and read in `ph-stabilize`, the same crossing `steps` makes."""
+    output: dict[str, Any] = Field(default_factory=dict)
+    """The value a child this skill directs returns, as a JSON Schema object: a
+    categorizing skill's `{"type": "object", "properties": {"kind": ...}}`. A child
+    given it finishes by returning one that matches, and fails if it cannot
+    (`ph.seams.subagents.settle_value`). Empty says nothing.
+
+    Written as JSON Schema itself rather than `parameters`' friendlier form, because a
+    value is a structure (lists, nested objects) where an input is one typed word. Held
+    to what pH checks: a root that is an object, and no keyword the validator would
+    skip (`object_schema_problems`)."""
     parameters: dict[str, Any] = Field(default_factory=dict)
     """The inputs this skill takes, as a JSON Schema object (P7-18).
 
@@ -667,6 +678,10 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
     if schema is None:
         return None
 
+    output = _output_schema(front.get("output"), path)
+    if output is None:
+        return None
+
     steps = _string_list(front, "steps", path, cap=MAX_STEPS)
     if steps is None:
         return None
@@ -701,6 +716,7 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         "argument_hint": hint,
         "allowed_tools": tools,
         "parameters": schema,
+        "output": output,
         "steps": steps,
         "max_nudges": nudges,
     }
@@ -793,6 +809,23 @@ def _parameter_schema(declared: object, path: Path) -> dict[str, Any] | None:
     if required:
         schema["required"] = required
     return schema
+
+
+def _output_schema(declared: object, path: Path) -> dict[str, Any] | None:
+    """An author's `output:` block, or `None` with the reason logged if pH cannot hold
+    a value to it. Absent is `{}`. A schema that may not constrain the reply is kept,
+    with a warning (`structural_warning`)."""
+    if declared is None:
+        return {}
+    try:
+        output = checked_object_schema(declared)
+    except ValueError as problems:
+        log.warning("ph.seams.skills: %s output cannot be checked: %s", path, problems)
+        return None
+    warning = structural_warning(output)
+    if warning is not None:
+        log.warning("ph.seams.skills: %s output: %s", path, warning)
+    return output
 
 
 def _rendered_value(value: object) -> str:

@@ -51,9 +51,9 @@ from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.cordis import Context, InactiveScopeError, plugin
-from ph.json import JsonValue
+from ph.json import JsonValue, dumps
 from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
-from ph.llm.types import PluginSource, create_user_message, text_of
+from ph.llm.types import PluginSource, create_user_message
 from ph.seams.subagents import (
     PARENT_TEARDOWN,
     SUSPENDED_DETAIL,
@@ -67,18 +67,18 @@ from ph.seams.subagents import (
     SubagentRun,
     SubagentSpawnError,
     child_options,
+    last_answer,
     open_child_log,
     record_deleted,
     record_ended,
     record_started,
     record_waiting,
+    settle_value,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
 from ph.session import (
     Session,
-    SessionEvent,
     child_session_id,
-    derive_event_message,
 )
 from ph.wire import WireModel
 
@@ -558,17 +558,32 @@ class RlmChildProvider:
             await agent.run()
             if child.finished.is_set():
                 return
-            answer = _last_assistant_text(own)
-            child.result = SubagentResult(status="done", answer=answer)
+            answer = last_answer(own)
+            # What a child with an `output` owes is the seam's rule; the ending is ours.
+            returned = settle_value(own, run)
+            if returned.problem:
+                # Its text is kept: the parent gets the prose and knows the shape it
+                # asked for is missing.
+                await self._fail(child, returned.problem, answer=answer)
+                return
+            child.result = SubagentResult(status="done", answer=answer, value=returned.value)
             # Silence is indistinguishable from a hang from the parent's side,
             # so a child that never sent a message is announced. A child that
             # *did* reply needs no notice — the reply is the notice — and its own
-            # log says whether it did, across a restart too.
-            tail = f" Last assistant text: {answer}" if answer else ""
-            silent = ChildNotice(
-                text=f"[rlm child {run.name} ({run.id}) completed without sending a reply.{tail}]",
-                summary=f"{run.name} finished without replying",
-            )
+            # log says whether it did, across a restart too. A value is announced
+            # whatever else the child said: it is what the parent asked for.
+            notice: ChildNotice | None = None
+            if returned.value is not None:
+                notice = ChildNotice(
+                    text=f"[rlm child {run.name} ({run.id}) returned: {dumps(returned.value)}]",
+                    summary=f"{run.name} returned its result",
+                )
+            elif not replied_to_parent(own):
+                notice = ChildNotice(
+                    text=f"[rlm child {run.name} ({run.id}) completed without sending a "
+                    f"reply.{_said(answer)}]",
+                    summary=f"{run.name} finished without replying",
+                )
             # The child's ending is on its own disk before its parent is handed the
             # answer (F1): `record_ended` flushes, and the waiters wake after it. The
             # notice rides on the ending, so a restart delivers one a crash held back.
@@ -576,7 +591,7 @@ class RlmChildProvider:
                 self.ctx,
                 own,
                 "done",
-                notice=None if replied_to_parent(own) else silent,
+                notice=notice,
                 answerPreview=answer[: self.config.answer_preview_chars] or None,
             )
             # The other half of retain-by-default (P6-28): a child that finished
@@ -589,20 +604,7 @@ class RlmChildProvider:
         except Exception as error:
             if child.finished.is_set():
                 return
-            message = f"{type(error).__name__}: {error}"
-            child.result = SubagentResult(status="error", error=message)
-            # The same order for a failure: the child's account of it first.
-            await record_ended(
-                self.ctx,
-                own,
-                "error",
-                notice=ChildNotice(
-                    text=f"[rlm child {run.name} ({run.id}) failed: {message}"
-                    f"{self._evidence(child)}]",
-                    summary=f"{run.name} failed",
-                ),
-                detail=message,
-            )
+            await self._fail(child, f"{type(error).__name__}: {error}")
             log.debug("ph_rlm.subagents: child %s failed", run.id, exc_info=True)
         finally:
             child.finished.set()
@@ -611,6 +613,27 @@ class RlmChildProvider:
             # of it). Keeping it for the host's lifetime leaked one CPython — and
             # the child's whole namespace — per delegation.
             await self._quiesce(child)
+
+    async def _fail(self, child: _Child, message: str, *, answer: str = "") -> None:
+        """End a child that failed, in the same order as any ending: the child's own
+        account first, saying why, where its checkout is, and what it last said, then
+        its parent's notice of it."""
+        run, own = child.run, child.session
+        assert own is not None, "a child fails only while it has its own log"
+        child.result = SubagentResult(status="error", answer=answer, error=message)
+        preview = answer[: self.config.answer_preview_chars]
+        await record_ended(
+            self.ctx,
+            own,
+            "error",
+            notice=ChildNotice(
+                text=f"[rlm child {run.name} ({run.id}) failed: {message}"
+                f"{self._evidence(child)}{_said(answer)}]",
+                summary=f"{run.name} failed",
+            ),
+            detail=message,
+            **({"answerPreview": preview} if preview else {}),
+        )
 
     def _evidence(self, child: _Child) -> str:
         """Where the failed child's tree is, for the message that says it failed.
@@ -892,38 +915,9 @@ def _task_text(prompt: str, restarts: int) -> str:
     )
 
 
-def _assistant_text(event: SessionEvent) -> str | None:
-    """One event's assistant text, or `None` when it carries none.
-
-    Through `derive_event_message` + `text_of` rather than reaching into the event
-    payload: those two own the rules for what an event projects to and which
-    blocks carry text, and a hand-rolled copy here would go quietly wrong the day
-    a new text-bearing block type lands.
-
-    Empty text answers `None` — the same as a tool-only turn — so the fold keeps
-    scanning back to the last turn that actually said something.
-    """
-    message = derive_event_message(event)
-    if message is None or message.role != "assistant":
-        return None
-    return text_of(message.content).strip() or None
-
-
-def _last_assistant_text(session: Session | None) -> str:
-    """The child's last non-empty assistant text — its answer, by convention.
-
-    An incremental fold rather than a reverse walk of `session.events`, which
-    materialized a snapshot of the child's whole log to read one turn — and this
-    is asked once per child, at the moment the log is longest.
-
-    Scoped to `assistant/message`, which is the only event type
-    `derive_event_message` projects into the assistant role; the role check stays
-    in the parser because that is the rule being relied on, not an assumption
-    about the type.
-    """
-    if session is None:
-        return ""
-    return session.projection("assistant/message", _assistant_text) or ""
+def _said(answer: str) -> str:
+    """A notice's account of what a child last said, or nothing when it said nothing."""
+    return f" Last assistant text: {answer}" if answer else ""
 
 
 @plugin(

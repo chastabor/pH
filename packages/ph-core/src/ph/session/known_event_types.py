@@ -287,10 +287,12 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # second provider emitting `rlm/…` would be lying about its identity in
         # an append-only log. The provider names itself in the payload instead.
         # Each is in the **child's own** log (Phase 11): a child's state *is* the
-        # fold of these, with no parent's copy beside it, so all three are required
-        # reading — the ladder counts starts off the statuses.
+        # fold of these, with no parent's copy beside it, so each is required
+        # reading — the ladder counts starts off the statuses, and a child's value
+        # is its `returned`.
         "subagent/admitted",
         "subagent/deleted",
+        "subagent/returned",
         "subagent/status",
         # The Continual Harness (P3-16). Its state *is* this fold — there is no
         # side file to fall back on — so a reader that skipped one would show a
@@ -565,6 +567,7 @@ AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # the auditor's view.
         "subagent/admitted",
         "subagent/status",
+        "subagent/returned",
         "subagent/deleted",
     }
 )
@@ -672,9 +675,9 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         # Every record of a child, in the child's own log, and from nowhere else: the
         # seam writes the admission, and a provider reports its child through this
         # module's doors (`record_waiting`, `record_started`, `record_ended`,
-        # `record_deleted`), which keep the durability rules each record carries.
+        # `record_deleted`, `record_returned`), which keep the rules each carries.
         "ph.seams.subagents": frozenset(
-            {"subagent/admitted", "subagent/deleted", "subagent/status"}
+            {"subagent/admitted", "subagent/deleted", "subagent/returned", "subagent/status"}
         ),
         "ph.seams.workspace": frozenset(
             {

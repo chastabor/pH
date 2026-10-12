@@ -698,6 +698,66 @@ def test_a_skill_may_name_the_model_a_child_it_directs_runs_on(tmp_path: Path) -
     assert found.model == "classify"
 
 
+KIND_OUTPUT = """output:
+  type: object
+  properties:
+    kind: {type: string, enum: [bug, feature]}
+  required: [kind]"""
+"""A categorizing skill's `output:`, as an author writes it."""
+
+
+def test_a_skill_may_declare_the_value_its_child_returns(tmp_path: Path) -> None:
+    """`output:` in the front matter, a JSON Schema read as written (typed child results,
+    B1). Sabotage: leave it out of `_optional_front`, and the skill declares nothing."""
+    write_skill(tmp_path, "sort", extra=KIND_OUTPUT)
+
+    (found,) = discover_skills([str(tmp_path)])
+
+    assert found.output == {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": ["bug", "feature"]}},
+        "required": ["kind"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("output", "said"),
+    [
+        ("output: [kind]", "it is not a mapping"),
+        ("output:\n  type: array", "root is not `type: object`"),
+        ("output:\n  type: object\n  oneOf: []", "keywords pH does not check: oneOf"),
+    ],
+    ids=["not-a-mapping", "not-an-object", "unchecked-keyword"],
+)
+def test_an_output_ph_cannot_check_refuses_the_skill(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, output: str, said: str
+) -> None:
+    """Refused rather than half-checked, as every malformed field is: a value pH would
+    pass without checking is a contract nobody kept. Sabotage: drop
+    `object_schema_problems` from `_output_schema`, and the skill installs."""
+    write_skill(tmp_path, "sort", extra=output)
+
+    with caplog.at_level("WARNING", logger="ph.seams.skills"):
+        assert discover_skills([str(tmp_path)]) == []
+
+    assert said in caplog.text
+
+
+def test_an_output_that_may_not_constrain_is_kept_and_warned_about(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A required field no property types survives every check and constrains nothing
+    on the wire, so the author is told when the skill loads (`structural_warning`).
+    Sabotage: drop the warning, and the author learns nothing."""
+    write_skill(tmp_path, "sort", extra="output:\n  type: object\n  required: [kind]")
+
+    with caplog.at_level("WARNING", logger="ph.seams.skills"):
+        (found,) = discover_skills([str(tmp_path)])
+
+    assert found.output == {"type": "object", "required": ["kind"]}
+    assert "kind have no typed `properties` entry" in caplog.text
+
+
 async def test_a_skill_names_the_row_that_installed_it(mount: MountProfile, tmp_path: Path) -> None:
     """As a tool does (`ToolRuntime.registrants`): the row a skill came from, for a
     narrowing that drops the row (S7b). One installed with no scope named is the

@@ -159,6 +159,45 @@ child runs on. A new row joins by declaring one, and nothing in the narrowing na
 it is admitted. What a spawn names beside a profile may narrow it further, and
 naming more than it gives is refused.
 
+## A value in a set shape (typed child results)
+
+A parent that needs a structure rather than prose names its shape: `output`, a JSON
+Schema object, on `task` or `rlm.run`, or in the front matter of a skill it gives the
+child (`output:`, [skills](skills.md)). `resolve_output` takes the spawn's own, else the
+one its skills declare; skills that declare different ones are refused, and so is a
+schema pH could only half check (`object_schema_problems`: a root that is not
+`type: object`, or a keyword the validator would skip). The request carries it, and the
+admission records it: a readmitted child still owes the shape its parent was promised,
+read back rather than worked out again.
+
+**The child returns its value through a tool of its own.** `_admit` gives a child that
+owes a value `submit_result`, registered on the child's own scope (a scope cannot filter
+its own registrations, so the child has it whatever its grant names, and no other agent
+does; `held_by` keeps it from the child's own children), with a prompt section saying it
+must finish by calling it and showing the shape. The tool's arguments are the value: one
+that does not match is a tool error naming each violation, which the model fixes on its
+next step; one that does is recorded and ends the child's turn.
+
+**Or as JSON text.** A JSON value is text in the end, so a child that answers with the
+object itself, fenced or not, has returned it too.
+
+**And fails if it returns neither.** A child about to stop with nothing returned is
+reminded once a start: the seam's `agent/turn-stopping` listener objects to the stop by
+steering one message in, as any such listener does, and counts what it sent off the
+child's own log. After the child runs, its provider's drive asks `settle_value`, which
+only reads the log: the value returned since this start, else the last reply read as the
+object. A child that has neither ends as `error`, with its text kept as the answer,
+because the value is a contract the parent may depend on. `task` raises with the child's
+last text in the message; an `rlm.run` parent gets the failure notice with it. A child
+woken to be asked something else (`rehydrated`) owes nothing again.
+
+**Where the value goes** (each session owns its log): a `subagent/returned` record in the
+child's own log (`via` is `tool` or `text`), which the child's state folds
+(`ChildState.value`) and its roster row shows. The provider puts it on `SubagentResult`
+for a waiting `task`, whose value carries it as `value` and whose text is the JSON; and
+an `rlm` child's ending notice carries it to its parent, so a crash before the parent
+read it delivers it on resume, as any notice is.
+
 ## Guards: a policy asked before the child exists
 
 `ctx.subagents.guard(check)` registers a deny-only policy the seam asks on every
@@ -245,13 +284,15 @@ log.
 
 Each session owns its log (Phase 11). Every record about a child is in the child's
 log, and the parent's log holds none: the parent keeps its own acts, such as the tool
-call that spawned the child. All three types are required reading, because a reader
-that skipped one would miscount the retry ladder or bring back a deleted child.
+call that spawned the child. Each type is required reading, because a reader that
+skipped one would miscount the retry ladder, bring back a deleted child, or lose the
+value a child returned.
 
 | record | carries | door | durable when |
 |---|---|---|---|
-| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `skills`, `tools`, `paths`), the model the spawn named (`choice`, `reasoningEffort`) and what it resolved to (`modelKey`, `route`), any `modelFallback`, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
+| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `skills`, `tools`, `paths`), the model the spawn named (`choice`, `reasoningEffort`) and what it resolved to (`modelKey`, `route`), any `modelFallback`, the `output` it owes, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
 | `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `notice`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
+| `subagent/returned` | `value`, checked against the child's `output`, and `via` (`tool` or `text`) | `record_returned`, from `submit_result` or `settle_value` | rides the ending that follows it; a value a crash took is asked for again by the readmitted run |
 | `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |
 
 - **The admission** has no `sessionId` or `parentId`: the log's own id is one, and

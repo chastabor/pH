@@ -28,12 +28,13 @@ failures as bugs.
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from typing import Literal, Protocol, TypeAlias, assert_never, get_args, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, assert_never, get_args, runtime_checkable
 
 import anyio
 from pydantic import Field, ValidationError
@@ -52,7 +53,7 @@ from ..cordis import (
     releasing,
     running,
 )
-from ..json import JsonValue, as_obj, as_seq, as_str, thaw_json
+from ..json import JsonObject, JsonValue, as_obj, as_seq, as_str, thaw_json
 from ..keys import (
     AGENTS,
     GOALS,
@@ -66,11 +67,14 @@ from ..keys import (
     SYSTEM_PROMPT,
     TOOLS,
 )
+from ..llm.structured import SchemaViolation, structural_warning, validated_shape
 from ..llm.types import (
     CONTEXT_SUMMARY_MAX_CHARS,
+    Message,
     PluginSource,
     create_user_message,
     new_message_id,
+    text_of,
 )
 from ..persistence.opening import open_session, stored_session
 from ..persistence.protocol import SessionPersistence
@@ -81,13 +85,20 @@ from ..session import (
     SessionFoldCache,
     SessionHeader,
     child_session_id,
+    derive_event_message,
     is_child_id,
     session_written,
 )
 from ..session.kinds import CREDENTIAL_WAIT, SESSION_HOLDER, hold_of
 from ..session.writers import log_writer
 from ..system_prompt.assembly import PromptSection
-from ..tools.definition import Deny, call_id_of
+from ..tools.definition import (
+    Deny,
+    ToolDefinition,
+    ToolRunContext,
+    call_id_of,
+    define_tool,
+)
 from ..tools.errors import (
     SPAWN_REFUSED,
     TOOL_BUDGET_SPENT,
@@ -95,6 +106,7 @@ from ..tools.errors import (
     FailureKind,
     HarnessError,
 )
+from ..tools.json_schema import checked_object_schema, validate_json_schema_value
 from ..tools.registry import ToolRestriction
 from ..wire import WireForm, WireModel, literal_lookup
 from ._registry import claim_entry, claim_key
@@ -122,6 +134,8 @@ __all__ = [
     "INTERRUPTED_DETAIL",
     "MAX_NAME_CHARS",
     "PARENT_TEARDOWN",
+    "RESULT_TOOL",
+    "RETURNED",
     "REVOKING_AT_ONCE",
     "SETTLED_STATUSES",
     "STATUS",
@@ -137,6 +151,8 @@ __all__ = [
     "ModelFallback",
     "ReadmittingProvider",
     "RehydratableProvider",
+    "Returned",
+    "ReturnedVia",
     "RevokingProvider",
     "SettledStatus",
     "SpawnGuard",
@@ -164,15 +180,18 @@ __all__ = [
     "extend_child_state",
     "family_reach",
     "fold_child_event",
+    "last_answer",
     "open_child_log",
     "parent_went_away",
     "reachable_family",
     "record_admitted",
     "record_deleted",
     "record_ended",
+    "record_returned",
     "record_started",
     "record_waiting",
     "restarts_since_progress",
+    "settle_value",
 ]
 
 log = logging.getLogger("ph.seams.subagents")
@@ -182,10 +201,19 @@ ORDER_BRIEF = ORDER_SKILLS + 10
 catalog is the menu — a reader who has just been told what to do should meet the
 list of other things last."""
 
+ORDER_OUTPUT = ORDER_BRIEF + 1
+"""Right after the brief: what to hand back is the end of the assignment."""
+
+RESULT_TOOL = "submit_result"
+"""The tool a child with an `output` returns its value through: registered on that
+child's own scope, so no other agent has it (`SubagentService._give_output`)."""
+
 ADMITTED = "subagent/admitted"
 DELETED = "subagent/deleted"
 STATUS = "subagent/status"
-"""The three records a delegation leaves — in the **child's own** log (Phase 11).
+RETURNED = "subagent/returned"
+"""The records a delegation leaves — in the **child's own** log (Phase 11).
+`returned` is a child's value, for one with an `output` (`record_returned`).
 
 Each session owns its log: a child records what it was asked, each start, each
 wait, its ending and its deletion in its own log, and nothing about it is written
@@ -200,9 +228,17 @@ every producer have to agree on them exactly."""
 
 _ANSWER = "assistant/message"
 CHILD_EVENT_TYPES = frozenset(
-    {ADMITTED, DELETED, STATUS, *SPENDING_TYPES, CREDENTIAL_WAIT.opened, CREDENTIAL_WAIT.settled}
+    {
+        ADMITTED,
+        DELETED,
+        STATUS,
+        RETURNED,
+        *SPENDING_TYPES,
+        CREDENTIAL_WAIT.opened,
+        CREDENTIAL_WAIT.settled,
+    }
 )
-"""What a child's state is folded from (`fold_child_event`): the three records; the ones
+"""What a child's state is folded from (`fold_child_event`): the records above; the ones
 that spend tokens (`SPENDING_TYPES`) — an answer among them, which is also what forgives
 the ladder; and a credential hold's pair. Any other record leaves a child's state as it
 was, so a reader of a stored log parses only these, and a watcher skips the rest."""
@@ -548,6 +584,10 @@ class SubagentRequest:
     model_fallback: ModelFallback | None = None
     """The model the child was asked onto and this mount could not run, so it runs on
     its parent's route instead (`resolve_model`)."""
+    output: dict[str, Any] | None = None
+    """The JSON Schema object the child's value must match: the spawn's own, else the
+    one the skills it is given declare (`resolve_output`). A child with one is given
+    `submit_result` and owes a value; `None` asks only for an answer."""
     access: Access = "read"
     preset: str | None = None
     """A named kind of child the deployment configured (`subagent-presets`).
@@ -614,6 +654,8 @@ class SubagentResult:
     answer: str = ""
     """The child's last non-empty assistant text. Empty when it never spoke."""
     error: str | None = None
+    value: JsonObject | None = None
+    """What a child with an `output` returned, checked against it (`settle_value`)."""
 
 
 SubagentAwaiter: TypeAlias = Callable[[], Awaitable[SubagentResult]]
@@ -630,10 +672,11 @@ class SubagentRun(WireForm):
     """A live delegation. Returned at admission, before the child answers.
 
     `WireForm`, not `WireDataclass`: it serializes itself, but it cannot take the
-    alias-derived body. That body emits every non-`None` field, and six of these
+    alias-derived body. That body emits every non-`None` field, and some of these
     do not travel — `owner` (which defaults to `""`, so it would always ride),
-    plus `result`, `dispose`, `grant`, `scope` and `ready`, a `Grant`, a `Context`
-    and an event among them. Only `id` → `runId` is a spelling the alias function would miss.
+    plus `output`, `result`, `dispose`, `grant`, `scope` and `ready`, a `Grant`, a
+    `Context` and an event among them. Only `id` → `runId` is a spelling the alias
+    function would miss.
 
     The fields are the admission facts a parent can act on immediately: what to
     call it, where its log is, and which guarantees it actually got. `granted`
@@ -672,6 +715,10 @@ class SubagentRun(WireForm):
     model_fallback: ModelFallback | None = None
     """The model this child was asked onto and runs without, stamped by the seam from
     the resolved request, at a spawn and at a readmission."""
+    output: dict[str, Any] | None = None
+    """The shape this child owes its value in, stamped by the seam from the request for
+    the provider's drive to settle (`settle_value`). Not in `to_wire`: a parent holds
+    the schema it asked for."""
     result: SubagentAwaiter | None = None
     """Awaits quiescence and reports the outcome. `None` from a provider whose
     children cannot be waited on."""
@@ -787,6 +834,9 @@ class Admission(WireModel):
     model_fallback: ModelFallback | None = None
     """The model the child was asked onto and ran without, for the audit: what the
     person running the parent has to set up for it to run there."""
+    output: dict[str, Any] | None = None
+    """The shape the child owes its value in, read back as it was, not worked out
+    again: the parent was promised this one, so a readmitted child still owes it."""
     requested_access: Access = "read"
     granted_access: Access = "read"
     downgrade_reason: DowngradeReason | None = None
@@ -827,6 +877,7 @@ def admission_payload(
         model_key=(entry.key or None) if entry is not None else None,
         route=entry.route if entry is not None else None,
         model_fallback=run.model_fallback,
+        output=request.output,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
         downgrade_reason=run.downgrade_reason,
@@ -980,16 +1031,208 @@ def _deliver_notice(parent: AgentDriver, notice: ChildNotice) -> None:
     missing. And a parent that read it had written it first, at the barrier before the
     request that read it, so it is never delivered twice.
     """
-    parent.inject(
-        create_user_message(
-            content=[{"type": "text", "text": notice.text}],
-            source=PluginSource(
-                plugin="ph.seams.subagents",
-                form="notice",
-                summary=notice.summary[:CONTEXT_SUMMARY_MAX_CHARS],
-            ),
-            message_id=notice.id,
-        )
+    parent.inject(_notice_message(notice.text, notice.summary, notice.id))
+
+
+ReturnedVia: TypeAlias = Literal["tool", "text"]
+"""How a child handed its value back: through `submit_result`, or as a reply that was
+the JSON object itself."""
+
+REMINDED = "reminded to return its result"
+"""The summary a child's one reminder carries, which is how a later turn's end tells it
+was sent (`_reminded`): the seam's other messages into an inbox are ending notices."""
+
+
+def record_returned(child: Session, /, value: JsonObject, *, via: ReturnedVia) -> SessionEvent:
+    """A child's value, checked, in its own log: what `settle_value` reads back and the
+    fold carries to its parent (`ChildState.value`).
+
+    No barrier of its own: the child's ending comes after it and flushes it
+    (`record_ended`), and a value a crash took before then is asked for again by the
+    readmitted run.
+    """
+    return _LOG.append(child, RETURNED, {"value": value, "via": via})
+
+
+def _result_tool(output: dict[str, Any]) -> ToolDefinition:
+    """`submit_result` for one child: its arguments are the value, checked against
+    `output`. A value that does not match is an error naming each violation, which the
+    model fixes on its next step, as it would any tool's arguments. One that does is
+    recorded in the child's own log and ends its turn."""
+
+    # `Any`, as `define_tool` asks of a raw-schema body: the check below is its type.
+    def execute(arguments: Any, run: ToolRunContext) -> str:  # noqa: ANN401
+        violations = validate_json_schema_value(output, arguments)
+        if violations:
+            raise ValueError(
+                f"this value is not the shape asked for: {'; '.join(violations)}. "
+                f"Call {RESULT_TOOL} again with it corrected."
+            )
+        if run.session is None:
+            raise ValueError(f"{RESULT_TOOL} returns a delegated child's value into its log")
+        record_returned(run.session, as_obj(arguments), via="tool")
+        run.conclude_turn()
+        return "Your result is recorded; you are done."
+
+    return define_tool(
+        RESULT_TOOL,
+        "Return your result, which is how this task ends. Call it once you are done, "
+        "with your result as the arguments, in the shape they declare. A value that "
+        "does not match comes back as an error saying what to fix.",
+        parameters=output,
+        output={"type": "string"},
+        execute=execute,
+        effect_free=True,
+    )
+
+
+def _output_note(output: dict[str, Any]) -> str:
+    """The child's prompt section saying it owes a value, and in what shape: its tool's
+    schema too, but said where a child working in code, or with no tool calls, reads it."""
+    return (
+        f"You owe your result in a set shape. When you are done, call `{RESULT_TOOL}` "
+        "with it; your task is not finished until a call succeeds. If you cannot call "
+        "it, end with a reply that is only the JSON object. The shape, as JSON Schema:"
+        f"\n\n```json\n{json.dumps(output, indent=2)}\n```"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Returned:
+    """What a child with an `output` handed back (`settle_value`): its value, or why
+    there is none."""
+
+    value: JsonObject | None = None
+    problem: str = ""
+
+
+def settle_value(child: Session, run: SubagentRun) -> Returned:
+    """What a child that has run to quiescence returned, for its provider to end it by:
+    the value it returned this start, through `submit_result` or as its last reply, or
+    why there is none.
+
+    **A provider's drive asks this, and does not decide it** (each door keeps its rule):
+    the provider ends the child as `done` with the value, or as `error` with `problem`,
+    keeping its text as the answer. An error, because the value is a contract the parent
+    may depend on: a parent handed prose where it asked for a structure would read the
+    wrong thing. By now the child was reminded once if it needed to be
+    (`_remind_owed`), so this only reads its log.
+
+    Nothing is owed by a child with no `output`, or by one woken to be asked something
+    else (`rehydrated`), whose value went to its parent when it first ended.
+    """
+    if run.output is None or _woken(child):
+        return Returned()
+    returned = _value_of(child, run.output)
+    if returned.problem:
+        return Returned(problem=f"it returned no value in the shape asked for: {returned.problem}")
+    return returned
+
+
+async def _remind_owed(agent: AgentDriver, _turn: int) -> None:
+    """A child about to stop that owes a value and has not returned it, reminded once a
+    start, by objecting to the stop as any `agent/turn-stopping` listener does: steering
+    one message in, so the same turn goes on.
+
+    Who owes what is read from the child's own log, its admission's `output`, so a
+    readmitted child is held to it too; the count of reminders is read there as well,
+    for `nudges_since`' reason: a counter on a listener starts at zero after a restart.
+    """
+    child = agent.session
+    if child is None:
+        return
+    output = child.projection(ADMITTED, _owed_output)
+    if output is None or _woken(child):
+        return
+    returned = _value_of(child, output)
+    if returned.value is None and not _reminded(child):
+        agent.steer(_notice_message(_reminder(returned.problem), REMINDED))
+
+
+def _value_of(child: Session, output: dict[str, Any]) -> Returned:
+    """This start's value: one `submit_result` recorded since the child's latest
+    `running`, else its last reply read as the JSON object, recorded once it checks.
+    Otherwise what was wrong with that reply, as the problem."""
+    since = _started(child)
+    returned = child.latest(RETURNED)
+    if returned is not None and returned.seq > since:
+        return Returned(value=thaw_json(as_obj(returned.data.get("value"))))
+    answer = child.projection(_ANSWER, _answer_of)
+    try:
+        value = validated_shape(answer[1] if answer and answer[0] > since else "", output)
+    except SchemaViolation as violation:
+        return Returned(problem=str(violation))
+    record_returned(child, value, via="text")
+    return Returned(value=value)
+
+
+def _started(child: Session) -> int:
+    """The seq of the child's latest status, its `running` while it runs: where this
+    start's records begin."""
+    status = child.latest(STATUS)
+    return status.seq if status is not None else -1
+
+
+def _woken(child: Session) -> bool:
+    """Whether the child's latest start woke it to be asked something else."""
+    status = child.latest(STATUS)
+    return status is not None and status.data.get("cause") == "rehydrated"
+
+
+def _reminded(child: Session) -> bool:
+    """Whether this start already reminded the child, read off its log."""
+    events = (child.at(index) for index in range(_started(child) + 1, child.seq))
+    return any(
+        event is not None
+        and event.type == "user/message"
+        and as_str(as_obj(event.data.get("source")).get("summary")) == REMINDED
+        for event in events
+    )
+
+
+def _owed_output(event: SessionEvent) -> dict[str, Any] | None:
+    """The shape an admission says its child owes, or `None`."""
+    output = thaw_json(event.data.get("output"))
+    return output if isinstance(output, dict) else None
+
+
+def _answer_of(event: SessionEvent) -> tuple[int, str] | None:
+    """One event's assistant text with its seq, or `None` when it carries none, so the
+    projection scans back to the last turn that said something (`last_answer`)."""
+    message = derive_event_message(event)
+    if message is None or message.role != "assistant":
+        return None
+    text = text_of(message.content).strip()
+    return (event.seq, text) if text else None
+
+
+def last_answer(child: Session | None) -> str:
+    """A child's last non-empty assistant text: its answer, by convention. An
+    incremental fold rather than a walk of its log, which is longest just when this is
+    asked."""
+    answer = child.projection(_ANSWER, _answer_of) if child is not None else None
+    return answer[1] if answer is not None else ""
+
+
+def _reminder(problem: str) -> str:
+    """The one correction a child that has not returned its value is sent."""
+    return (
+        f"You have not returned your result in the shape asked for ({problem}). Call "
+        f"`{RESULT_TOOL}` with it now, or reply with only the JSON object."
+    )
+
+
+def _notice_message(text: str, summary: str, message_id: str | None = None) -> Message:
+    """A message from this seam into an agent's inbox: a child's ending to its parent,
+    or a reminder to a child. One shape, so a reader of either knows whose it is."""
+    return create_user_message(
+        content=[{"type": "text", "text": text}],
+        source=PluginSource(
+            plugin="ph.seams.subagents",
+            form="notice",
+            summary=summary[:CONTEXT_SUMMARY_MAX_CHARS],
+        ),
+        message_id=message_id,
     )
 
 
@@ -1387,13 +1630,19 @@ class SubagentService:
         and `grant_for`: `start` needs the resolution three times (the ceiling,
         the brief, the containment check), and passing the one answer down makes
         the three agree by construction rather than by re-derivation.
+
+        A parent's `submit_result` is not among what it holds: it is how that parent
+        answers its own parent, and a child of its own handed it would return a value
+        into nobody's contract.
         """
         parent_scope = boundary if boundary is not None else self._delegating_boundary(request)
         skills = self.ctx.get(SKILLS)
         tools = self.ctx.get(TOOLS)
         return (
             tuple(sorted(skills.reach(parent_scope))) if skills is not None else (),
-            tuple(tools.names(scope=parent_scope)) if tools is not None else (),
+            tuple(name for name in tools.names(scope=parent_scope) if name != RESULT_TOOL)
+            if tools is not None
+            else (),
         )
 
     def _delegating_boundary(self, request: SubagentRequest) -> Context:
@@ -1556,16 +1805,59 @@ class SubagentService:
                 "a subagent needs a provider and a model; the parent has none to inherit"
             )
 
+    def resolve_output(self, request: SubagentRequest) -> SubagentRequest:
+        """The shape a spawn's child owes its value in: the spawn's own `output`, else
+        the one the skills it is given declare, else none.
+
+        A schema pH cannot hold a value to is refused (`object_schema_problems`), as
+        are skills that declare different ones, which the parent settles by passing
+        `output`. Refused rather than degraded: the parent asked for a structure it
+        means to read, and a child running without that contract would answer some
+        other question. Not asked again at a readmission, whose admission holds the
+        shape the parent was promised (`_request_of`).
+        """
+        if request.output is not None:
+            # A plain dict from here: the type the request declares, and what is sent
+            # to the child's model as its tool's schema.
+            try:
+                output = checked_object_schema(request.output)
+            except ValueError as problems:
+                raise SubagentSpawnError(
+                    f"the output a child was asked for cannot be checked: {problems}"
+                ) from problems
+            warning = structural_warning(output)
+            if warning is not None:
+                log.warning("a child's output: %s", warning)
+            return replace(request, output=output)
+        declared = {
+            name: skill.output
+            for name, skill in self._given_skills(request).items()
+            if skill.output
+        }
+        outputs = list(declared.values())
+        if any(output != outputs[0] for output in outputs[1:]):
+            raise SubagentSpawnError(
+                f"the skills this child is given declare different outputs "
+                f"({', '.join(sorted(declared))}); pass the one it should return as `output`"
+            )
+        return replace(request, output=outputs[0] if outputs else None)
+
     def _skill_models(self, request: SubagentRequest) -> dict[str, str]:
         """The model each skill a spawn names asks for, by skill, for those that ask."""
+        return {
+            name: skill.model for name, skill in self._given_skills(request).items() if skill.model
+        }
+
+    def _given_skills(self, request: SubagentRequest) -> dict[str, Skill]:
+        """The skills a spawn names, by name, as the parent holds them."""
         service = self.ctx.get(SKILLS)
         if not request.skills or service is None:
             return {}
         boundary = self._delegating_boundary(request)
         return {
-            name: skill.model
+            name: skill
             for name in request.skills
-            if (skill := service.get(name, boundary)) is not None and skill.model
+            if (skill := service.get(name, boundary)) is not None
         }
 
     async def resolve_profile(self, request: SubagentRequest) -> SubagentRequest:
@@ -1771,9 +2063,11 @@ class SubagentService:
         # Stamped here rather than trusted from the provider: the service is what
         # knows which name the caller asked for, and `rehydrate` has to be able
         # to find its way back to the same provider. The fallback is what this
-        # start resolved (`resolve_model`), a readmission's as much as a spawn's.
+        # start resolved (`resolve_model`), a readmission's as much as a spawn's,
+        # and the output is what the child owes its parent.
         run.owner = owner
         run.model_fallback = request.model_fallback
+        run.output = request.output
         child = self.ctx.require(SESSIONS).get(run.session_id)
         # A parent with no log of its own has nothing a child could be found by, and
         # nothing is recorded for its child: the one case a spawn is not durable.
@@ -1795,6 +2089,7 @@ class SubagentService:
                 self._landed(parent, run.name)
             try:
                 self._enforce(grant, run, held, boundary)
+                self._give_output(run)
             except InactiveScopeError as gone:
                 # The ceiling registers on the child's scope, which a parent that went
                 # away took with it: the same refusal a provider's own builds get.
@@ -1814,6 +2109,32 @@ class SubagentService:
             raise
         self._runs[run.id] = run
         return run
+
+    def _give_output(self, run: SubagentRun) -> None:
+        """Give a child that owes a value the way to return it: `submit_result`, and a
+        note in its prompt that it must.
+
+        **Registered on the child's own scope, deliberately.** `Grant.apply` narrows
+        only by restriction, because a scope's own registration is one its own filter
+        cannot mask. That is what a return channel needs: the child has it whatever
+        its grant names, and no other agent does (`held_by` keeps it from the child's
+        own children too). It grants no reach, only a way to answer.
+        """
+        if run.output is None:
+            return
+        tools = self.ctx.get(TOOLS)
+        if run.scope is None or tools is None:
+            raise SubagentSpawnError(
+                f'the "{run.owner or "subagent"}" provider gives its child no scope of its '
+                "own, so the child cannot be given the tool it returns a value through"
+            )
+        tools.register(_result_tool(run.output), scope=run.scope)
+        prompt = self.ctx.get(SYSTEM_PROMPT)
+        if prompt is not None:
+            note = PromptSection(
+                name="subagent:output", text=_output_note(run.output), order=ORDER_OUTPUT
+            )
+            prompt.section(note, scope=run.scope)
 
     def _enforce(
         self,
@@ -1862,7 +2183,8 @@ class SubagentService:
 
     async def start(self, name: str, request: SubagentRequest) -> SubagentRun:
         """Admit a child and return its handle. Does not wait for an answer."""
-        request = self.resolve_model(self.resolve_preset(await self.resolve_profile(request)))
+        resolved = self.resolve_preset(await self.resolve_profile(request))
+        request = self.resolve_output(self.resolve_model(resolved))
         parent = request.parent.session
         if parent is not None:
             # Every child the parent has, on disk as well as in memory, before anything
@@ -2338,6 +2660,7 @@ class SubagentService:
             name=admission.name or None,
             choice=admission.choice or ModelChoice(),
             reasoning_effort=admission.reasoning_effort,
+            output=admission.output,
             access=admission.requested_access,
             preset=admission.preset,
             skills=admission.skills,
@@ -2533,6 +2856,7 @@ async def apply(ctx: Context, config: None) -> None:
     # disposed session's cached projection is a value nobody can reach.
     ctx.on("session/created", service._published)
     ctx.on("session/disposed", service._let_go)
+    ctx.on("agent/turn-stopping", _remind_owed)
     contribute_fold_cache(
         ctx, id="subagent-fold-cache", subject="subagent state", stale=service.stale_folds
     )
@@ -2685,6 +3009,8 @@ class ChildState:
     resumes_at_last_answer: int = 0
     tokens: int = 0
     """What it spent — its answers and its compactions — by `TokenUsage.total`."""
+    value: JsonObject | None = None
+    """What it returned, for a child with an `output` (`record_returned`), or `None`."""
 
     @property
     def admitted(self) -> bool:
@@ -2754,6 +3080,8 @@ class ChildState:
         the model's roster tool and a front end's panel."""
         admission = thaw_json(self.admission.to_wire()) if self.admission is not None else {}
         assert isinstance(admission, dict)
+        # The schema a row's reader asked for and holds already; the value is the news.
+        admission.pop("output", None)
         row: dict[str, JsonValue] = {
             **admission,
             "sessionId": self.session_id,
@@ -2769,6 +3097,7 @@ class ChildState:
             "answerPreview": self.answer_preview,
             "deletedReason": self.deleted_reason,
             "awaiting": self.awaiting,
+            "value": thaw_json(self.value) if self.value is not None else None,
         }
         row.update({key: value for key, value in optional.items() if value is not None})
         if self.deleted:
@@ -2817,6 +3146,8 @@ def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
         )
     if kind == DELETED:
         return replace(state, deleted=True, deleted_reason=as_str(data.get("reason")) or None)
+    if kind == RETURNED:
+        return replace(state, value=as_obj(data.get("value")))
     if kind == _ANSWER:
         return replace(
             state, resumes_at_last_answer=state.resumes, tokens=state.tokens + event_tokens(event)

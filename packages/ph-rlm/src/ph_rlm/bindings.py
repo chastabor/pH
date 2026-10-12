@@ -76,6 +76,10 @@ class RunArgs(ToolModel):
     name: str | None = None
     model: str | None = None
     """A model your profile lists, by key; `None` runs the child on your own (S7b)."""
+    output: dict[str, Any] | None = None
+    """A JSON Schema object for the result you need back. The child returns a value
+    matching it, which reaches you in its ending message and its roster row, or it
+    fails. A skill you give it may declare one; this overrides it."""
     thinking: str | None = None
     access: Access = "read"
     """`read` | `write`. Defaults to `read` (E4): a child that only needs to read
@@ -175,6 +179,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 name=args.name,
                 reasoning_effort=args.thinking,
                 choice=ModelChoice(key=args.model or ""),
+                output=args.output,
                 profile=args.profile,
                 access=args.access,
                 preset=args.preset,

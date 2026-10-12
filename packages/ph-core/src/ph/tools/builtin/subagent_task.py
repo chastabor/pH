@@ -32,7 +32,7 @@ from pydantic import Field
 
 from ...cancel import Canceled, raced
 from ...cordis import Context, maybe_await, plugin
-from ...json import JsonObject, as_str
+from ...json import JsonObject, as_str, dumps
 from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
 from ...seams.models import ModelChoice
@@ -125,6 +125,15 @@ class TaskArgs(ToolModel):
             "what you hold. One that would give it more than you have is refused."
         ),
     )
+    output: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "A JSON Schema object for the result you need back, when you need a "
+            "structure rather than prose. The child returns a value matching it, which "
+            "comes back as `value`, or the call fails. A skill you give it may declare "
+            "one; this overrides it."
+        ),
+    )
 
 
 class TaskValue(ToolModel):
@@ -133,6 +142,8 @@ class TaskValue(ToolModel):
     session_id: str
     status: SubagentStatus
     answer: str = ""
+    value: dict[str, Any] | None = None
+    """The child's result in the shape asked for (`output`), checked."""
     granted_access: Access = "read"
     note: str | None = None
     """What the model should know beside the answer: for a child that outlived its
@@ -164,7 +175,12 @@ STILL_WORKING = (
 harness that is stopping, or found in the roster on resume, still live."""
 
 
-def _task_value(run: SubagentRun, status: SubagentStatus, answer: str = "") -> dict[str, Any]:
+def _task_value(
+    run: SubagentRun,
+    status: SubagentStatus,
+    answer: str = "",
+    value: JsonObject | None = None,
+) -> dict[str, Any]:
     """The call's value for the child `run` names, however the call learned of it — its
     own wait, or the roster on resume. One builder, so the two cannot disagree."""
     notes = [] if status == "done" else [STILL_WORKING]
@@ -175,6 +191,7 @@ def _task_value(run: SubagentRun, status: SubagentStatus, answer: str = "") -> d
         session_id=run.session_id,
         status=status,
         answer=answer,
+        value=dict(value) if value is not None else None,
         granted_access=run.granted_access,
         note=" ".join(notes) or None,
     ).model_dump()
@@ -184,7 +201,12 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
     if value.get("status") != "done":
         # A child that outlived its wait has no answer yet; the note says where it is.
         return text_content(as_str(value.get("note")))
-    parts = [as_str(value.get("answer"), "(the child produced no answer)")]
+    returned = value.get("value")
+    parts = [
+        dumps(returned)
+        if returned is not None
+        else as_str(value.get("answer"), "(the child produced no answer)")
+    ]
     if value.get("note"):
         parts.append(as_str(value["note"]))
     return text_content("\n\n".join(parts))
@@ -215,6 +237,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 preset=args.preset,
                 profile=args.profile,
                 choice=ModelChoice(key=args.model or ""),
+                output=args.output,
                 skills=args.skills,
                 tools=args.tools,
                 call_id=run.call_id,
@@ -232,11 +255,14 @@ async def apply(ctx: Context, config: Config) -> None:
             # A failure, not a value with a sad field: a child that was canceled
             # or fell over did not answer the question, and a parent reading
             # `answer: ""` as an answer is the misreading this prevents.
+            # Its text, where it said something: a child that could not return the
+            # shape asked for may still have found what the parent needs to decide.
             raise ValueError(
                 f"subagent {handle.name} ({handle.session_id}) ended as {outcome.status}"
                 + (f": {outcome.error}" if outcome.error else "")
+                + (f"\n\nIts last text:\n{outcome.answer}" if outcome.answer else "")
             )
-        return _task_value(handle, outcome.status, outcome.answer)
+        return _task_value(handle, outcome.status, outcome.answer, outcome.value)
 
     async def reconciled(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
         """Did a `task` call a crash cut short start a child? The children's own logs

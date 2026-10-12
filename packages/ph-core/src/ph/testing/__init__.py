@@ -98,7 +98,7 @@ from .builders import (
 )
 from .diagnostics import report_section
 from .folds import VerifyingFoldCache, assert_fold_laws, check_fold_laws, prefix_of
-from .skills import skill, write_skill
+from .skills import KIND_OUTPUT, skill, write_skill
 from .stub_compaction import StubCompactionEngine
 from .stub_sandbox import StubSandboxProvider
 from .stub_subagent import HoldingProvider, RefusingProvider, StubSubagentProvider
@@ -133,6 +133,7 @@ removed.
 
 __all__ = [
     "FAKE_OPTIONS",
+    "KIND_OUTPUT",
     "REPLAY_ROW",
     "SCAFFOLDING",
     "FakeAdapter",

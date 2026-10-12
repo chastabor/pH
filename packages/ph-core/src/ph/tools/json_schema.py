@@ -26,12 +26,14 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from ..json import JsonValue
+from ..json import JsonValue, thaw_json
 from ..wire import validation_errors
 
 __all__ = [
     "CONSTRAINING_KEYWORDS",
     "SUPPORTED_KEYWORDS",
+    "checked_object_schema",
+    "object_schema_problems",
     "schema_of",
     "unsupported_keywords",
     "validate_json_schema_value",
@@ -140,6 +142,38 @@ def unsupported_keywords(schema: object) -> set[str]:
     return found
 
 
+def object_schema_problems(schema: object) -> list[str]:
+    """Why `schema` cannot be the declared shape of a value pH holds a caller to: not a
+    mapping, a root that is not `type: object`, or a keyword this validator does not
+    enforce. Empty when it can.
+
+    For a schema pH did not author, a skill's or a spawn's `output`, so one that uses a
+    keyword pH would skip is refused rather than half-checked (`unsupported_keywords`).
+    An object at the root, because the value is also a tool's arguments.
+    """
+    schema = thaw_json(schema)
+    if not isinstance(schema, dict):
+        return ["it is not a mapping"]
+    problems: list[str] = []
+    if schema.get("type") != "object":
+        problems.append("its root is not `type: object`")
+    unsupported = unsupported_keywords(schema)
+    if unsupported:
+        problems.append(f"it uses keywords pH does not check: {', '.join(sorted(unsupported))}")
+    return problems
+
+
+def checked_object_schema(schema: object) -> dict[str, Any]:
+    """`schema` as the plain dict a value is held to, or `ValueError` saying why it
+    cannot be one (`object_schema_problems`): one check for every caller that takes a
+    declared shape."""
+    plain = thaw_json(schema)
+    problems = object_schema_problems(plain)
+    if problems or not isinstance(plain, dict):
+        raise ValueError("; ".join(problems))
+    return plain
+
+
 def validate_json_schema_value(
     schema: type[BaseModel] | dict[str, Any], value: object
 ) -> list[str]:
@@ -147,6 +181,11 @@ def validate_json_schema_value(
 
     An empty list means valid. A pydantic declaration delegates to pydantic, so
     the tool's own model is the validator.
+
+    Either JSON shape is checked, frozen (`MappingProxyType`/`tuple`, as a tool's
+    arguments and a logged schema arrive) or plain: thawed here, once, because the
+    checks below are `dict` and `list` checks, and a frozen schema read as one would
+    pass everything below its root unchecked.
     """
     if isinstance(schema, type) and issubclass(schema, BaseModel):
         try:
@@ -154,8 +193,10 @@ def validate_json_schema_value(
         except ValidationError as error:
             return validation_errors(error)
         return []
+    plain = thaw_json(schema)
     violations: list[str] = []
-    _validate(schema, value, "", schema, violations)
+    if isinstance(plain, dict):
+        _validate(plain, thaw_json(value), "", plain, violations)
     return violations
 
 

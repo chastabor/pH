@@ -325,7 +325,9 @@ def test_the_walk_follows_an_imported_constant() -> None:
     assert "ph_app.daemon.supervisor" in WALK.static["supervisor/retry"]
 
 
-@pytest.mark.parametrize("record", ["subagent/admitted", "subagent/status", "subagent/deleted"])
+@pytest.mark.parametrize(
+    "record", ["subagent/admitted", "subagent/status", "subagent/returned", "subagent/deleted"]
+)
 def test_a_childs_records_have_one_writer(record: str) -> None:
     """S10 and after: a provider reports its child, in the child's own log, through
     `ph.seams.subagents`' doors — `record_started` flushes a restart before the

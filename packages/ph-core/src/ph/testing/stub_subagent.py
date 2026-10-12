@@ -43,6 +43,8 @@ class StubSubagentProvider:
     answer: str = "the child's answer"
     status: SubagentStatus = "done"
     error: str | None = None
+    value: dict[str, Any] | None = None
+    """What a child with an `output` returned, as a provider's drive settles it."""
     grants: Access | None = None
     """What the child actually gets. `None` grants what was asked."""
     downgrade_reason: DowngradeReason | None = None
@@ -102,7 +104,9 @@ class StubSubagentProvider:
         return run
 
     async def _settle(self) -> SubagentResult:
-        return SubagentResult(status=self.status, answer=self.answer, error=self.error)
+        return SubagentResult(
+            status=self.status, answer=self.answer, error=self.error, value=self.value
+        )
 
     def last(self) -> SubagentRequest:
         """The most recent request, for a test asserting what was delegated."""

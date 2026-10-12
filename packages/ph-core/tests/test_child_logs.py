@@ -20,14 +20,18 @@ import pytest
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
 from ph.json import JsonValue, as_obj, as_seq, as_str
-from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SKILLS, SUBAGENTS
+from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SKILLS, SUBAGENTS, TOOLS
+from ph.llm.types import Message, text_of
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
     PARENT_TEARDOWN,
+    RESULT_TOOL,
+    RETURNED,
     STATUS,
     ChildNotice,
     ModelFallback,
+    Returned,
     SubagentRequest,
     SubagentRun,
     SubagentSpawnError,
@@ -35,10 +39,12 @@ from ph.seams.subagents import (
     exhausted_detail,
     record_deleted,
     record_ended,
+    settle_value,
 )
 from ph.session import Session, SessionEvent, SessionHeader, SurfaceIntent, session_written
 from ph.testing import (
     FAKE_OPTIONS,
+    KIND_OUTPUT,
     MountProfile,
     StubSubagentProvider,
     admitted_child,
@@ -61,9 +67,11 @@ def _parent(ctx: Context, options: AgentOptions = FAKE_OPTIONS) -> AgentDriver:
 
 @dataclass(slots=True)
 class _Readmitting:
-    """A stub that says which children it was asked to take back, and declines them."""
+    """A stub that says which children it was asked to take back, and declines them,
+    or, `takes_back`, starts each again as its inner stub would."""
 
     inner: StubSubagentProvider
+    takes_back: bool = False
     asked: list[str] = field(default_factory=list)
     requests: list[SubagentRequest] = field(default_factory=list)
     """What each was rebuilt into from its admission."""
@@ -76,7 +84,7 @@ class _Readmitting:
     ) -> SubagentRun | None:
         self.asked.append(run_id)
         self.requests.append(request)
-        return None
+        return await self.inner.start(request) if self.takes_back else None
 
 
 async def _from_an_earlier_process(
@@ -330,6 +338,128 @@ async def test_a_readmitted_child_runs_on_its_parent_s_route_where_a_spawn_is_re
     assert child_options(request) == parent.options
     assert request.model_fallback == fallback
     assert "runs on its parent's route" in caplog.text
+
+
+KIND = dict(KIND_OUTPUT)
+
+
+@dataclass(slots=True)
+class _Stopping:
+    """An agent at the end of a turn, as `agent/turn-stopping` hands one to a listener."""
+
+    session: Session
+    steered: list[Message] = field(default_factory=list)
+
+    def steer(self, message: Message) -> None:
+        self.steered.append(message)
+
+
+def _owing(ctx: Context, *records: tuple[str, dict[str, JsonValue]]) -> Session:
+    """A child admitted owing a value in `KIND`, its log holding `records` after."""
+    parent = ctx.require(SESSIONS).create("lead")
+    child = admitted_child(ctx, parent, "r1", {"name": "scout", "output": KIND})
+    for kind, data in records:
+        if kind == "assistant/message":
+            log_event(child, kind, data, SurfaceIntent("append"))
+        else:
+            log_event(child, kind, data)
+    return child
+
+
+def _run_of(child: Session) -> SubagentRun:
+    """The handle of a child owing a value in `KIND`."""
+    return SubagentRun(
+        id="r1",
+        name="scout",
+        session_id=child.id,
+        parent_id="lead",
+        model_provider="fake",
+        model="fake-1",
+        requested_access="read",
+        granted_access="read",
+        output=KIND,
+    )
+
+
+RESUMED: tuple[str, dict[str, JsonValue]] = (STATUS, {"status": "running", "cause": "resumed"})
+WOKEN: tuple[str, dict[str, JsonValue]] = (STATUS, {"status": "running", "cause": "rehydrated"})
+PROSE: tuple[str, dict[str, JsonValue]] = (
+    "assistant/message",
+    dict(assistant_payload("prose, not JSON", "a1")),
+)
+
+
+async def test_a_value_returned_before_this_start_is_not_this_start_s(
+    mount: MountProfile,
+) -> None:
+    """A child restarted after it returned a value, and before its ending was written,
+    owes one again: the restart re-presents its task, and its answer is read from what
+    it did since. Sabotage: read the latest `returned` whenever it was written."""
+    ctx = await mount()
+    old: tuple[str, dict[str, JsonValue]] = (RETURNED, {"value": {"kind": "bug"}, "via": "tool"})
+    child = _owing(ctx, old, RESUMED, PROSE)
+
+    returned = settle_value(child, _run_of(child))
+
+    assert returned.value is None and "the reply is not JSON" in returned.problem
+
+
+async def test_a_child_that_owes_a_value_is_reminded_once_a_start(mount: MountProfile) -> None:
+    """At the end of a turn with nothing returned, the seam objects to the stop by
+    steering one reminder in, read off the child's own log, so a second turn's end
+    does not send another. Sabotage: drop `_reminded`, and the child is reminded at
+    every turn's end."""
+    ctx = await mount()
+    child = _owing(ctx, RESUMED, PROSE)
+    agent = _Stopping(child)
+
+    await ctx.serial("agent/turn-stopping", agent, 1)
+    (reminder,) = agent.steered
+    log_event(child, "user/message", dict(reminder.to_wire()), SurfaceIntent("append"))
+    await ctx.serial("agent/turn-stopping", agent, 1)
+
+    assert "You have not returned your result" in text_of(reminder.content)
+    assert len(agent.steered) == 1
+
+
+async def test_a_woken_child_owes_nothing_again(mount: MountProfile) -> None:
+    """A child woken to be asked something else answers by message: its value went to
+    its parent when it first ended. Sabotage: drop `_woken` from `settle_value` or from
+    the reminder, and the woken child is reminded, then failed, for an answer it gave
+    long ago."""
+    ctx = await mount()
+    child = _owing(ctx, WOKEN, PROSE)
+    agent = _Stopping(child)
+
+    await ctx.serial("agent/turn-stopping", agent, 1)
+
+    assert agent.steered == []
+    assert settle_value(child, _run_of(child)) == Returned()
+
+
+async def test_a_readmitted_child_still_owes_the_value_its_parent_was_promised(
+    mount: MountProfile,
+) -> None:
+    """Its shape is read back from its admission, not worked out again, since the parent
+    already relies on it, and the child is given its way to return it again.
+
+    Sabotage: drop `output` from `_request_of`, or give the tool only where the
+    admission is written, and the readmitted child owes nothing.
+    """
+    ctx = await mount()
+    provider = _Readmitting(StubSubagentProvider(root=ctx), takes_back=True)
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
+    parent = _parent(ctx)
+    assert parent.session is not None
+    await _from_an_earlier_process(ctx, parent.session, admission={"output": KIND})
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
+
+    (request,) = provider.requests
+    assert request.output == KIND
+    (run,) = ctx.require(SUBAGENTS).list(parent_id=parent.id)
+    assert run.output == KIND
+    assert RESULT_TOOL in ctx.require(TOOLS).names(scope=not_none(run.scope))
 
 
 @pytest.mark.parametrize(

@@ -40,6 +40,7 @@ from ph.seams.subagents import (
 from ph.session import Session
 from ph.testing import (
     FAKE_OPTIONS,
+    KIND_OUTPUT,
     MountProfile,
     StubSubagentProvider,
     log_event,
@@ -177,6 +178,43 @@ async def test_a_child_that_failed_is_an_error_not_an_empty_answer(mount: MountP
 
     assert result.is_error
     assert "the model refused" in text_of(result.content)
+
+
+KIND = KIND_OUTPUT
+
+
+async def test_a_child_s_value_is_the_call_s_answer(mount: MountProfile) -> None:
+    """A `task` given an `output` hands it to the child, and the value the child returns
+    is the call's: in `value`, and as the text the model reads. Sabotage: leave `output`
+    off the request, or render the answer over the value."""
+    provider = StubSubagentProvider(answer="it is a bug", value={"kind": "bug"})
+    ctx = await _mounted(mount, ("stub", provider))
+    provider.root = ctx  # a scope of its own, which a child owing a value is given a tool on
+
+    result = await run_tool(ctx, "task", {"prompt": "sort this", "output": KIND}, agent=_agent(ctx))
+
+    assert provider.last().output == KIND
+    assert result.value["value"] == {"kind": "bug"}
+    assert text_of(result.content) == '{"kind":"bug"}'
+
+
+async def test_a_child_that_returned_no_value_fails_with_its_text_kept(
+    mount: MountProfile,
+) -> None:
+    """What a child said is kept where it could not return the shape asked for: the
+    parent may still find what it needs in it. Sabotage: raise the ending alone."""
+    provider = StubSubagentProvider(
+        status="error",
+        answer="It looks like a bug.",
+        error="it returned no value in the shape asked for: the reply is not JSON",
+    )
+    ctx = await _mounted(mount, ("stub", provider))
+
+    result = await run_tool(ctx, "task", {"prompt": "sort this"}, agent=_agent(ctx))
+
+    assert result.is_error
+    assert "returned no value" in text_of(result.content)
+    assert "Its last text:\nIt looks like a bug." in text_of(result.content)
 
 
 async def test_a_provider_that_cannot_be_waited_on_is_refused(mount: MountProfile) -> None:

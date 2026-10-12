@@ -41,6 +41,7 @@ which is honest: the model was genuinely told something new.
 | `path`, `source`, `version` | where it came from |
 | `argument_hint` | the author's one line for the common case |
 | `parameters` | declared inputs, validated before the body is rendered |
+| `output` | the value a child this skill directs returns, as a JSON Schema object (`type: object` at its root, only keywords pH checks); the child returns one or fails ([subagents](subagents.md)) |
 | `steps` | the playbook, seeded into the todo list |
 | `allowed_tools` | what this skill may reach |
 | `model` | the listed model a child this skill directs runs on, by key (`model: classify`); one the profile cannot run falls back to the parent's model, and the parent is told; a restarted child asks the skill again |

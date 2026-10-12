@@ -11,10 +11,20 @@ reach it, before a third copy decides frontmatter looks slightly different.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from ..seams.skills import Skill
 
-__all__ = ["skill", "write_skill"]
+__all__ = ["KIND_OUTPUT", "skill", "write_skill"]
+
+KIND_OUTPUT: dict[str, Any] = {
+    "type": "object",
+    "properties": {"kind": {"type": "string", "enum": ["bug", "feature"]}},
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+"""A sorting skill's `output`: which kind of report its child read. The one shape the
+typed-result tests in both packages return, so they cannot drift apart."""
 
 
 def write_skill(
@@ -49,13 +59,18 @@ def write_skill(
 
 
 def skill(
-    name: str, *, description: str = "does a thing", hint: str = "", model: str = ""
+    name: str,
+    *,
+    description: str = "does a thing",
+    hint: str = "",
+    model: str = "",
+    output: dict[str, Any] | None = None,
 ) -> Skill:
     """One registered skill, with no file behind it; `model` is the key it asks a child
-    it directs to run on.
+    it directs to run on, and `output` the shape of the value that child returns.
 
     For the tests that care about the *registry* — visibility, narrowing, the
     catalog — rather than about the format on disk. Written out in three modules
     before it moved here, which is the same road `write_skill` took.
     """
-    return Skill(name=name, description=description, hint=hint, model=model)
+    return Skill(name=name, description=description, hint=hint, model=model, output=output or {})
