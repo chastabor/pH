@@ -560,7 +560,7 @@ class RlmChildProvider:
                 return
             answer = last_answer(own)
             # What a child with an `output` owes is the seam's rule; the ending is ours.
-            returned = settle_value(own, run)
+            returned = settle_value(own)
             if returned.problem:
                 # Its text is kept: the parent gets the prose and knows the shape it
                 # asked for is missing.

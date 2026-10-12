@@ -36,6 +36,7 @@ from ph.seams.subagents import (
     SubagentRun,
     SubagentSpawnError,
     child_options,
+    child_state,
     exhausted_detail,
     record_deleted,
     record_ended,
@@ -366,21 +367,6 @@ def _owing(ctx: Context, *records: tuple[str, dict[str, JsonValue]]) -> Session:
     return child
 
 
-def _run_of(child: Session) -> SubagentRun:
-    """The handle of a child owing a value in `KIND`."""
-    return SubagentRun(
-        id="r1",
-        name="scout",
-        session_id=child.id,
-        parent_id="lead",
-        model_provider="fake",
-        model="fake-1",
-        requested_access="read",
-        granted_access="read",
-        output=KIND,
-    )
-
-
 RESUMED: tuple[str, dict[str, JsonValue]] = (STATUS, {"status": "running", "cause": "resumed"})
 WOKEN: tuple[str, dict[str, JsonValue]] = (STATUS, {"status": "running", "cause": "rehydrated"})
 PROSE: tuple[str, dict[str, JsonValue]] = (
@@ -399,7 +385,7 @@ async def test_a_value_returned_before_this_start_is_not_this_start_s(
     old: tuple[str, dict[str, JsonValue]] = (RETURNED, {"value": {"kind": "bug"}, "via": "tool"})
     child = _owing(ctx, old, RESUMED, PROSE)
 
-    returned = settle_value(child, _run_of(child))
+    returned = settle_value(child)
 
     assert returned.value is None and "the reply is not JSON" in returned.problem
 
@@ -424,17 +410,54 @@ async def test_a_child_that_owes_a_value_is_reminded_once_a_start(mount: MountPr
 
 async def test_a_woken_child_owes_nothing_again(mount: MountProfile) -> None:
     """A child woken to be asked something else answers by message: its value went to
-    its parent when it first ended. Sabotage: drop `_woken` from `settle_value` or from
-    the reminder, and the woken child is reminded, then failed, for an answer it gave
-    long ago."""
+    its parent when it first ended. Sabotage: drop `_woken` from `_owed`, and the woken
+    child is reminded, then failed, for an answer it gave long ago."""
     ctx = await mount()
     child = _owing(ctx, WOKEN, PROSE)
     agent = _Stopping(child)
 
     await ctx.serial("agent/turn-stopping", agent, 1)
+    assert settle_value(child) == Returned()
+    await record_ended(ctx, child, "done")
 
     assert agent.steered == []
-    assert settle_value(child, _run_of(child)) == Returned()
+    assert child_state(child).status == "done"
+
+
+async def test_no_provider_can_end_a_child_done_that_owes_a_value_it_did_not_return(
+    mount: MountProfile,
+) -> None:
+    """The contract is held at the door every provider ends a child through, not by
+    each provider's drive: asked for `done` with nothing returned, `record_ended` ends
+    the child as `error`, saying why, and tells its parent so in a notice of its own.
+
+    Sabotage: drop the check from `record_ended`, and the child ends `done` with no
+    value for a parent that asked for one.
+    """
+    ctx = await mount()
+    child = _owing(ctx, RESUMED, PROSE)
+
+    await record_ended(ctx, child, "done")
+
+    state = child_state(child)
+    assert state.status == "error"
+    assert "returned no value in the shape asked for" in not_none(state.detail)
+    assert "scout (r1) failed" in not_none(state.notice).text
+    assert "Last assistant text: prose, not JSON" in not_none(state.notice).text
+
+
+async def test_the_ending_door_reads_a_json_reply_as_the_value(mount: MountProfile) -> None:
+    """A provider that settles nothing itself still gets the value: asked for `done`,
+    the door reads the child's JSON reply as its value, and the child ends `done` with
+    it. Sabotage: skip the check at the door, and the reply is never read as one."""
+    ctx = await mount()
+    reply = ("assistant/message", dict(assistant_payload('{"kind": "feature"}', "a1")))
+    child = _owing(ctx, RESUMED, reply)
+
+    await record_ended(ctx, child, "done")
+
+    state = child_state(child)
+    assert (state.status, state.value) == ("done", {"kind": "feature"})
 
 
 async def test_a_readmitted_child_still_owes_the_value_its_parent_was_promised(

@@ -1005,8 +1005,24 @@ async def record_ended(
     **What it left unfinished beneath it ends with it** (`_end_beneath`). **And what
     it tells its parent** (`notice`) rides on the ending, on the child's disk first,
     and is then delivered into the parent's inbox (`_deliver_notice`).
+
+    **A child that owes a value cannot end `done` without one**, whichever provider
+    ends it: the door settles it (`settle_value`) and ends a child that has none as
+    `error`, saying why, with a notice of the seam's own in place of the provider's,
+    which was worded for an answer.
     """
     fields: dict[str, JsonValue] = dict(extra)
+    problem = settle_value(child).problem if status == "done" else ""
+    admission = child.projection(ADMITTED, _admission_of) if problem else None
+    if admission is not None:
+        status = "error"
+        fields["detail"] = problem
+        answer = last_answer(child)
+        said = f" Last assistant text: {answer}" if answer else ""
+        notice = ChildNotice(
+            text=f"[child {admission.name} ({admission.run_id}) failed: {problem}.{said}]",
+            summary=f"{admission.name} returned no value",
+        )
     if notice is not None:
         fields["notice"] = notice.to_wire()
     event = _append_status(child, status, **fields)
@@ -1106,24 +1122,21 @@ class Returned:
     problem: str = ""
 
 
-def settle_value(child: Session, run: SubagentRun) -> Returned:
-    """What a child that has run to quiescence returned, for its provider to end it by:
-    the value it returned this start, through `submit_result` or as its last reply, or
-    why there is none.
+def settle_value(child: Session) -> Returned:
+    """What a child that has run to quiescence returned: the value it returned this
+    start, through `submit_result` or as its last reply (recorded as the value), or why
+    there is none. For a provider wording its own ending; `record_ended` holds every
+    ending to it, and the waiter's result follows the log (`_settle_waiter`).
 
-    **A provider's drive asks this, and does not decide it** (each door keeps its rule):
-    the provider ends the child as `done` with the value, or as `error` with `problem`,
-    keeping its text as the answer. An error, because the value is a contract the parent
-    may depend on: a parent handed prose where it asked for a structure would read the
-    wrong thing. By now the child was reminded once if it needed to be
-    (`_remind_owed`), so this only reads its log.
-
-    Nothing is owed by a child with no `output`, or by one woken to be asked something
-    else (`rehydrated`), whose value went to its parent when it first ended.
+    The shape owed is the child's admission's, so a child whose parent has no log,
+    and wrote no admission, is held to nothing here. A child woken to be asked
+    something else (`rehydrated`) owes nothing again: its value went to its parent when
+    it first ended.
     """
-    if run.output is None or _woken(child):
+    output = _owed(child)
+    if output is None:
         return Returned()
-    returned = _value_of(child, run.output)
+    returned = _value_of(child, output)
     if returned.problem:
         return Returned(problem=f"it returned no value in the shape asked for: {returned.problem}")
     return returned
@@ -1139,10 +1152,9 @@ async def _remind_owed(agent: AgentDriver, _turn: int) -> None:
     for `nudges_since`' reason: a counter on a listener starts at zero after a restart.
     """
     child = agent.session
-    if child is None:
-        return
-    output = child.projection(ADMITTED, _owed_output)
-    if output is None or _woken(child):
+    # A root owes nothing, and is not made to read its whole log back to say so.
+    output = _owed(child) if child is not None and child.header.delegating_parent else None
+    if child is None or output is None:
         return
     returned = _value_of(child, output)
     if returned.value is None and not _reminded(child):
@@ -1190,10 +1202,23 @@ def _reminded(child: Session) -> bool:
     )
 
 
-def _owed_output(event: SessionEvent) -> dict[str, Any] | None:
-    """The shape an admission says its child owes, or `None`."""
-    output = thaw_json(event.data.get("output"))
-    return output if isinstance(output, dict) else None
+def _owed(child: Session) -> dict[str, Any] | None:
+    """The shape a child owes its value in this start, by its own admission: `None` for
+    one that owes none, or that was woken to be asked something else."""
+    admission = child.projection(ADMITTED, _admission_of)
+    if admission is None or admission.output is None or _woken(child):
+        return None
+    return admission.output
+
+
+def _admission_of(event: SessionEvent) -> Admission | None:
+    """One `subagent/admitted` record as an `Admission`, or `None` for one that does not
+    parse: the fold's reading, and the projection the reminder and the ending door read
+    it through, once a session rather than at every turn's end."""
+    try:
+        return Admission.model_validate(event.data)
+    except ValidationError:
+        return None
 
 
 def _answer_of(event: SessionEvent) -> tuple[int, str] | None:
@@ -2068,6 +2093,7 @@ class SubagentService:
         run.owner = owner
         run.model_fallback = request.model_fallback
         run.output = request.output
+        self._settle_waiter(run)
         child = self.ctx.require(SESSIONS).get(run.session_id)
         # A parent with no log of its own has nothing a child could be found by, and
         # nothing is recorded for its child: the one case a spawn is not durable.
@@ -2109,6 +2135,29 @@ class SubagentService:
             raise
         self._runs[run.id] = run
         return run
+
+    def _settle_waiter(self, run: SubagentRun) -> None:
+        """Make what a waiter is handed for a child that owes a value agree with the
+        child's own log, whichever provider ran it: the ending door may have ended
+        `error` a child its provider called `done` (`record_ended`), and the value is
+        the one the log holds. So `task` answers from the log, as its reconcile does
+        after a crash, and a provider relying on the door gets it right for nothing."""
+        awaited = run.result
+        if run.output is None or awaited is None:
+            return
+
+        async def settled() -> SubagentResult:
+            result = await awaited()
+            state = self.state(run.session_id)
+            if result.status != "done" or state is None:
+                return result
+            if state.status == "error":
+                return replace(result, status="error", value=None, error=state.detail)
+            if result.value is None and state.value is not None:
+                return replace(result, value=thaw_json(state.value))
+            return result
+
+        run.result = settled
 
     def _give_output(self, run: SubagentRun) -> None:
         """Give a child that owes a value the way to return it: `submit_result`, and a
@@ -3124,9 +3173,8 @@ def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
         return state
     data = event.data
     if kind == ADMITTED:
-        try:
-            admission = Admission.model_validate(data)
-        except ValidationError:
+        admission = _admission_of(event)
+        if admission is None:
             return state
         return replace(state, admission=admission, admitted_at=float(event.time))
     if kind == STATUS:

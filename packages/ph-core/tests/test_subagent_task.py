@@ -19,6 +19,7 @@ the one misreading that turns a failed delegation into a wrong conclusion.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
@@ -32,17 +33,21 @@ from ph.seams.subagents import (
     ADMITTED,
     STATUS,
     ModelFallback,
+    SubagentProvider,
     SubagentRequest,
     SubagentResult,
     SubagentRun,
     admission_payload,
+    record_ended,
+    record_started,
 )
-from ph.session import Session
+from ph.session import Session, SurfaceIntent
 from ph.testing import (
     FAKE_OPTIONS,
     KIND_OUTPUT,
     MountProfile,
     StubSubagentProvider,
+    assistant_payload,
     log_event,
     not_none,
     reconciled_call,
@@ -61,7 +66,7 @@ addressing an existing id by name would mount the plugin twice."""
 
 async def _mounted(
     mount: MountProfile,
-    *providers: tuple[str, StubSubagentProvider],
+    *providers: tuple[str, SubagentProvider],
     **config: object,
 ) -> Context:
     """A profile with these providers, composed the way a real one is.
@@ -196,6 +201,59 @@ async def test_a_child_s_value_is_the_call_s_answer(mount: MountProfile) -> None
     assert provider.last().output == KIND
     assert result.value["value"] == {"kind": "bug"}
     assert text_of(result.content) == '{"kind":"bug"}'
+
+
+@dataclass(slots=True)
+class _ByTheDoor:
+    """A provider that settles nothing itself, as a minimal one would: its child
+    replies `reply`, and it calls that `done` through the seam's ending door."""
+
+    reply: str
+    inner: StubSubagentProvider = field(default_factory=StubSubagentProvider)
+
+    async def start(self, request: SubagentRequest) -> SubagentRun:
+        ctx = request.parent.ctx
+        self.inner.root = ctx  # a scope of its own, which a child owing a value needs
+        run = await self.inner.start(request)
+
+        async def ended() -> SubagentResult:
+            child = not_none(ctx.require(SESSIONS).get(run.session_id))
+            await record_started(ctx, child)
+            reply = assistant_payload(self.reply, "a1")
+            log_event(child, "assistant/message", reply, SurfaceIntent("append"))
+            await record_ended(ctx, child, "done")
+            return SubagentResult(status="done", answer=self.reply)
+
+        run.result = ended
+        return run
+
+
+async def test_a_provider_ending_through_the_door_gets_typed_results_for_nothing(
+    mount: MountProfile,
+) -> None:
+    """Any provider, not only ph-rlm: one that never asks `settle_value` still returns
+    its child's value to `task`, read from the log, since the waiter follows what the
+    door recorded. Sabotage: drop `_settle_waiter`, and `task` gets no value."""
+    ctx = await _mounted(mount, ("door", _ByTheDoor(reply='{"kind": "bug"}')))
+
+    result = await run_tool(ctx, "task", {"prompt": "sort this", "output": KIND}, agent=_agent(ctx))
+
+    assert result.value["value"] == {"kind": "bug"}
+
+
+async def test_a_provider_ending_through_the_door_cannot_answer_task_without_a_value(
+    mount: MountProfile,
+) -> None:
+    """Its `done` with nothing returned is an error in the log, and the waiter says so
+    too, rather than handing `task` the provider's `done`. Sabotage: drop the error
+    branch of `_settle_waiter`, and `task` returns a `done` with no value."""
+    ctx = await _mounted(mount, ("door", _ByTheDoor(reply="It is a bug.")))
+
+    result = await run_tool(ctx, "task", {"prompt": "sort this", "output": KIND}, agent=_agent(ctx))
+
+    assert result.is_error
+    assert "returned no value in the shape asked for" in text_of(result.content)
+    assert "Its last text:\nIt is a bug." in text_of(result.content)
 
 
 async def test_a_child_that_returned_no_value_fails_with_its_text_kept(

@@ -132,6 +132,11 @@ What changed from the design above, decided in the building:
 - **The one reminder is an `agent/turn-stopping` steer**, the door a listener objects to
   a stop through, rather than the seam running the child's agent again; so
   `settle_value` only reads the log.
+- **The ending door holds every provider to the contract.** `record_ended` asked for
+  `done` settles the child itself and ends one with no value as `error`, and the seam
+  makes the waiter's result follow the log (`_settle_waiter`), so a provider gets typed
+  results by spawning through the seam and ending through the door; ph-rlm asks
+  `settle_value` first only to word its own notices.
 
 Still open: **B4** (a pydantic class as the shape, and an instance back; an rlm cell reads
 the value from the notice or `rlm_list_subagents` today) and the **live gate**.

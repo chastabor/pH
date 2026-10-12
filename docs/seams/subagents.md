@@ -184,17 +184,22 @@ object itself, fenced or not, has returned it too.
 **And fails if it returns neither.** A child about to stop with nothing returned is
 reminded once a start: the seam's `agent/turn-stopping` listener objects to the stop by
 steering one message in, as any such listener does, and counts what it sent off the
-child's own log. After the child runs, its provider's drive asks `settle_value`, which
-only reads the log: the value returned since this start, else the last reply read as the
-object. A child that has neither ends as `error`, with its text kept as the answer,
-because the value is a contract the parent may depend on. `task` raises with the child's
+child's own log. The ending door holds every provider to the rest: `record_ended`,
+asked to end a child `done`, settles it (`settle_value`: the value returned since this
+start, else the last reply read as the object) and ends one that has neither as
+`error`, saying why and keeping its last text. The result a waiter is handed follows
+that log (`_settle_waiter`), so a provider gets typed results by spawning through the
+seam and ending through the door. The value is a contract the parent may depend on, so
+a child without one fails either way. Held to by its own admission: a child whose
+parent has no log, and wrote none, is given the tool but held to nothing. `task` raises with the child's
 last text in the message; an `rlm.run` parent gets the failure notice with it. A child
 woken to be asked something else (`rehydrated`) owes nothing again.
 
 **Where the value goes** (each session owns its log): a `subagent/returned` record in the
 child's own log (`via` is `tool` or `text`), which the child's state folds
-(`ChildState.value`) and its roster row shows. The provider puts it on `SubagentResult`
-for a waiting `task`, whose value carries it as `value` and whose text is the JSON; and
+(`ChildState.value`) and its roster row shows. A waiting `task` gets it on its
+`SubagentResult`, as the log holds it, whose value carries it as `value` and whose text
+is the JSON; and
 an `rlm` child's ending notice carries it to its parent, so a crash before the parent
 read it delivers it on resume, as any notice is.
 
@@ -258,9 +263,10 @@ Obligations a provider carries, in order:
    log is filed in the parent's family. That log is the child's only record, and it
    is how the parent finds the child after a restart (`SessionArchive.descendants_of`),
    so the seam refuses a child whose log does not name its parent.
-2. **Validate the kwargs, gate the depth** (`RLM_MAX_DEPTH`), and preflight the
-   model **with no fallback**: a child silently downgraded to another model is a
-   result nobody can interpret.
+2. **Validate the kwargs, and gate the depth** (`RLM_MAX_DEPTH`). The model is not
+   the provider's: a request arrives resolved (`entry`, else its parent's route), on
+   an adapter the seam checked (`resolve_model`), and `child_options` builds the
+   child's settings from it.
 3. **Hand back the run, and hold the child at its gate.** The provider doesn't write
    the admission. The seam does, into the child's log, because it holds both the
    resolved request and the run, and it stamps the `owner` a readmission finds the
@@ -276,6 +282,9 @@ Obligations a provider carries, in order:
    `record_ended`, which rides on the ending and is delivered into the parent's own
    inbox. The resume sweep delivers one a crash kept from the parent, and never one
    the parent's log already has.
+6. **End a child that owes a value as any other**, through `record_ended`: the
+   seam holds it to the value ([above](#a-value-in-a-set-shape-typed-child-results)).
+   A provider that wants its own wording asks `settle_value` first, as ph-rlm does.
 
 A child's spend needs no obligation: its answers carry their `usage` in its own
 log.
