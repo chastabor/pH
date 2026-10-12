@@ -22,7 +22,6 @@ record land in one batch, so the record is in the log exactly when the edit is.
 
 from __future__ import annotations
 
-import difflib
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Annotated, Any
@@ -42,6 +41,8 @@ from ph.session import (
     messages_of,
     originals,
     render_messages,
+    shape_of,
+    unified_diff,
 )
 from ph.text import thousands
 from ph.tools.definition import (
@@ -195,6 +196,8 @@ class RecallValue(ToolModel):
 
 class DiffValue(ToolModel):
     section: str
+    edits: list[str]
+    """The revisions behind the section, oldest first (`Session.history`)."""
     diff: str
     truncated: bool
 
@@ -291,16 +294,17 @@ async def apply(ctx: Context, config: Config) -> None:
         session = _session(run)
         section = _revised(session, mapper, args.section)
         current = render_messages(messages_of(session, section.nodes))
-        lines = difflib.unified_diff(
-            _original_text(session, section).splitlines(),
-            current.splitlines(),
-            fromfile=f"{section.name} as first written",
-            tofile=f"{section.name} now",
-            lineterm="",
-        )
-        diff = "\n".join(lines)
+        labels = (f"{section.name} as first written", f"{section.name} now")
+        diff = "\n".join(unified_diff(_original_text(session, section), current, labels))
         return DiffValue(
-            section=section.name, diff=diff[:DIFF_CHARS], truncated=len(diff) > DIFF_CHARS
+            section=section.name,
+            edits=[
+                _edit_line(session, event)
+                for seq in section.nodes
+                for event in session.history(seq)
+            ],
+            diff=diff[:DIFF_CHARS],
+            truncated=len(diff) > DIFF_CHARS,
         ).model_dump()
 
     tools.register(
@@ -387,7 +391,8 @@ async def apply(ctx: Context, config: Config) -> None:
     tools.register(
         define_tool(
             "context_diff",
-            "Show a unified diff of a revised section against the originals it stands for.",
+            "Show a unified diff of a revised section against the originals it stands for, "
+            "after the list of edits that led there, oldest first.",
             parameters=DiffArgs,
             output=ToolOutput(schema=DiffValue, render=_render_diff),
             execute=diff_tool,
@@ -483,6 +488,13 @@ def _revised(session: Session, mapper: SectionMap, name: str) -> Section:
     return section
 
 
+def _edit_line(session: Session, event: SessionEvent) -> str:
+    """One revision behind a section, as `context_diff` lists it: where it landed, what
+    it did, and the records its producer wrote for it."""
+    records = ", ".join(record.type for record in session.records_of(event.seq))
+    return f"seq {event.seq}: {shape_of(event)}" + (f" ({records})" if records else "")
+
+
 def _original_text(session: Session, section: Section) -> str:
     """The conversation a section stands for, as it was first written."""
     return render_messages(message for seq in section.nodes for message in originals(session, seq))
@@ -566,7 +578,8 @@ def _render_recall(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa
 
 
 def _render_diff(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
+    edits = "".join(f"- {line}\n" for line in value["edits"])
     body = value["diff"] or "(no difference)"
     if value["truncated"]:
         body += "\n[diff cut; the session log holds both versions]"
-    return text_content(body)
+    return text_content(f"Edits, oldest first:\n{edits}\n{body}" if edits else body)

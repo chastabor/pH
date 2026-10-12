@@ -779,3 +779,28 @@ async def test_a_skill_names_the_row_that_installed_it(mount: MountProfile, tmp_
     assert service.registrants()["passing"] == "skills-progressive"
     await beside.dispose()
     assert "passing" not in service.registrants()
+
+
+@pytest.mark.parametrize(
+    ("accepts", "read"),
+    [
+        ("accepts: [image/*, application/pdf]", ["image/*", "application/pdf"]),
+        ("accepts: [pictures]", None),
+        ("accepts: image/png", None),
+    ],
+    ids=["types-and-families", "not-a-media-type", "not-a-list"],
+)
+def test_a_skill_states_the_media_it_hands_its_child(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, accepts: str, read: list[str] | None
+) -> None:
+    """A3: a list of media types or families, refused whole when one is not, as every
+    malformed field is: a skill whose child silently lost a requirement would run it
+    on a route that cannot see. Sabotage: drop the pattern check."""
+    write_skill(tmp_path, "sort", extra=accepts)
+
+    with caplog.at_level("WARNING", logger="ph.seams.skills"):
+        found = discover_skills([str(tmp_path)])
+
+    assert [one.accepts for one in found] == ([] if read is None else [read])
+    if read is None:
+        assert "accepts" in caplog.text

@@ -14,8 +14,10 @@ from pydantic import ValidationError
 
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, ProfileDocument, load_profile_documents
-from ph.keys import MODELS
+from ph.keys import DIAGNOSTICS, LLM_FAKE, MODELS
+from ph.llm.adapter import ResolvedModel
 from ph.seams.models import (
+    MODEL_KINDS,
     Config,
     ModelChoice,
     ModelChoiceError,
@@ -170,3 +172,35 @@ async def test_a_mount_refuses_a_route_no_adapter_serves(mount: MountProfile) ->
     assert choose(ctx, ModelChoice()).route.label == "fake/fake-1"
     with pytest.raises(ModelChoiceError, match=r'no adapter here serves "nope".*serves fake'):
         choose(ctx, ModelChoice(provider="nope", model="m"))
+
+
+async def test_doctor_names_a_setting_a_route_cannot_carry(mount: MountProfile) -> None:
+    """A1: a route that sets a sampling setting its API does not take works, and `phern
+    doctor` says which it drops, so the person learns before reading a warning in a
+    log. Sabotage: leave the section out, or name a setting the route carries."""
+    route = {"provider": "fake", "model": "fake-1", "temperature": 0.6, "topK": 20}
+    ctx = await mount({"id": "models", "config": {"default": "main", "models": {"main": route}}})
+    ctx.require(LLM_FAKE).route = ResolvedModel(sampling=frozenset({"temperature"}))
+
+    report = dict(ctx.require(DIAGNOSTICS).report())
+
+    assert report["Model settings"] == [("main", "topK dropped: fake/fake-1 takes temperature")]
+    entry = ctx.require(MODELS).entry("main", ModelRoute.model_validate(route))
+    assert (entry.options().temperature, entry.options().top_k) == (0.6, 20)
+
+
+async def test_doctor_lists_which_shared_kinds_a_profile_serves(mount: MountProfile) -> None:
+    """A2: the cue to set a kind up. A shared kind the list holds names its route, and one
+    it does not says a skill asking for it runs on its parent's model. Sabotage: leave
+    the section out, or call an unlisted kind served."""
+    listed = {
+        "main": {"provider": "fake", "model": "fake-1"},
+        "classify": {"provider": "fake", "model": "fake-9"},
+    }
+    ctx = await mount({"id": "models", "config": {"default": "main", "models": listed}})
+
+    kinds = dict(dict(ctx.require(DIAGNOSTICS).report())["Model kinds"])
+
+    assert set(kinds) == set(MODEL_KINDS)
+    assert kinds["classify"] == "fake/fake-9"
+    assert kinds["light"].startswith("not listed;") and "parent's model" in kinds["light"]

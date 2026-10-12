@@ -47,6 +47,7 @@ from ph.llm.types import (
     Message,
     ReasoningBlock,
     ReasoningDelta,
+    SamplingSetting,
     StreamChunk,
     TextBlock,
     TextDelta,
@@ -57,6 +58,7 @@ from ph.llm.types import (
     UsageChunk,
     is_error_finish,
     text_of,
+    wire_sampling,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.uploads import FileHandle
@@ -100,6 +102,25 @@ Row config below rather than a constant at the call site, because `purpose` is
 this API's one required form field and gateways in front of it do not agree about
 the vocabulary — `user_data` is what OpenAI's own chat completions read as an
 input file, and a compatible server may want `assistants` or nothing at all."""
+
+SAMPLING_WIRE: dict[SamplingSetting, str] = {
+    "temperature": "temperature",
+    "topP": "top_p",
+    "presencePenalty": "presence_penalty",
+    "frequencyPenalty": "frequency_penalty",
+    "topK": "top_k",
+    "minP": "min_p",
+}
+"""Each sampling setting's body field on this wire (A1).
+
+`top_k` and `min_p` are not OpenAI's: llama.cpp and vLLM take them as extra body
+fields, and OpenAI refuses a field it does not know. So a route carries them only when
+its profile says its server does (`ProviderProfile.sampling_extras`)."""
+
+OPENAI_SAMPLING: frozenset[SamplingSetting] = frozenset(
+    {"temperature", "topP", "presencePenalty", "frequencyPenalty"}
+)
+"""What every server speaking this wire takes."""
 
 
 class WindowProbe(WireModel):
@@ -209,6 +230,10 @@ class ProviderProfile(WireModel):
     images and a 20 MB ceiling, so a text-only local model was promised
     capabilities it does not have. A route that takes none sets `accepts: []`."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
+    sampling_extras: tuple[Literal["topK", "minP"], ...] = ()
+    """Sampling settings this server takes beyond OpenAI's own (A1): llama.cpp and vLLM
+    take `topK` and `minP`. Empty by default, because OpenAI refuses a body field it
+    does not know, and a route's `topK` is then dropped with a warning instead."""
     uploads: tuple[str, ...] = ()
     """MIME types to send by *reference* through the Files API rather than inline (P7-03).
 
@@ -382,8 +407,9 @@ class OpenAiCompatibleAdapter:
                 }
                 for tool in options.tools
             ]
-        if options.temperature is not None:
-            body["temperature"] = options.temperature
+        body.update(
+            wire_sampling(options, {setting: SAMPLING_WIRE[setting] for setting in self.sampling})
+        )
         max_tokens = options.max_tokens or self.profile.default_max_tokens
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -441,7 +467,17 @@ class OpenAiCompatibleAdapter:
         # This wire takes `response_format: {"type": "json_schema", …}` with
         # `strict`, so the server builds a grammar and the reply cannot come back
         # another shape (P7-17).
-        return resolved(self.profile, structured_output=True, credential=self.profile.api_key_env)
+        return resolved(
+            self.profile,
+            structured_output=True,
+            credential=self.profile.api_key_env,
+            sampling=self.sampling,
+        )
+
+    @property
+    def sampling(self) -> frozenset[SamplingSetting]:
+        """The sampling settings this route carries: OpenAI's, and its server's extras."""
+        return OPENAI_SAMPLING | frozenset(self.profile.sampling_extras)
 
 
 @dataclass(slots=True)

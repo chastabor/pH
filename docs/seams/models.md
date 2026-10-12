@@ -16,14 +16,35 @@ nowhere a profile could say. The row lists them by key:
       fast: {provider: anthropic, model: claude-haiku-4-5-20251001}
 ```
 
-Each route may carry `reasoningEffort`, `temperature` and `maxTokens`, which a
-root started on it gets as its agent settings, and so does a child an agent starts
+Each route may carry `reasoningEffort`, `maxTokens` and the sampling settings model
+makers recommend (`temperature`, `topP`, `topK`, `minP`, `presencePenalty`,
+`frequencyPenalty`), which a root started on it gets as its agent settings, and so does a child an agent starts
 on it, by key or as the whole route (`child_options`), rather than its parent's. A
 child whose skill names a key this mount cannot run falls back to its parent's route
 and says so (`ModelFallback`, in [subagents](subagents.md)), and a readmitted child
 resolves its route again against the list as it is then, falling back the same way
 whatever named it. `default` must be a listed key; a list may be empty, which is
 `ph-base`'s: it registers no adapter, so there is nothing to list.
+
+**Kinds are keys named for the job** (`MODEL_KINDS`), so a skill works on any profile:
+`classify` for short replies at low effort with steady settings (sorting, tagging, yes
+or no), and `light` for cheap general work. A profile serves a kind by listing it, on
+whatever route does that job well there; a kind it does not list falls back to the
+parent's model with a warning, the cue to set it up, and `phern doctor` lists under
+"Model kinds" which it serves. Shipped profiles do not alias a kind to their default
+model, which would hide that warning. Media are not kinds: a skill states what it hands
+its child with `accepts`, whatever kind it asks for ([subagents](subagents.md)). ph-core
+ships one skill that asks for a kind, `categorize` (`model: classify`, a checked
+`{category, reason}` value), offered wherever a provider can start a child.
+
+**A sampling setting a route's API cannot carry is dropped, not refused.** Each
+adapter says which it takes (`ResolvedModel.sampling`): OpenAI-compatible servers take
+`temperature`, `topP` and the penalties, and `topK` and `minP` where a profile says
+its server does (`samplingExtras`, as llama.cpp and vLLM do); Anthropic takes
+`temperature`, `topP` and `topK`; Google all but `minP`. The `llm` seam drops any other
+before the request and warns once per route and setting, and `phern doctor` names it
+under "Model settings". An unset setting is never sent, so the server's own flags
+decide it.
 
 ## One rule for a choice
 

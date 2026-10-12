@@ -557,6 +557,7 @@ phern doctor                                  # roots, platform, available profi
 phern doctor --profile rlm-stable             # then mount it and let every row report
 phern events                                  # the event producer/consumer matrix
 phern --mode trajectory --session <id|path>   # audit a log, mounting nothing
+phern revisions <id|path> > revisions.jsonl  # every change to the context, one JSON line each
 ```
 
 `phern doctor` is the topology answered by the rows themselves — which containment

@@ -14,7 +14,8 @@ order they will be built. Each is its own change with its own gate.
    kind names a skill can ask for on any profile, and a check that a child's model can take
    the media it is handed.
 
-**Status:** section 1 done 2026-10-11 (see its Status); sections 2 and 3 not started. **Done first, 2026-10-11** (recorded under S7b in
+**Status:** section 1 done 2026-10-11, sections 2 and 3 done 2026-10-12 (see each
+one's Status). **Done first, 2026-10-11** (recorded under S7b in
 `Session_Profiles_Plan.md`):
 
 - A child named onto a whole route (`provider`/`model`) resolves through the list like a
@@ -260,6 +261,48 @@ docstrings are rewritten along with the reader.
 - It reads a stored log through `ph.persistence.read_session`, as `diffs` already can, from
   a `phern` command.
 
+### Status (2026-10-12)
+
+H1 to H4 are built. **The decision was taken as proposed:** the link is a payload key
+core reserves (`revises`), not an envelope field, so the log format is unchanged.
+
+- **H1.** `substitute`, `rewrite` and a third door, `rewrite_many`, take the producer's
+  record as a `RevisionRecord` (its own writer, its type, its payload) and write it
+  right after the replacement, stamped `revises: [seq, ...]`. `LogWriter.append` refuses
+  any other write that carries the key; the door writes through `_append_revising`.
+  `Session.records_of(seq)` answers from an index (`RevisionIndex`) extended as the log
+  grows. `/diff`'s batch pairing (`_landed`, `_batch`) and its `shared` flag are gone: a
+  record that explains several changes says so by its own `revises`. ph-clm's
+  `_edit_at` is a lookup, and `clm/revised` lost `replacement`. Every producer's record
+  now follows its replacement, compaction's summary and the clip's `offload/spilled`
+  included. The writers walk reads `RevisionRecord(<writer>, type, …)` as a write.
+- **H2.** `RevisionRecord.size` (`RevisionSize`: tokens or bytes, before, after) is
+  written by the door as the record's `size`: compaction's summary and argument elision
+  and ph-clm in tokens, the clip and input-offload in bytes. `/diff` reads it in place
+  of the `<unit>Before`/`<unit>After` convention, which is gone, and lists the door's two
+  keys apart from the producer's fields. The gate is in `tests/test_revision_history.py`,
+  which drives each producer for real.
+- **H3.** `Session.history(seq)` lists every replacement behind a node, oldest first,
+  from the same index, kept per node once worked out (what a node stands for never
+  changes). `/diff` lists one group per surface node a revision led to, and `w` switches
+  its details between each edit, newest first with its records and its own diff, and the
+  whole history, the node as first written against the node now. `unified_diff` in
+  `ph.session.revise` is the one diff helper, with its labels as arguments, for `/diff`
+  and ph-clm's `context_diff`, which now lists the section's edits, oldest first, above
+  its diff. *Departure from the design:* groups are surface nodes only, not ph-clm
+  sections, because the app may not read a bundle's section map
+  (`test_app_layering.py`); a section is a run of these nodes.
+- **H4.** `phern revisions <id|path>` prints one JSON line per change, read from the log
+  on disk with nothing mounted (`ph_app.stored.load_session`, which the trajectory
+  viewer now shares): the change's shape, what it replaced and what it is now as
+  `render_messages` renders both, its producer, its records whole, the door's size,
+  and the tool calls its records name by `callId`. *Departure:* "the model's call that
+  asked for it" is read generically, since the app may not import ph-clm, so the
+  clip's row names the call whose result was clipped. `ph_app.revisions` reads a
+  revision once for `/diff` and the export (`read_revision`); core holds what every
+  reader shares: `shape_of`, `revises_of`, `RevisionSize.of` and `producer_data`. The gate is
+  `tests/test_revision_history.py`, which also holds H2's.
+
 ### Steps and gates
 
 - **H1: Records through the door.** Every producer moves, and `records_of` replaces the
@@ -277,9 +320,15 @@ docstrings are rewritten along with the reader.
 ### What breaks
 
 - Logs written before H1 have records with no `revises`, so `/diff` shows their changes
-  with no records beside them. There is no shim.
-- Compaction's summary record comes after its replacement instead of before it.
-- `clm/revised.replacement` repeats `revises` and is dropped from ph-clm's own record.
+  with no records beside them, and ph-clm cannot restore an edit made before H1 (it
+  answers that the section has not been revised). There is no shim.
+- Compaction's summary record comes after its replacement instead of before it, and so
+  does the overflow clip's `offload/spilled`.
+- `clm/revised.replacement` repeats `revises` and is dropped from ph-clm's own record, and
+  `tokensBefore`/`tokensAfter` move into the door's `size`.
+- `substitute` and `rewrite` take a required record; a caller outside the shipped
+  producers (a test, a plugin) passes one (`ph.testing.revision_record`).
+- `/diff` no longer reads a `<unit>Before`/`<unit>After` pair off any record.
 
 ## 3. Model kinds
 
@@ -340,6 +389,46 @@ docstrings are rewritten along with the reader.
   comment records a model with no image input spending many steps trying to see one, so
   the warning has to reach the parent.
 
+### Status (2026-10-12)
+
+**A1 to A3 are built.** The decisions are below; the graceful-degradation rule settled
+two of them as proposed, and Charles settled the third.
+
+- `ModelRoute`, `AgentOptions`, `LlmCallConfig` and `GenerateOptions` gain `top_p`,
+  `top_k`, `min_p`, `presence_penalty` and `frequency_penalty` beside `temperature`,
+  flat as `temperature` is, so a logged header is unchanged where none is set. Each
+  layer copies them as it does `temperature` (`ModelEntry.options`, `seed_config`,
+  `_build_request`, compaction's `_replay`); `sampling_of` reads them by the name a
+  route spells (`SamplingSetting`).
+- `ResolvedModel.sampling` says what a route's API takes; `resolved()` requires it.
+  OpenAI-compatible: `temperature`, `topP` and the penalties, plus `topK` and `minP`
+  where a profile lists them in `samplingExtras` (the shipped `llama.yaml` does);
+  Anthropic: `temperature`, `topP`, `topK`; Google: all but `minP`. Each adapter
+  sends only those, under its wire's names.
+- The `llm` seam drops any other before the request (so `llm/send` sees what is
+  sent) and warns once per route and setting; the `models` row adds a "Model
+  settings" section to `phern doctor` naming each listed key that drops one.
+- *Found:* no adapter sends `reasoningEffort`; see "Recorded, not planned".
+- **A2.** `MODEL_KINDS` (`ph.seams.models`) names the shared kinds, `classify` and
+  `light`, with the job each is for; the `models` row adds a "Model kinds" section to
+  `phern doctor` naming the route each is listed on, or that a skill asking for it runs
+  on its parent's model. ph-core ships `categorize` (`ph/shipped_skills`), which asks
+  for `classify` and owes `{category, reason}`, offered by a row that registers a
+  subagent provider (`offer_shipped_skills`, from ph-rlm's `rlm-subagent-provider`),
+  so its catalog line appears only where a child can be started. The skills README's
+  front-matter table gains `model`, `output` and `accepts`, and `docs/seams/models.md`
+  the kinds.
+- **A3.** A skill states the media it hands its child (`accepts: [image/*]`,
+  `Skill.accepts`, at most 16, each a type or family). `resolve_model` asks them of the
+  route it resolved to (`_with_media`): a route that cannot take them gives way to the
+  parent's where that can (`ModelFallback.reason` `cannot-accept`, with `media`); one
+  the spawn named itself is refused, the rule for every spawn choice; where neither
+  can, the child runs and sees placeholders, and a `MediaShortfall` reaches the
+  admission (`mediaShortfall`) and the parent's note. A readmission asks again and
+  degrades. *Not built:* media "the spawn's attachments imply", since a spawn request
+  carries none. `categorize` states no `accepts`, since it sorts text as well; a skill
+  that sorts only pictures would.
+
 ### Steps and gates
 
 - **A1: Settings.** *Gate:* each adapter's request body carries what its API takes and
@@ -350,28 +439,89 @@ docstrings are rewritten along with the reader.
 - **A3: Media.** *Gate:* an image-categorizing child whose kind's route takes no images
   falls back to a parent that does; with neither able, it runs and the parent is warned.
 
-### Decisions to make
+### Decisions (made 2026-10-12)
 
-- The kind names, and whether `vision`, `audio` and `video` are kinds or requirements a
-  skill states with `accepts`.
-- A setting a route cannot carry: drop it with a warning (proposed), or refuse it.
-- What a child does when no route here takes its media: run with placeholders and warn
-  (proposed), or refuse.
+- **Media are requirements, not kinds** (decided by Charles): kinds name the job
+  (`classify`, `light`), and a skill states its media with `accepts`, so a cheap
+  classifier that takes images is one key and one list.
+- **A setting a route cannot carry is dropped with a warning**, as proposed, by the
+  graceful-degradation rule.
+- **A child no route here lets see its media runs with placeholders and its parent is
+  warned**, as proposed, by the same rule; a route the spawn itself named that cannot
+  take them is refused, since the parent can choose again at once.
+
+### What breaks
+
+- `ph.llm.adapter.resolved()` requires `sampling`, so an adapter outside this repository
+  that calls it must say what its wire takes.
+- `ModelRoute`, `AgentOptions`, `LlmCallConfig` and `GenerateOptions` gain five optional
+  fields; a header with none set is written as before.
+- A route on the OpenAI wire sends `top_k` and `min_p` only where its profile lists them
+  in `samplingExtras`; the shipped `llama.yaml` does, and a person's own overlay of a
+  llama.cpp or vLLM route has to add them.
+- Wherever ph-rlm's subagent provider is mounted, the skill catalog gains `categorize`,
+  so those profiles' prompts gain a line.
+- `ModelFallback.reason` gains `cannot-accept` (with `media`), and the admission
+  `mediaShortfall`; a log from before opens as it did.
+- A skill's front matter gains `accepts`; a malformed one refuses the skill.
 
 ## Recorded, not planned here
 
-- **A request larger than the window is sent before it is shrunk** (found by section 1's
-  live gate, 2026-10-12). On the local llama slot (16,384 tokens), one cell's output,
-  capped at a fixed 64 KB (`max_log_bytes`, about 16,000 to 20,000 tokens), can outgrow
-  the window by itself. Compaction keeps the latest turn whole, so the next loop request
-  (about 26,000 tokens) goes to the server, which refuses it ("request exceeds the
-  available context size"); the overflow recovery then shrinks it to about 4,800 tokens
-  and the turn carries on. The `rlm` profile mounts no offload row (`rlm-stable` does).
-  - *The options:* scale the kernel's `max_log_bytes` to the route's window; check an
-    assembled request against the window before sending, and apply the overflow remedy
-    first; or mount the offload row in `rlm`.
-  - *Cost of waiting:* one refused request and a retry each time a cell prints that much,
-    and a line in the server's log a person reads as a fault.
+- **No adapter sends `reasoningEffort`** (found building A1, 2026-10-12). A route's or a
+  spawn's effort reaches `GenerateOptions` and the footer (`reasoning_reading`), and
+  stops there: none of the three adapters puts it in a body. Each API spells it
+  differently (OpenAI's `reasoning_effort`, Anthropic's `thinking.budget_tokens`,
+  Google's `thinkingConfig.thinkingBudget`, llama.cpp's `chat_template_kwargs`), so
+  sending it means mapping an effort onto a budget per wire, which is a design of its
+  own.
+  - *Cost of waiting:* a person who sets an effort sees it in the footer and gets the
+    server's default.
+
+- **A request larger than the window was sent before it was shrunk: fixed 2026-10-12**
+  (found by section 1's live gate). On the local llama slot (16,384 tokens), one cell's
+  output, capped at a fixed 64 KB (`max_log_bytes`), can outgrow the window by itself,
+  and a summary leaves the latest turn whole, so the next request (about 26,000 tokens)
+  went to the server, which refused it; only then did the overflow recovery clip it.
+  - *What was built* (the option chosen, of three: scaling `max_log_bytes` to the
+    window, checking the request against the window before sending, or mounting the
+    offload row in `rlm`): `compaction-summarize` listens on `agent/request`, where
+    input-offload revises too, once the step's batch is in the log and before the loop
+    derives the messages, and asks whether the token meter's estimate of the request
+    fills the whole window (`_past_the_window`, trigger `window`). If so it runs the
+    overflow remedy first: the clip of the step's results, then a summary in the direct
+    shape if it still does not fit. The step's own pressure check leaves such a request
+    to it, so the clip comes before a summary is paid for. No refusal is faked, so
+    `limits` counts no model call and the log shows no retry; the estimate is the
+    meter's, the provider's last count plus what was added since.
+  - *Found on the way, fixed with it:* the recovery after a refusal clipped only results
+    at the very end of the context, but a step's batch can come after them (rlm's
+    session facts, added again once a summary has shadowed them), so the clip found
+    nothing and the turn ended in the refusal. `_trailing_results` now looks past the
+    batch's user messages.
+  - *Live check* (a throwaway probe, not kept): a cell printing 65 KB on the local Qwen
+    was clipped before the next request, which was about 2,700 tokens, with nothing
+    refused; with the check disabled, the refusal was recovered by the clip past the
+    session facts.
+  - *The prefix benchmark moved with it* (`docs/dev-notes/prefix-cache-benchmark.md`,
+    findings 5 and 6, and the headline): at the 8,192 window `rlm-stable` now clips
+    each oversized cell result before sending instead of summarizing every turn, so
+    it sends 88 % fewer tokens, keeps its cached prefix (75.9 %, was 22.9 %), and its
+    uncached tokens fall from about 36,000 to 4,120. The summary's trade against the
+    prefix still applies when the history itself outgrows the window.
+  - *Cost of the estimate:* without `tiktoken` the meter counts four characters a
+    token, which under-counts digit-heavy output on Qwen; a request it misses is still
+    refused once and recovered as before.
+
+- **A drain that times out on a running refinement fails the teardown.** Seen in the
+  live probe above: a summary makes an automatic refinement due (`harness.auto.due`),
+  `turn/end` starts it, and with no task group bound to the jobs seam it runs on
+  `ctx.detach`, so `ctx.drain()` waits on its model call (minutes on a local 27B model)
+  until its deadline. A `CancelledError` then reaches pytest's runner (and a
+  `ClosedResourceError` after it). A shielded deadline scope around `asyncio.gather`
+  alone does not leak it (checked), so the cancel comes from elsewhere. No kept test
+  hits it today: the smoke tests' turns write no summary.
+  - *Cost of waiting:* a teardown error in a live test whose turn compacts, and
+    possibly the same at a daemon's shutdown while a refinement runs.
 
 - **A fallback badge on a child's row in the TUI.** `ChildRow` shows a downgrade today;
   a model fallback reaches the parent's tool result and the log, but not the panel.

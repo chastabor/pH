@@ -16,12 +16,23 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from ..cordis import Context, Running, events, plugin, running
 from ..keys import LLM
-from .types import Finish, FinishReason, GenerateOptions, LlmFailure, StreamChunk
+from .types import (
+    FIELD_OF,
+    Finish,
+    FinishReason,
+    GenerateOptions,
+    LlmFailure,
+    SamplingSetting,
+    StreamChunk,
+    sampling_fields,
+    sampling_of,
+    uncarried,
+)
 
 __all__ = [
     "AdapterHandle",
@@ -121,6 +132,16 @@ class ResolvedModel:
     outcomes differ in kind: over that, nothing is sent; over this, everything
     works and a person is quietly overpaying, which is the failure that lasts for
     a whole session because nothing announces it."""
+    sampling: frozenset[SamplingSetting] | None = None
+    """The sampling settings this route's API takes (A1), or `None` when its adapter has
+    not said.
+
+    A setting outside it is dropped before the request reaches the adapter, with a
+    warning once per route and setting, and the `models` row names it in `phern
+    doctor`: graceful degradation, since a route that runs without a recommended
+    setting still works, where one refused would not. `None` drops and warns about
+    nothing, since a guess would either warn falsely or send a field a strict server
+    refuses."""
     credential: str | None = None
     """The credential this route resolves at the adapter edge, **by name** (I-3) —
     the `apiKeyEnv` its row names — or `None` for a route that needs none.
@@ -170,7 +191,11 @@ class MediaRoute(Protocol):
 
 
 def resolved(
-    route: MediaRoute, *, structured_output: bool, credential: str | None
+    route: MediaRoute,
+    *,
+    structured_output: bool,
+    credential: str | None,
+    sampling: frozenset[SamplingSetting],
 ) -> ResolvedModel:
     """One route's config as the `ResolvedModel` every layer above reads.
 
@@ -190,7 +215,8 @@ def resolved(
     call site, and a route that declared it in config could promise a guarantee
     its adapter does not implement. `credential` is passed for the plainer reason
     that it is not a media fact: it is the name the adapter resolves at its edge,
-    and **required** so an adapter cannot forget to say (T5).
+    and **required** so an adapter cannot forget to say (T5). `sampling` is the
+    wire's too, and required for the same reason.
     """
     return ResolvedModel(
         context_window=route.context_window,
@@ -201,6 +227,7 @@ def resolved(
         usable_image_edge=route.usable_image_edge,
         structured_output=structured_output,
         credential=credential,
+        sampling=sampling,
     )
 
 
@@ -244,6 +271,9 @@ class LlmRuntime:
     ctx: Context
     _registrations: list[AdapterHandle] = field(default_factory=list)
     _routes: dict[str, AdapterHandle] = field(default_factory=dict)
+    _dropped: set[tuple[str, str, SamplingSetting]] = field(default_factory=set)
+    """Each `(provider, model, setting)` already warned about, so a session warns once
+    rather than on every request."""
 
     def register_adapter(self, providers: Sequence[str], adapter: LlmAdapter) -> AdapterHandle:
         """Claim one or more provider routes for `adapter`.
@@ -298,11 +328,34 @@ class LlmRuntime:
             resolved = resolver(provider, model)
         return resolved if isinstance(resolved, ResolvedModel) else ResolvedModel()
 
+    def _carried(self, request: GenerateOptions) -> GenerateOptions:
+        """`request` as its route can carry it: a sampling setting its API does not take
+        is dropped, with a warning the first time (`ResolvedModel.sampling`)."""
+        if not sampling_of(request):
+            return request
+        carried = self.resolve_model(request.provider, request.model).sampling
+        if carried is None:
+            return request
+        request, dropped = _carried_by(request, carried)
+        for setting in dropped:
+            seen = (request.provider, request.model, setting)
+            if seen not in self._dropped:
+                self._dropped.add(seen)
+                log.warning(
+                    "ph.llm: %s/%s does not take %s, so it is not sent; it takes %s",
+                    request.provider,
+                    request.model,
+                    setting,
+                    ", ".join(sorted(carried)) or "none",
+                )
+        return request
+
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
         """Dispatch one request through the `llm/stream` waterfall."""
 
         async def inner(request: GenerateOptions) -> AsyncIterator[StreamChunk]:
             handle = self._route(request.provider)
+            request = self._carried(request)
             await self.ctx.serial("llm/send", request)
             # The binding goes *inside* the generator (C10). Both
             # `adapter.stream(...)` and `_normalized(...)` are async-generator
@@ -313,6 +366,19 @@ class LlmRuntime:
             return _normalized(handle.adapter.stream(request), request, handle.by)
 
         return await self.ctx.waterfall("llm/stream", options, inner=inner)
+
+
+def _carried_by(
+    request: GenerateOptions, carried: frozenset[SamplingSetting]
+) -> tuple[GenerateOptions, list[SamplingSetting]]:
+    """`request` without the sampling settings its route does not take, and which."""
+    dropped = uncarried(request, carried)
+    if not dropped:
+        return request, dropped
+    fields = sampling_fields(request)
+    for setting in dropped:
+        fields[FIELD_OF[setting]] = None
+    return replace(request, **fields), dropped
 
 
 async def _normalized(

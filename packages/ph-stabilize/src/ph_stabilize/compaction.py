@@ -26,6 +26,12 @@ Invariants this row holds:
   overflow the trailing tool-result batch is spilled and pointed at (§7.4 item 7)
   before summarization is attempted at all — that batch is precisely the shape
   that leaves no balanced cut.
+* **A request past the whole window takes the overflow remedy before it is sent.**
+  One step's results can outgrow the window by themselves (a 64 KB cell on a
+  16 384-token slot), and a summary leaves the latest turn whole, so such a request
+  went out anyway, was refused, and was only then clipped. The estimate says so at
+  `agent/request`, with the step's batch in the log, so the clip runs there
+  (trigger `window`), and the step's own pressure check leaves it to that one.
 * **The request replays the conversation's own envelope**: same `system`, same
   `tools`, the shadowed messages as themselves, and the extraction prompt
   appended as the last *user* message. So the request is a strict prefix of the
@@ -39,7 +45,8 @@ Invariants this row holds:
   reply with no text is retried once in the self-contained shape — without tools,
   and with the whole range. Cheap first, correct second.
 * **Overflow never replays**, because the envelope in question is the request a
-  provider just refused for being too large. It sends upstream's own 4 000-token
+  provider just refused for being too large; nor does a conversation the estimate
+  still puts past the window after the clip. It sends upstream's own 4 000-token
   tail (`_DEFAULT_TRIM_TOKEN_LIMIT`, `strategy="last"`) rendered as text, which is
   also the only shape that can carry it — a *suffix* of a balanced range may begin
   with an orphaned tool result. When that tail is trimmed the rendered text
@@ -47,9 +54,11 @@ Invariants this row holds:
   conversation, and not told that is what it is reading, will state the middle as
   the intent.
 
-Two triggers, and they ask genuinely different questions: `agent/pre-step` asks
+Three triggers, and they ask genuinely different questions: `agent/pre-step` asks
 "will the next request be too big" from an *estimate*, because no usage number
-exists for a request nobody has made; `agent/request-error` asks nothing — the
+exists for a request nobody has made; `agent/request` asks "would a provider refuse
+this request at all", from the same estimate once the step's batch is in;
+`agent/request-error` asks nothing — the
 provider has already answered `CONTEXT_WINDOW_EXCEEDED`, which `llm-retry`
 declines to retry so this row can see it.
 
@@ -70,6 +79,7 @@ from ph.agent.types import (
     PreStepRequest,
     RequestErrorAction,
     RequestFailure,
+    RequestProposal,
 )
 from ph.agent_loop import AgentCanceled
 from ph.cancel import Canceled
@@ -81,6 +91,7 @@ from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
     ContentBlock,
     GenerateOptions,
+    LlmCallConfig,
     MediaBlock,
     Message,
     PluginSource,
@@ -91,6 +102,7 @@ from ph.llm.types import (
     ToolResultBlock,
     create_message,
     create_user_message,
+    sampling_fields,
     text_of,
 )
 from ph.seams.compaction import CompactionError, CompactionResult, CompactionTrigger
@@ -98,12 +110,14 @@ from ph.seams.spill import SpillClaim
 from ph.seams.token_meter import TokenBaseline
 from ph.session import (
     EpochHeader,
+    RevisionRecord,
+    RevisionSize,
     Session,
     SessionEvent,
     derive_event_message,
     editable_message,
     is_stand_in,
-    rewrite,
+    rewrite_many,
     safe_cutoff,
     substitute,
 )
@@ -373,19 +387,41 @@ class Config(WireModel):
 # ------------------------------------------------------------- tool pairing --
 
 
+def _past_the_window(baseline: TokenBaseline) -> bool:
+    """Whether the next request, by the estimate, fills the whole window: one a
+    provider would only refuse. `False` when the window is unknown, where a refusal
+    is the only word on it."""
+    pressure = baseline.pressure
+    return pressure is not None and pressure >= 1
+
+
 def _trailing_results(session: Session) -> tuple[int, ...]:
-    """The run of `tool/result` nodes the surface currently ends with.
+    """The run of `tool/result` nodes the surface ends with, past the user messages
+    a step's batch put after them.
 
     Upstream's `_find_tail_tool_message_batch`, over surface positions. Empty
     when the conversation does not end in tool results — which is the ordinary
     case, and the cheap check that keeps this pass free when it does not apply.
+
+    **Past the batch**, because pH splices one between a step's results and its next
+    request: prompt context that changed (rlm's session facts, added again once a
+    summary has shadowed them), a steer, a result's own context. A refusal comes
+    after that batch, so asking only for results at the very end found none, and the
+    turn ended in a refusal the clip could have recovered.
     """
-    events = session.events
     nodes = session.surface.nodes
+
+    def kind(position: int) -> str:
+        event = session.at(nodes[position])
+        return "" if event is None else event.type
+
     end = len(nodes)
-    while end > 0 and events[nodes[end - 1]].type == "tool/result":
+    while end > 0 and kind(end - 1) == "user/message":
         end -= 1
-    return nodes[end:]
+    start = end
+    while start > 0 and kind(start - 1) == "tool/result":
+        start -= 1
+    return nodes[start:end]
 
 
 # ------------------------------------------------------- argument truncation --
@@ -616,8 +652,23 @@ class SummarizeEngine:
         """The policy itself, unguarded — the guard is its caller's."""
         meter = self.ctx.require(TOKEN_METER)
         baseline: TokenBaseline = meter.baseline(session)
-        if trigger == "pressure" and not self._under_pressure(baseline):
+        estimated = trigger in ("pressure", "window")
+        if estimated and not self._under_pressure(baseline):
             return None
+        past = _past_the_window(baseline)
+        if trigger == "pressure" and past:
+            # A request no provider would take is the request's own check to relieve
+            # (`window`, at `agent/request`): measured with the step's batch in, and
+            # clipped there before a summary is paid for.
+            return None
+        if trigger == "window":
+            if not past:
+                return None
+            # The overflow remedy before the refusal rather than after it: the clip
+            # first, since what puts a request past the whole window is most often
+            # the step's own results.
+            if await self.clip_overflow_tail(agent):
+                baseline = meter.baseline(session)
         # Before the expensive remedy, the free one: eliding a 40 KB file body
         # the model already wrote costs no model call, and often takes enough
         # off that the summary is not needed this step (§7.4 item 2).
@@ -626,14 +677,15 @@ class SummarizeEngine:
             # surface since the last reported usage, so what was taken off comes
             # off the count now rather than at the next response.
             baseline = meter.baseline(session)
-        if trigger == "pressure" and not self._under_pressure(baseline):
+        if estimated and not self._under_pressure(baseline):
             return None
         if self._declined_since_the_surface_moved(session):
             # A decline stands until something is added. Without this the
             # overflow path would re-attempt inside the same `while True` step
             # loop, and each attempt costs a model call to reach the same answer.
             return None
-        return await self._compact(agent, session, trigger)
+        oversized = trigger == "overflow" or _past_the_window(baseline)
+        return await self._compact(agent, session, trigger, oversized=oversized)
 
     async def compact_now(
         self, agent: AgentHandle, *, instructions: str = ""
@@ -698,14 +750,17 @@ class SummarizeEngine:
         trigger: CompactionTrigger,
         *,
         instructions: str = "",
+        oversized: bool = False,
     ) -> CompactionResult | None:
+        """`oversized`: the conversation is past the window, by the provider's word or
+        the estimate's, so the summarizer is shown its tail rather than a replay."""
         plan = self._plan(session)
         if plan is None:
             return None
         self._running.add(session.id)
         try:
             summary, usage, shape = await self._summarize(
-                agent, session, plan, instructions, trigger
+                agent, session, plan, instructions, oversized=oversized
             )
             if not summary:
                 # Landing an empty summary would shadow the conversation with
@@ -841,36 +896,41 @@ class SummarizeEngine:
         events = session.events
         cutoff = self._truncate_cutoff(session, nodes)
         elides = self._elides_arguments(agent)
-        rewritten: list[int] = []
+        rewrites: list[tuple[SessionEvent, dict[str, Any]]] = []
         saved = 0
-        # One batch: the rewrites and the record of them land together or not at
-        # all (P10-14). One at a time, a rewrite the surface refused partway left
-        # the ones before it in the log with no `compaction/args-truncated` saying
-        # why — and the record, had it been written, describing rewrites that
-        # never landed.
-        with session.batch() as batch:
-            for at in nodes[:cutoff]:
-                event = events[at]
-                if event.type != "assistant/message":
-                    continue
-                replacement = truncated_assistant_message(
-                    event, elides=elides, max_length=settings.max_length
-                )
-                if replacement is None:
-                    continue
-                message, savings = replacement
-                rewrite(batch, event, message)
-                rewritten.append(at)
-                saved += savings
-            if rewritten:
-                # The harness's own statement of what it elided. Without it the
-                # only record is a diff between two events, and no record at all
-                # of *why*.
-                _LOG.append(
-                    batch,
-                    "compaction/args-truncated",
-                    {"trigger": trigger, "seqs": rewritten, "savedChars": saved},
-                )
+        for at in nodes[:cutoff]:
+            event = events[at]
+            if event.type != "assistant/message":
+                continue
+            replacement = truncated_assistant_message(
+                event, elides=elides, max_length=settings.max_length
+            )
+            if replacement is None:
+                continue
+            message, savings = replacement
+            rewrites.append((event, message))
+            saved += savings
+        rewritten = [event.seq for event, _ in rewrites]
+        if rewrites:
+            # One batch: the rewrites and the record of them land together or not at
+            # all (P10-14). One at a time, a rewrite the surface refused partway left
+            # the ones before it in the log with no `compaction/args-truncated`
+            # saying why — and the record, had it been written, describing rewrites
+            # that never landed. One record for them all, naming each (`revises`):
+            # the harness's own statement of what it elided, without which the only
+            # record is a diff between two events, and no record at all of *why*.
+            meter = self.ctx.require(TOKEN_METER)
+            record = RevisionRecord(
+                _LOG,
+                "compaction/args-truncated",
+                {"trigger": trigger, "seqs": rewritten, "savedChars": saved},
+                RevisionSize(
+                    "tokens",
+                    sum(meter.node_tokens(session, seq) for seq in rewritten),
+                    sum(meter.measure(Message.model_validate(new)) for _, new in rewrites),
+                ),
+            )
+            rewrite_many(session, rewrites, record)
         return tuple(rewritten)
 
     def _should_truncate(self, baseline: TokenBaseline, nodes: tuple[int, ...]) -> bool:
@@ -916,25 +976,25 @@ class SummarizeEngine:
         A `tool/result` surface `replace` is the mechanism, and the surface validator
         constrains it to changing content alone — the invariant that makes this safe to
         do to history the model has already read.
+
+        Asked on a provider's refusal, and before one: at the step's start, when the
+        estimate puts the request past the whole window (`_past_the_window`).
         """
         session: Session | None = agent.session
         if session is None:
             return ()
-        events = session.events
         tail = _trailing_results(session)
         if not tail:
             return ()
-        budget = self._clip_budget(session)
-        measured = sum(
-            self.ctx.require(TOKEN_METER).measure(message)
-            for message in (derive_event_message(events[seq]) for seq in tail)
-            if message is not None
-        )
-        if measured < budget:
+        # The meter's own per-node counts, which the baseline that asked for this has
+        # just filled: the largest messages in the session, not tokenized twice.
+        meter = self.ctx.require(TOKEN_METER)
+        if sum(meter.node_tokens(session, seq) for seq in tail) < self._clip_budget(session):
             return ()
         clipped: list[int] = []
         for at in tail:
-            if await self._clip_one(session, events[at]):
+            event = session.at(at)
+            if event is not None and await self._clip_one(session, event):
                 clipped.append(at)
         return tuple(clipped)
 
@@ -988,9 +1048,7 @@ class SummarizeEngine:
         # land together or not at all. And fail open, as everywhere else in this
         # bundle: a clip that cannot store the content must not be the reason the
         # model loses it.
-        return await spill_tool_result(
-            self.ctx, session, planned, beside=lambda batch: rewrite(batch, event, clipped)
-        )
+        return await spill_tool_result(self.ctx, session, planned, rewriting=(event, clipped))
 
     def _window(self, session: Session) -> int | None:
         context = session.request_context()
@@ -1004,7 +1062,8 @@ class SummarizeEngine:
         session: Session,
         plan: _Plan,
         instructions: str,
-        trigger: CompactionTrigger,
+        *,
+        oversized: bool,
     ) -> tuple[str, TokenUsage | None, str]:
         """One `purpose="compaction"` call; the summary, its cost, and its shape.
 
@@ -1018,13 +1077,13 @@ class SummarizeEngine:
         conversation's — the whole point, since the shadowed range is a prefix of
         the surface and a cached prefix is what makes this call nearly free
         (A12). `direct` sends the extraction instruction as its own system prompt
-        with no tools. Overflow always takes `direct`, and has to: replaying the
-        request a provider just refused for being too large, plus an
-        instruction, refuses again.
+        with no tools. An `oversized` conversation always takes `direct`, and has
+        to: replaying the request a provider just refused for being too large, or
+        one the estimate says it would refuse, plus an instruction, refuses again.
         """
         header = session.request_header()
         extras = self._extras(session, agent, instructions)
-        if trigger == "overflow" or header is None:
+        if oversized or header is None:
             # The trimmed tail, inlined as text rather than sent as messages: a
             # *suffix* of a balanced range can begin with an orphaned tool
             # result, and rendering sidesteps a structure the range no longer
@@ -1083,7 +1142,7 @@ class SummarizeEngine:
             messages=(*plan.messages, _instruction_message(instruction)),
             system=header.system,
             tools=tuple(header.tools or ()),
-            temperature=header.config.temperature,
+            **sampling_fields(header.config),
             stop=tuple(header.config.stop or ()),
             max_tokens=self.config.max_tokens,
             session_id=session.id,
@@ -1157,7 +1216,7 @@ class SummarizeEngine:
         instructions: str,
         shape: str,
     ) -> CompactionResult:
-        """Write the history, record the accounting, then replace the surface."""
+        """Write the history, then replace the surface, the accounting after it."""
         history = render_for_summary(plan.messages, trimmed=False)
         store = self.ctx.require(SPILL_STORE)
         ref = await store.try_save_text(
@@ -1167,57 +1226,55 @@ class SummarizeEngine:
             content=history,
         )
         options = agent.options
-        # One batch (P10-14). The two events are adjacent, which is what lets a
-        # consumer price a shadowed range from the record immediately before it;
-        # and they land together, so a replacement the surface refuses no longer
-        # leaves an accounting record for a summary that replaced nothing.
-        with session.batch() as batch:
-            _LOG.append(
-                batch,
-                "compaction/summarized",
-                {
-                    "trigger": trigger,
-                    "shadowedSeqs": list(plan.shadowed_seqs),
-                    "shadowedTokens": plan.shadowed_tokens,
-                    "kept": plan.kept,
-                    "provider": str(options.provider or ""),
-                    "model": str(options.model or ""),
-                    "maxTokens": self.config.max_tokens,
-                    "locator": None if ref is None else ref.locator,
-                    "usage": None if usage is None else usage.to_wire(),
-                    "instructions": instructions or None,
-                    # Which request shape paid for this summary. The cache is the
-                    # whole reason `replay` exists, and `usage.cacheReadTokens`
-                    # beside it is what makes "did we actually get the hit" a
-                    # question the log can answer rather than an assumption.
-                    "shape": shape,
-                },
-            )
-            text = (
-                REPLACEMENT_WITHOUT_PATH.format(summary=summary)
-                if ref is None
-                else REPLACEMENT_WITH_PATH.format(file_path=ref.locator, summary=summary)
-            )
-            replacement = substitute(
-                batch,
-                plan.shadowed_seqs,
-                create_user_message(
-                    content=[{"type": "text", "text": text}],
-                    # The harness speaking, and saying which kind of speech it is.
-                    # `form="compaction"` is the discriminator a reader needs: an
-                    # offloaded paste is also a plugin-authored replacement, and
-                    # calling either one by the other's name tells the person
-                    # something false about their own conversation.
-                    source=PluginSource(
-                        plugin="compaction-summarize",
-                        form="compaction",
-                        summary=(
-                            f"{count_of(len(plan.shadowed_seqs), 'message')} summarized"
-                            f" (~{plan.shadowed_tokens} tokens)"
-                        ),
-                    ),
+        text = (
+            REPLACEMENT_WITHOUT_PATH.format(summary=summary)
+            if ref is None
+            else REPLACEMENT_WITH_PATH.format(file_path=ref.locator, summary=summary)
+        )
+        message = create_user_message(
+            content=[{"type": "text", "text": text}],
+            # The harness speaking, and saying which kind of speech it is.
+            # `form="compaction"` is the discriminator a reader needs: an
+            # offloaded paste is also a plugin-authored replacement, and
+            # calling either one by the other's name tells the person
+            # something false about their own conversation.
+            source=PluginSource(
+                plugin="compaction-summarize",
+                form="compaction",
+                summary=(
+                    f"{count_of(len(plan.shadowed_seqs), 'message')} summarized"
+                    f" (~{plan.shadowed_tokens} tokens)"
                 ),
-            )
+            ),
+        )
+        # The summary's record, written by the door right after the replacement it
+        # explains and stamped with it, in one batch with it (P10-14): a replacement
+        # the surface refuses leaves no record of a summary that replaced nothing.
+        record = RevisionRecord(
+            _LOG,
+            "compaction/summarized",
+            {
+                "trigger": trigger,
+                "shadowedSeqs": list(plan.shadowed_seqs),
+                "shadowedTokens": plan.shadowed_tokens,
+                "kept": plan.kept,
+                "provider": str(options.provider or ""),
+                "model": str(options.model or ""),
+                "maxTokens": self.config.max_tokens,
+                "locator": None if ref is None else ref.locator,
+                "usage": None if usage is None else usage.to_wire(),
+                "instructions": instructions or None,
+                # Which request shape paid for this summary. The cache is the
+                # whole reason `replay` exists, and `usage.cacheReadTokens`
+                # beside it is what makes "did we actually get the hit" a
+                # question the log can answer rather than an assumption.
+                "shape": shape,
+            },
+            RevisionSize(
+                "tokens", plan.shadowed_tokens, self.ctx.require(TOKEN_METER).measure(message)
+            ),
+        )
+        replacement = substitute(session, plan.shadowed_seqs, message, record)
         return CompactionResult(
             trigger=trigger,
             summary=summary,
@@ -1263,7 +1320,7 @@ class SummarizeEngine:
     config=Config,
 )
 async def apply(ctx: Context, config: Config) -> None:
-    """Register the engine and arm the two automatic triggers."""
+    """Register the engine and arm the three automatic triggers."""
     ctx.require(SPILL_STORE).claim(
         SpillClaim.under_session(
             # `REPLACEMENT_WITH_PATH` tells the model the history "has been saved
@@ -1291,6 +1348,15 @@ async def apply(ctx: Context, config: Config) -> None:
             await engine.compact_if_needed(request.agent, "pressure")
         return decision
 
+    async def on_request(proposal: RequestProposal, next_: Next[LlmCallConfig]) -> LlmCallConfig:
+        config = await next_(proposal)
+        # At the request itself, once the step's batch is in the log and before the
+        # loop derives the messages, as input-offload revises there: a request the
+        # estimate puts past the whole window is clipped, or summarized, before it is
+        # sent, rather than sent to be refused.
+        await engine.compact_if_needed(proposal.agent, "window")
+        return config
+
     async def on_request_error(
         failure: RequestFailure, next_: Next[RequestErrorAction | None]
     ) -> RequestErrorAction | None:
@@ -1314,4 +1380,5 @@ async def apply(ctx: Context, config: Config) -> None:
         return RequestErrorAction(kind="retry")
 
     ctx.on("agent/pre-step", on_pre_step)
+    ctx.on("agent/request", on_request)
     ctx.on("agent/request-error", on_request_error)

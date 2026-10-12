@@ -115,14 +115,23 @@ runs) with `choose`, into the request's `entry` (`None` on the parent's route):
   learn what to set up.
 * **Skills that name different models** are refused: the parent settles it with
   `model=`.
+* **The media its skills hand it** (`accepts: [image/*]`, model kinds A3) are then
+  asked of the route it resolved to (`ResolvedModel.accepts`; a family matches any
+  member). A route that cannot take them gives way to the parent's where that one
+  can, a `ModelFallback` with reason `cannot-accept` and the `media` it could not
+  take; one the spawn named itself is refused instead, by the rule above. Where
+  neither route can, the child runs on its own and sees a text placeholder for each
+  (`media-degrade`), and the request carries a `MediaShortfall` (the media, the route)
+  that the admission records as `mediaShortfall` and the parent's `note` says. What a
+  spawn's own attachments imply is not asked: a request carries none.
 
 A readmission degrades every one of these instead (below). What neither refuses nor
 degrades is a child left on its parent's route under a parent with none: there is
 nothing to fall back to, so the seam refuses it at a spawn and ends it at a restart,
 and a provider builds only a child that has a route, served by an adapter here.
 
-The child runs with its route's call settings (`reasoningEffort`, `temperature`,
-`maxTokens`) the way a root started on the key does, and none of its parent's: a
+The child runs with its route's call settings (`reasoningEffort`, `maxTokens` and its
+sampling settings, `temperature` among them) the way a root started on the key does, and none of its parent's: a
 temperature tuned for the parent's model is not one for this. A child on its
 parent's route runs with its parent's options. An effort the spawn names is the
 child's either way. `child_options` states that rule once, for every provider. The

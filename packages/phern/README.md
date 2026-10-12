@@ -83,7 +83,8 @@ it, and `command/run` records it), a Textual action, and a key:
 
 Rows contribute their own screens and commands through `ctx.tui_screens` and
 `ctx.commands`, and they arrive with the same three routes — `/trajectory` (`f2`)
-and `/diff` (`f3`, every change to what the model sees, before and after) are two
+and `/diff` (`f3`, every change to what the model sees, grouped by what it changed, each
+edit or the whole history) are two
 such screens, each contributed by a row rather than built in, and each takes its
 key and palette entry away with it if its row is removed. Screens are presentation,
 so every named profile ships them (`profiles/presentation.yaml`) and a profile

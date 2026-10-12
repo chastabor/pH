@@ -44,6 +44,7 @@ from ph.testing import (
     assistant_payload,
     log_event,
     plugin_payload,
+    revision_record,
     text_chunks,
     user_payload,
 )
@@ -302,7 +303,7 @@ def test_a_replacement_after_the_reply_takes_off_what_it_shadowed() -> None:
     _counted(session)
     original = meter.measure_text("y" * 4_000)
 
-    substitute(session, (0,), _summary("the gist"))
+    substitute(session, (0,), _summary("the gist"), revision_record("compaction/summarized"))
 
     assert meter.baseline(session).tokens == 1_050 - original + meter.measure(_summary("the gist"))
 
@@ -317,7 +318,7 @@ def test_a_node_added_and_shadowed_since_the_reply_counts_neither_way() -> None:
         session, "user/message", user_payload("z" * 4_000, "m3"), SurfaceIntent("append")
     )
 
-    substitute(session, (late.seq,), _summary("short"))
+    substitute(session, (late.seq,), _summary("short"), revision_record("compaction/summarized"))
 
     assert meter.baseline(session).tokens == 1_050 + meter.measure(_summary("short"))
 

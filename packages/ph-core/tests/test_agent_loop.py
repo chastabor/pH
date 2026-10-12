@@ -12,6 +12,7 @@ So the check runs at runtime, on the request the adapter is about to receive.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import anyio
@@ -44,6 +45,7 @@ from ph.llm.types import (
     TextDelta,
     ToolCallBlock,
     create_user_message,
+    sampling_of,
 )
 from ph.session import SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.system_prompt.assembly import PromptContext, PromptSection
@@ -174,6 +176,31 @@ async def test_pre_step_reject_blocks_the_turn(mount: MountProfile) -> None:
     assert "step/start" not in [event.type for event in session.events]
     assert as_obj(session.events[-1].data["reason"])["kind"] == "blocked"
     assert not agent.inbox.has_pending, "a rejected step still consumes its batch"
+
+
+async def test_a_route_s_sampling_settings_reach_the_request_and_its_header(
+    mount: MountProfile,
+) -> None:
+    """A1: what the model maker recommends travels from the agent's options into the
+    logged call config and every request built from it. Sabotage: leave one out of
+    `seed_config` or `_build_request`."""
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("s")
+    options = replace(FAKE, temperature=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5)
+
+    await ctx.require(AGENTS).create(session, options).prompt("hello")
+
+    header = session.request_header()
+    assert header is not None
+    request = ctx.require(LLM_FAKE).requests[-1]
+    for carried in (header.config, request):
+        assert sampling_of(carried) == {
+            "temperature": 0.6,
+            "topP": 0.95,
+            "topK": 20,
+            "minP": 0.0,
+            "presencePenalty": 1.5,
+        }
 
 
 async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:

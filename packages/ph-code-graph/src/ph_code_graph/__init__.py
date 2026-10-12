@@ -53,7 +53,7 @@ from pydantic import Field
 
 from ph.cordis import Context, MountRefusal, ServiceKey, plugin
 from ph.json import JsonObject, as_int
-from ph.keys import COMMANDS, FS, SKILLS, TOOLS
+from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import contribute_item
@@ -61,7 +61,7 @@ from ph.seams.changes import tree_state
 from ph.seams.commands import Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
-from ph.seams.skills import discover_skills
+from ph.seams.skills import offer_skills as offer_package_skills
 from ph.text import count_of
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
@@ -473,26 +473,8 @@ list still works when the pack has it.
 
 
 def offer_skills(ctx: Context) -> None:
-    """Install this package's `SKILL.md` files, if a skills registry is mounted.
-
-    `discover_skills` already globs `<root>/*/SKILL.md`, validates each one and
-    skips a malformed one with a logged reason — the whole of what a
-    hand-written loader was doing here in 28 lines, duplicated byte-for-byte
-    into the sibling package. Reaching for the seam's own reader instead is the
-    rule `contribute_via`'s docstring states about itself.
-
-    **Through `contribute_via`, so the skill arrives exactly when the plugin
-    does** and leaves with it. `skills-progressive` ships an empty `paths` on
-    purpose — scanning a well-known directory would make "install a skill" mean
-    "drop a file somewhere", and a skill is something a distribution installs
-    deliberately (I7). A distribution registering its own is that act.
-
-    Only the one-line description rides the prompt every turn; the body stays on
-    disk until the model asks for it by name (G9).
-    """
-    root = Path(__file__).parent / "skills"
-    for skill in discover_skills([str(root)], source="ph-code-graph"):
-        contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
+    """Install this package's `SKILL.md` files (`ph.seams.skills.offer_skills`)."""
+    offer_package_skills(ctx, Path(__file__).parent / "skills", source="ph-code-graph")
 
 
 @plugin("code-graph", affects="environment", inject=[TOOLS, FS], config=Config)

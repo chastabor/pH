@@ -31,7 +31,7 @@ from ph.agent.types import AgentOptions
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cancel import Canceled
 from ph.cordis import DEPLOYMENT, Context
-from ph.json import as_obj, thaw_json
+from ph.json import as_int, as_obj, as_seq, thaw_json
 from ph.keys import AGENTS, COMMANDS, COMPACTION, LLM_FAKE, SESSIONS, TOKEN_METER, TOOLS
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -46,9 +46,8 @@ from ph.llm.types import (
     text_of,
 )
 from ph.seams.compaction import CompactionError, CompactionNote
-from ph.session import Session, SurfaceIntent, balanced_cuts
+from ph.session import Session, SurfaceError, SurfaceIntent, balanced_cuts
 from ph.session.events import SurfaceReplace
-from ph.session.json import InvalidJsonValueError
 from ph.session.known_event_types import IGNORABLE_SESSION_EVENT_TYPES
 from ph.testing import (
     FAKE_OPTIONS,
@@ -58,6 +57,9 @@ from ph.testing import (
     log_event,
     not_none,
     plugin_payload,
+    simple_tool,
+    streamed,
+    tool_call_chunks,
     tool_result_payload,
     user_payload,
 )
@@ -347,8 +349,13 @@ async def test_the_replacement_cites_every_node_it_shadows(mount: MountProfile) 
     await ctx.require(COMMANDS).dispatch("/compact", session=session, agent=agent)
 
     (record,) = _events(session, "compaction/summarized")
-    replacement = session.events[record.seq + 1]
-    assert replacement.type == "user/message", "the record must sit beside its replacement"
+    [replaced] = [as_int(seq) for seq in as_seq(record.data["revises"])]
+    replacement = session.events[replaced]
+    assert replacement.type == "user/message", "the record does not explain the summary"
+    assert session.records_of(replaced) == (record,)
+    size = as_obj(record.data["size"])
+    assert (size["unit"], size["before"]) == ("tokens", record.data["shadowedTokens"])
+    assert 0 < as_int(size["after"]) < as_int(size["before"])
     # `list(...)` on both sides: an appended payload is deep-frozen, so the seqs
     # come back as a tuple and an `==` against the citation would compare shapes.
     assert list(replacement.source_event_seqs or ()) == list(record.data["shadowedSeqs"])
@@ -599,9 +606,9 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
 
     Appended one at a time, a rewrite refused partway left the ones before it in
     the log — elided from what the model sees — with no record saying so or why.
-    Here the second rewrite's payload is one the write door refuses, after the
-    first has been stamped: nothing of the pass lands, and the refusal reaches the
-    caller rather than a half-applied pass.
+    Here the second rewrite renames its message, which the surface refuses at the
+    write, after the first has been stamped: nothing of the pass lands, and the
+    refusal reaches the caller rather than a half-applied pass.
     """
     ctx = await mount(profile=PROFILE)
     body = "x" * (MAX_ARG_LENGTH + 1)
@@ -630,11 +637,11 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
         calls.append(event.seq)
         found = real(event, **options)
         if len(calls) == 2 and found is not None:
-            return {**found[0], "unwritable": {1, 2}}, found[1]
+            return {**found[0], "id": "renamed"}, found[1]
         return found
 
     monkeypatch.setattr(compaction, "truncated_assistant_message", refused_second)
-    with pytest.raises(InvalidJsonValueError):
+    with pytest.raises(SurfaceError, match="must keep the message id"):
         _truncate(ctx, session)
 
     assert len(calls) == 2, "the pass never reached a second rewrite"
@@ -645,6 +652,12 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
     assert len(_truncate(ctx, session)) == 2
     record = not_none(session.latest("compaction/args-truncated"))
     assert record.seq == session.seq - 1
+    # One record for both rewrites, and each finds it.
+    replacements = [as_int(seq) for seq in as_seq(record.data["revises"])]
+    assert len(replacements) == 2
+    assert all(session.records_of(seq) == (record,) for seq in replacements)
+    size = as_obj(record.data["size"])
+    assert size["unit"] == "tokens" and as_int(size["after"]) < as_int(size["before"])
 
 
 async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: MountProfile) -> None:
@@ -783,9 +796,14 @@ async def test_a_result_the_clip_would_grow_is_not_spilled(mount: MountProfile) 
     assert len(clipped) == 1
     (spilled,) = _events(session, "offload/spilled")
     assert spilled.data["callId"] == "c0", "the short result was spilled and left inline"
-    replaced = session.events[spilled.seq + 1]
+    [revised] = [as_int(seq) for seq in as_seq(spilled.data["revises"])]
+    replaced = session.events[revised]
     assert replaced.type == "tool/result" and replaced.batch == spilled.batch
     assert spilled.batch is not None
+    assert session.records_of(revised) == (spilled,)
+    size = as_obj(spilled.data["size"])
+    assert (size["unit"], size["before"]) == ("bytes", 30_000)
+    assert as_int(size["after"]) < 30_000
 
 
 async def test_the_clip_changes_only_the_result_content(mount: MountProfile) -> None:
@@ -831,6 +849,26 @@ async def test_a_conversation_that_does_not_end_in_tool_results_is_untouched(
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
     assert await _engine(ctx).clip_overflow_tail(agent) == ()
+
+
+async def test_results_the_step_s_batch_came_after_are_still_clipped(mount: MountProfile) -> None:
+    """A refusal comes after the step's batch, which can put a message after the
+    results: rlm's session facts, added again once a summary has shadowed them. Found
+    live, where the clip found no results at the very end and the turn ended in the
+    refusal. Results the model has answered since are not the tail, however large.
+    Sabotage: look for results at the very end only, or past a reply too."""
+    ctx = await mount(profile=PROFILE)
+    session = _tool_batch_session("past-the-batch", 30_000)
+    answered = _tool_batch_session("answered", 30_000)
+    _pressured(answered)
+    for one in (session, answered):
+        log_event(one, "user/message", user_payload("# Session", "m9"), SurfaceIntent("append"))
+    agents = ctx.require(AGENTS)
+
+    assert len(await _engine(ctx).clip_overflow_tail(agents.create(session, FAKE_OPTIONS))) == 1
+    assert "0" * 30_000 not in _derived_text(session)
+    assert "# Session" in _model_text(session), "the batch was clipped too"
+    assert await _engine(ctx).clip_overflow_tail(agents.create(answered, FAKE_OPTIONS)) == ()
 
 
 async def test_the_clip_alone_is_enough_to_retry_the_request(mount: MountProfile) -> None:
@@ -1072,6 +1110,79 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountP
     assert record.data["shape"] == "direct"
     assert SUMMARY in _model_text(session)
     assert text_of(session.derive_messages()[-1].content) == "answer", "the retry did not land"
+
+
+SLOT = 2_000
+"""A window one tool result can outgrow by itself, as a 64 KB cell outgrows a local
+server's 16 384-token slot."""
+
+
+async def test_a_request_past_the_window_is_clipped_before_it_is_sent(
+    mount: MountProfile,
+) -> None:
+    """A step's result larger than the whole window, on a server that refuses what does
+    not fit: the clip runs at the next step's start, so nothing is refused.
+
+    A summary leaves the latest turn whole, so the request used to go out anyway, be
+    refused, and only then be clipped: one wasted request each time, and a line in the
+    server's log a person reads as a fault. Sabotage: leave the clip to the refusal,
+    and the server refuses once.
+    """
+    ctx = await mount(profile=PROFILE)
+    _route(ctx)
+    ctx.require(LLM_FAKE).context_window = SLOT
+    meter = ctx.require(TOKEN_METER)
+    body = "word " * (SLOT * 2)
+    ctx.require(TOOLS).register(simple_tool("dump", lambda _arguments, _run: body))
+    refused: list[int] = []
+    called = False
+
+    async def server(options: GenerateOptions, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
+        nonlocal called
+        if not options.is_loop_request:
+            return await next_(options)
+        size = meter.estimate_messages(options.messages)
+        if size >= SLOT:
+            refused.append(size)
+            return _overflowing()
+        if not called:
+            called = True
+            return streamed(tool_call_chunks("c1", "dump", "{}"))
+        return await next_(options)
+
+    ctx.on("llm/stream", server)
+    session = ctx.require(SESSIONS).create("past-the-window")
+    agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
+    await agent.prompt("dump it")
+
+    assert refused == [], "a request past the window was sent"
+    (spilled,) = _events(session, "offload/spilled")
+    assert spilled.data["callId"] == "c1"
+    assert Path(spilled.data["locator"]).read_text(encoding="utf-8") == body
+    assert text_of(session.derive_messages()[-1].content) == "answer"
+
+
+async def test_a_conversation_still_past_the_window_is_summarized_from_its_tail(
+    mount: MountProfile,
+) -> None:
+    """Past the window with no results to clip, the request's own check summarizes, and
+    sends the summarizer the conversation's tail rather than a replay of it, which is a
+    request the provider would refuse as well; the step's pressure check leaves it to
+    that one. Sabotage: choose the shape by the trigger alone, or summarize at the
+    step's start as well."""
+    ctx = await mount(profile=PROFILE)
+    _route(ctx)
+    agent = await _conversation(ctx, "past-the-window-history")
+    session = agent.session
+    log_event(session, "request/context", {"provider": "fake", "model": "f", "contextWindow": SLOT})
+    pressure = ctx.require(TOKEN_METER).baseline(session).pressure
+    assert pressure is not None and pressure >= 1, "the fixture is not past the window"
+
+    assert await _engine(ctx).compact_if_needed(agent, "pressure") is None
+    assert await _engine(ctx).compact_if_needed(agent, "window") is not None
+
+    (record,) = _events(session, "compaction/summarized")
+    assert (record.data["trigger"], record.data["shape"]) == ("window", "direct")
 
 
 # --------------------------------------------------------------- declining --

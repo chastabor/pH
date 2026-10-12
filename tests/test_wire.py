@@ -233,6 +233,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "Admission": {"runId": "r1", "name": "scout", "owner": "rlm-child", "prompt": "look"},
         "ChildNotice": {"text": "[the child finished]", "summary": "finished", "id": "n1"},
         "ModelFallback": {"asked": ["classify"], "reason": "unlisted"},
+        "MediaShortfall": {"media": ["image/*"], "route": "llama/qwen"},
         "Budget": {},
         "ReasoningBlock": {"text": "thinking"},
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},

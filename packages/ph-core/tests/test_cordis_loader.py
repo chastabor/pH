@@ -926,6 +926,11 @@ def test_the_full_profile_resolves_every_row_through_its_model() -> None:
         "model": "fake-1",
         "reasoningEffort": None,
         "temperature": None,
+        "topP": None,
+        "topK": None,
+        "minP": None,
+        "presencePenalty": None,
+        "frequencyPenalty": None,
         "maxTokens": None,
     }, "the defaults the profile never wrote are in it"
     assert "config" in environment["tool-bash"], "every row states its config, if only as null"

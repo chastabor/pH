@@ -10,6 +10,7 @@ actually happened.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -19,6 +20,7 @@ from ph.cordis import Context, running
 from ph.json import JsonObject
 from ph.keys import LLM
 from ph.llm import BlockAssembler, named_call
+from ph.llm.adapter import ResolvedModel
 from ph.llm.adapter import apply as llm_apply
 from ph.llm.types import (
     BlockEnd,
@@ -347,4 +349,58 @@ async def test_an_adapters_stream_body_runs_inside_its_rows_binding() -> None:
         pass
 
     assert seen == [row], "the adapter's body ran outside its row's binding"
+    await root.dispose()
+
+
+async def test_a_setting_the_route_cannot_carry_is_dropped_with_one_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A1: the seam sends a route only the sampling settings its API takes, and says
+    once, not on every request, which it dropped; a route whose adapter has not said
+    gets what it was asked for. Sabotage: send the setting anyway, or warn every time."""
+    root = Context()
+    await llm_apply(root, None)
+    runtime = root.require(LLM)
+    sent: dict[str, list[GenerateOptions]] = {"strict": [], "unsaid": []}
+
+    class Recording:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def stream(self, options: GenerateOptions) -> Any:  # noqa: ANN401
+            sent[self.name].append(options)
+
+            async def chunks() -> Any:  # noqa: ANN401
+                for chunk in text_chunks("ok"):
+                    yield chunk
+
+            return chunks()
+
+    class Strict(Recording):
+        def resolve_model(self, provider: str, model: str) -> ResolvedModel:
+            return ResolvedModel(sampling=frozenset({"temperature", "topP"}))
+
+    runtime.register_adapter(["strict"], Strict("strict"))
+    runtime.register_adapter(["unsaid"], Recording("unsaid"))
+    with caplog.at_level(logging.WARNING, logger="ph.llm"):
+        for provider in ("strict", "strict", "unsaid"):
+            options = GenerateOptions(
+                provider=provider,
+                model="m",
+                messages=(user_text("hi"),),
+                temperature=0.6,
+                top_p=0.9,
+                top_k=20,
+            )
+            async for _chunk in await runtime.stream(options):
+                pass
+
+    assert [(one.temperature, one.top_p, one.top_k) for one in sent["strict"]] == [
+        (0.6, 0.9, None)
+    ] * 2
+    assert sent["unsaid"][0].top_k == 20, "a route that said nothing lost a setting"
+    warned = [
+        record.getMessage() for record in caplog.records if "does not take" in record.getMessage()
+    ]
+    assert len(warned) == 1 and "strict/m does not take topK" in warned[0], warned
     await root.dispose()

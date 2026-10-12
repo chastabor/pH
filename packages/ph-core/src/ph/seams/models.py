@@ -55,17 +55,21 @@ from ..cordis import (
     plugin,
 )
 from ..keys import LLM, MODELS, MOUNT
+from ..llm.types import sampling_fields, uncarried
 from ..session import Session
 from ..session_profile import OverrideSource, override
 from ..wire import WireModel
 from ._names import require_slug, slugify
+from .diagnostics import Diagnostic, contribute
 
 __all__ = [
     "KEY_MAX",
+    "MODEL_KINDS",
     "Config",
     "ModelChoice",
     "ModelChoiceError",
     "ModelEntry",
+    "ModelKind",
     "ModelList",
     "ModelRoute",
     "UnrunnableChoice",
@@ -80,6 +84,23 @@ __all__ = [
 
 KEY_MAX = 32
 """The longest key a profile may name a model by — a word a person types."""
+
+ModelKind: TypeAlias = Literal["classify", "light"]
+"""A kind of model a shipped skill may ask for by key (A2): named for the job, so a
+skill works on any profile, rather than for a model, which only one profile has."""
+
+MODEL_KINDS: Mapping[ModelKind, str] = {
+    "classify": "short replies at low effort with steady settings: sorting, tagging, yes or no",
+    "light": "cheap general work: a summary, a lookup, a first pass",
+}
+"""Each shared kind, and the job it names (A2).
+
+A profile serves a kind by listing it as a key, on whatever route does that job well
+there. One it does not list falls back to the parent's model with a warning
+(`ModelFallback`), which is the cue to set it up; `phern doctor` lists which kinds the
+profile serves. Shipped profiles do not alias a kind to their default model, since that
+would hide the warning. The media a skill hands its child are not kinds: a skill states
+them with `accepts`, whatever kind it asks for."""
 
 
 UnrunnableReason: TypeAlias = Literal["unlisted", "unserved"]
@@ -103,12 +124,23 @@ class UnrunnableChoice(ModelChoiceError):
 
 
 class ModelRoute(WireModel):
-    """One route: the provider that serves it, the model, and its call settings."""
+    """One route: the provider that serves it, the model, and its call settings.
+
+    The sampling settings (`temperature` to `frequency_penalty`) are what a model maker
+    recommends, kept beside the model they were tuned for. Each is sent where the
+    route's API takes it and dropped with a warning where it does not
+    (`ResolvedModel.sampling`); unset is unsent, so the server's own flags decide.
+    """
 
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     reasoning_effort: str | None = None
     temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
     max_tokens: int | None = None
 
     @property
@@ -251,7 +283,7 @@ class ModelEntry(WireModel):
             provider=route.provider,
             model=route.model,
             max_tokens=route.max_tokens,
-            temperature=route.temperature,
+            **sampling_fields(route),
             reasoning_effort=route.reasoning_effort,
             model_key=self.key,
         )
@@ -412,7 +444,56 @@ def narrows(mounted: Config, asked: Config, _reach: ChildReach) -> ChildLimit:
     return ChildLimit(model_key=key)
 
 
+def dropped_settings(ctx: Context, models: ModelList) -> list[tuple[str, str]]:
+    """`phern doctor`'s rows for each listed route that sets a sampling setting its API
+    does not take, which every request on it drops with a warning (A1). Nothing for a
+    route whose adapter has not said what it takes."""
+    llm = ctx.get(LLM)
+    if llm is None:
+        return []
+    rows: list[tuple[str, str]] = []
+    for key, route in models.routes.items():
+        carried = llm.resolve_model(route.provider, route.model).sampling
+        if carried is None:
+            continue
+        dropped = uncarried(route, carried)
+        if dropped:
+            takes = ", ".join(sorted(carried)) or "none"
+            rows.append((key, f"{', '.join(dropped)} dropped: {route.label} takes {takes}"))
+    return rows
+
+
+def served_kinds(models: ModelList) -> list[tuple[str, str]]:
+    """`phern doctor`'s rows for each shared kind (`MODEL_KINDS`): the route this
+    profile serves it on, or that a skill asking for it runs on its parent's model."""
+    routes = models.routes
+    return [
+        (
+            kind,
+            routes[kind].label if kind in routes else f"not listed; {job}, on the parent's model",
+        )
+        for kind, job in MODEL_KINDS.items()
+    ]
+
+
 @plugin("models", affects="environment", config=Config, narrows=narrows)
 async def apply(ctx: Context, config: Config) -> None:
-    """Provide the profile's model list."""
-    ctx.provide(MODELS, ModelList(config))
+    """Provide the profile's model list, and say in `phern doctor` which settings it
+    sets that its routes cannot carry."""
+    models = ModelList(config)
+    ctx.provide(MODELS, models)
+    contribute(
+        ctx,
+        Diagnostic(
+            id="model-settings",
+            title="Model settings",
+            read=lambda: dropped_settings(ctx, models),
+            order=7,
+        ),
+    )
+    contribute(
+        ctx,
+        Diagnostic(
+            id="model-kinds", title="Model kinds", read=lambda: served_kinds(models), order=8
+        ),
+    )

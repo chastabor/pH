@@ -33,13 +33,19 @@ happens.
 **Not a writer: `admit`.** A replica, a seed and a fork mirror a log somebody else
 wrote; they admit records, and write none.
 
+**`revises` is reserved.** A record stamped with it says which surface replacements it
+explains, and `Session.records_of` pairs the two by it, so only the revision door
+(`ph.session.revise`) stamps it: `append` refuses a payload carrying the key, and the
+door writes a producer's record through `_append_revising`, with the producer's own
+writer, since the type is the producer's.
+
 @module ph.session.writers
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -50,7 +56,11 @@ from .known_event_types import declared_owner, written_by
 if TYPE_CHECKING:
     from .session import Session, SessionBatch
 
-__all__ = ["LogWriteError", "LogWriter", "log_writer", "scaffolding_writer"]
+__all__ = ["REVISES", "LogWriteError", "LogWriter", "log_writer", "scaffolding_writer"]
+
+REVISES = "revises"
+"""The payload key the revision door stamps on a producer's record: the seqs of the
+replacements it explains. Reserved: no other write may carry it."""
 
 
 class LogWriteError(ValueError):
@@ -88,15 +98,42 @@ class LogWriter:
         this is on the agent loop's hot path (`assistant/chunk`, per streamed token);
         `test_log_writers.py` holds a benchmark to it.
 
-        :raises LogWriteError: when `event_type` is not this writer's.
+        :raises LogWriteError: when `event_type` is not this writer's, or `data` carries
+            the reserved `revises`.
         """
         if event_type not in self.types and not self.owns(event_type):
+            raise _not_the_writer(self.owner, event_type)
+        try:
+            stamped = REVISES in data
+        except TypeError:
+            # A payload that is not an object is the session's to refuse, saying so.
+            stamped = False
+        if stamped:
             raise LogWriteError(
-                f'{self.owner} is not a writer of record for "{event_type}", so it cannot '
-                "write one; the writers of record are `known_event_types.WRITERS`, and a "
-                "package's own types are the ones it declared"
+                f'"{REVISES}" pairs a record with the replacements it explains, so only the '
+                "revision door writes it: hand the record to `ph.session.revise`"
             )
         return log._append(event_type, data, surface)
+
+    def _append_revising(
+        self,
+        log: Session | SessionBatch,
+        event_type: str,
+        data: Mapping[str, JsonValue],
+        revises: Sequence[int],
+    ) -> SessionEvent:
+        """`data`, stamped with the replacements it explains. `ph.session.revise`'s alone."""
+        if not self.owns(event_type):
+            raise _not_the_writer(self.owner, event_type)
+        return log._append(event_type, {**data, REVISES: list(revises)}, None)
+
+
+def _not_the_writer(owner: str, event_type: str) -> LogWriteError:
+    return LogWriteError(
+        f'{owner} is not a writer of record for "{event_type}", so it cannot write one; the '
+        "writers of record are `known_event_types.WRITERS`, and a package's own types are "
+        "the ones it declared"
+    )
 
 
 def log_writer(owner: str) -> LogWriter:

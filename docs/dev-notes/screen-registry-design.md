@@ -288,7 +288,9 @@ the id, label and key (`f3`), inserted beside the trajectory's in
 `profiles/presentation.yaml`, and a client-side builder in `LOCAL_SCREENS`
 (`ph_app.tui.diff_screen`). It lists every surface replacement in the log — a
 compaction summary, an elided argument, an offloaded paste, a model's own context
-edit — with the records that landed beside each and a unified diff, from the mirrored
-session alone, so it needed no protocol change and the app still imports no bundle.
+edit — grouped by the node each led to, with the records its producer wrote for each
+(`Session.records_of`) and a unified diff per edit or over the node's whole history,
+from the mirrored session alone, so it needed no protocol change and the app still
+imports no bundle.
 It is meant to grow kinds of change: its projection (`ph_app.tui.diffs`) is a tuple
 of source functions, and context revisions are the first.

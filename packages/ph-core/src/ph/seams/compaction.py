@@ -50,13 +50,14 @@ __all__ = [
 
 log = logging.getLogger("ph.seams.compaction")
 
-CompactionTrigger: TypeAlias = Literal["pressure", "overflow", "manual"]
+CompactionTrigger: TypeAlias = Literal["pressure", "window", "overflow", "manual"]
 """Why compaction is being considered.
 
-`pressure` is the estimate before a request is made, `overflow` is the
-provider's own `CONTEXT_WINDOW_EXCEEDED` after one was, and `manual` is a person
-typing `/compact`. An engine is allowed to answer them differently: the first
-two are policy, the third is an instruction.
+`pressure` is the estimate before a step, `window` the estimate at the request
+itself that it fills the whole window (one a provider would only refuse), `overflow`
+is the provider's own `CONTEXT_WINDOW_EXCEEDED` after one was sent, and `manual` is
+a person typing `/compact`. An engine is allowed to answer them differently: the
+first three are policy, the last is an instruction.
 """
 
 

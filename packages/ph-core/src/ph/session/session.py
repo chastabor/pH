@@ -46,6 +46,7 @@ from .request_header import (
     parse_request_context,
     parse_request_header,
 )
+from .revision_index import RevisionIndex
 from .surface import SurfaceManager, fold_surface
 
 __all__ = ["Session", "SessionBatch", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
@@ -278,6 +279,7 @@ class Session:
         "_log",
         "_observers",
         "_publishing",
+        "_revisions",
         "_surface",
         "durable_length",
         "first_live_seq",
@@ -305,6 +307,7 @@ class Session:
         self._derived_nodes = 0
         self._derived_generation = 0
         self._latest: dict[_Key, _LatestFold[object]] = {}
+        self._revisions = RevisionIndex()
 
         if seed is not None:
             # Validate the seed to the SAME invariants `_append` enforces. A
@@ -769,6 +772,27 @@ class Session:
         answer by scanning a log that is mostly `assistant/chunk`s.
         """
         return self.projection(event_type, _the_event)
+
+    def records_of(self, seq: int) -> tuple[SessionEvent, ...]:
+        """The records that explain the replacement at `seq`, in log order: what its
+        producer wrote through the revision door (`ph.session.revise`), stamped with
+        it. Empty for a node no revision put there, and for a replacement written
+        before the door stamped its records.
+
+        Indexed as the log grows, so a reader asking of every node pays once.
+        """
+        return self._revisions.read(self._log, seq)
+
+    def history(self, seq: int) -> tuple[SessionEvent, ...]:
+        """Every replacement that led to node `seq` as it is now, oldest first: the node
+        itself when it is one, and every replacement among what it stands for, followed
+        through `shadowed_by`. Unlike git's one line per file, it merges: a summary of
+        five revised nodes has their five revisions behind it, and its own.
+
+        Kept per node once worked out, since what a node stands for is fixed when it is
+        written.
+        """
+        return self._revisions.history(self.at, seq)
 
     def projection[T](self, event_type: str, parse: Callable[[SessionEvent], T | None]) -> T | None:
         """Any "latest event of type X, read as Y" question, folded incrementally.

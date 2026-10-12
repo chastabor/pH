@@ -78,7 +78,9 @@ from .profiles import (
     unfolded_profiles,
 )
 from .profiles_cli import profiles_app
+from .revisions import revision_rows
 from .runtime import mounted
+from .stored import load_session
 from .web import DEFAULT_HOST, DEFAULT_PORT
 from .workspaces import workspaces_app
 
@@ -1009,6 +1011,26 @@ def events(
             row["doc"],
         )
     console.print(table)
+
+
+@app.command()
+def revisions(
+    target: Annotated[str, typer.Argument(help="A session id, or the path to a stored log.")],
+) -> None:
+    """Print every revision to what the model saw, one JSON line each.
+
+    What the change replaced and what it is now, its producer's records, the size the
+    revision door wrote and the tool calls those records name, for diagnosis and for
+    training data (`ph_app.revisions`). Read from the log on disk with nothing mounted,
+    as `--mode trajectory` reads one, so a crashed run or a copy someone sent exports
+    as well as a live one.
+    """
+    try:
+        session = load_session(target)
+    except (OSError, ValueError) as error:
+        fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
+    for row in revision_rows(session):
+        emit(json.dumps(row, ensure_ascii=False))
 
 
 @app.command()

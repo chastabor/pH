@@ -28,12 +28,14 @@ from tui_helpers import MakeApp, root_of, running, stand_in, turn_done, until
 import ph_app.tui
 from ph.keys import TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
-from ph.session import Session, SessionEvent, substitute
+from ph.session import SessionEvent, substitute
+from ph.testing import revision_record
 from ph_app.daemon.supervisor import Root
+from ph_app.revisions import Revision
 from ph_app.screen_rows import DIFF_KEY
-from ph_app.tui import diffs
 from ph_app.tui.app import PHTuiApp
-from ph_app.tui.diff_screen import DiffScreen
+from ph_app.tui.diff_screen import DIFF_LINES, DiffScreen, _edits
+from ph_app.tui.diffs import DiffEntry, DiffGroup
 from ph_app.tui.frontend import FrontSession
 from ph_app.tui.modals.pickers import command_choices
 from ph_app.tui.remote import LOCAL_SCREENS
@@ -401,7 +403,8 @@ async def _turns_with_revisions(
     landed: list[SessionEvent] = []
     for text in ("second", "third"):
         asked = [one for one in root.session.events if one.type == "user/message"][-1]
-        landed.append(substitute(root.session, (asked.seq,), stand_in(f"[{asked.seq}]")))
+        why = revision_record("compaction/summarized")
+        landed.append(substitute(root.session, (asked.seq,), stand_in(f"[{asked.seq}]"), why))
         await front.submit(text)
     await until(pilot, lambda: front.session.seq == root.session.seq)
     app.state_changed()
@@ -424,20 +427,20 @@ async def test_the_diff_lists_the_daemons_revisions_and_escape_returns_to_the_ch
     the daemon wrote, so no request beyond the ones the transcript already made; and
     only the row on screen is rendered."""
     rendered: list[int] = []
-    render = diffs._texts
+    render = Revision.texts
 
-    def counting(session: Session, shadowed: tuple[int, ...], seq: int) -> tuple[str, str]:
-        rendered.append(seq)
-        return render(session, shadowed, seq)
+    def counting(revision: Revision) -> tuple[str, str]:
+        rendered.append(revision.event.seq)
+        return render(revision)
 
-    monkeypatch.setattr(diffs, "_texts", counting)
+    monkeypatch.setattr(Revision, "texts", counting)
     async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
         landed = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
 
         screen = await _open_diff(app, pilot)
         await pilot.pause()
-        assert [entry.seq for entry in screen.entries] == [one.seq for one in landed]
-        assert {entry.title for entry in screen.entries} == {"stand-in"}
+        assert [group.seq for group in screen.groups] == [one.seq for one in landed]
+        assert {group.latest.title for group in screen.groups} == {"stand-in"}
         selected = screen.selected()
         assert selected is not None
         assert set(rendered) == {selected.seq}, "a row nobody looked at was rendered"
@@ -499,3 +502,30 @@ async def _unload(root: Root, screen_id: str) -> None:
     registry = root.ctx.get("tui_screens")
     entry = registry._entries[screen_id]
     await entry.owner.dispose()
+
+
+def test_edits_past_the_drawn_budget_are_counted_not_rendered() -> None:
+    """A summary's group holds every older summary, and each one's before can be most of
+    a conversation, so once the drawn lines are spent the rest are counted rather than
+    rendered and diffed on every cursor move. Sabotage: render every edit."""
+    rendered: list[int] = []
+
+    def entry(seq: int) -> DiffEntry:
+        def texts() -> tuple[str, str]:
+            rendered.append(seq)
+            return "\n".join(f"line {index}" for index in range(DIFF_LINES)), ""
+
+        return DiffEntry(seq=seq, title="rewrite", summary="", producer="", texts=texts)
+
+    group = DiffGroup(
+        kind="revision",
+        seq=3,
+        reveal=3,
+        entries=(entry(1), entry(2), entry(3)),
+        whole=lambda: ("", ""),
+    )
+
+    shown = _edits(group).plain
+
+    assert rendered == [3], "an edit past the budget was rendered"
+    assert "2 older edits; w shows the whole history" in shown

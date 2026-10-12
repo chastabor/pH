@@ -50,6 +50,7 @@ from ph.llm.types import (
     Message,
     ReasoningBlock,
     ReasoningDelta,
+    SamplingSetting,
     StreamChunk,
     TextBlock,
     TextDelta,
@@ -59,6 +60,7 @@ from ph.llm.types import (
     ToolResultBlock,
     UsageChunk,
     is_error_finish,
+    wire_sampling,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -70,6 +72,14 @@ from ._media import forget_named_handle, load_handles, load_media, media_pointer
 __all__ = ["AnthropicAdapter", "apply"]
 
 log = logging.getLogger("ph_app.adapters.anthropic")
+
+SAMPLING_WIRE: dict[SamplingSetting, str] = {
+    "temperature": "temperature",
+    "topP": "top_p",
+    "topK": "top_k",
+}
+"""Each sampling setting this API takes, and its body field (A1): no `min_p`, and no
+penalties. Any other a route sets is dropped with a warning (`ResolvedModel.sampling`)."""
 
 _SIGNATURE_KEY = "signature"
 """Where this adapter keeps its attestation inside `ReasoningBlock.provider_state`."""
@@ -360,8 +370,7 @@ class AnthropicAdapter:
                 # not.
                 tools[-1]["cache_control"] = _breakpoint()
             body["tools"] = tools
-        if options.temperature is not None:
-            body["temperature"] = options.temperature
+        body.update(wire_sampling(options, SAMPLING_WIRE))
         if options.stop:
             body["stop_sequences"] = list(options.stop)
         return body, handles
@@ -408,7 +417,12 @@ class AnthropicAdapter:
         # instruction, the validation and the retry, and not the wire's guarantee
         # (P7-17). Passing it rather than leaving a default unremarked is what
         # stops the next adapter copying an omission it thought was an oversight.
-        return resolved(self.config, structured_output=False, credential=self.config.api_key_env)
+        return resolved(
+            self.config,
+            structured_output=False,
+            credential=self.config.api_key_env,
+            sampling=frozenset(SAMPLING_WIRE),
+        )
 
 
 @dataclass(slots=True)

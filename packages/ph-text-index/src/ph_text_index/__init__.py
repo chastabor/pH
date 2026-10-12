@@ -56,7 +56,7 @@ from pydantic import Field
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
 from ph.indexable import triage
 from ph.json import JsonObject
-from ph.keys import COMMANDS, FS, SKILLS, TOOLS
+from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.locks import LockBusy, acquire_file_lock
 from ph.paths import default_cache_path, resolve_roots
@@ -65,7 +65,7 @@ from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
-from ph.seams.skills import discover_skills
+from ph.seams.skills import offer_skills as offer_package_skills
 from ph.text import count_of
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
@@ -604,12 +604,7 @@ def _render_search(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa
 
 
 def offer_skills(ctx: Context) -> None:
-    """Install this package's `SKILL.md` files, if a skills registry is mounted.
-
-    `discover_skills` already globs `<root>/*/SKILL.md`, validates each one and
-    skips a malformed one with a logged reason — the whole of what a
-    hand-written loader was doing here in 28 lines, duplicated byte-for-byte
-    into the sibling package.
+    """Install this package's `SKILL.md` files (`ph.seams.skills.offer_skills`).
 
     **Called from the provider's claim, not from this row's `apply`.** The tools
     appear only once an embedder exists, and the skill has to follow them: with
@@ -617,13 +612,8 @@ def offer_skills(ctx: Context) -> None:
     supports — the catalog line for `text-search` rode every prompt while
     `text_index`/`text_search` were absent, which is the exact failure the
     module docstring says the tools avoid.
-
-    Only the one-line description rides the prompt; the body stays on disk until
-    the model asks for it by name (G9).
     """
-    root = Path(__file__).parent / "skills"
-    for skill in discover_skills([str(root)], source="ph-text-index"):
-        contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
+    offer_package_skills(ctx, Path(__file__).parent / "skills", source="ph-text-index")
 
 
 @plugin("text-index", affects="environment", inject=[TOOLS, FS], config=Config)

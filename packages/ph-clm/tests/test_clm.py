@@ -24,7 +24,7 @@ from clm_helpers import (
     sections_of,
 )
 
-from ph.json import as_obj, as_seq
+from ph.json import as_int, as_obj, as_seq
 from ph.keys import LLM_FAKE, SESSIONS, TOKEN_METER
 from ph.llm.types import PluginSource, TokenUsage, create_user_message, text_of
 from ph.session import (
@@ -41,6 +41,7 @@ from ph.testing import (
     assert_fold_laws,
     assistant_payload,
     log_event,
+    revision_record,
     run_tool,
     user_payload,
 )
@@ -169,6 +170,12 @@ async def test_a_tombstone_shadows_the_run_and_keeps_the_log(mount: MountProfile
         "the record and the edit it describes landed apart"
     )
     assert tuple(as_seq(record.data.get("shadowed"))) == (*step.nodes, *reply.nodes)
+    assert agent.session.records_of(replacement.seq) == (record,)
+    assert not {"replacement", "tokensBefore", "tokensAfter"} & set(record.data), (
+        "the record repeats what the door stamps"
+    )
+    size = as_obj(record.data["size"])
+    assert size["unit"] == "tokens" and as_int(size["after"]) < as_int(size["before"])
     assert agent.session.stale() == []
 
 
@@ -389,23 +396,24 @@ async def test_recall_reads_back_what_a_revision_stands_for(mount: MountProfile)
     assert "cut at the token bound" in text_of(cut.content)
 
 
-async def test_a_diff_shows_both_versions(mount: MountProfile) -> None:
+async def test_a_diff_shows_both_versions_and_every_edit_between(mount: MountProfile) -> None:
+    """The section as first written against now, after the edits that led there,
+    oldest first, which the session's history lists (`Session.history`). Sabotage: list
+    only the latest edit."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
     reply = sections_of(ctx, agent.session)[2]
-    await edit(
-        ctx,
-        agent,
-        "context_rewrite",
-        {"section": reply.name, "old": "line 1 of parser.py", "new": "parser.py:1"},
-    )
+    for old, new in (("line 1 of parser.py", "parser.py:1"), ("the bug", "The bug")):
+        await edit(ctx, agent, "context_rewrite", {"section": reply.name, "old": old, "new": new})
 
     result = await edit(ctx, agent, "context_diff", {"section": reply.name})
 
     diff = text_of(result.content)
     assert "-the bug is on line 1 of parser.py" in diff
-    assert "+the bug is on parser.py:1" in diff
+    assert "+The bug is on parser.py:1" in diff
+    edits = [line for line in diff.splitlines() if line.startswith("- seq ")]
+    assert len(edits) == 2 and all("rewrite (clm/revised)" in line for line in edits)
 
 
 async def test_an_unrevised_section_has_nothing_to_recall(mount: MountProfile) -> None:
@@ -530,7 +538,7 @@ async def test_only_a_context_edit_is_restored(mount: MountProfile) -> None:
         content=[{"type": "text", "text": "the parser was read"}],
         source=PluginSource(plugin="compaction-summarize", form="compaction", summary="read"),
     )
-    substitute(agent.session, step.nodes, summary)
+    substitute(agent.session, step.nodes, summary, revision_record("compaction/summarized"))
     summarized = sections_of(ctx, agent.session)[1]
     logged = len(agent.session.events)
 

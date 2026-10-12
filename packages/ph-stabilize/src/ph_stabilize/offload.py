@@ -47,14 +47,15 @@ caps are per stream, so one cell can still emit twice the threshold.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from ph.cordis import DEPLOYMENT, Boundary, Context, Next, plugin
+from ph.json import JsonObject, JsonValue
 from ph.keys import SPILL_STORE, TOOLS
 from ph.llm.types import text_of
 from ph.seams.spill import PlannedBlob, SpillClaim
-from ph.session import Session, SessionBatch
+from ph.session import RevisionRecord, RevisionSize, Session, SessionEvent, rewrite
 from ph.session.writers import log_writer
 from ph.tools.definition import (
     Accept,
@@ -288,14 +289,15 @@ async def spill_tool_result(
     session: Session,
     planned: ResultSpill,
     *,
-    beside: Callable[[SessionBatch], object] | None = None,
+    rewriting: tuple[SessionEvent, Mapping[str, JsonValue]] | None = None,
 ) -> bool:
     """Make a planned relocation: write the blob, then record it.
 
-    `beside` appends into the batch that holds the `offload/spilled` record — the
-    overflow clip's `tool/result` replace, which is the other half of the same
-    relocation (S14): apart, a refused replace or a torn tail left an accounting
-    record describing a replacement that never landed.
+    `rewriting` is the result to rewrite in place, and the message to rewrite it to,
+    when the relocation is a replacement's other half — the overflow clip's — so the
+    `offload/spilled` record goes through the revision door with it, in one batch
+    (S14): apart, a refused replace or a torn tail left an accounting record describing
+    a replacement that never landed.
 
     `False` is the fail-open path both callers need: an offload that cannot store
     the content must not be the reason the model loses it. The seam logs why.
@@ -309,14 +311,12 @@ async def spill_tool_result(
     # forwarding address, not the conversation, because the replacement the model
     # saw is what `tool/result` carries. After the blob is on disk (`SpillStore.try_save`),
     # so no record names bytes that are not there.
-    with session.batch() as batch:
-        _LOG.append(
-            batch,
-            "offload/spilled",
-            {"callId": planned.call_id, "locator": ref.locator, "bytes": ref.bytes},
-        )
-        if beside is not None:
-            beside(batch)
+    data: JsonObject = {"callId": planned.call_id, "locator": ref.locator, "bytes": ref.bytes}
+    if rewriting is None:
+        _LOG.append(session, "offload/spilled", data)
+        return True
+    size = RevisionSize("bytes", ref.bytes, len(planned.replacement.encode("utf-8")))
+    rewrite(session, *rewriting, RevisionRecord(_LOG, "offload/spilled", data, size))
     return True
 
 

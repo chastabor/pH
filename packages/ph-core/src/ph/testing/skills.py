@@ -10,6 +10,7 @@ reach it, before a third copy decides frontmatter looks slightly different.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -65,12 +66,21 @@ def skill(
     hint: str = "",
     model: str = "",
     output: dict[str, Any] | None = None,
+    accepts: Sequence[str] = (),
 ) -> Skill:
     """One registered skill, with no file behind it; `model` is the key it asks a child
-    it directs to run on, and `output` the shape of the value that child returns.
+    it directs to run on, `output` the shape of the value that child returns, and
+    `accepts` the media it hands that child.
 
     For the tests that care about the *registry* — visibility, narrowing, the
     catalog — rather than about the format on disk. Written out in three modules
     before it moved here, which is the same road `write_skill` took.
     """
-    return Skill(name=name, description=description, hint=hint, model=model, output=output or {})
+    return Skill(
+        name=name,
+        description=description,
+        hint=hint,
+        model=model,
+        output=output or {},
+        accepts=list(accepts),
+    )

@@ -5,13 +5,13 @@ from __future__ import annotations
 import itertools
 import json
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.keys import AGENTS, LLM_FAKE, SESSIONS, TOKEN_METER
-from ph.llm.types import GenerateOptions, StreamChunk
+from ph.llm.types import GenerateOptions
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent, render_messages
 from ph.testing import (
@@ -20,6 +20,7 @@ from ph.testing import (
     assistant_payload,
     log_event,
     run_tool,
+    streamed,
     tool_call_chunks,
     tool_result_payload,
     user_payload,
@@ -147,15 +148,10 @@ def answer_first_request(
         if options.is_loop_request and not asked:
             asked = True
             ctx.require(LLM_FAKE).requests.append(options)
-            return _stream(tool_call_chunks(CALL_ID, name, json.dumps(arguments())))
+            return streamed(tool_call_chunks(CALL_ID, name, json.dumps(arguments())))
         return await next_(options)
 
     ctx.on("llm/stream", first)
-
-
-async def _stream(chunks: Iterable[StreamChunk]) -> AsyncIterator[StreamChunk]:
-    for chunk in chunks:
-        yield chunk
 
 
 def context_tokens(ctx: Context, session: Session) -> int:

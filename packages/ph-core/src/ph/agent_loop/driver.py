@@ -77,6 +77,7 @@ from ..llm.types import (
     ToolCallBlock,
     create_assistant_message,
     create_user_message,
+    sampling_fields,
 )
 from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
@@ -675,7 +676,7 @@ class ReactLoopAgent:
             system=header.system,
             tools=tuple(header.tools or ()),
             reasoning_effort=header.config.reasoning_effort,
-            temperature=header.config.temperature,
+            **sampling_fields(header.config),
             max_tokens=header.config.max_tokens,
             stop=tuple(header.config.stop or ()),
             session_id=session.id,

@@ -60,6 +60,7 @@ __all__ = [
     "oversized_notices",
     "record_degraded",
     "record_oversized",
+    "untaken",
     "unusable_reason",
 ]
 
@@ -154,6 +155,21 @@ class MediaPresence(Protocol):
     """
 
     def exists(self, ref: AttachmentRef) -> bool: ...
+
+
+def untaken(needed: Sequence[str], accepts: frozenset[str]) -> tuple[str, ...]:
+    """The media in `needed` a route taking `accepts` cannot: a type it does not list, or
+    a family (`image/*`) it lists no member of. For a requirement stated ahead of the
+    bytes, as a skill states what it hands a child (`Skill.accepts`); a block that is
+    here is asked about exactly (`unusable_reason`)."""
+    return tuple(
+        media
+        for media in needed
+        if not (
+            media in accepts
+            or (media.endswith("/*") and any(one.startswith(media[:-1]) for one in accepts))
+        )
+    )
 
 
 def unusable_reason(

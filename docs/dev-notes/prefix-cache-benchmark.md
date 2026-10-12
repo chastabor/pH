@@ -6,19 +6,24 @@ system prompt is byte-identical and that each request extends the last — but i
 puts no number on what that is worth, and no number on what `stabilize` costs
 or saves. This is that measurement.
 
-**Headline: stabilization cuts tokens sent by 67 % under context pressure and
-changes what a provider bills by under 2 %.** The saving is almost entirely a
-saving on tokens the prefix cache would have served anyway. What stabilization
-buys at these sizes is headroom, not price.
+**Headline: under context pressure, stabilization cuts tokens sent by 88 % and
+keeps the prefix cache, so what a provider bills falls by as much.** The pressure
+in this workload is one cell result a turn larger than the window, and
+`compaction-summarize` clips each one before the request that would carry it.
+With a window the session fits, stabilization costs about 2 %.
+
+Until 2026-10-12 the same run summarized the history every turn instead: 67 %
+fewer tokens sent, the prefix lost, and under 2 % off the bill. Finding 5 says
+what changed, and when that trade still applies.
 
 ## The numbers
 
 | context window | profile | requests | tokens/turn | sent | cacheable | uncached |
 | --- | --- | --- | --- | --- | --- | --- |
-| 200,000 | `rlm` | 6 | 23,651 | 141,906 | 74.9% | 35,641 |
-| 200,000 | `rlm-stable` | 6 | 24,052 | 144,312 | 75.0% | 36,043 |
-| 8,192 | `rlm` | 6 | 23,651 | 141,906 | 74.9% | 35,641 |
-| 8,192 | `rlm-stable` | 6 | 7,845 | 47,069 | 22.9% | 36,278 |
+| 200,000 | `rlm` | 6 | 23,878 | 143,268 | 75.0% | 35,868 |
+| 200,000 | `rlm-stable` | 6 | 24,279 | 145,674 | 75.1% | 36,270 |
+| 8,192 | `rlm` | 6 | 23,878 | 143,268 | 75.0% | 35,868 |
+| 8,192 | `rlm-stable` | 6 | 2,846 | 17,074 | 75.9% | 4,120 |
 
 *cacheable* is the share of everything sent that a provider could serve from the
 previous request's prefix: the longest common run of messages, and only when the
@@ -57,13 +62,13 @@ session as though it were the ordinary case.
 
 Every request's cacheable prefix is its predecessor *in full*. Nothing is
 rewritten, so a provider re-reads only what the turn added, and the hit rate is
-74.9 % across the run. This is the structural property, priced.
+75.0 % across the run. This is the structural property, priced.
 
 ## Finding 2 — nothing in `rlm` consults the context window
 
 The two `rlm` rows are identical measurements. An unstabilized profile has no
 mechanism that reacts to the budget, so a session that outgrows it simply keeps
-growing: the 8 192 row sends 141 906 tokens against an 8 192-token window, and
+growing: the 8 192 row sends 143 268 tokens against an 8 192-token window, and
 against a real provider the last four requests would be refused outright. That
 is the gap `stabilize` exists to close, and it is worth seeing as a number
 rather than as a design intention.
@@ -96,43 +101,60 @@ where offload would have preserved the whole result behind a reference. The
 second is the one worth checking, because truncation is lossy and offload is
 not.
 
-## Finding 5 — under pressure, the trade is real in both directions
+The overflow clip is the exception, since 2026-10-12. It spills a result through
+offload's own operation when the request carrying it would not fit the window
+(finding 5), so at the 8 192 window every cell result here is spilled after all,
+and at 200 000 none is.
 
-With the window exceeded every turn, `compaction-summarize` replaces the history
-with a summary. Tokens per turn fall by 67 % (23 651 → 7 845). The prefix hit
-rate falls with them, 74.9 % → 22.9 %, because the summary lands at position 0
-and every cached byte before it is invalidated.
+## Finding 5 — under pressure from one result, the clip keeps the prefix
 
-That is I4's surface `replace` against A12's prefix stability, and the two are
-structurally opposed: a projection that rewrites history cannot also be a
-prefix that never moves. Both invariants are correct; the cost of holding them
-together is this number.
+Each turn's cell result, about 16 600 tokens, is larger than the 8 192 window by
+itself. At the next step's start `compaction-summarize` sees that the request
+carrying it would fill the whole window, and clips it first: the result is spilled
+to a file and replaced by a pointer before it is ever sent. Tokens per turn fall by
+88 % (23 878 → 2 846), and the hit rate does not fall at all (75.9 %), because
+nothing that was already sent is rewritten: each request still extends the last.
 
-## Finding 6 — the saving is almost entirely cached tokens
+Before that check (2026-10-12), the request went out over the window, and a summary
+replaced the history every turn: tokens per turn fell by 67 %, and the hit rate
+with them, 74.9 % → 22.9 %, because the summary lands at position 0 and every
+cached byte before it is invalidated. That is I4's surface `replace` against A12's
+prefix stability, and the two are structurally opposed: a projection that rewrites
+history cannot also be a prefix that never moves. The trade still applies when the
+history itself outgrows the window; this workload no longer reaches it, since after
+the clip three turns fit.
 
-Uncached tokens across all four rows: **35 641, 36 043, 35 641, 36 278** — a
-spread of 1.8 %. The 67 % reduction in tokens *sent* is a reduction in tokens the
-cache would have served for a fraction of the price.
+## Finding 6 — the saving reaches the bill
+
+Uncached tokens: **35 868, 36 270, 35 868** for the three rows the clip leaves
+alone, a spread of 1.1 %, and **4 120** for `rlm-stable` at 8 192. Because the clip
+keeps the prefix, the tokens it saves are ones a provider would have billed at full
+rate, not ones its cache would have served. (The summarizing run before it saved
+almost only cached tokens: its four rows were within 1.8 % of each other.)
 
 What follows for a deployment:
 
 * If the session fits the window, `stabilize` costs ~2 % and buys the gates —
   the human-in-the-loop rules, the limits, the fs permissions. Those are its
   value there, not tokens.
-* If the session does not fit, `stabilize` is what makes it run at all, and the
-  right expectation is *headroom*, not a smaller bill.
-* A provider that does **not** discount cached input inverts finding 6 entirely:
-  there, the 67 % is a real 67 %. The benchmark measures tokens, not any
-  provider's price list.
+* If one result does not fit, `stabilize` clips it before it is sent. The model
+  reads a pointer to the file in its place, and the bill falls with the tokens.
+* If the history does not fit, `stabilize` summarizes it, and the right
+  expectation there is *headroom*, not a smaller bill, on a provider that
+  discounts cached input. A provider that does **not** discount it makes that
+  saving a real one too. The benchmark measures tokens, not any provider's price
+  list.
 
 ## What this did not measure
 
 * Any real model's behavior — the trajectory is authored (see above).
 * `input-offload`, which needs a large pasted *input*; every prompt here is one
   short sentence.
+* A history that outgrows the window, where a summary is the remedy and finding
+  5's trade applies; this workload's pressure is one result a turn.
 * Sessions long enough for compaction to run repeatedly under a large window,
   which is the regime a real long-running agent reaches and the one where
-  finding 5's trade compounds.
+  that trade compounds.
 * Cache *TTL*. A provider's prefix cache expires; every number here assumes the
   previous request's prefix is still warm, which is the best case.
 
@@ -149,5 +171,5 @@ The table above is rendered from `tests/prefix_bench.json`, the run it records.
 The tests assert the findings as **relationships rather than digits**: absolute
 counts move with the length of the temporary directory, because the workspace
 path is rendered into the session context snapshot and is therefore part of what
-the model reads. A guard on 141 906 would fail on a machine with a longer
+the model reads. A guard on 143 268 would fail on a machine with a longer
 `TMPDIR`, which is a property of the runner and not of pH.

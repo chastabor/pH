@@ -15,11 +15,12 @@ writer of record for (`known_event_types.WRITERS`). That is held twice:
 ## What counts as a write
 
 A call `<writer>.append(log, type, data, …)` where `<writer>` is the module's own
-binding of `log_writer(__name__)`, and an `IntentKind(opened=…, settled=…,
-writer=<writer>)` declaration — whose pair the journal writes through that writer, so
-the leaf that declares a kind is the writer of record of both its types. The type is
-read from a literal, a module constant, or a constant imported by name from another
-module.
+binding of `log_writer(__name__)`; a `RevisionRecord(<writer>, type, data)`, the record
+the revision door writes through that writer after the replacement it explains; and an
+`IntentKind(opened=…, settled=…, writer=<writer>)` declaration — whose pair the journal
+writes through that writer, so the leaf that declares a kind is the writer of record of
+both its types. The type is read from a literal, a module constant, or a constant
+imported by name from another module.
 
 ## Why a site whose type is a variable is a listed decision
 
@@ -70,11 +71,13 @@ NOT_A_LOG_WRITE: frozenset[tuple[str, str]] = frozenset(
         # The journal, writing a declared kind's pair through the kind's own writer —
         # credited to the leaf that declared the kind, which is the writer of record.
         ("ph.session.journal", "kind.writer"),
-        # `ph.testing.log_event`: the scaffolding writer tests build logs with.
+        # `ph.testing.log_event` and `revision_record`: the scaffolding writer tests
+        # build logs with.
         ("ph.testing.builders", "SCAFFOLDING"),
     }
 )
-"""Two-argument `.append` receivers that are not a module's own writer, and why."""
+"""Two-argument `.append` receivers, and `RevisionRecord` writers, that are not a module's
+own writer, and why."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +195,20 @@ def _walk() -> _Walk:
                 strays.append(f"{line} constructs a SurfaceReplace past ph.session.revise")
             if name == "_append" and len(node.args) >= 2 and not in_session:
                 strays.append(f"{line} calls a log's _append past its writer")
+            if name == "_append_revising" and module != "ph.session.revise":
+                strays.append(f"{line} stamps `revises` past the revision door")
+            if name == "RevisionRecord" and node.args:
+                holder = node.args[0]
+                if (module, ast.unparse(holder)) in NOT_A_LOG_WRITE:
+                    pass
+                elif not (isinstance(holder, ast.Name) and holder.id in own):
+                    strays.append(f"{line} hands the revision door a writer not its own")
+                elif len(node.args) >= 2:
+                    kind = type_of(module, node.args[1])
+                    if kind is None:
+                        variable.add((module, ast.unparse(node.args[1])))
+                    else:
+                        static[kind].add(module)
             if name == "IntentKind":
                 keywords = {keyword.arg: keyword.value for keyword in node.keywords}
                 writer = keywords.get("writer")

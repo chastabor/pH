@@ -68,6 +68,7 @@ from ph.seams.subagents import (
     SubagentSpawnError,
     child_options,
     last_answer,
+    offer_shipped_skills,
     open_child_log,
     record_deleted,
     record_ended,
@@ -927,9 +928,11 @@ def _said(answer: str) -> str:
     inject=[SUBAGENTS, AGENTS, SESSIONS, JOBS],
 )
 async def apply(ctx: Context, config: Config) -> None:
-    """Register the `rlm-child` provider and expose it for the bindings row."""
+    """Register the `rlm-child` provider and expose it for the bindings row, and offer
+    the skills ph-core ships for handing to a child (`categorize`)."""
     provider = RlmChildProvider(ctx=ctx, config=config)
     ctx.require(SUBAGENTS).register_provider(PROVIDER_NAME, provider)
     ctx.provide(RLM_CHILDREN, provider)
+    offer_shipped_skills(ctx)
     # Registered after the provider, so it runs before the provider is withdrawn.
     ctx.add_disposer(provider.suspend, label="rlm-children.suspend")

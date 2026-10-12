@@ -21,7 +21,13 @@ from ph.llm.types import ContextForm, Message, PluginSource, create_user_message
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
 from ph.seams.user_questions import UserQuestion
 from ph.session import Session, SessionEvent, SurfaceIntent, editable_message, rewrite
-from ph.testing import assistant_payload, log_event, tool_result_payload, user_payload
+from ph.testing import (
+    assistant_payload,
+    log_event,
+    revision_record,
+    tool_result_payload,
+    user_payload,
+)
 from ph_app.daemon.supervisor import Root
 from ph_app.payloads import AskKey, ProfileDecision
 from ph_app.tui.app import PHTuiApp
@@ -301,7 +307,8 @@ def revisable(output: str) -> tuple[Session, SessionEvent, SessionEvent, Session
 
 
 def rewritten(session: Session, result: SessionEvent, text: str) -> SessionEvent:
-    """`result` with its output rewritten in place to `text`."""
+    """`result` with its output rewritten in place to `text`, as the overflow clip
+    rewrites one, with its record."""
     message = editable_message(result)
     message["content"][0]["content"] = [{"type": "text", "text": text}]
-    return rewrite(session, result, message)
+    return rewrite(session, result, message, revision_record("offload/spilled", {"callId": "c1"}))

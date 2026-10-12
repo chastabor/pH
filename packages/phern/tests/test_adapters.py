@@ -26,7 +26,8 @@ from __future__ import annotations
 import base64
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -705,6 +706,81 @@ async def test_the_openai_request_body_carries_tools_and_the_system_slot() -> No
     assert body["stream"] is True
     # Usage is requested explicitly, because D15 makes it authoritative.
     assert body["stream_options"] == {"include_usage": True}
+
+
+def _sampled(provider: str, *, settings: bool = True) -> GenerateOptions:
+    """A request with every sampling setting set, or none."""
+    asked = GenerateOptions(
+        provider=provider,
+        model="m",
+        messages=(
+            create_user_message(content=[{"type": "text", "text": "hi"}], source={"kind": "user"}),
+        ),
+    )
+    if not settings:
+        return asked
+    return replace(
+        asked,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.05,
+        presence_penalty=1.5,
+        frequency_penalty=0.2,
+    )
+
+
+OPENAI_FIELDS = {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.05,
+    "presence_penalty": 1.5,
+    "frequency_penalty": 0.2,
+}
+
+
+async def test_each_wire_carries_the_sampling_settings_its_api_takes_and_nothing_unset() -> None:
+    """A1's gate: each adapter sends the settings its API takes under its own names, and
+    a setting it does not take, or one the request leaves unset, is not in the body.
+    What it says it carries is what the seam drops by. Sabotage: send `min_p` to
+    Anthropic, or `top_k` to a server that did not say it takes it."""
+    root = Context()
+    plain = OpenAiCompatibleAdapter(ctx=root, profile=ProviderProfile(provider="p"))
+    llama = OpenAiCompatibleAdapter(
+        ctx=root, profile=ProviderProfile(provider="p", sampling_extras=("topK", "minP"))
+    )
+    anthropic = AnthropicAdapter(ctx=root, config=AnthropicConfig())
+    google = GoogleAdapter(ctx=root, config=GoogleConfig())
+
+    def sent(body: dict[str, Any], names: Iterable[str]) -> dict[str, Any]:
+        return {name: body[name] for name in names if name in body}
+
+    plain_body, _ = await plain._body(_sampled("p"))
+    llama_body, _ = await llama._body(_sampled("p"))
+    unset_body, _ = await llama._body(_sampled("p", settings=False))
+    anthropic_body, _ = await anthropic._body(_sampled("anthropic"))
+    google_body, _ = await google._body(_sampled("google"))
+
+    assert sent(plain_body, OPENAI_FIELDS) == {
+        name: OPENAI_FIELDS[name]
+        for name in ("temperature", "top_p", "presence_penalty", "frequency_penalty")
+    }
+    assert sent(llama_body, OPENAI_FIELDS) == OPENAI_FIELDS
+    assert sent(unset_body, OPENAI_FIELDS) == {}
+    assert sent(anthropic_body, OPENAI_FIELDS) == {"temperature": 0.6, "top_p": 0.95, "top_k": 20}
+    assert sent(google_body["generationConfig"], ("temperature", "topP", "topK", "minP")) == {
+        "temperature": 0.6,
+        "topP": 0.95,
+        "topK": 20,
+    }
+    assert google_body["generationConfig"]["presencePenalty"] == 1.5
+    assert llama.resolve_model("p", "m").sampling == frozenset(
+        {"temperature", "topP", "topK", "minP", "presencePenalty", "frequencyPenalty"}
+    )
+    assert anthropic.resolve_model("anthropic", "m").sampling == frozenset(
+        {"temperature", "topP", "topK"}
+    )
 
 
 @pytest.mark.parametrize(

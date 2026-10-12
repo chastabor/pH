@@ -22,9 +22,18 @@ payload built from the original, D8's fields left behind, the citation. And the
 writers walk (`test_log_writers.py`) holds that no other shipped module constructs
 a `SurfaceReplace`, so it stays the one place those are remembered.
 
-Both write into the caller's log *or batch*, through this module's own writer, so
-a producer's record of why — `compaction/summarized`, `offload/input-spilled`,
-`clm/revised` — lands in the same batch as the revision it describes.
+**Every revision carries its producer's record of why**, and the door writes it:
+`compaction/summarized`, `offload/input-spilled`, `clm/revised`, handed in as a
+`RevisionRecord` with the producer's own writer, since the type is the producer's. The
+door writes it right after the replacement, into the caller's log *or batch*, stamped
+`revises: [seq, ...]` with the replacements it explains, a payload key the writers keep
+for this door alone (`writers.REVISES`). So `Session.records_of(seq)` answers "why is
+this node here" by lookup, for every producer alike, where readers used to infer the
+pairing from where a record sat in its batch. A record for several replacements at once,
+as argument elision writes one for every argument it cut, goes through `rewrite_many`,
+which names them all. A record may carry the revision's size (`RevisionSize`), which the
+door writes as its `size`: tokens where the producer counts them, bytes where it moves
+them.
 
 **D8, why a rewritten assistant reply drops `usage`, `turn` and `step`.** The
 replacement is appended at the tail. `TokenMeter.last_usage` folds to the newest
@@ -40,10 +49,13 @@ than a pair of integers a reader has to match up.
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, assert_never, cast
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Literal, TypeAlias, assert_never, cast
 
-from ..json import JsonValue, thaw_json
+from ..json import JsonValue, as_int, as_obj, as_str, thaw_json
 from ..llm.types import (
     MediaBlock,
     Message,
@@ -56,29 +68,136 @@ from ..llm.types import (
 from ..text import block_marker
 from .derive import derive_event_message
 from .events import SessionEvent, SurfaceIntent, SurfaceReplace
-from .surface import REWRITTEN_IN_PLACE, SurfaceError, is_in_place_rewrite, shadowed_by
-from .writers import log_writer
-
-if TYPE_CHECKING:
-    from .session import Session, SessionBatch
+from .revision_index import RevisionIndex, revises_of
+from .session import Session, SessionBatch
+from .surface import (
+    REWRITTEN_IN_PLACE,
+    SurfaceError,
+    is_in_place_rewrite,
+    is_stand_in,
+    shadowed_by,
+)
+from .writers import REVISES, LogWriter, log_writer
 
 _LOG = log_writer(__name__)
 
 __all__ = [
+    "RevisionIndex",
+    "RevisionRecord",
+    "RevisionShape",
+    "RevisionSize",
     "editable_message",
     "messages_of",
     "origin_of",
     "originals",
+    "producer_data",
     "render_messages",
+    "revises_of",
     "rewrite",
+    "rewrite_many",
+    "shape_of",
     "substitute",
+    "unified_diff",
 ]
 
 
+SIZE = "size"
+"""The payload key the door writes a record's `RevisionSize` under."""
+
+SizeUnit: TypeAlias = Literal["tokens", "bytes", "chars"]
+"""Tokens where a producer counts them, bytes where it moves them; characters where a
+reader that has no meter counts them itself."""
+
+RevisionShape: TypeAlias = Literal["substitution", "stand-in", "rewrite"]
+"""How a revision changed the surface: a **substitution** stands for a run of nodes
+with text of its own, and a **stand-in** is the substitution that claims the run left
+the surface as condensed conversation (`is_stand_in`), a summary or a model's
+revision; a **rewrite** replaces one node with a near-copy of itself
+(`is_in_place_rewrite`)."""
+
+
+def shape_of(event: SessionEvent) -> RevisionShape:
+    """How the replacement `event` changed the surface: one answer for `/diff`, the
+    revision export and ph-clm's `context_diff`."""
+    if is_in_place_rewrite(event):
+        return "rewrite"
+    return "stand-in" if is_stand_in(event) else "substitution"
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionSize:
+    """How big what a revision replaced was, and what it put there, in `unit`. For a
+    record of several replacements, all of them together."""
+
+    unit: SizeUnit
+    before: int
+    after: int
+
+    def to_wire(self) -> dict[str, JsonValue]:
+        return {"unit": self.unit, "before": self.before, "after": self.after}
+
+    def label(self) -> str:
+        return f"{self.before:,}→{self.after:,} {self.unit}"
+
+    @classmethod
+    def of(cls, record: SessionEvent) -> RevisionSize | None:
+        """The size the door wrote on `record`, or `None` for none, or for a unit this
+        build does not know."""
+        size = as_obj(record.data.get(SIZE))
+        unit = as_str(size.get("unit"))
+        if unit not in ("tokens", "bytes", "chars"):
+            return None
+        return cls(cast("SizeUnit", unit), as_int(size.get("before")), as_int(size.get("after")))
+
+
+def producer_data(record: SessionEvent) -> dict[str, JsonValue]:
+    """What a record's producer wrote, without what the door stamped on it (`revises`,
+    `size`): a record's own fields, as a reader lists them."""
+    return {key: value for key, value in record.data.items() if key not in (REVISES, SIZE)}
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionRecord:
+    """A producer's record of why it revised the surface, for the door to write.
+
+    `writer` is the producer's own, which owns `type`; the door adds `revises`, and
+    `size` when there is one.
+    """
+
+    writer: LogWriter
+    type: str
+    data: Mapping[str, JsonValue]
+    size: RevisionSize | None = None
+
+    def __post_init__(self) -> None:
+        if SIZE in self.data:
+            raise ValueError(f'"{SIZE}" is the door\'s to write: hand it over as `size`')
+
+    def _write(self, log: SessionBatch, revises: Sequence[int]) -> SessionEvent:
+        data = self.data if self.size is None else {**self.data, SIZE: self.size.to_wire()}
+        return self.writer._append_revising(log, self.type, data, revises)
+
+
+@contextmanager
+def _together(log: Session | SessionBatch) -> Iterator[SessionBatch]:
+    """`log` as a batch, so a replacement and its record land together or not at all
+    (P10-14): the caller's own, or one opened here for a caller that wrote nothing
+    else beside them."""
+    if isinstance(log, SessionBatch):
+        yield log
+        return
+    with log.batch() as batch:
+        yield batch
+
+
 def substitute(
-    log: Session | SessionBatch, shadowed: Sequence[int], message: Message
+    log: Session | SessionBatch,
+    shadowed: Sequence[int],
+    message: Message,
+    record: RevisionRecord,
 ) -> SessionEvent:
-    """Append `message` in place of the nodes `shadowed` names.
+    """Append `message` in place of the nodes `shadowed` names, then `record`; the
+    replacement is returned.
 
     The surface lands it where the earliest of them was and takes the rest out; the
     log keeps every one of them (I4). `message` is a user message of its own — a
@@ -90,24 +209,53 @@ def substitute(
             f"one turn's speaker, and this one is {message.role!r}"
         )
     seqs = tuple(shadowed)
-    return _LOG.append(
-        log,
-        "user/message",
-        message.to_wire(),
-        SurfaceIntent(surface_op=SurfaceReplace(replaces=seqs), source_event_seqs=seqs),
-    )
+    with _together(log) as batch:
+        replacement = _LOG.append(
+            batch,
+            "user/message",
+            message.to_wire(),
+            SurfaceIntent(surface_op=SurfaceReplace(replaces=seqs), source_event_seqs=seqs),
+        )
+        record._write(batch, (replacement.seq,))
+    return replacement
 
 
 def rewrite(
-    log: Session | SessionBatch, event: SessionEvent, message: Mapping[str, JsonValue]
+    log: Session | SessionBatch,
+    event: SessionEvent,
+    message: Mapping[str, JsonValue],
+    record: RevisionRecord,
 ) -> SessionEvent:
-    """Append a near-copy of `event` carrying `message`, in place of it.
+    """Append a near-copy of `event` carrying `message`, in place of it, then `record`;
+    the replacement is returned.
 
     `message` is the replacement message's wire form — the original's, changed
     (`editable_message`). Its id must stay the original's, which the commit checks:
     that is what "near-copy" means, and what lets a reader update the row it
     already has rather than draw a second one.
     """
+    return rewrite_many(log, ((event, message),), record)[0]
+
+
+def rewrite_many(
+    log: Session | SessionBatch,
+    rewrites: Sequence[tuple[SessionEvent, Mapping[str, JsonValue]]],
+    record: RevisionRecord,
+) -> tuple[SessionEvent, ...]:
+    """`rewrite` for each `(event, message)`, then one `record` naming every replacement:
+    for a producer whose one record explains them all, as argument elision's does."""
+    if not rewrites:
+        raise ValueError("a record of rewrites names at least one")
+    with _together(log) as batch:
+        replacements = tuple(_rewritten(batch, event, message) for event, message in rewrites)
+        record._write(batch, tuple(one.seq for one in replacements))
+    return replacements
+
+
+def _rewritten(
+    log: SessionBatch, event: SessionEvent, message: Mapping[str, JsonValue]
+) -> SessionEvent:
+    """The near-copy itself, with no record: `rewrite_many`'s half."""
     if event.type not in REWRITTEN_IN_PLACE:
         raise SurfaceError(
             f'only an assistant reply or a tool result is rewritten in place, not "{event.type}"'
@@ -179,6 +327,14 @@ def messages_of(session: Session, seqs: Iterable[int]) -> Iterator[Message]:
         event = session.at(seq)
         if event is not None and (message := derive_event_message(event)) is not None:
             yield message
+
+
+def unified_diff(before: str, after: str, labels: tuple[str, str]) -> tuple[str, ...]:
+    """Two renderings as a unified diff, every line of it, under `labels`: the one diff
+    `/diff` and ph-clm's `context_diff` draw. A reader that shows it bounds it."""
+    return tuple(
+        difflib.unified_diff(before.splitlines(), after.splitlines(), *labels, lineterm="")
+    )
 
 
 def render_messages(messages: Iterable[Message]) -> str:

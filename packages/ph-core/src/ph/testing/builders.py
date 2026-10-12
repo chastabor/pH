@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import errno
 import os
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +32,7 @@ from ..llm.types import (
     ContextForm,
     PluginSource,
     ReasoningBlock,
+    StreamChunk,
     TextBlock,
     TokenUsage,
     ToolResultBlock,
@@ -69,6 +70,8 @@ from ..seams.workspace import (
     WorkspaceSeam,
 )
 from ..session import (
+    RevisionRecord,
+    RevisionSize,
     Session,
     SessionBatch,
     SessionEvent,
@@ -249,6 +252,22 @@ def log_event(
     """Write one event into a hand-built log, through `SCAFFOLDING` — what a test
     calls where it used to call `session.append` (T6)."""
     return SCAFFOLDING.append(log, event_type, data, surface)
+
+
+async def streamed(chunks: Iterable[StreamChunk]) -> AsyncIterator[StreamChunk]:
+    """Scripted chunks (`text_chunks`, `tool_call_chunks`) as the stream a provider
+    sends, for an `llm/stream` listener that answers a request itself."""
+    for chunk in chunks:
+        yield chunk
+
+
+def revision_record(
+    event_type: str, data: Mapping[str, JsonValue] | None = None, size: RevisionSize | None = None
+) -> RevisionRecord:
+    """A producer's record, for a test that revises the surface through the door
+    (`ph.session.revise`): written by `SCAFFOLDING`, so `event_type` may be any type
+    this build reads, one the test declared included."""
+    return RevisionRecord(SCAFFOLDING, event_type, data or {}, size)
 
 
 def admitted_child(

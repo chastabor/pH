@@ -67,7 +67,7 @@ from ..tools.presentation import simple_views
 from ..tools.registry import register_when_composed
 from ..wire import WireModel
 from ._names import require_slug, slug_pattern
-from ._registry import claim_key
+from ._registry import claim_key, contribute_item
 from ._restriction import NameFilter
 from .models import KEY_MAX
 
@@ -85,6 +85,7 @@ __all__ = [
     "SkillService",
     "apply",
     "discover_skills",
+    "offer_skills",
     "progressive",
     "read_skill",
     "read_summary",
@@ -173,6 +174,12 @@ MAX_STEPS = 32
 """How many steps one skill may declare. A procedure longer than this is two
 procedures, and every step is an entry the model cannot delete — so the cap is
 also a bound on how much of somebody's plan a skill may commandeer."""
+
+MAX_ACCEPTS = 16
+"""The most media patterns one skill may state it hands its child (`accepts`)."""
+
+MEDIA_PATTERN = re.compile(r"[a-z]+/(\*|[a-z0-9][a-z0-9.+-]*)")
+"""A media type a skill states, `image/png`, or a whole family of them, `image/*`."""
 
 MAX_PARAMETERS = 16
 """How many inputs one skill may declare. A procedure needing more than this has
@@ -271,6 +278,13 @@ class Skill(WireModel):
     spawn names this skill; the key is the parent's profile's to hold, and one it
     cannot run degrades: the child runs on its parent's model, and the parent is told
     (`ModelFallback`). Empty says nothing."""
+    accepts: list[str] = Field(default_factory=list)
+    """The media this skill hands a child it directs, as media types or families
+    (`image/*`): what the child's model has to take for it to see them (A3). Stated
+    apart from `model`, which names the job, so a cheap classifier that takes images is
+    one key and one list. A child whose route cannot take them runs on its parent's
+    route if that one can, and otherwise sees a text placeholder for each, its parent
+    told. Empty says nothing."""
     max_nudges: int | None = None
     """How many times `skill-steps` may steer toward this skill's steps without
     the plan moving, or `None` for the row's own `maxNudges` (D16).
@@ -596,6 +610,22 @@ async def apply(ctx: Context, config: None) -> None:
 # ------------------------------------------------------- the format on disk --
 
 
+def offer_skills(ctx: Context, root: Path, *, source: str) -> None:
+    """Install the `SKILL.md` files under `root` as `source`'s, if a skills registry is
+    mounted: how a package ships skills.
+
+    `discover_skills` globs `<root>/*/SKILL.md`, validates each one and skips a malformed
+    one with a logged reason; each arrives through `contribute_item`, so exactly when
+    the row offering it does, and leaves with it. A row offers its skills on purpose,
+    which is what keeps `skills-progressive`'s empty `paths` meaningful: installing a
+    skill is something a distribution does deliberately (I7). Only the one-line
+    description rides the prompt every turn; the body stays on disk until the model
+    asks for it by name (G9).
+    """
+    for skill in discover_skills([str(root)], source=source):
+        contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
+
+
 def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | None:
     """One `SKILL.md`, validated. `None` — with a reason logged — if it is not one.
 
@@ -710,9 +740,18 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         log.warning("ph.seams.skills: %s names a model %r that is not a key", path, model)
         return None
 
+    accepts = _string_list(front, "accepts", path, cap=MAX_ACCEPTS)
+    if accepts is None:
+        return None
+    unknown = [one for one in accepts if not MEDIA_PATTERN.fullmatch(one)]
+    if unknown:
+        log.warning("ph.seams.skills: %s accepts what is not a media type: %s", path, unknown)
+        return None
+
     return {
         "version": version,
         "model": model,
+        "accepts": accepts,
         "argument_hint": hint,
         "allowed_tools": tools,
         "parameters": schema,

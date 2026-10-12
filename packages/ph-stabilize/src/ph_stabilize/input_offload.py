@@ -40,8 +40,9 @@ from ph.keys import SPILL_STORE
 from ph.llm.types import LlmCallConfig, PluginSource, UserSource, create_user_message, text_of
 from ph.seams.spill import SpillClaim, SpillRef
 from ph.session import (
+    RevisionRecord,
+    RevisionSize,
     Session,
-    SessionBatch,
     SessionEvent,
     derive_event_message,
     is_replacement_surface_event,
@@ -174,13 +175,13 @@ async def apply(ctx: Context, config: Config) -> None:
         # (S14), and both after the blob is on disk (`SpillStore.try_save`). Apart, a
         # flush between them landed the record with no replacement, and a resumed
         # session never offloaded the paste again.
-        with session.batch() as batch:
-            _LOG.append(
-                batch,
-                "offload/input-spilled",
-                {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
-            )
-            _append_preview(batch, event, ref, preview)
+        record = RevisionRecord(
+            _LOG,
+            "offload/input-spilled",
+            {"seq": event.seq, "locator": ref.locator, "bytes": ref.bytes},
+            RevisionSize("bytes", ref.bytes, len(preview.encode("utf-8"))),
+        )
+        _append_preview(session, event, ref, preview, record)
         # The config is returned untouched. `_build_request` calls
         # `derive_messages()` *after* this waterfall, so the loop picks the
         # replacement up on its own — which is what keeps one statement of the
@@ -190,10 +191,13 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.on("agent/request", offload)
 
 
-def _append_preview(batch: SessionBatch, event: SessionEvent, ref: SpillRef, preview: str) -> None:
-    """The notice that stands in for a spilled paste, on the surface where it was."""
+def _append_preview(
+    session: Session, event: SessionEvent, ref: SpillRef, preview: str, record: RevisionRecord
+) -> None:
+    """The notice that stands in for a spilled paste, on the surface where it was, and
+    the record of the spill after it."""
     substitute(
-        batch,
+        session,
         (event.seq,),
         create_user_message(
             content=[{"type": "text", "text": preview}],
@@ -207,4 +211,5 @@ def _append_preview(batch: SessionBatch, event: SessionEvent, ref: SpillRef, pre
                 summary=f"{count_of(ref.bytes, 'byte')} offloaded to {Path(ref.locator).name}",
             ),
         ),
+        record,
     )

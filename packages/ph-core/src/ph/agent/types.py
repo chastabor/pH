@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 from ..cancel import Cancellation
-from ..llm.types import LlmCallConfig, LlmFailure, Message
+from ..llm.types import LlmCallConfig, LlmFailure, Message, sampling_fields
 from ..wire import WireDataclass
 
 if TYPE_CHECKING:
@@ -245,6 +245,11 @@ class AgentOptions:
     model: str = ""
     max_tokens: int | None = None
     temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
     reasoning_effort: str | None = None
     model_key: str = ""
     """The session's name for this route (`ph.seams.models`), `""` for one it does not
@@ -256,6 +261,6 @@ class AgentOptions:
             provider=self.provider,
             model=self.model,
             reasoning_effort=self.reasoning_effort,
-            temperature=self.temperature,
+            **sampling_fields(self),
             max_tokens=self.max_tokens,
         )

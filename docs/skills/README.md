@@ -133,6 +133,9 @@ look like in this codebase, and what a good sabotage is for a gate.
 | `parameters` | no | ≤ 16 inputs. See below. |
 | `steps` | no | ≤ 32 non-empty, **distinct** strings. This is the half that makes the skill self-steering. |
 | `max-nudges` | no | A non-negative integer: how many times `skill-steps` may steer toward these steps with the plan unchanged. Overrides the row's `maxNudges` (default 3). `0` seeds the steps and never steers — for a procedure where a partial run is still worth something. |
+| `model` | no | For a skill handed to a child: the model it runs on, by a key of the profile's `models` list. Prefer a shared kind (`classify`, `light`; see `docs/seams/models.md`) so the skill works on any profile; a key the profile does not list runs the child on its parent's model, and the parent is told. |
+| `output` | no | For a skill handed to a child: the value it returns, as a JSON Schema object (`type: object` at the root, only keywords pH checks). The child returns it through `submit_result` or as its reply, and fails if it cannot. |
+| `accepts` | no | ≤ 16 media types or families (`image/*`, `application/pdf`) the skill hands its child. A child whose route cannot take them runs on its parent's route if that can, and otherwise sees placeholders, its parent told. |
 
 **A malformed value refuses the whole skill** rather than being dropped, and the
 reason is diagnostic: a skill installed with `allowed-tools` silently empty

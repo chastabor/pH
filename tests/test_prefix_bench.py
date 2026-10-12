@@ -7,7 +7,7 @@ has an assertion here, and they are **relationships rather than digits**.
 
 Absolute token counts move with the length of the temporary directory — the
 workspace path is rendered into the session context snapshot, so it is part of
-what the model reads and therefore part of the count. Asserting 141,906 would
+what the model reads and therefore part of the count. Asserting 143,268 would
 make the guard fail on a machine with a longer `TMPDIR`, which is a property of
 the runner and not of pH. The committed `prefix_bench.json` records the run the
 report's table was rendered from; its *shape* is checked here so the record
@@ -107,7 +107,7 @@ def test_the_window_does_not_change_an_unstabilized_run(
 
     Both `rlm` rows are byte-identical measurements. An unstabilized profile has
     no mechanism that consults the context window, so a session that outgrows it
-    simply keeps growing — which is what the 8 192 row is: 141 906 tokens sent
+    simply keeps growing — which is what the 8 192 row is: 143 268 tokens sent
     against an 8 192-token budget.
     """
     wide, narrow = _row(measured, "rlm", 200_000), _row(measured, "rlm", 8_192)
@@ -163,38 +163,48 @@ def test_offload_cannot_reach_a_code_mode_result_at_shipped_defaults(
     )
 
 
-def test_under_pressure_stabilization_trades_the_prefix_for_headroom(
+def test_under_pressure_the_clip_saves_tokens_and_keeps_the_prefix(
     measured: list[Measurement],
 ) -> None:
-    """Claim 5 — the trade, and it is a real one in both directions.
+    """Claim 5 — a result past the window is clipped before it is sent, so the prefix
+    survives the saving.
 
-    With the window exceeded every turn, `compaction-summarize` replaces the
-    history with a summary. That is what cuts tokens per turn by two thirds, and
-    it is also what costs the prefix: the summary lands at position 0, so every
-    cached byte before it is invalidated (I4's surface `replace` against A12's
-    prefix stability).
+    Each turn's cell result is larger than the 8 192 window by itself, and
+    `compaction-summarize` clips it at the next step's start, before the request that
+    would carry it. Nothing already sent is rewritten, so each request still extends
+    the last while tokens per turn fall. Before that check a summary replaced the
+    history every turn, which cost the prefix: the summary lands at position 0.
     """
     plain, stable = _row(measured, "rlm", 8_192), _row(measured, "rlm-stable", 8_192)
 
-    assert stable.tokens_per_turn < plain.tokens_per_turn * 0.4, "compaction did not engage"
-    assert stable.hit_rate < 0.30 < plain.hit_rate, "the prefix survived, so nothing was replaced"
+    assert stable.tokens_per_turn < plain.tokens_per_turn * 0.2, "the clip did not engage"
+    for index in range(1, stable.requests):
+        assert stable.cached_tokens[index] == stable.request_tokens[index - 1], (
+            f"rlm-stable at 8192 rewrote history before request {index}"
+        )
 
 
-def test_the_saving_is_almost_entirely_cached_tokens(
+def test_the_saving_reaches_the_uncached_tokens(
     measured: list[Measurement],
 ) -> None:
-    """Claim 6 — the headline, and the one that changes what a person should expect.
+    """Claim 6 — the headline: what a provider bills at full rate falls with the tokens.
 
-    Uncached tokens are what a provider bills at full rate. They are within a
-    few percent across **every** row: the 67 % reduction in tokens sent is
-    almost entirely a reduction in tokens the prefix cache would have served
-    anyway. Stabilization's value here is context-window headroom, not price.
+    Uncached tokens are within a few percent across every row the clip leaves alone,
+    and a fraction of that where it clips. A kept prefix is what makes the difference:
+    the tokens the clip saves were never going to be served from a cache.
 
-    Stated as a bound rather than a ratio per row because the point is the
-    absence of a difference, and a bound is what "no material difference" means.
+    Stated as a bound rather than a ratio per row because the point among the three
+    is the absence of a difference, and a bound is what "no material difference" means.
     """
-    uncached = [sum(row.request_tokens) - sum(row.cached_tokens) for row in measured]
+    uncached = {
+        (row.profile, row.context_window): sum(row.request_tokens) - sum(row.cached_tokens)
+        for row in measured
+    }
+    clipped = uncached.pop(("rlm-stable", 8_192))
 
-    assert max(uncached) / min(uncached) < 1.05, (
-        f"uncached totals diverged: {uncached} — the headline claim no longer holds"
+    assert max(uncached.values()) / min(uncached.values()) < 1.05, (
+        f"uncached totals diverged: {uncached} — the rows the clip leaves alone differ"
+    )
+    assert clipped < min(uncached.values()) * 0.2, (
+        f"the clipped row billed {clipped} uncached tokens against {uncached}"
     )

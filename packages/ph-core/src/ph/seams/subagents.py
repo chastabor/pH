@@ -34,6 +34,7 @@ import secrets
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, assert_never, get_args, runtime_checkable
 
 import anyio
@@ -57,6 +58,7 @@ from ..json import JsonObject, JsonValue, as_obj, as_seq, as_str, thaw_json
 from ..keys import (
     AGENTS,
     GOALS,
+    LLM,
     NAMED_PROFILES,
     SANDBOX,
     SESSION_PERSISTENCE,
@@ -67,6 +69,7 @@ from ..keys import (
     SYSTEM_PROMPT,
     TOOLS,
 )
+from ..llm.media import untaken
 from ..llm.structured import SchemaViolation, structural_warning, validated_shape
 from ..llm.types import (
     CONTEXT_SUMMARY_MAX_CHARS,
@@ -120,7 +123,14 @@ from .models import (
     UnrunnableReason,
     choose,
 )
-from .skills import ORDER_SKILLS, Skill, SkillRestriction, SkillService, record_read
+from .skills import (
+    ORDER_SKILLS,
+    Skill,
+    SkillRestriction,
+    SkillService,
+    offer_skills,
+    record_read,
+)
 from .subagent_profiles import narrowing
 from .token_meter import SPENDING_TYPES, event_tokens
 
@@ -138,6 +148,7 @@ __all__ = [
     "RETURNED",
     "REVOKING_AT_ONCE",
     "SETTLED_STATUSES",
+    "SHIPPED_SKILLS",
     "STATUS",
     "SUSPENDED_DETAIL",
     "UNRECOVERABLE_DETAIL",
@@ -148,6 +159,7 @@ __all__ = [
     "ChildState",
     "FallbackReason",
     "FamilyRole",
+    "MediaShortfall",
     "ModelFallback",
     "ReadmittingProvider",
     "RehydratableProvider",
@@ -182,6 +194,7 @@ __all__ = [
     "family_reach",
     "fold_child_event",
     "last_answer",
+    "offer_shipped_skills",
     "open_child_log",
     "parent_went_away",
     "reachable_family",
@@ -411,10 +424,10 @@ def _downgrade_text(reason: DowngradeReason | str) -> str:
     return _DOWNGRADE_TEXT.get(reason, f"access was narrowed ({reason})")
 
 
-FallbackReason: TypeAlias = UnrunnableReason | Literal["contested"]
+FallbackReason: TypeAlias = UnrunnableReason | Literal["contested", "cannot-accept"]
 """Why a child runs on its parent's route rather than the model it was asked onto: the
-list does not hold the key, no adapter here serves its provider, or the skills it was
-given name different models."""
+list does not hold the key, no adapter here serves its provider, the skills it was
+given name different models, or its route cannot take the media they hand it."""
 
 
 class ModelFallback(WireModel):
@@ -430,6 +443,31 @@ class ModelFallback(WireModel):
     """The model asked for, a key or `provider/model` for a whole route; for skills
     that disagree, each key they name."""
     reason: FallbackReason
+    media: tuple[str, ...] | None = None
+    """For `cannot-accept`, the media its skills hand it that the route cannot take;
+    absent otherwise."""
+
+
+class MediaShortfall(WireModel):
+    """Media a child's skills hand it that neither its route nor its parent's can take
+    (A3), so it runs and sees a text placeholder for each, its parent told. A record
+    rather than a refusal, for graceful degradation's reason: the child can still do
+    what words can do, and the person learns what to set up."""
+
+    media: tuple[str, ...] = Field(min_length=1)
+    route: str
+    """The route it runs on, `provider/model`."""
+
+
+def _shortfall_text(shortfall: MediaShortfall) -> str:
+    """The sentence for media a child cannot see, for `admission_notes`."""
+    media = ", ".join(shortfall.media)
+    return (
+        f"runs on {shortfall.route}, which cannot take {media}, which its skills hand it, "
+        "and neither can yours: it sees a placeholder for each, so ask of it only what "
+        "it can answer without seeing them, until the person running you sets up a "
+        "model that takes them"
+    )
 
 
 def _fallback_text(fallback: ModelFallback) -> str:
@@ -445,6 +483,9 @@ def _fallback_text(fallback: ModelFallback) -> str:
             )
         case "contested":
             why = f"because the skills it was given name different models ({asked})"
+        case "cannot-accept":
+            media = ", ".join(fallback.media or ())
+            why = f"rather than {asked}, which cannot take {media}, which its skills hand it"
         case unknown:
             assert_never(unknown)
     return (
@@ -471,6 +512,8 @@ def admission_notes(run: SubagentRun) -> list[str]:
         notes.append(_downgrade_text(run.downgrade_reason))
     if run.model_fallback is not None:
         notes.append(_fallback_text(run.model_fallback))
+    if run.media_shortfall is not None:
+        notes.append(_shortfall_text(run.media_shortfall))
     return notes
 
 
@@ -594,6 +637,9 @@ class SubagentRequest:
     model_fallback: ModelFallback | None = None
     """The model the child was asked onto and this mount could not run, so it runs on
     its parent's route instead (`resolve_model`)."""
+    media_shortfall: MediaShortfall | None = None
+    """Media its skills hand it that neither its route nor its parent's can take
+    (`resolve_model`)."""
     output: dict[str, Any] | None = None
     """The JSON Schema object the child's value must match: the spawn's own, else the
     one the skills it is given declare (`resolve_output`). A child with one is given
@@ -725,6 +771,9 @@ class SubagentRun(WireForm):
     model_fallback: ModelFallback | None = None
     """The model this child was asked onto and runs without, stamped by the seam from
     the resolved request, at a spawn and at a readmission."""
+    media_shortfall: MediaShortfall | None = None
+    """Media this child's skills hand it that it cannot see, stamped as
+    `model_fallback` is."""
     output: dict[str, Any] | None = None
     """The shape this child owes its value in, stamped by the seam from the request for
     the provider's drive to settle (`settle_value`). Not in `to_wire`: a parent holds
@@ -782,6 +831,8 @@ class SubagentRun(WireForm):
             wire["downgradeReason"] = self.downgrade_reason
         if self.model_fallback is not None:
             wire["modelFallback"] = self.model_fallback.to_wire()
+        if self.media_shortfall is not None:
+            wire["mediaShortfall"] = self.media_shortfall.to_wire()
         return wire
 
 
@@ -844,6 +895,9 @@ class Admission(WireModel):
     model_fallback: ModelFallback | None = None
     """The model the child was asked onto and ran without, for the audit: what the
     person running the parent has to set up for it to run there."""
+    media_shortfall: MediaShortfall | None = None
+    """Media its skills handed it that it could not see, for the audit, as
+    `model_fallback` is."""
     output: dict[str, Any] | None = None
     """The shape the child owes its value in, read back as it was, not worked out
     again: the parent was promised this one, so a readmitted child still owes it."""
@@ -887,6 +941,7 @@ def admission_payload(
         model_key=(entry.key or None) if entry is not None else None,
         route=entry.route if entry is not None else None,
         model_fallback=run.model_fallback,
+        media_shortfall=run.media_shortfall,
         output=request.output,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
@@ -1802,7 +1857,19 @@ class SubagentService:
         again, and a refusal would end the child. Worked out again rather than read back
         from its admission, so a model the person has set up since reaches a readmitted
         child as it reaches a new one, and so does a skill that now names another.
+
+        **Then the media its skills hand it** (`Skill.accepts`, A3), asked of the route
+        it resolved to (`_with_media`): one that cannot take them gives way to its
+        parent's route where that one can, and where neither can the child runs and
+        sees a placeholder for each, its parent told (`MediaShortfall`). A route the
+        spawn named itself is refused instead, by the rule above.
         """
+        return self._with_media(
+            self._resolve_route(request, readmitting=readmitting), readmitting=readmitting
+        )
+
+    def _resolve_route(self, request: SubagentRequest, *, readmitting: bool) -> SubagentRequest:
+        """`resolve_model`'s route, before the media are asked about."""
         choice = request.choice
         by_skills = choice.is_default
         named = self._skill_models(request) if by_skills else {}
@@ -1824,13 +1891,66 @@ class SubagentService:
                 fallback = ModelFallback(asked=(choice.spelled,), reason=error.reason)
                 why = f"{choice.spelled!r} cannot run here: {error}"
                 refusal = f"a child cannot run on {choice.spelled!r}: {error}"
-        # Refused only where whoever chose can choose again at once: a spawn, about its
-        # own choice or about skills that disagree.
-        if not readmitting and (fallback.reason == "contested" or not by_skills):
+        # Refusable where whoever chose can choose again at once: a spawn, about its own
+        # choice or about skills that disagree.
+        refusable = fallback.reason == "contested" or not by_skills
+        return self._degraded(request, fallback, why, refusal, refusable, readmitting)
+
+    def _degraded(
+        self,
+        request: SubagentRequest,
+        fallback: ModelFallback,
+        why: str,
+        refusal: str,
+        refusable: bool,
+        readmitting: bool,
+    ) -> SubagentRequest:
+        """`request` on its parent's route, said in the log and on the request; or, where
+        whoever chose can choose again at once and it is not a readmission, refused."""
+        if refusable and not readmitting:
             raise SubagentSpawnError(refusal)
         self._require_parents_route(request)
         log.warning("a child runs on its parent's route, since %s", why)
-        return replace(request, model_fallback=fallback)
+        return replace(request, entry=None, model_fallback=fallback)
+
+    def _with_media(self, request: SubagentRequest, *, readmitting: bool) -> SubagentRequest:
+        """`request` on a route that can take the media its skills hand the child, where
+        there is one (`resolve_model`)."""
+        needed = sorted(
+            {media for skill in self._given_skills(request).values() for media in skill.accepts}
+        )
+        if not needed:
+            return request
+        llm = self.ctx.require(LLM)
+
+        def missing(provider: str, model: str) -> tuple[str, ...]:
+            return untaken(needed, llm.resolve_model(provider, model).accepts)
+
+        parent, entry = request.parent.options, request.entry
+        route = entry.route if entry is not None else None
+        unseen = missing(
+            *((route.provider, route.model) if route else (parent.provider, parent.model))
+        )
+        if not unseen:
+            return request
+        if entry is not None and not missing(parent.provider, parent.model):
+            asked = entry.key or entry.route.label
+            said = f"{asked!r} cannot take {', '.join(unseen)}, which its skills hand it"
+            refusal = (
+                f"a child cannot run on {asked!r}: {said}; name a model that takes them, or "
+                "leave `model=` unset to run it on yours"
+            )
+            fallback = ModelFallback(asked=(asked,), reason="cannot-accept", media=unseen)
+            refusable = not request.choice.is_default
+            return self._degraded(request, fallback, said, refusal, refusable, readmitting)
+        label = route.label if route else f"{parent.provider}/{parent.model}"
+        log.warning(
+            "a child on %s sees placeholders for %s, which its skills hand it and neither "
+            "its route nor its parent's takes",
+            label,
+            ", ".join(unseen),
+        )
+        return replace(request, media_shortfall=MediaShortfall(media=unseen, route=label))
 
     @staticmethod
     def _require_parents_route(request: SubagentRequest) -> None:
@@ -2103,6 +2223,7 @@ class SubagentService:
         # and the output is what the child owes its parent.
         run.owner = owner
         run.model_fallback = request.model_fallback
+        run.media_shortfall = request.media_shortfall
         run.output = request.output
         self._settle_waiter(run)
         child = self.ctx.require(SESSIONS).get(run.session_id)
@@ -2935,6 +3056,22 @@ async def presets(ctx: Context, config: PresetConfig) -> None:
     ctx.provide(SUBAGENT_PRESETS, SubagentPresetService(presets=dict(config.presets)))
 
 
+SHIPPED_SKILLS = Path(__file__).parent.parent / "shipped_skills"
+"""The skills ph-core ships for handing to a child: `categorize`, which asks for the
+`classify` kind and owes a checked value (A2)."""
+
+
+def offer_shipped_skills(ctx: Context) -> None:
+    """Install the shipped delegation skills, if a skills registry is mounted.
+
+    Called by a row that registers a provider, which is what starts a child (ph-rlm's
+    `rlm-child`), not by this seam's: a skill for handing to a child is noise in a
+    profile that cannot start one, and only its one-line description rides the prompt
+    (G9).
+    """
+    offer_skills(ctx, SHIPPED_SKILLS, source="subagents")
+
+
 @plugin("subagents", affects="environment", inject=[SESSIONS])
 async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
@@ -3161,6 +3298,7 @@ class ChildState:
             owner=record.owner,
             downgrade_reason=record.downgrade_reason,
             model_fallback=record.model_fallback,
+            media_shortfall=record.media_shortfall,
         )
 
     def to_wire(self) -> dict[str, JsonValue]:

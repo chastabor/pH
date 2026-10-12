@@ -20,12 +20,9 @@ from daemon_helpers import daemon_in_thread
 from textual.app import App, ComposeResult
 from tui_helpers import revisable, rewritten, stand_in, tui_app, until
 
-from ph.session import Session, substitute
+from ph.session import RevisionSize, Session, substitute
 from ph.session.known_event_types import declare_log_type
-from ph.testing import (
-    isolated_log_types,
-    log_event,
-)
+from ph.testing import isolated_log_types, revision_record
 from ph_app.tui.diff_screen import DiffScreen
 from ph_app.tui.diffs import build_diffs
 from ph_app.tui.state import ChatItem, ToolCard, TuiState
@@ -203,22 +200,36 @@ class _DiffSnapshot(App[None]):
         await self.push_screen(screen)
 
 
-def test_the_diff_screen_shows_a_change_its_records_and_its_diff(
-    snap_compare: Any,  # noqa: ANN401
-) -> None:
-    """A rewrite and the stand-in over it: the table, the stand-in's record with its
-    recorded size, and the diff against what it replaced."""
+def _rewritten_then_summarized() -> tuple[Session, int]:
+    """A rewrite and the stand-in over it, one node's two edits; and where it is."""
     session, _, replied, result = revisable("# a\nfirst line\nsecond line")
     cut = rewritten(session, result, "# a\n(2 lines cut)")
     with isolated_log_types():
         declare_log_type("probe/revised", owner="probe", ignorable=True, audit_only=True)
-        with session.batch() as batch:
-            summary = stand_in("Read a.md: a heading and two lines.")
-            replacement = substitute(batch, (replied.seq, cut.seq), summary)
-            log_event(
-                batch, "probe/revised", {"verb": "replace", "tokensBefore": 31, "tokensAfter": 9}
-            )
-    assert snap_compare(_DiffSnapshot(session, replacement.seq), terminal_size=(100, 32))
+        summary = stand_in("Read a.md: a heading and two lines.")
+        record = revision_record(
+            "probe/revised", {"verb": "replace"}, RevisionSize("tokens", 31, 9)
+        )
+        replacement = substitute(session, (replied.seq, cut.seq), summary, record)
+    return session, replacement.seq
+
+
+def test_the_diff_screen_shows_a_change_its_records_and_its_diff(
+    snap_compare: Any,  # noqa: ANN401
+) -> None:
+    """One node's group: the table, then each edit newest first, the stand-in's record
+    with its recorded size and its diff against what it replaced."""
+    session, at = _rewritten_then_summarized()
+    assert snap_compare(_DiffSnapshot(session, at), terminal_size=(100, 32))
+
+
+def test_the_diff_screen_shows_a_node_s_whole_history(
+    snap_compare: Any,  # noqa: ANN401
+) -> None:
+    """After `w`: the node as first written against the node now, one diff over both
+    edits."""
+    session, at = _rewritten_then_summarized()
+    assert snap_compare(_DiffSnapshot(session, at), press=["w"], terminal_size=(100, 32))
 
 
 def test_markup_in_user_text_renders_literally(snap_compare: Any) -> None:  # noqa: ANN401

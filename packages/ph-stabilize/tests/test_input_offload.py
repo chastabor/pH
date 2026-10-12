@@ -18,7 +18,7 @@ from stabilize_helpers import PROFILE, blob, break_spill
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
-from ph.json import as_obj
+from ph.json import as_int, as_obj, as_seq
 from ph.keys import AGENTS, SESSIONS
 from ph.llm.types import PluginSource, create_user_message, text_of
 from ph.session import Session, SurfaceIntent
@@ -85,8 +85,13 @@ async def test_one_character_over_is_offloaded(mount: MountProfile) -> None:
     (spilled,) = [e for e in session.events if e.type == "offload/input-spilled"]
     assert Path(str(spilled.data["locator"])).is_file()
     # The accounting and the replacement it describes, in one batch (S14).
-    preview = session.events[spilled.seq + 1]
+    [revised] = [as_int(one) for one in as_seq(spilled.data["revises"])]
+    preview = session.events[revised]
     assert preview.type == "user/message" and preview.surface_op is not None
+    assert session.records_of(revised) == (spilled,)
+    size = as_obj(spilled.data["size"])
+    assert (size["unit"], size["before"]) == ("bytes", spilled.data["bytes"])
+    assert 0 < as_int(size["after"]) < as_int(size["before"])
     assert spilled.batch is not None and preview.batch == spilled.batch
 
 

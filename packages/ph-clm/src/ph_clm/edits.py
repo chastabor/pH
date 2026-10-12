@@ -67,6 +67,8 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import TokenBaseline
 from ph.session import (
+    RevisionRecord,
+    RevisionSize,
     Session,
     SessionBatch,
     SessionEvent,
@@ -74,6 +76,7 @@ from ph.session import (
     is_in_place_rewrite,
     messages_of,
     render_messages,
+    revises_of,
     rewrite,
     shadowed_by,
     substitute,
@@ -156,6 +159,11 @@ class Revision:
     def context_after(self) -> int:
         return self.context_before - self.tokens_before + self.tokens_after
 
+    def size(self) -> RevisionSize:
+        """What the edit replaced and what it put there, in tokens: the door writes it
+        on the record as its `size`."""
+        return RevisionSize("tokens", self.tokens_before, self.tokens_after)
+
     def record(self) -> JsonObject:
         return {
             "verb": self.verb,
@@ -163,10 +171,7 @@ class Revision:
             "callId": self.call_id,
             "first": self.first,
             "last": self.last,
-            "replacement": self.replacement,
             "shadowed": list(self.shadowed),
-            "tokensBefore": self.tokens_before,
-            "tokensAfter": self.tokens_after,
             "reread": self.reread,
             "contextBefore": self.context_before,
             "removed": [
@@ -176,22 +181,25 @@ class Revision:
 
 
 def revision_of(event: SessionEvent | None) -> Revision | None:
-    """A `clm/revised` record read back, or `None` for any other event."""
+    """A `clm/revised` record read back, or `None` for any other event. Its replacement
+    and its size are what the revision door stamped it with (`revises`, `size`)."""
     if event is None or event.type != REVISED:
         return None
     data = event.data
     verb = as_str(data.get("verb"))
-    if verb not in get_args(Verb):
+    revised = revises_of(event)
+    size = RevisionSize.of(event)
+    if verb not in get_args(Verb) or len(revised) != 1 or size is None:
         return None
     via: Via = "mirror" if as_str(data.get("via")) == "mirror" else "tool"
     return Revision(
         verb=cast("Verb", verb),
         first=as_int(data.get("first")),
         last=as_int(data.get("last")),
-        replacement=as_int(data.get("replacement")),
+        replacement=revised[0],
         shadowed=tuple(as_int(seq) for seq in as_seq(data.get("shadowed"))),
-        tokens_before=as_int(data.get("tokensBefore")),
-        tokens_after=as_int(data.get("tokensAfter")),
+        tokens_before=size.before,
+        tokens_after=size.after,
         reread=as_int(data.get("reread")),
         context_before=as_int(data.get("contextBefore")),
         call_id=as_str(data.get("callId")) or None,
@@ -276,7 +284,8 @@ class Pending:
     """One edit validated and drafted, not yet written — `Editor.land` writes several
     in one batch, so a front end that makes many at once lands all or none."""
 
-    write: Callable[[SessionBatch], SessionEvent]
+    write: Callable[[SessionBatch, RevisionRecord], SessionEvent]
+    """Lands the edit and its record, which the door writes after it."""
     draft: Revision
 
 
@@ -478,8 +487,8 @@ class Editor:
         call_id: str | None,
         via: Via = "tool",
     ) -> list[Revision]:
-        """Gate every draft, then write them all, each followed by its record, in one
-        batch — for one call, through one front end."""
+        """Gate every draft, then write them all, each with its record, in one batch —
+        for one call, through one front end."""
         baseline = self.sections.meter.baseline(session)
         # The batch as one change: two drafts that each fit can together not, and the
         # receipt reports them together.
@@ -492,14 +501,11 @@ class Editor:
         with session.batch() as batch:
             for draft in drafts:
                 revision = dataclasses.replace(
-                    draft.draft,
-                    replacement=draft.write(batch).seq,
-                    call_id=call_id,
-                    via=via,
-                    context_before=baseline.tokens,
+                    draft.draft, call_id=call_id, via=via, context_before=baseline.tokens
                 )
-                _LOG.append(batch, REVISED, revision.record())
-                landed.append(revision)
+                record = RevisionRecord(_LOG, REVISED, revision.record(), revision.size())
+                replacement = draft.write(batch, record)
+                landed.append(dataclasses.replace(revision, replacement=replacement.seq))
         return landed
 
     # ------------------------------------------------------------------ inner --
@@ -518,7 +524,7 @@ class Editor:
         span = sections[start:stop]
         shadowed = tuple(seq for section in span for seq in section.nodes)
         return Pending(
-            lambda batch: substitute(batch, shadowed, message),
+            lambda batch, record: substitute(batch, shadowed, message, record),
             Revision(
                 verb=verb,
                 first=span[0].id,
@@ -544,7 +550,7 @@ class Editor:
         meter = self.sections.meter
         later = section.nodes[section.nodes.index(event.seq) + 1 :]
         return Pending(
-            lambda batch: rewrite(batch, event, message),
+            lambda batch, record: rewrite(batch, event, message, record),
             Revision(
                 verb=verb,
                 in_place=True,
@@ -600,14 +606,8 @@ def _note(texts: Sequence[str], summary: str, *, form: ContextForm = "compaction
 
 def _edit_at(session: Session, seq: int) -> Revision | None:
     """The record of this row's edit that put node `seq` on the surface, or `None` when
-    none did.
-
-    O(1): `Editor.land` writes the record immediately after the replacement it
-    describes, in the same batch, so the record of a node at `seq` is the event at
-    `seq + 1`.
-    """
-    revision = revision_of(session.at(seq + 1))
-    return revision if revision is not None and revision.replacement == seq else None
+    none did: the revision door stamps each record with the replacement it explains."""
+    return next(filter(None, map(revision_of, session.records_of(seq))), None)
 
 
 def _removed_by(session: Session, section: Section) -> tuple[Removed, ...] | None:

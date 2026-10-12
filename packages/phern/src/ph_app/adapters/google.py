@@ -61,6 +61,7 @@ from ph.llm.types import (
     Message,
     ReasoningBlock,
     ReasoningDelta,
+    SamplingSetting,
     StreamChunk,
     TextBlock,
     TextDelta,
@@ -71,6 +72,7 @@ from ph.llm.types import (
     UsageChunk,
     is_error_finish,
     text_of,
+    wire_sampling,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -82,6 +84,16 @@ from ._media import forget_named_handle, load_handles, load_media, media_pointer
 __all__ = ["GoogleAdapter", "apply"]
 
 log = logging.getLogger("ph_app.adapters.google")
+
+SAMPLING_WIRE: dict[SamplingSetting, str] = {
+    "temperature": "temperature",
+    "topP": "topP",
+    "topK": "topK",
+    "presencePenalty": "presencePenalty",
+    "frequencyPenalty": "frequencyPenalty",
+}
+"""Each sampling setting this API takes, and its `generationConfig` field (A1): all but
+`minP`, which is dropped with a warning (`ResolvedModel.sampling`)."""
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -464,8 +476,7 @@ class GoogleAdapter:
                 }
             ]
         generation: dict[str, Any] = {}
-        if options.temperature is not None:
-            generation["temperature"] = options.temperature
+        generation.update(wire_sampling(options, SAMPLING_WIRE))
         max_tokens = options.max_tokens or self.config.default_max_tokens
         if max_tokens is not None:
             generation["maxOutputTokens"] = max_tokens
@@ -515,7 +526,12 @@ class GoogleAdapter:
         # See `_body`: this route is asked for JSON and not held to a schema, so
         # it does not enforce one. Claiming otherwise would make a caller skip the
         # validation that is actually doing the work.
-        return resolved(self.config, structured_output=False, credential=self.config.api_key_env)
+        return resolved(
+            self.config,
+            structured_output=False,
+            credential=self.config.api_key_env,
+            sampling=frozenset(SAMPLING_WIRE),
+        )
 
 
 def _file_record(payload: dict[str, Any]) -> dict[str, Any]:

@@ -23,7 +23,19 @@ from rlm_fixtures import MODELS_ROW, PROVIDER_ROW
 
 from ph.cordis import ChildLimit, ChildReach, Context, Profile, ProfileDocument, plugin
 from ph.json import JsonObject, as_obj, as_seq, thaw_json
-from ph.keys import AGENTS, MOUNT, NAMED_PROFILES, SANDBOX, SESSIONS, SKILLS, SUBAGENTS
+from ph.keys import (
+    AGENTS,
+    LLM,
+    LLM_FAKE,
+    MOUNT,
+    NAMED_PROFILES,
+    SANDBOX,
+    SESSIONS,
+    SKILLS,
+    SUBAGENTS,
+)
+from ph.llm.adapter import ResolvedModel
+from ph.llm.fake import FakeAdapter
 from ph.paths import canonical
 from ph.seams.models import ModelChoice, choose
 from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
@@ -553,3 +565,104 @@ async def test_a_row_says_how_a_child_holds_less_of_it(
 
     skills = as_seq(_admitted(ctx, parent)["skills"])
     assert "sort" in skills and "audit" not in skills
+
+
+MAIN_ONLY: JsonObject = {
+    "id": "models",
+    "config": {"default": "main", "models": {"main": {"provider": "fake", "model": "fake-1"}}},
+}
+"""A list that serves no shared kind (`MODEL_KINDS`)."""
+
+
+async def test_the_shipped_categorize_skill_runs_on_the_classify_kind_where_one_is_listed(
+    mount: MountProfile,
+) -> None:
+    """A2's gate: the skill ph-core ships for sorting asks for the shared `classify`
+    kind and owes a checked value, so it runs on whatever route a profile lists under
+    that name; a profile that lists none runs the child on the parent's model and says
+    so to the parent. Sabotage: name a model rather than the kind, or stop offering the
+    skill with the provider."""
+    listed, parent = await _parent(mount)
+    shipped = not_none(listed.require(SKILLS).get("categorize", parent.ctx))
+    assert shipped.model == "classify" and shipped.output is not None
+    assert list(as_seq(shipped.output["required"])) == ["category", "reason"]
+
+    run = await _spawn(listed, parent, skills=("categorize",))
+    child = not_none(listed.require(AGENTS).get(run.session_id))
+    assert (child.options.model_key, child.options.model) == ("classify", "fake-9")
+
+    unlisted, other = await _parent(mount, models=MAIN_ONLY)
+    run = await _spawn(unlisted, other, skills=("categorize",))
+    assert not_none(unlisted.require(AGENTS).get(run.session_id)).options == other.options
+    [note] = admission_notes(run)
+    assert '"classify"' in note and "your own model" in note
+
+
+BLIND: JsonObject = {
+    "id": "models",
+    "config": {
+        "default": "main",
+        "models": {
+            "main": {"provider": "fake", "model": "fake-1"},
+            "classify": {"provider": "blind", "model": "sorter-1"},
+        },
+    },
+}
+"""`classify` on a provider whose routes take text alone."""
+
+
+async def _seeing(mount: MountProfile, *, parent_sees: bool) -> tuple[Context, Any]:
+    """A parent under `BLIND`, on a route that takes images or not, and a sorting
+    skill that hands its child images."""
+    ctx, parent = await _parent(mount, models=BLIND)
+    ctx.require(LLM).register_adapter(["blind"], FakeAdapter())
+    if parent_sees:
+        ctx.require(LLM_FAKE).route = ResolvedModel(accepts=frozenset({"image/png"}))
+    ctx.require(SKILLS).register(skill("sort-picture", model="classify", accepts=("image/*",)))
+    return ctx, parent
+
+
+async def test_a_child_whose_kind_cannot_see_its_media_runs_on_a_parent_that_can(
+    mount: MountProfile,
+) -> None:
+    """A3's gate, first half: the route the kind resolves to takes no images, its
+    parent's does, so the child runs there, and the parent and the admission say why.
+    Sabotage: keep the blind route, or drop the reason."""
+    ctx, parent = await _seeing(mount, parent_sees=True)
+
+    run = await _spawn(ctx, parent, skills=("sort-picture",))
+
+    assert not_none(ctx.require(AGENTS).get(run.session_id)).options == parent.options
+    fallback = {"asked": ["classify"], "reason": "cannot-accept", "media": ["image/*"]}
+    assert _admitted(ctx, parent)["modelFallback"] == fallback
+    [note] = admission_notes(run)
+    assert "cannot take image/*" in note and "your own model" in note
+
+
+async def test_a_child_no_route_here_lets_see_its_media_runs_and_its_parent_is_told(
+    mount: MountProfile,
+) -> None:
+    """A3's gate, second half: neither route takes images, so the child still runs on
+    its kind's route, sees placeholders, and the parent is told what to set up.
+    Sabotage: refuse the spawn, or say nothing."""
+    ctx, parent = await _seeing(mount, parent_sees=False)
+
+    run = await _spawn(ctx, parent, skills=("sort-picture",))
+
+    child = not_none(ctx.require(AGENTS).get(run.session_id))
+    assert (child.options.provider, child.options.model) == ("blind", "sorter-1")
+    shortfall = {"media": ["image/*"], "route": "blind/sorter-1"}
+    assert _admitted(ctx, parent)["mediaShortfall"] == shortfall
+    [note] = admission_notes(run)
+    assert "placeholder" in note and "image/*" in note
+
+
+async def test_a_spawn_that_names_a_route_its_media_cannot_reach_is_refused(
+    mount: MountProfile,
+) -> None:
+    """The parent chose the route itself and can choose again at once, so it is refused
+    rather than moved. Sabotage: degrade it as a skill's own key is."""
+    ctx, parent = await _seeing(mount, parent_sees=True)
+
+    with pytest.raises(SubagentSpawnError, match="cannot take image/\\*"):
+        await _spawn(ctx, parent, skills=("sort-picture",), choice=ModelChoice(key="classify"))
