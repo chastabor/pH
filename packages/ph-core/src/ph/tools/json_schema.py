@@ -57,6 +57,7 @@ SUPPORTED_KEYWORDS: frozenset[str] = frozenset(
         "minItems",
         "maxItems",
         "pattern",
+        "anyOf",
         # Annotations: carried to the model, never validated.
         "title",
         "description",
@@ -76,10 +77,12 @@ CONSTRAINING_KEYWORDS: frozenset[str] = frozenset(
 Beside `SUPPORTED_KEYWORDS` because both are this module's vocabulary, and
 **deliberately not a subset of it**: that one lists what *pH's own validator*
 enforces, this one what a **grammar built from the schema** would constrain, and
-`anyOf`/`oneOf`/`allOf` are in the second and not the first. A route that
-compiles the schema honors them; `validate_json_schema_value` does not, and
-`unsupported_keywords` correctly says so. Two questions, one place, so the next
-reader sees the difference rather than discovering it.
+`oneOf`/`allOf` are in the second and not the first. A route that compiles the
+schema honors them; `validate_json_schema_value` does not, and
+`unsupported_keywords` correctly says so. `anyOf` is in both: it is how pydantic
+writes `str | None`, so a pydantic model's schema is one pH can hold a value to. Two
+questions, one place, so the next reader sees the difference rather than discovering
+it.
 
 Read by `llm.structured.structural_warning`, which used `"type" in entry` alone
 — so every schema with an optional required field warned that its grammar would
@@ -139,6 +142,10 @@ def unsupported_keywords(schema: object) -> set[str]:
             nested = schema.get(key)
             if isinstance(nested, dict):
                 found |= unsupported_keywords(nested)
+        branches = schema.get("anyOf")
+        if isinstance(branches, list):
+            for branch in branches:
+                found |= unsupported_keywords(branch)
     return found
 
 
@@ -269,6 +276,20 @@ def _validate(
         return
     schema = _resolve(schema, root)
     where = path or "<root>"
+
+    branches = schema.get("anyOf")
+    if isinstance(branches, list) and branches:
+        failed: list[list[str]] = []
+        for branch in branches:
+            found: list[str] = []
+            _validate(branch, value, path, root, found)
+            if not found:
+                break
+            failed.append(found)
+        else:
+            tried = " | ".join("; ".join(one) for one in failed)
+            out.append(f"{where}: matches none of its alternatives ({tried})")
+            return
 
     declared = schema.get("type")
     types = declared if isinstance(declared, list) else [declared] if declared else []

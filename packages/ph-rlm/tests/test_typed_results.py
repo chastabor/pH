@@ -14,7 +14,7 @@ import json
 from typing import Any, TypeAlias
 
 import pytest
-from rlm_fixtures import PROVIDER_ROW
+from rlm_fixtures import BINDINGS_ROW, PROVIDER_ROW
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
@@ -35,11 +35,13 @@ from ph.testing import (
     RecordedStep,
     ReplayAdapter,
     not_none,
+    run_tool,
     simple_tool,
     skill,
     text_chunks,
     tool_call_chunks,
 )
+from ph_rlm.bindings import WAIT_TOOL
 from ph_rlm.subagents import PROVIDER_NAME
 
 pytestmark = pytest.mark.anyio
@@ -80,7 +82,7 @@ def _said_to(model: ReplayAdapter, index: int) -> str:
 
 async def _parent(mount: MountProfile, *steps: Step) -> tuple[Context, AgentDriver, ReplayAdapter]:
     """A parent on a scripted route its children inherit."""
-    ctx = await mount(dict(PROVIDER_ROW))
+    ctx = await mount(dict(PROVIDER_ROW), dict(BINDINGS_ROW))
     model = _replies(*steps)
     ctx.require(LLM).register_adapter(("scripted",), model)
     session = ctx.require(SESSIONS).create("parent")
@@ -300,3 +302,70 @@ async def test_a_parent_s_return_tool_is_not_something_it_holds(mount: MountProf
 
     assert RESULT_TOOL in ctx.require(TOOLS).names(scope=parent.ctx)
     assert RESULT_TOOL not in tools
+
+
+# -------------------------------------------------------------- waiting for one --
+
+
+async def _wait(ctx: Context, parent: AgentDriver, child_id: str) -> Any:  # noqa: ANN401
+    """`rlm.wait(child_id)` as the parent calls it."""
+    return await run_tool(
+        ctx, WAIT_TOOL, {"child_id": child_id}, agent=parent, session=parent.session
+    )
+
+
+async def test_a_parent_waits_for_its_child_s_value(mount: MountProfile) -> None:
+    """The one wait there is, for a step that needs the value: it hands back what the
+    child returned, checked. Sabotage: answer with the child's text, and the value is
+    lost."""
+    ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "bug"}))
+    run = await _spawn(ctx, parent, output=KIND)
+
+    waited = await _wait(ctx, parent, run.id)
+
+    assert waited.value["value"] == {"kind": "bug"}
+    assert '{"kind":"bug"}' in repr(waited.content)
+
+
+async def test_a_child_settled_before_the_wait_is_answered_from_its_log(
+    mount: MountProfile,
+) -> None:
+    """A child this process no longer holds, as after a restart, is answered from its
+    own log. Sabotage: refuse a child with no live run."""
+    ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "feature"}))
+    run = await _spawn(ctx, parent, output=KIND)
+    await _settled(ctx, run)
+    ctx.require(SUBAGENTS).forget(run.id)
+
+    waited = await _wait(ctx, parent, run.id)
+
+    assert waited.value["value"] == {"kind": "feature"}
+
+
+async def test_a_wait_for_a_child_that_failed_fails_with_its_text_kept(
+    mount: MountProfile,
+) -> None:
+    ctx, parent, _script = await _parent(mount, "A bug.", "Still a bug.")
+    run = await _spawn(ctx, parent, output=KIND)
+
+    waited = await _wait(ctx, parent, run.id)
+
+    assert waited.is_error
+    assert "ended as error" in repr(waited.content)
+    assert "Still a bug." in repr(waited.content)
+
+
+async def test_an_agent_cannot_wait_on_a_child_not_its_own(mount: MountProfile) -> None:
+    """Another agent's live child is not yours to wait on, nor is an id no child has.
+    Sabotage: look the run up without asking whose child it is."""
+    ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "bug"}))
+    run = await _spawn(ctx, parent, output=KIND)
+    stranger = ctx.require(AGENTS).create(
+        ctx.require(SESSIONS).create("stranger"), AgentOptions(provider="scripted", model="s1")
+    )
+
+    theirs = await _wait(ctx, stranger, run.id)
+    nobody = await _wait(ctx, parent, "child-of-nobody")
+
+    assert theirs.is_error and "you have no child" in repr(theirs.content)
+    assert nobody.is_error and "you have no child" in repr(nobody.content)

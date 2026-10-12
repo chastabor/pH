@@ -33,8 +33,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ph.cancel import Canceled, raced
 from ph.cordis import Context, plugin
-from ph.json import JsonObject, as_str
+from ph.json import JsonObject, as_str, dumps, thaw_json
 from ph.keys import SUBAGENTS, TOOLS
 from ph.llm.types import ContentBlock
 from ph.seams.code_runtime import CodeBindingNamespace
@@ -45,6 +46,7 @@ from ph.seams.subagents import (
     SubagentRun,
     admission_notes,
     admitted_by,
+    ended_text,
 )
 from ph.session import Session, SessionEvent
 from ph.tools import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -61,6 +63,7 @@ NAMESPACE = "rlm"
 RUN_TOOL = "rlm_run"
 LIST_TOOL = "rlm_list_subagents"
 DELETE_TOOL = "rlm_delete_subagent"
+WAIT_TOOL = "rlm_wait"
 
 _RUN_DESCRIPTION = (
     "Delegate a task to a child agent. Returns immediately with an admission "
@@ -104,6 +107,19 @@ class RunArgs(ToolModel):
 class DeleteArgs(ToolModel):
     child_id: str
     reason: str = "user"
+
+
+class WaitArgs(ToolModel):
+    child_id: str
+    """The child to wait for: the `childId` its spawn handed back."""
+
+
+class Settled(WireModel):
+    """What a wait hands back for a child that ended `done`: what it said, and its value."""
+
+    answer: str = ""
+    value: dict[str, Any] | None = None
+    """The child's value, for one asked for an `output`, checked against it."""
 
 
 class SpawnHandle(WireModel):
@@ -214,6 +230,24 @@ async def apply(ctx: Context, config: Config) -> None:
         children = ctx.require(SUBAGENTS).children(session.id) if session is not None else {}
         return {"children": [state.to_wire() for state in children.values()]}
 
+    async def wait_for_child(args: WaitArgs, run: ToolRunContext) -> dict[str, Any]:
+        """A failed child fails the call with its last text kept; a canceled wait stops
+        waiting and leaves the child working, where `task` releases it."""
+        session = run.session
+        try:
+            awaited = ctx.require(SUBAGENTS).waiter(session.id if session else "", args.child_id)
+        except LookupError as refused:
+            raise ToolCallError(WAIT_TOOL, str(refused)) from refused
+        result = await raced(run.signal, awaited)
+        if result is None:
+            raise Canceled(f"the wait for {args.child_id} was canceled")
+        if result.status != "done":
+            raise ToolCallError(WAIT_TOOL, ended_text(args.child_id, result))
+        return Settled(
+            answer=result.answer,
+            value=thaw_json(result.value) if result.value is not None else None,
+        ).to_wire()
+
     async def delete_child(args: DeleteArgs, run: ToolRunContext) -> dict[str, Any]:
         session = run.session
         removed = (
@@ -246,6 +280,17 @@ async def apply(ctx: Context, config: Config) -> None:
     )
     tools.register(
         define_tool(
+            WAIT_TOOL,
+            "Wait for one of your children to end, and get its value: what it returned "
+            "in the shape you asked for with `output`, else its answer. The one wait "
+            "there is, for when your next step needs it; a child that failed is an error.",
+            parameters=WaitArgs,
+            output=ToolOutput(schema=Settled, render=_render_settled),
+            execute=wait_for_child,
+        )
+    )
+    tools.register(
+        define_tool(
             DELETE_TOOL,
             "Revoke a child. Its transcript stays on disk, ending in a tombstone.",
             parameters=DeleteArgs,
@@ -261,6 +306,7 @@ async def apply(ctx: Context, config: Config) -> None:
         specs = (
             ("run", RUN_TOOL, True),
             ("list_subagents", LIST_TOOL, False),
+            ("wait", WAIT_TOOL, False),
             ("delete_subagent", DELETE_TOOL, False),
         )
         bindings = [
@@ -289,6 +335,11 @@ def _render_roster(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa
         for row in rows
     ]
     return text_content("\n".join(lines))
+
+
+def _render_settled(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
+    returned = value.get("value")
+    return text_content(dumps(returned) if returned is not None else as_str(value.get("answer")))
 
 
 def _render_deleted(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401

@@ -45,6 +45,7 @@ from ...seams.subagents import (
     admission_notes,
     admitted_by,
     child_is_live,
+    ended_text,
 )
 from ...session import Session, SessionEvent
 from ...wire import WireModel
@@ -255,12 +256,8 @@ async def apply(ctx: Context, config: Config) -> None:
             # A failure, not a value with a sad field: a child that was canceled
             # or fell over did not answer the question, and a parent reading
             # `answer: ""` as an answer is the misreading this prevents.
-            # Its text, where it said something: a child that could not return the
-            # shape asked for may still have found what the parent needs to decide.
             raise ValueError(
-                f"subagent {handle.name} ({handle.session_id}) ended as {outcome.status}"
-                + (f": {outcome.error}" if outcome.error else "")
-                + (f"\n\nIts last text:\n{outcome.answer}" if outcome.answer else "")
+                f"subagent {ended_text(f'{handle.name} ({handle.session_id})', outcome)}"
             )
         return _task_value(handle, outcome.status, outcome.answer, outcome.value)
 

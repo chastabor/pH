@@ -388,7 +388,12 @@ EOF
 # are stripped first: that document carries a worked overlay example with a
 # `baseUrl` in it, and matching the example instead of the setting would be the
 # same bug one layer down.
-SMOKE_TESTS=(tests/test_local_server.py tests/test_local_rlm.py tests/test_local_clm.py)
+SMOKE_TESTS=(
+  tests/test_local_server.py
+  tests/test_local_rlm.py
+  tests/test_local_clm.py
+  tests/test_local_typed_results.py
+)
 SMOKE_PROFILE="packages/phern/src/ph_app/profiles/llama.yaml"
 
 profile_base_url() {

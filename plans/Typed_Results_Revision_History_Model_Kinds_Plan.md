@@ -14,8 +14,7 @@ order they will be built. Each is its own change with its own gate.
    kind names a skill can ask for on any profile, and a check that a child's model can take
    the media it is handed.
 
-**Status:** section 1 under way: B1 to B3 built 2026-10-11, B4 and the live gate
-open (see its Status). **Done first, 2026-10-11** (recorded under S7b in
+**Status:** section 1 done 2026-10-11 (see its Status); sections 2 and 3 not started. **Done first, 2026-10-11** (recorded under S7b in
 `Session_Profiles_Plan.md`):
 
 - A child named onto a whole route (`provider`/`model`) resolves through the list like a
@@ -138,8 +137,17 @@ What changed from the design above, decided in the building:
   results by spawning through the seam and ending through the door; ph-rlm asks
   `settle_value` first only to word its own notices.
 
-Still open: **B4** (a pydantic class as the shape, and an instance back; an rlm cell reads
-the value from the notice or `rlm_list_subagents` today) and the **live gate**.
+**B4 and the live gate are built too.** A cell passes a pydantic model class as `output`
+and gets an instance back from `rlm.wait`, a new binding (`rlm_wait`) that waits for
+one of its own children; the validator gained `anyOf`, so a model's `X | None` fields
+check; and a cell's annotations are its own now (`compile_cell` stopped inheriting the
+guest's `from __future__ import annotations`, which left every pydantic model in a cell
+unbuildable). The live gate, `tests/test_local_typed_results.py` in `./test.sh smoke`,
+sorts a report and a picture on the local Qwen through skills that declare `output:`;
+the picture is attached by the child, on a route that takes images. On it the local Qwen
+returned its values through the tool (`via: tool`). It also found that the harness's
+refine job ignored its cancel token, so a refinement ran on past a disposed scope; it is
+raced against the token now.
 
 ### Steps and gates
 
@@ -351,6 +359,19 @@ docstrings are rewritten along with the reader.
   (proposed), or refuse.
 
 ## Recorded, not planned here
+
+- **A request larger than the window is sent before it is shrunk** (found by section 1's
+  live gate, 2026-10-12). On the local llama slot (16,384 tokens), one cell's output,
+  capped at a fixed 64 KB (`max_log_bytes`, about 16,000 to 20,000 tokens), can outgrow
+  the window by itself. Compaction keeps the latest turn whole, so the next loop request
+  (about 26,000 tokens) goes to the server, which refuses it ("request exceeds the
+  available context size"); the overflow recovery then shrinks it to about 4,800 tokens
+  and the turn carries on. The `rlm` profile mounts no offload row (`rlm-stable` does).
+  - *The options:* scale the kernel's `max_log_bytes` to the route's window; check an
+    assembled request against the window before sending, and apply the overflow remedy
+    first; or mount the offload row in `rlm`.
+  - *Cost of waiting:* one refused request and a retry each time a cell prints that much,
+    and a line in the server's log a person reads as a fault.
 
 - **A fallback badge on a child's row in the TUI.** `ChildRow` shows a downgrade today;
   a model fallback reaches the parent's tool result and the log, but not the panel.

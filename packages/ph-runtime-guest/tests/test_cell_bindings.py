@@ -168,6 +168,18 @@ async def test_a_trailing_expression_is_the_cells_value() -> None:
     assert await run_cell("total", namespace) == 5, "the earlier cell's name persisted"
 
 
+async def test_a_cell_s_annotations_are_its_own_not_the_guest_s() -> None:
+    """A cell runs with plain Python's annotations, not this package's `from __future__
+    import annotations`: inherited, each was a string a pydantic model then had to
+    resolve through a module a cell is not, and a cell's own model never built.
+    Sabotage: compile without `dont_inherit`, and the annotation is the string `'int'`."""
+    namespace: dict[str, object] = {"__name__": "__ph_cell__"}
+
+    annotations = await run_cell("class Point:\n    x: int\nPoint.__annotations__", namespace)
+
+    assert annotations == {"x": int}
+
+
 async def test_a_name_from_a_nested_scope_does_not_leak_between_cells() -> None:
     """The negative rule, proved where it would actually bite.
 

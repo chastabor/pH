@@ -186,7 +186,9 @@ def compile_cell(program: str, filename: str = CELL_FILENAME) -> Any:  # noqa: A
     )
     module = ast.Module(body=[wrapper], type_ignores=[])
     ast.fix_missing_locations(module)
-    return compile(module, filename, "exec")
+    # `dont_inherit`: a cell is not this module, so it keeps plain annotations rather
+    # than this module's `__future__` strings, which a pydantic model there cannot resolve.
+    return compile(module, filename, "exec", dont_inherit=True)
 
 
 def _looks_like_magic(program: str) -> bool:

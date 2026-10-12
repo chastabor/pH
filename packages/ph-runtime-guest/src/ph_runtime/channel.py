@@ -21,11 +21,11 @@ from datetime import date, datetime
 from datetime import time as time_of_day
 from decimal import Decimal
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Protocol, TypeGuard
 
 from .protocol import FD_ENV, FRAME_BYTES_ENV, PROTOCOL_FD
 
-__all__ = ["MAX_FRAME_BYTES", "Channel", "frame_limit", "jsonable"]
+__all__ = ["MAX_FRAME_BYTES", "Channel", "Model", "frame_limit", "is_model", "jsonable"]
 
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 """The read limit when the host names none — see `FRAME_BYTES_ENV` (F8)."""
@@ -45,6 +45,26 @@ def frame_limit() -> int:
     except ValueError:
         return MAX_FRAME_BYTES
     return named if named > 0 else MAX_FRAME_BYTES
+
+
+class Model(Protocol):
+    """A pydantic model class, known by its shape: this venv need not hold pydantic, and
+    model code that defines one brought it."""
+
+    @classmethod
+    def model_json_schema(cls) -> dict[str, Any]: ...
+
+    @classmethod
+    def model_validate(cls, obj: Any) -> Any: ...  # noqa: ANN401
+
+
+def is_model(value: object) -> TypeGuard[type[Model]]:
+    """Whether `value` is a pydantic model class."""
+    return (
+        isinstance(value, type)
+        and callable(getattr(value, "model_json_schema", None))
+        and callable(getattr(value, "model_validate", None))
+    )
 
 
 def jsonable(value: object) -> object:
@@ -67,7 +87,16 @@ def jsonable(value: object) -> object:
     wire* and not of one frame: an argument, a cell's value and every other
     frame leave through `send`, and a `Path` that survives as one and not the
     others is the same bug reported twice.
+
+    A pydantic model class is the shape it declares, its JSON Schema, which is what a
+    tool taking one holds a value to (`rlm.run`'s `output`); an instance is its JSON,
+    as `rlm.wait` hands a cell one back.
     """
+    if is_model(value):
+        return value.model_json_schema()
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json")
     if isinstance(value, PurePath):
         return str(value)
     if isinstance(value, datetime | date | time_of_day):

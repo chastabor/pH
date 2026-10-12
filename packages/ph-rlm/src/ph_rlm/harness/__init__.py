@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 
+from ph.cancel import raced
 from ph.cordis import Context, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
@@ -249,7 +250,12 @@ async def apply(ctx: Context, config: Config) -> None:
 
         async def body(job: Job) -> str:
             try:
-                return await refine(request)
+                # Raced against the job's own token: a job's cancellation is
+                # cooperative, and a pass is a model call or two that would otherwise
+                # run on after its scope was disposed, past a mount's bounded
+                # teardown or a daemon's shutdown.
+                refined = await raced(job.token, lambda: refine(request))
+                return refined if refined is not None else "refinement canceled"
             finally:
                 running.discard(request.session.id)
                 # Released, not abandoned: the work is over, so the entry goes

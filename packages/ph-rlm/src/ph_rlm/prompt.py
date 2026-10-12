@@ -87,6 +87,11 @@ What the call signatures above cannot tell you:
   child on your own. A skill you give the child may name the one it needs.
 - `profile` assigns the child a named profile: it keeps only what that profile
   runs of what you hold, and a profile that asks for more is refused.
+- `output` asks the child for its result in a set shape, as a JSON Schema object or,
+  where `pydantic` imports, a model class. The child returns a value in that shape
+  or fails. When your next step needs it, `value = await rlm.wait(handle)` is the one
+  wait there is: it hands you that value (an instance of your class, given one), or
+  a child's answer, and raises if the child failed.
 
 You may message your parent, your siblings and your own children, and nobody
 else. Delegate work that is genuinely separable and worth another agent's

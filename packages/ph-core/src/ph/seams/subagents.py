@@ -176,6 +176,7 @@ __all__ = [
     "child_state",
     "child_state_of",
     "default_child_name",
+    "ended_text",
     "exhausted_detail",
     "extend_child_state",
     "family_reach",
@@ -450,6 +451,15 @@ def _fallback_text(fallback: ModelFallback) -> str:
         f"runs on your own model {why}; it may do the work less well until the person "
         "running you sets up the model it should run on"
     )
+
+
+def ended_text(name: str, result: SubagentResult) -> str:
+    """Why a child its caller waited on gave it nothing to use: how it ended, why, and its
+    last text, which may still hold what the caller needs. One wording for every tool that
+    waits."""
+    why = f": {result.error}" if result.error else ""
+    said = f"\n\nIts last text:\n{result.answer}" if result.answer else ""
+    return f"{name} ended as {result.status}{why}{said}"
 
 
 def admission_notes(run: SubagentRun) -> list[str]:
@@ -1107,8 +1117,9 @@ def _output_note(output: dict[str, Any]) -> str:
     schema too, but said where a child working in code, or with no tool calls, reads it."""
     return (
         f"You owe your result in a set shape. When you are done, call `{RESULT_TOOL}` "
-        "with it; your task is not finished until a call succeeds. If you cannot call "
-        "it, end with a reply that is only the JSON object. The shape, as JSON Schema:"
+        f"with it (from code, `await tools.{RESULT_TOOL}(...)`); that is your answer, and "
+        "your task is not finished until a call succeeds. If you cannot call it, end with "
+        "a reply that is only the JSON object. The shape, as JSON Schema:"
         f"\n\n```json\n{json.dumps(output, indent=2)}\n```"
     )
 
@@ -2447,6 +2458,34 @@ class SubagentService:
 
     def get(self, run_id: str) -> SubagentRun | None:
         return self._runs.get(run_id)
+
+    def waiter(self, parent_id: str, run_id: str) -> SubagentAwaiter:
+        """How a parent waits for one of its own children: its live run's waiter, or, for
+        a child this process no longer holds, the ending its own log records (its answer
+        then the preview the ending kept). One reading for every tool that waits, so the
+        ownership check and the log's account cannot drift apart between them.
+
+        :raises LookupError: for a child that is not the parent's, or one still working
+            with nothing here to wait on.
+        """
+        state = self.children(parent_id).get(run_id)
+        if state is None:
+            raise LookupError(f"you have no child {run_id!r}")
+        live = self._runs.get(run_id)
+        if live is not None and live.result is not None:
+            return live.result
+        if child_is_live(state):
+            raise LookupError(f"{state.name} is still working, and cannot be waited on")
+
+        async def logged() -> SubagentResult:
+            return SubagentResult(
+                status=state.status,
+                answer=state.answer_preview or "",
+                error=state.detail,
+                value=state.value,
+            )
+
+        return logged
 
     def list(self, *, parent_id: str | None = None) -> list[SubagentRun]:
         """Live runs, optionally only one parent's, in admission order."""

@@ -17,7 +17,8 @@ from runtime_helpers import run_python_cell
 
 from ph.agent.types import AgentHandle
 from ph.cordis import Context
-from ph.keys import SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.keys import LLM_FAKE, SESSIONS, SKILLS, SUBAGENTS, SYSTEM_PROMPT, TOOLS
+from ph.llm.fake import text_script
 from ph.seams.subagents import admitted_by
 from ph.session import Session
 from ph.system_prompt.assembly import render_prompt
@@ -109,6 +110,40 @@ async def test_a_spawn_s_handle_says_its_child_runs_without_its_skill_s_model(
 
     assert result.is_error is False
     assert 'rather than "classify"' in result.value["value"]
+
+
+SORTING_CELL = """
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class Sort(BaseModel):
+    kind: Literal["bug", "feature"]
+    note: str | None = None
+
+
+handle = await rlm.run(prompt="sort this report", output=Sort)
+value = await rlm.wait(handle)
+[type(value).__name__, value.kind, value.note]
+"""
+"""A cell that asks a child for a value in its own model's shape, and waits for it."""
+
+
+async def test_a_cell_gets_an_instance_of_its_own_model_back(
+    delegating_runtime: MountedRuntime,
+) -> None:
+    """B4's gate, across the real process boundary: the class crosses as its schema,
+    `X | None` (`anyOf`) included, the child answers in that shape, and the cell gets
+    an instance of its own class back. Sabotage: send the class unconverted, or hand
+    the cell the plain dict."""
+    ctx, session, agent = await delegating_runtime()
+    ctx.require(LLM_FAKE).respond = text_script('{"kind": "bug"}')
+
+    result = await run_python_cell(ctx, SORTING_CELL, agent=agent, session=session)
+
+    assert result.is_error is False, result.value
+    assert result.value["value"] == ["Sort", "bug", None]
 
 
 async def test_a_spawn_from_a_cell_is_a_durable_dispatch(

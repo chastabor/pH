@@ -125,6 +125,25 @@ def test_a_type_union_passes_when_any_member_matches() -> None:
     assert _violations(schema, 3) == ["<root>: expected string or null"]
 
 
+def test_any_of_passes_when_any_alternative_does() -> None:
+    """`anyOf` is how pydantic writes `str | None`, so a pydantic model's schema is one
+    pH can hold a value to: one alternative matching is enough, and none matching names
+    what each wanted. Sabotage: leave `anyOf` unchecked, and `3` passes."""
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+
+    assert _violations(schema, "s") == [] and _violations(schema, None) == []
+    assert _violations(schema, 3) == [
+        "<root>: matches none of its alternatives (<root>: expected string | <root>: expected null)"
+    ]
+
+
+def test_an_unchecked_keyword_inside_an_alternative_is_reported() -> None:
+    """An alternative is a schema like any other, so what it hides is found too."""
+    schema = {"anyOf": [{"type": "string", "format": "email"}, {"type": "null"}]}
+
+    assert unsupported_keywords(schema) == {"format"}
+
+
 def test_a_type_nobody_has_heard_of_leaves_the_value_alone() -> None:
     """Fail *open* on an unknown dialect, which is the module's whole posture.
 

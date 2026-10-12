@@ -199,9 +199,20 @@ woken to be asked something else (`rehydrated`) owes nothing again.
 child's own log (`via` is `tool` or `text`), which the child's state folds
 (`ChildState.value`) and its roster row shows. A waiting `task` gets it on its
 `SubagentResult`, as the log holds it, whose value carries it as `value` and whose text
-is the JSON; and
-an `rlm` child's ending notice carries it to its parent, so a crash before the parent
-read it delivers it on resume, as any notice is.
+is the JSON; and an `rlm` child's ending notice carries it to its parent, so a crash
+before the parent read it delivers it on resume, as any notice is.
+
+**In a cell, a model class and an instance back.** `rlm.run(..., output=Sort)` takes a
+pydantic model class where `pydantic` imports (the managed kernel venv does not hold it;
+a skill or an interpreter that does brings it): the guest sends the host the class's
+JSON Schema, which is what the child is held to, and remembers the class for that
+child. `await rlm.wait(handle)`, the one wait there is (`rlm_wait`), waits for one of
+the cell's own children (`SubagentService.waiter`, the seam's one reading of a parent's
+wait: its live waiter, else what the child's own log records) and hands back
+`Sort.model_validate(value)`: the value, checked once more in the cell's own terms. Given a schema as a dict it hands back the dict, for
+a child asked for no shape its answer, and for a child that failed it raises with the
+child's last text. `X | None` fields check, since the validator holds `anyOf`; a
+plugin in the host passes `schema_of(Model)` and builds its instance from the value.
 
 ## Guards: a policy asked before the child exists
 

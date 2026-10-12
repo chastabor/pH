@@ -22,15 +22,17 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import anyio
 import pytest
 from rlm_fixtures import HARNESS_ROW
 
 from ph.cordis import Context
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM_FAKE, SESSIONS
+from ph.llm.fake import FakeAdapter
 from ph.llm.types import GenerateOptions
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SessionEvent, SurfaceReplace
-from ph.testing import FAKE_OPTIONS, MountProfile, block_text, log_event, user_payload
+from ph.testing import FAKE_OPTIONS, MountProfile, block_text, log_event, settled, user_payload
 from ph_rlm.harness import (
     CONSIDERED,
     REFINED,
@@ -365,6 +367,31 @@ async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
     assert ctx.require(JOBS).list() == []
     # Forgotten because it finished, not canceled: the refinement still landed.
     assert [event for event in session.events if event.type == REFINED] != []
+
+
+async def test_a_canceled_pass_ends_rather_than_running_on(
+    refining: Refining, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job's cancellation is cooperative, so a pass that never read its token ran its
+    model call on after its scope went: past a mount's bounded teardown, which then
+    cancelled it under the test. Sabotage: await the pass without racing the token,
+    and the canceled job never ends."""
+    ctx, session, agent = await refining()
+    asked: list[object] = []
+
+    async def held(*_args: object) -> Any:  # noqa: ANN401
+        asked.append(_args)
+        await anyio.sleep_forever()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(FakeAdapter, "stream", held)
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
+    (job,) = ctx.require(JOBS).list()
+    await settled(lambda: asked, "the pass to reach its model call")
+
+    ctx.require(JOBS).cancel(job.id)
+
+    await settled(lambda: ctx.require(JOBS).list() == [], "the canceled pass to end")
 
 
 # ------------------------------------------------------------ the trigger --
