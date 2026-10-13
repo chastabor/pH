@@ -138,7 +138,12 @@ spawn names, else one its skills agree on (`Skill.effort`, resolved by `resolve_
 skills that disagree leave it to the route), else its route's, either way; `default`
 among them asks for the provider's own and sends nothing. An effort is sent where the
 child's route's `efforts` define it, and one they do not is withheld with a warning
-([models](models.md)). `child_options` states that rule once, for every provider. The
+([models](models.md)). The spawn asks the same of the effort that wins
+(`unmapped_effort`), so the parent is not left reading a quick answer as a careful one:
+the child still runs, on the model it was asked onto, and the request carries an
+`EffortUnsent` (the effort, the route, the efforts it defines) that the admission records
+as `effortUnsent` and the parent's `note` says. `child_options` states that rule once,
+for every provider. The
 child's `subagent/admitted` records what the spawn named (`choice`, and
 `reasoningEffort`) apart from what it resolved to (`modelKey`, and the whole route as
 `route`, a `ModelRoute`): the first is what a readmission resolves again, the second is
@@ -323,7 +328,7 @@ value a child returned.
 
 | record | carries | door | durable when |
 |---|---|---|---|
-| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `skills`, `tools`, `paths`), the model the spawn named (`choice`, `reasoningEffort`) and what it resolved to (`modelKey`, `route`), any `modelFallback`, the `output` it owes, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
+| `subagent/admitted` | `admission_payload(run, request)` — run id, name, route, both accesses and any downgrade, the prompt, and the narrowing (`preset`, `profile`, `skills`, `tools`, `paths`), the model the spawn named (`choice`, `reasoningEffort`) and what it resolved to (`modelKey`, `route`), any `modelFallback`, `mediaShortfall` or `effortUnsent`, the `output` it owes, and `callId` where given — plus `owner`, `parentTurn` and `goalId` | `record_admitted`, written by the seam alone | on the child's disk before its gate opens; a write that fails refuses the spawn (S2) |
 | `subagent/status` | `status`, and `cause`, `detail`, `answerPreview`, `notice`, `slots` or `reason` where they apply | `record_waiting` (`queued`), `record_started` (`running`), `record_ended` (`done`, `error`, `canceled`) | a `resumed` start before its attempt (S10); an ending before its parent is handed the result (F1); a wait rides the child's next flush |
 | `subagent/returned` | `value`, checked against the child's `output`, and `via` (`tool` or `text`) | `record_returned`, from `submit_result` or `settle_value` | rides the ending that follows it; a value a crash took is asked for again by the readmitted run |
 | `subagent/deleted` | `reason` | `record_deleted` | in one batch with `canceled` if the child had not ended, and flushed (S14) |

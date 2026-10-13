@@ -42,6 +42,7 @@ more than one.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,7 @@ from local_server import LIVE, TEMPERATURE, answer_of, get_json, server_props, s
 from ph.agent.types import AgentOptions
 from ph.json import as_int, as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
-from ph.llm.types import Sampling
+from ph.llm.types import ReasoningBlock, Sampling
 from ph.session import Session
 from ph.testing import MountProfile
 from ph_app.attach import ingest, prompt_message
@@ -205,6 +206,56 @@ async def test_thinking_does_not_arrive_as_the_answer(mount: MountProfile, route
         "`reasoning_content`, so the tag is now in the transcript and will be replayed to "
         "the model. vLLM wants `--reasoning-parser qwen3` (`deepseek_r1` on older builds); "
         f"llama.cpp wants `--reasoning-format deepseek`. Answer: {answer[:400]!r}"
+    )
+
+
+THINKING_OFF = {"chat_template_kwargs": {"enable_thinking": False}}
+"""Qwen's thinking switch, as a profile's `efforts` spell it for a llama.cpp route: the
+server passes `chat_template_kwargs` to the template per request."""
+
+
+async def test_an_effort_the_route_defines_reaches_the_template(
+    mount: MountProfile, route: str
+) -> None:
+    """A route's `efforts` are request fields the model's template reads, and only a live
+    template can say whether they arrived: the adapter tests assert the body, not what
+    the server made of it.
+
+    Two turns on one listed route, asking the same question: at the provider's default
+    the model thinks, and at `none` (`THINKING_OFF`) it does not. The first turn is what
+    makes the second mean something, since a model that did not think about this anyway
+    would pass the second alone.
+
+    Skipped when the loaded model's template has no `enable_thinking`: which fields an
+    effort sends is the model's own spelling (`ModelRoute.efforts`), and these are
+    Qwen's.
+    """
+    template = (server_props() or {}).get("chat_template") or ""
+    if "enable_thinking" not in template:
+        pytest.skip(f"the model at {server_root()} has no `enable_thinking` in its template")
+    listed = {"provider": "llama", "model": route, "efforts": {"none": THINKING_OFF}}
+    ctx = await mount(
+        {"id": "models", "config": {"default": "main", "models": {"main": listed}}},
+        profile=resolve_profile("llama"),
+    )
+
+    async def thought(effort: str | None) -> bool:
+        session = ctx.require(SESSIONS).create(f"local-effort-{effort or 'default'}")
+        options = replace(_options(route), reasoning_effort=effort)
+        await ctx.require(AGENTS).create(session, options).prompt("What is 17 * 23?")
+        header = session.request_header()
+        assert header is not None
+        assert not header.withheld, f"the route's efforts did not define {effort}"
+        return any(
+            isinstance(block, ReasoningBlock)
+            for message in session.transcript()
+            if message.role == "assistant"
+            for block in message.content
+        )
+
+    assert await thought(None), "at its default the model did not think, so `none` proves nothing"
+    assert not await thought("none"), (
+        f"the model thought at `none`: {THINKING_OFF} did not reach its template"
     )
 
 

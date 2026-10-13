@@ -222,6 +222,50 @@ async def test_a_child_runs_at_the_spawn_s_effort_else_its_skills_else_its_route
     assert await effort(skills=("quick", "deep")) == "low"
 
 
+EFFORTS: JsonObject = {
+    "id": "models",
+    "config": {
+        "default": "main",
+        "models": {
+            "main": {
+                "provider": "fake",
+                "model": "fake-1",
+                "efforts": {"low": {"think": "brief"}, "none": {"think": "off"}},
+            },
+        },
+    },
+}
+"""`FAKE_OPTIONS`' route, listed with the two efforts its profile says how to send."""
+
+
+async def test_a_child_runs_without_an_effort_its_route_cannot_send_and_its_parent_is_told(
+    mount: MountProfile,
+) -> None:
+    """The child's own request withholds an effort its route's profile does not define,
+    so its parent is told, or it reads a quick answer as a careful one: the admission
+    records the effort that wins and the spawn's answer says what the route runs at. One
+    the route defines, `default`, or none says nothing, and a resumed parent's handle
+    reads the same off the child's log. Sabotage: drop `_unsent_effort`, ask about the
+    spawn's effort rather than the one that wins, or leave it out of `ChildState.run`."""
+    ctx, parent = await _parent(mount, models=EFFORTS)
+    ctx.require(SKILLS).register(skill("deep", effort="high"))
+
+    async def told(**kwargs: Any) -> list[str]:  # noqa: ANN401
+        run = await _spawn(ctx, parent, **kwargs)
+        children = ctx.require(SUBAGENTS).children(parent.session.id).values()
+        (child,) = (child for child in children if child.session_id == run.session_id)
+        assert admission_notes(child.run()) == admission_notes(run)
+        return admission_notes(run)
+
+    [note] = await told(reasoning_effort="high")
+    assert "'high'" in note and "fake/fake-1" in note and "low, none or default" in note
+    [note] = await told(skills=("deep",))
+    assert "'high'" in note, "the effort its skill names is the one it runs without"
+    assert await told(reasoning_effort="low") == []
+    assert await told(reasoning_effort="default") == []
+    assert await told() == []
+
+
 async def test_a_whole_route_the_list_holds_runs_as_its_entry(mount: MountProfile) -> None:
     """Named as provider and model rather than by key, it is still the listed entry: its
     key and its settings, as a root started on the route gets. Sabotage: leave a whole

@@ -59,6 +59,7 @@ from ..keys import (
     AGENTS,
     GOALS,
     LLM,
+    MODELS,
     NAMED_PROFILES,
     SANDBOX,
     SESSION_PERSISTENCE,
@@ -73,11 +74,13 @@ from ..llm.media import untaken
 from ..llm.structured import SchemaViolation, structural_warning, validated_shape
 from ..llm.types import (
     CONTEXT_SUMMARY_MAX_CHARS,
+    DEFAULT_EFFORT,
     Message,
     PluginSource,
     create_user_message,
     new_message_id,
     text_of,
+    unmapped_effort,
 )
 from ..persistence.opening import open_session, stored_session
 from ..persistence.protocol import SessionPersistence
@@ -118,6 +121,7 @@ from .invariants import contribute_fold_cache
 from .models import (
     ModelChoice,
     ModelEntry,
+    ModelList,
     ModelRoute,
     UnrunnableChoice,
     UnrunnableReason,
@@ -157,6 +161,7 @@ __all__ = [
     "ChildCounts",
     "ChildNotice",
     "ChildState",
+    "EffortUnsent",
     "FallbackReason",
     "FamilyRole",
     "MediaShortfall",
@@ -472,6 +477,30 @@ def _shortfall_text(shortfall: MediaShortfall) -> str:
     )
 
 
+class EffortUnsent(WireModel):
+    """A reasoning effort a child runs without, because its route's profile does not say
+    how to send it (`ModelRoute.efforts`): its own request withholds it by the same rule
+    (`unmapped_effort`), so it thinks at its provider's default, its parent told. A
+    record rather than a refusal, as `MediaShortfall` is: the child runs on the model
+    it was asked onto, and only how hard it thinks differs."""
+
+    effort: str
+    route: str
+    """The route it runs on, `provider/model`."""
+    defined: tuple[str, ...] = ()
+    """The efforts that route's profile defines, which a parent can name instead."""
+
+
+def _unsent_text(unsent: EffortUnsent) -> str:
+    """The sentence for an effort a child runs without, for `admission_notes`."""
+    named = ", ".join(unsent.defined)
+    can = f"{named} or {DEFAULT_EFFORT}" if named else f"only {DEFAULT_EFFORT}"
+    return (
+        f"thinks at its provider's default rather than {unsent.effort!r}, which the "
+        f"profile does not say how to send to {unsent.route}; it can run at {can} there"
+    )
+
+
 def _fallback_text(fallback: ModelFallback) -> str:
     """The sentence for a model fallback, for `admission_notes`."""
     asked = ", ".join(f'"{model}"' for model in fallback.asked)
@@ -507,8 +536,9 @@ def ended_text(name: str, result: SubagentResult) -> str:
 
 def admission_notes(run: SubagentRun) -> list[str]:
     """What a parent is told about how its child was admitted, beside the facts: why
-    its access is narrower than asked, and why it runs on another model than its skill
-    asked for. One list, so the delegating tools cannot tell a parent different things."""
+    its access is narrower than asked, why it runs on another model than its skill
+    asked for, what it cannot see, and an effort it runs without. One list, so the
+    delegating tools cannot tell a parent different things."""
     notes: list[str] = []
     if run.downgrade_reason is not None:
         notes.append(_downgrade_text(run.downgrade_reason))
@@ -516,6 +546,8 @@ def admission_notes(run: SubagentRun) -> list[str]:
         notes.append(_fallback_text(run.model_fallback))
     if run.media_shortfall is not None:
         notes.append(_shortfall_text(run.media_shortfall))
+    if run.effort_unsent is not None:
+        notes.append(_unsent_text(run.effort_unsent))
     return notes
 
 
@@ -642,6 +674,9 @@ class SubagentRequest:
     media_shortfall: MediaShortfall | None = None
     """Media its skills hand it that neither its route nor its parent's can take
     (`resolve_model`)."""
+    effort_unsent: EffortUnsent | None = None
+    """The effort it will run at, where its route's profile does not say how to send
+    it (`resolve_model`)."""
     skill_effort: str | None = None
     """The reasoning effort the skills it is given name (`Skill.effort`), where they
     agree (`resolve_model`): over its route's, under the spawn's own (`child_options`)."""
@@ -779,6 +814,8 @@ class SubagentRun(WireForm):
     media_shortfall: MediaShortfall | None = None
     """Media this child's skills hand it that it cannot see, stamped as
     `model_fallback` is."""
+    effort_unsent: EffortUnsent | None = None
+    """The effort this child runs without, stamped as `model_fallback` is."""
     output: dict[str, Any] | None = None
     """The shape this child owes its value in, stamped by the seam from the request for
     the provider's drive to settle (`settle_value`). Not in `to_wire`: a parent holds
@@ -838,6 +875,8 @@ class SubagentRun(WireForm):
             wire["modelFallback"] = self.model_fallback.to_wire()
         if self.media_shortfall is not None:
             wire["mediaShortfall"] = self.media_shortfall.to_wire()
+        if self.effort_unsent is not None:
+            wire["effortUnsent"] = self.effort_unsent.to_wire()
         return wire
 
 
@@ -903,6 +942,8 @@ class Admission(WireModel):
     media_shortfall: MediaShortfall | None = None
     """Media its skills handed it that it could not see, for the audit, as
     `model_fallback` is."""
+    effort_unsent: EffortUnsent | None = None
+    """The effort it ran without, for the audit, as `model_fallback` is."""
     output: dict[str, Any] | None = None
     """The shape the child owes its value in, read back as it was, not worked out
     again: the parent was promised this one, so a readmitted child still owes it."""
@@ -947,6 +988,7 @@ def admission_payload(
         route=entry.route if entry is not None else None,
         model_fallback=run.model_fallback,
         media_shortfall=run.media_shortfall,
+        effort_unsent=run.effort_unsent,
         output=request.output,
         requested_access=run.requested_access,
         granted_access=run.granted_access,
@@ -1870,7 +1912,10 @@ class SubagentService:
         spawn named itself is refused instead, by the rule above.
 
         **And the effort its skills name** (`Skill.effort`), which `child_options` puts
-        under the spawn's own and over its route's (`_with_effort`).
+        under the spawn's own and over its route's (`_with_effort`). The effort that
+        wins, where its route's profile does not say how to send it, is run without and
+        its parent told (`EffortUnsent`), never refused: the child is on the model it
+        was asked onto either way.
         """
         routed = self._with_media(
             self._resolve_route(request, readmitting=readmitting), readmitting=readmitting
@@ -1878,9 +1923,10 @@ class SubagentService:
         return self._with_effort(routed)
 
     def _with_effort(self, request: SubagentRequest) -> SubagentRequest:
-        """`request` with the effort its skills name, where they agree. Skills that name
-        different efforts name none, so the child runs at its route's: an effort is a
-        setting to degrade around, not a contract the parent must settle."""
+        """`request` with the effort its skills name, where they agree, and the effort it
+        runs at where its route cannot send it. Skills that name different efforts name
+        none, so the child runs at its route's: an effort is a setting to degrade around,
+        not a contract the parent must settle."""
         named = self._named_by_skills(request, lambda skill: skill.effort)
         efforts = set(named.values())
         if len(efforts) > 1:
@@ -1888,7 +1934,20 @@ class SubagentService:
                 "a child's skills name different efforts (%s), so it runs at its route's",
                 ", ".join(f"{name}: {effort}" for name, effort in sorted(named.items())),
             )
-        return replace(request, skill_effort=efforts.pop() if len(efforts) == 1 else None)
+        request = replace(request, skill_effort=efforts.pop() if len(efforts) == 1 else None)
+        return replace(request, effort_unsent=self._unsent_effort(request))
+
+    def _unsent_effort(self, request: SubagentRequest) -> EffortUnsent | None:
+        """The effort `request`'s child runs at, where its route's profile does not say
+        how to send it: asked by the rule its own request withholds the effort by
+        (`unmapped_effort`), of the list the spawn resolved its route from."""
+        options = child_options(request)
+        listed = self.ctx.get(MODELS) or ModelList()
+        defined = listed.efforts_for(options.provider, options.model, key=options.model_key)
+        if not unmapped_effort(options.reasoning_effort, defined):
+            return None
+        route = f"{options.provider}/{options.model}"
+        return EffortUnsent(effort=options.reasoning_effort, route=route, defined=tuple(defined))
 
     def _resolve_route(self, request: SubagentRequest, *, readmitting: bool) -> SubagentRequest:
         """`resolve_model`'s route, before the media are asked about."""
@@ -2246,6 +2305,7 @@ class SubagentService:
         run.owner = owner
         run.model_fallback = request.model_fallback
         run.media_shortfall = request.media_shortfall
+        run.effort_unsent = request.effort_unsent
         run.output = request.output
         self._settle_waiter(run)
         child = self.ctx.require(SESSIONS).get(run.session_id)
@@ -3321,6 +3381,7 @@ class ChildState:
             downgrade_reason=record.downgrade_reason,
             model_fallback=record.model_fallback,
             media_shortfall=record.media_shortfall,
+            effort_unsent=record.effort_unsent,
         )
 
     def to_wire(self) -> dict[str, JsonValue]:

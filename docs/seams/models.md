@@ -84,8 +84,9 @@ since it is the provider's and not pH's, `efforts` cannot define it.
 **An effort asked for that the route has no mapping for is warned about.** One its
 `efforts` do not define, its own or one a spawn or a skill asks of a child on it, is
 not sent, so the provider's default applies, with a warning once per route and effort
-and a line under "Model settings". An effort defined as `{}` sends nothing on purpose
-and is not warned about. The fields are the route's the request is sent on, looked up
+and a line under "Model settings"; a child's parent is told at the spawn, in its
+answer's `note` (`EffortUnsent`, [subagents](subagents.md)). An effort defined as `{}`
+sends nothing on purpose and is not warned about. The fields are the route's the request is sent on, looked up
 in the session's own list after any plugin moved it (`ModelList.efforts_for`, the
 agent's key first where two keys list one route), so a route the list does not hold has
 none and its effort is withheld.

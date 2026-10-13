@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 from daemon_helpers import Daemon
-from daemon_helpers import until as settled
+from daemon_helpers import until as daemon_until
 from textual.app import App
 from textual.binding import Binding
 from textual.pilot import Pilot
@@ -1029,7 +1029,7 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(
     # root's life, and the closed terminal's socket tears down a moment after
     # the `async with` above returns.
     root = root_of(tui_daemon)
-    await settled(lambda: not root.subscribers, what="the first terminal to detach")
+    await daemon_until(lambda: not root.subscribers, what="the first terminal to detach")
     await tui_daemon.sweep()
     assert not tui_daemon.holds("pilot")
 
@@ -1179,7 +1179,9 @@ async def test_a_turn_started_in_the_tui_finishes_after_the_tui_is_gone(
 
     assert tui_daemon.holds("pilot"), "closing a terminal is not a shutdown"
     root = root_of(tui_daemon)
-    await settled(lambda: root.status == "idle", what="the turn to finish with nobody watching")
+    await daemon_until(
+        lambda: root.status == "idle", what="the turn to finish with nobody watching"
+    )
 
     async with running(make_tui_app()) as (second, _pilot):
         assert second.front is not None

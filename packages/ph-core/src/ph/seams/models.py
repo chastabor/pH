@@ -158,7 +158,8 @@ class ModelRoute(WireModel):
     Gemini 2.5 `generationConfig.thinkingConfig.thinkingBudget`. No adapter guesses one.
     An effort asked for that this does not name (the route's own, or one a spawn or a
     skill asks for) is not sent, with a warning, the request header's record
-    (`EpochHeader.withheld`) and a line in `phern doctor`. `DEFAULT_EFFORT` is not pH's
+    (`EpochHeader.withheld`), a line in `phern doctor` and, for a child, a note to its
+    parent (`EffortUnsent`). `DEFAULT_EFFORT` is not pH's
     to define, so it is refused here. Absent rather than empty when unset, so a route's
     wire form is as it was.
 

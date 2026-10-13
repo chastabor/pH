@@ -234,6 +234,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
         "ChildNotice": {"text": "[the child finished]", "summary": "finished", "id": "n1"},
         "ModelFallback": {"asked": ["classify"], "reason": "unlisted"},
         "MediaShortfall": {"media": ["image/*"], "route": "llama/qwen"},
+        "EffortUnsent": {"effort": "max", "route": "llama/qwen", "defined": ["low", "none"]},
         "Budget": {},
         "ReasoningBlock": {"text": "thinking"},
         "ToolResultBlock": {"toolCallId": "c1", "content": [TextBlock(text="out")]},
