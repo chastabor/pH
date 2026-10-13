@@ -506,6 +506,25 @@ async def test_auto_refine_fires_at_the_threshold_and_stays_local(refining: Refi
     ]
 
 
+async def test_only_a_turns_end_costs_the_auto_refine_listener_a_task(
+    refining: Refining,
+) -> None:
+    """`session/event` fires for every event of every session, each streamed chunk
+    included, and an async listener is a task each time. The auto-refine listener is
+    sync until a turn ends, so anything else costs it no task, and a turn's end still
+    starts its pass. Sabotage: consider every event, not only a turn's end."""
+    ctx, session, _agent = await refining(turnsBetweenRefinements=1, cooldownMinutes=0)
+    script(ctx, review=YES, planner=json.dumps(PROPOSAL))
+    await settle_background(ctx)
+
+    log_event(session, "assistant/chunk", {"turn": 1, "step": 1, "chunk": {"type": "text-delta"}})
+    assert not ctx._runtime.background, "an event that was not a turn's end spawned a task"
+
+    turn(session)
+    await settle_background(ctx)
+    assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is not None
+
+
 async def test_a_declined_review_costs_one_cheap_call(refining: Refining) -> None:
     ctx, session, _agent = await refining(turnsBetweenRefinements=3, cooldownMinutes=0)
     script(ctx, review=NO)

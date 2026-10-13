@@ -935,23 +935,6 @@ def _on_disk(path: Path, marker: str) -> bool:
     return path.exists() and marker in path.read_text()
 
 
-async def _until(done: Callable[[], bool], *, what: str) -> None:
-    """Poll until `done()`, or fail saying what was being waited for.
-
-    `prompt` returns as soon as the message is *logged* — the turn has not
-    started, let alone crashed — so a wait written as "while it still looks
-    fine" exits on its first check and asserts against an empty log.
-    """
-    try:
-        with anyio.fail_after(10):
-            while not done():
-                await anyio.sleep(0.01)
-    except TimeoutError:
-        # `fail_after` raises a bare `TimeoutError`, so without this the `what=`
-        # every call site passes reached no message at all.
-        pytest.fail(f"timed out waiting for {what}")
-
-
 async def test_an_injected_crash_is_retried_and_the_root_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_ladder: None
 ) -> None:
@@ -971,12 +954,12 @@ async def test_an_injected_crash_is_retried_and_the_root_recovers(
         # Waiting on the *answer*, not on "idle": a root is idle throughout the
         # ladder's own backoff, so a wait for idle exits during the sleep and
         # asserts against a log the retry has not written to yet.
-        await _until(
+        await until(
             lambda: any(e.type == "assistant/message" for e in root.session.events_from(0)),
             what="the retried task to finish its turn",
         )
 
-        await _until(
+        await until(
             lambda: root.recovery.attempts == 0, what="the ladder to clear after recovering"
         )
         types = [event.type for event in root.session.events_from(0)]
@@ -1008,7 +991,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         _crash(monkeypatch, root, 99)
 
         await client.prompt("doomed", "hello")
-        await _until(lambda: root.status == "failed", what="the ladder to give up")
+        await until(lambda: root.status == "failed", what="the ladder to give up")
 
         types = [event.type for event in root.session.events_from(0)]
         assert types.count(recovery.RETRY) == len(recovery.RETRY_DELAYS)
@@ -1022,7 +1005,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         # the notification is still crossing the outbox and the pump. Reading
         # `seen` at that instant caught the client mid-delivery — `retrying` had
         # landed and `failed` had not — about one run in four.
-        await _until(
+        await until(
             lambda: "failed" in {str(params.get("status", "")) for params in seen},
             what="the failed status to reach the client",
         )
@@ -1037,7 +1020,7 @@ async def test_the_ladder_gives_up_after_its_last_attempt_and_reports(
         # about one run in six. With the flush deleted this waits out its
         # timeout instead, which is still a failure.
         written = stored_log(tmp_path / "sessions", "doomed")
-        await _until(lambda: _on_disk(written, recovery.FAILED), what="the give-up to reach disk")
+        await until(lambda: _on_disk(written, recovery.FAILED), what="the give-up to reach disk")
 
 
 async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
@@ -1066,7 +1049,7 @@ async def test_a_root_resumed_mid_ladder_does_not_start_the_count_over(
             # back — so shutting down at the in-memory flip raced the flush that
             # makes the claim true, and the resumed root came back `retrying`.
             written = stored_log(tmp_path / "sessions", "stubborn")
-            await _until(
+            await until(
                 lambda: _on_disk(written, recovery.FAILED),
                 what="the spent ladder to reach disk",
             )
@@ -1102,7 +1085,7 @@ async def test_one_root_crashing_does_not_take_the_daemon_down(
         casualty = daemon.running.supervisor.roots["casualty"]
         _crash(monkeypatch, casualty, 99)
         await client.prompt("casualty", "hello")
-        await _until(lambda: casualty.status == "failed", what="the doomed root to give up")
+        await until(lambda: casualty.status == "failed", what="the doomed root to give up")
         monkeypatch.undo()
 
         # The daemon still answers, the bystander is still there, and it works.
@@ -1250,7 +1233,7 @@ async def test_a_failing_flush_climbs_the_ladder_instead_of_retrying_forever(
 
         monkeypatch.setattr(type(root.ctx.require(SESSIONS)), "flush", broken)
         await client.prompt("unflushable", "hello")
-        await _until(lambda: root.status == "failed", what="the ladder to give up")
+        await until(lambda: root.status == "failed", what="the ladder to give up")
 
         types = [event.type for event in root.session.events_from(0)]
         assert types.count(recovery.RETRY) == len(recovery.RETRY_DELAYS), (
@@ -1375,7 +1358,7 @@ async def test_a_root_mid_ladder_is_not_released(
         _crash(monkeypatch, root, 99)
 
         await client.prompt("climbing", "hello")
-        await _until(lambda: root.recovery.attempts > 0, what="the ladder to start")
+        await until(lambda: root.recovery.attempts > 0, what="the ladder to start")
         assert root.status == "retrying"
         assert await supervisor.sweep(after=0) == [], "released a root mid-ladder"
 
@@ -1446,7 +1429,7 @@ async def test_release_actually_runs(tmp_path: Path) -> None:
         await client.prompt("swept", "hello")
         await _settled(client, "swept", events=1)
         await client.call("session/detach", sessionId="swept")
-        await _until(
+        await until(
             lambda: "swept" not in daemon.running.supervisor.roots,
             what="an idle root to be released on its own",
         )
@@ -2014,9 +1997,9 @@ async def test_a_reaped_runtime_dir_reaches_every_root_as_a_record(
 
         # Logout, as logind performs it: the whole directory, not just the file.
         shutil.rmtree(tmp_path / "xdg")
-        with anyio.fail_after(10):
-            while not (_notices(first) and _notices(second)):
-                await anyio.sleep(0.01)
+        await until(
+            lambda: _notices(first) and _notices(second), what="both roots to hear of the logout"
+        )
 
         said = _notices(first)[0].data
         assert said["reason"] == "removed"
@@ -2058,9 +2041,7 @@ async def test_the_roots_keep_working_when_the_socket_goes(
         # Polled on the answer rather than on `status`, which reads `idle` in the
         # window between the prompt being queued and the root's task waking: a
         # wait on it would pass before the turn it is waiting for had started.
-        with anyio.fail_after(10):
-            while not answered():
-                await anyio.sleep(0.01)
+        await until(answered, what="the root's answer")
 
 
 async def test_a_second_daemons_socket_is_not_mistaken_for_a_recovery(

@@ -36,7 +36,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import anyio
 import pytest
 
 from ph.agent.types import AgentDriver, AgentOptions
@@ -55,7 +54,7 @@ from ph.seams.credentials import waiting_for
 from ph.seams.subagents import ChildState
 from ph.session import Session, SessionEvent, declared_intents, open_intents, outcome_of
 from ph.session.kinds import APPROVAL_ASK, SHELL_COMMAND, TOOL_EFFECT
-from ph.testing import MountProfile, not_none, resume_stored, stored_types
+from ph.testing import MountProfile, not_none, resume_stored, settled, stored_types
 
 pytestmark = pytest.mark.anyio
 
@@ -121,9 +120,11 @@ def _children(ctx: Context, root: Session) -> dict[str, ChildState]:
 
 
 async def _until_settled(ctx: Context, root: Session, *runs: str) -> None:
-    with anyio.fail_after(20):
-        while any(_children(ctx, root)[run].status != "done" for run in runs):
-            await anyio.sleep(0.02)
+    await settled(
+        lambda: all(_children(ctx, root)[run].status == "done" for run in runs),
+        f"children {', '.join(runs)} to finish",
+        seconds=20,
+    )
 
 
 def _stored_open(ctx: Context, session_id: str) -> list[str]:

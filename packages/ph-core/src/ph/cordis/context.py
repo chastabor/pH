@@ -741,10 +741,16 @@ def remove_identical[T](entries: list[T], value: T) -> None:
     by field — so disposing the second deleted the first, and the first's disposer
     then deleted the survivor, reordering what was left. Every registry of values
     releases through this: a hook (`Context.on`), a contribution (`claim_entry`), a
-    per-scope filter (`ScopedEntries`).
+    per-scope filter (`ScopedEntries`), a scope's own effects.
+
+    **Newest first.** Registrations unwind newest first, so the newest occurrence is
+    the one usually going: an effect `_unwind` just ran, a detached task's stop. And
+    for one object claimed twice, it is the occurrence the later claim put there, so
+    undoing that claim leaves the earlier one where it was. From the front, the
+    survivor moved behind everything claimed between the two.
     """
-    for index, held in enumerate(entries):
-        if held is value:
+    for index in reversed(range(len(entries))):
+        if entries[index] is value:
             del entries[index]
             return
 
@@ -1407,7 +1413,16 @@ class Context:
     # -------------------------------------------------------------- effects --
 
     def add_disposer(self, dispose: Disposer, *, label: str = "") -> Disposer:
-        """Register an already-acquired teardown as an effect of this scope."""
+        """Register an already-acquired teardown as an effect of this scope.
+
+        **Refused once the scope is down, though its unwind may still be running**,
+        and callers count on that: a subagent spawned under a parent that went away
+        turns this refusal into its coded `parent_went_away`. Accepted mid-unwind,
+        the child would be built into the dying scope and torn down at once, with
+        the spawn reporting a run. `_hold`, which every held `detach` goes
+        through, is the one registration that joins an unwind under way; its
+        docstring says why.
+        """
         self._assert_active()
         effect = _Effect(dispose=dispose, label=label)
         self._effects.append(effect)
@@ -1419,23 +1434,10 @@ class Context:
             # here first. By identity: two `add_disposer` calls with one bound
             # method and one label produce equal `_Effect`s (A8).
             effect.done = effect.ran = True
-            self._remove_effect(effect)
+            remove_identical(self._effects, effect)
             return effect.dispose()
 
         return release
-
-    def _remove_effect(self, effect: _Effect) -> None:
-        """Take `effect` off this scope's list by identity; nothing if it is gone.
-
-        The newest is checked first, because it is the usual one: `_unwind` removes
-        what it ran from the end, and a detached task's stop is most often the last
-        thing its scope took on.
-        """
-        effects = self._effects
-        if effects and effects[-1] is effect:
-            effects.pop()
-        else:
-            remove_identical(effects, effect)
 
     async def effect(
         self, enter: Callable[[], MaybeAwaitable[Disposer]], *, label: str = ""
@@ -1730,7 +1732,7 @@ class Context:
             # **That effect, not the last one.** A `detach` during the await above
             # appends its stop here even though this scope is down (`_hold`), and
             # a bare `pop()` took that newcomer unrun in place of this one.
-            self._remove_effect(effect)
+            remove_identical(self._effects, effect)
 
     def _leave_tree(self) -> None:
         """Unlink from the parent and drop what this scope served. Cannot fail.
@@ -2098,7 +2100,7 @@ class Context:
                 # Over, so nothing is owed. Dropped rather than released, which
                 # would call the stop: for `finish`, a coroutine nobody awaits.
                 held.done = held.ran = True
-                self._remove_effect(held)
+                remove_identical(self._effects, held)
             if not finished.cancelled() and finished.exception() is not None:
                 log.error("ph.cordis: detached %s failed", label, exc_info=finished.exception())
 

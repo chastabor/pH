@@ -51,7 +51,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import anyio
 import pytest
 from rlm_fixtures import (
     BINDINGS_ROW,
@@ -125,6 +124,7 @@ from ph.testing import (
     resume_stored,
     run_tool,
     settle_background,
+    settled,
     skill,
     stored_events,
     stored_types,
@@ -754,7 +754,7 @@ async def test_deleting_a_child_leaves_a_tombstone(
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "doomed")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     subagents = ctx.require(SUBAGENTS)
 
     assert await subagents.delete(session, run.id, reason="user") is True
@@ -1151,22 +1151,6 @@ async def test_a_child_with_no_tree_is_announced_without_naming_one(
 # ---------------------------------------------------------------- the queue --
 
 
-async def _until(predicate: Callable[[], bool], what: str) -> None:
-    """Poll until `predicate()`, or fail saying what was being waited for.
-
-    The `except` is the point, and `daemon_helpers.until` makes the same argument
-    for its own copy: `fail_after` raises a bare `TimeoutError`, so a call site's
-    `what` reaches nobody without this — and a wedged queue is exactly the failure
-    that arrives as a timeout with no other evidence.
-    """
-    try:
-        with anyio.fail_after(5):
-            while not predicate():
-                await anyio.sleep(0.005)
-    except TimeoutError:
-        pytest.fail(f"timed out waiting for {what}")
-
-
 async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
     delegating: MountedRuntime, gate: ModelGate
 ) -> None:
@@ -1175,7 +1159,7 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
     ctx, session, parent = await delegating(maxConcurrent=1)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
-    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the first child to reach the model")
 
     children = ctx.require(SUBAGENTS).children(session.id)
     assert children[first.id].status == "running"
@@ -1183,7 +1167,7 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
     assert _statuses(ctx, second) == ["queued"], "the wait is in its log"
 
     gate.release_one()
-    await _until(lambda: gate.arrived == 2, "the second child to take the freed slot")
+    await settled(lambda: gate.arrived == 2, "the second child to take the freed slot")
     assert ctx.require(SUBAGENTS).children(session.id)[first.id].status == "done"
     assert _statuses(ctx, second) == ["queued", "running"]
 
@@ -1219,7 +1203,7 @@ async def test_a_child_that_failed_frees_its_slot(
     second = await _spawn(ctx, parent, "second")
 
     assert (await first.result()).status == "error"
-    await _until(lambda: gate.arrived == 1, "the second child to run after the failure")
+    await settled(lambda: gate.arrived == 1, "the second child to run after the failure")
     gate.release_one()
 
     assert (await second.result()).status == "done"
@@ -1235,14 +1219,14 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     ctx, session, parent = await delegating(maxConcurrent=1)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
-    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the first child to reach the model")
 
     assert await ctx.require(SUBAGENTS).delete(session, second.id, reason="user") is True
     assert _statuses(ctx, second) == ["queued", "canceled"]
 
     third = await _spawn(ctx, parent, "third")
     gate.release_one()
-    await _until(lambda: gate.arrived == 2, "the third child to take the slot the first freed")
+    await settled(lambda: gate.arrived == 2, "the third child to take the slot the first freed")
     gate.release_one()
     assert (await first.result()).status == "done"
     assert (await third.result()).status == "done"
@@ -1333,7 +1317,7 @@ async def test_a_live_childs_log_refuses_a_second_opener(
     """
     ctx, _session, parent = await delegating()
     child = await _spawn(ctx, parent, "first")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     elsewhere = await mount()
 
     with pytest.raises(SessionBusy):
@@ -1357,7 +1341,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     ctx, session, parent = await delegating(maxConcurrent=1)
     await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
-    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the first child to reach the model")
     assert _statuses(ctx, second) == ["queued"]
     await _persisted(ctx, session)
 
@@ -1368,7 +1352,7 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     assert second.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}, (
         "the queued child came back under its own id"
     )
-    await _until(
+    await settled(
         lambda: _statuses(revived_ctx, second)[-1] == "running",
         "the readmitted child to reach the model",
     )
@@ -1396,7 +1380,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     interrupted = await _spawn(ctx, parent, "only")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     assert _statuses(ctx, interrupted) == ["running"]
     await _persisted(ctx, session)
 
@@ -1407,12 +1391,12 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     # The count follows the restart's own `running` record, which a detached
     # drive job writes a moment later — so this waits for the fact rather than
     # reading the child's state before it exists.
-    await _until(
+    await settled(
         lambda: restarts_since_progress(_state(revived_ctx, interrupted)) == 1,
         "the restart to be counted",
     )
     assert _state(revived_ctx, interrupted).starts == 2, "one first run, one restart"
-    await _until(gate.twice, "the resumed child to reach the model again")
+    await settled(gate.twice, "the resumed child to reach the model again")
 
     child = revived_ctx.require(SESSIONS).get(interrupted.session_id)
     assert child is not None
@@ -1439,14 +1423,14 @@ async def test_a_child_that_replied_before_a_restart_is_not_announced_as_silent(
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     run = await _spawn(ctx, parent, "only")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     child = not_none(ctx.require(SESSIONS).get(run.session_id))
     reply_to_parent(child)
     await ctx.require(SESSIONS).flush(child)
     await _persisted(ctx, session)
 
     revived_ctx, revived, _parent = await _restart(mount, session.id)
-    await _until(gate.twice, "the readmitted child to reach the model")
+    await settled(gate.twice, "the readmitted child to reach the model")
     gate.release_all()
     await settle_background(revived_ctx)
 
@@ -1471,7 +1455,7 @@ async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_t
     """
     ctx, session, parent = await delegating()
     working = await _spawn(ctx, parent, "keep going")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
 
     await ctx.root.dispose()
     revived_ctx, _revived, _parent = await _restart(mount, session.id)
@@ -1481,7 +1465,7 @@ async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_t
         "the child's log does not say why it stopped"
     )
     assert working.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
-    await _until(gate.twice, "the resumed child to reach the model again")
+    await settled(gate.twice, "the resumed child to reach the model again")
 
 
 async def test_a_suspended_child_keeps_what_was_queued_for_it(
@@ -1498,13 +1482,13 @@ async def test_a_suspended_child_keeps_what_was_queued_for_it(
     """
     ctx, _session, parent = await delegating()
     working = await _spawn(ctx, parent, "keep going")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     child = not_none(ctx.require(AGENTS).get(working.session_id))
     child.steer(user_text("also this"))
 
     await ctx.root.dispose()
     revived_ctx, _revived, _parent = await _restart(mount, parent.id)
-    await _until(gate.twice, "the resumed child to reach the model again")
+    await settled(gate.twice, "the resumed child to reach the model again")
 
     log = not_none(revived_ctx.require(SESSIONS).get(working.session_id)).events
     assert not [
@@ -1530,11 +1514,11 @@ async def test_a_child_suspended_before_its_first_step_is_handed_its_task_once(
     ctx, session, parent = await delegating(maxConcurrent=1)
     await _spawn(ctx, parent, "first")
     waiting = await _spawn(ctx, parent, "second")
-    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the first child to reach the model")
 
     await ctx.root.dispose()
     revived_ctx, _revived, _parent = await _restart(mount, session.id, concurrent=2)
-    await _until(lambda: gate.arrived >= 3, "both children to reach the model again")
+    await settled(lambda: gate.arrived >= 3, "both children to reach the model again")
 
     child = revived_ctx.require(SESSIONS).get(waiting.session_id)
     assert child is not None
@@ -1592,7 +1576,7 @@ async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
     """
     ctx, session, parent = await delegating()
     interrupted = await _spawn(ctx, parent, "only")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
     revived: list[Context] = []
     seen: list[int] = []
@@ -1607,7 +1591,7 @@ async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
 
     monkeypatch.setattr(ReactLoopAgent, "run", watched)
     await _restart(mount, session.id, prepare=revived.append)
-    await _until(gate.twice, "the resumed child to reach the model again")
+    await settled(gate.twice, "the resumed child to reach the model again")
 
     assert seen == [1], "the attempt began before its restart was on the child's disk"
 
@@ -1635,7 +1619,7 @@ async def _stalled(
 ) -> Any:  # noqa: ANN401
     """A child at the model that has already been restarted `restarts` times."""
     child = await _spawn(ctx, parent, "only")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     await _resumed(ctx, child, restarts)
     return child
 
@@ -1691,7 +1675,7 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
     # **The restart is still recorded as one**, counting up from the answer.
     # Derived from the ladder instead, this readmit would look like a first run,
     # write no `resumed`, and the ladder would never count it again.
-    await _until(
+    await settled(
         lambda: restarts_since_progress(_state(revived_ctx, moved)) == 1,
         "the restart to be counted from a cleared ladder",
     )
@@ -1762,10 +1746,10 @@ async def _grandchild(
 ) -> tuple[Any, Any]:
     """A child and the child it delegated to, both at the model, both logs written."""
     middle = await _spawn(ctx, parent, "delegate further")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     child = not_none(ctx.require(AGENTS).get(middle.session_id))
     grandchild = await _spawn(ctx, child, "do the work", **leaf)
-    await _until(lambda: gate.arrived == 2, "the grandchild to reach the model")
+    await settled(lambda: gate.arrived == 2, "the grandchild to reach the model")
     await _persisted(ctx, not_none(parent.session))
     await _persisted(ctx, not_none(child.session))
     return middle, grandchild
@@ -1812,11 +1796,11 @@ async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
     assert leaf.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}, (
         "the grandchild came back under its own id"
     )
-    await _until(
+    await settled(
         lambda: restarts_since_progress(_state(revived_ctx, leaf)) == 1,
         "the grandchild's restart to be counted in its own log",
     )
-    await _until(lambda: gate.arrived == 4, "both to reach the model again")
+    await settled(lambda: gate.arrived == 4, "both to reach the model again")
     assert swept_first == [True], "the child's new attempt started before its children were swept"
 
 
@@ -1887,7 +1871,7 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     narrowed = await _spawn(
         ctx, parent, "second", skills=("review",), tools=("read",), paths=("/srv/cache",)
     )
-    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the first child to reach the model")
     await _persisted(ctx, session)
 
     revived_ctx, _revived, _parent = await _restart(mount, session.id, skills=("review", "audit"))
@@ -1926,7 +1910,7 @@ async def test_a_model_set_up_since_reaches_a_readmitted_child(
     _sorting(ctx)
     child = await _spawn(ctx, parent, "sort these", skills=("sort",))
     assert child.model_fallback == ModelFallback(asked=("classify",), reason="unlisted")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
 
     revived_ctx, _revived, _parent = await _restart(
@@ -1953,7 +1937,7 @@ async def test_a_readmitted_child_whose_model_is_gone_runs_on_its_parent_s_and_s
     _sorting(ctx)
     child = await _spawn(ctx, parent, "sort these", skills=("sort",))
     assert (child.model, child.model_fallback) == ("fake-9", None)
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
 
     revived_ctx, _revived, revived_parent = await _restart(mount, session.id, prepare=_sorting)
@@ -1976,7 +1960,7 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     orphan = await _spawn(ctx, parent, "only")
-    await _until(lambda: gate.arrived == 1, "the child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
 
     # Over a snapshot, as `_restart` is: ending the child means claiming its log,
@@ -2015,7 +1999,7 @@ async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
     ctx.require(SKILLS).register(skill("review"))
     await _spawn(ctx, parent, "first")
     narrowed = await _spawn(ctx, parent, "second", skills=("review",))
-    await _until(lambda: gate.arrived == 1, "the first child to reach the model")
+    await settled(lambda: gate.arrived == 1, "the first child to reach the model")
     await _persisted(ctx, session)
 
     # The deployment no longer mounts `review`, so the parent does not hold it

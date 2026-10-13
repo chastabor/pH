@@ -148,28 +148,36 @@ def models_overlay(**routes: Mapping[str, object]) -> dict[str, Any]:
     return {"id": "models", "config": {"default": "main", "models": listed}}
 
 
-async def settled(check: Callable[[], object], what: str) -> None:
-    """Poll until `check()` is true, or fail saying what was waited for.
+@contextmanager
+def _failing_after(seconds: float, what: str) -> Iterator[None]:
+    """`anyio.fail_after`, failing the test with what was being waited for.
 
-    **The fifth copy of this loop is why it is here.** Four suites had written
-    it out — `test_seams`, `test_subagents`, `daemon_helpers`, `test_daemon` —
-    under three names, and `daemon_helpers.until` already states the argument:
-    "a copy that gets missed fails as a *hang*, which is the least legible
-    failure a suite has". `ph.testing` is the declared home for scaffolding no
-    shipped module imports, and this is scaffolding.
-
-    `fail_after` alone raises a bare `TimeoutError` naming neither the wait nor
-    the reason, which is what `what` is for.
+    `fail_after` alone raises a bare `TimeoutError` naming neither the wait nor the
+    reason, and a wedged wait is exactly the failure that arrives with no other
+    evidence. Every bounded wait here goes through this, so none can drop the name.
     """
     # `ph.testing` is shipped, and its helpers import where pytest is not installed.
     import pytest  # noqa: PLC0415
 
     try:
-        with anyio.fail_after(5):
-            while not check():
-                await anyio.sleep(0.005)
+        with anyio.fail_after(seconds):
+            yield
     except TimeoutError:
         pytest.fail(f"timed out waiting for {what}")
+
+
+async def settled(check: Callable[[], object], what: str, *, seconds: float = 5.0) -> None:
+    """Poll until `check()` is true, or fail saying what was waited for.
+
+    **The one copy of this loop**, which suites had written out under several
+    names: a copy that gets missed fails as a *hang*, the least legible failure a
+    suite has. `ph.testing` is the declared home for scaffolding no shipped module
+    imports, and this is scaffolding. `seconds` is for a suite whose waits are
+    longer, as a daemon's are.
+    """
+    with _failing_after(seconds, what):
+        while not check():
+            await anyio.sleep(0.005)
 
 
 async def settle_background(ctx: Context) -> None:
@@ -181,18 +189,12 @@ async def settle_background(ctx: Context) -> None:
     it to trip on. Looped, because each can start the other: a child's drive ends by
     waking listeners, and a listener can start a job.
     """
-    # `ph.testing` is shipped, and its helpers import where pytest is not installed.
-    import pytest  # noqa: PLC0415
-
     jobs = ctx.get(JOBS)
-    try:
-        with anyio.fail_after(10):
+    with _failing_after(10, "background jobs and detached tasks to end"):
+        await ctx.settled()
+        while jobs is not None and jobs.in_flight:
+            await jobs.settled()
             await ctx.settled()
-            while jobs is not None and jobs.in_flight:
-                await jobs.settled()
-                await ctx.settled()
-    except TimeoutError:
-        pytest.fail("timed out waiting for background jobs and detached tasks to end")
 
 
 def simple_tool(

@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 
 from ph.cancel import raced
-from ph.cordis import Context, plugin
+from ph.cordis import Context, MaybeAwaitable, plugin
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.paths import resolve_roots
 from ph.seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
@@ -347,13 +347,24 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------- auto-refine --
 
-    async def on_session_event(session: Session, event: SessionEvent) -> None:
+    def on_session_event(session: Session, event: SessionEvent) -> MaybeAwaitable[None]:
         """H7: consider refining at the end of a turn.
 
         On `turn/end` rather than on a timer, because that is the one moment the
         conversation is both complete and quiet.
+
+        **Sync until there is something to consider.** `session/event` fires for
+        every event of every session, each streamed chunk included, and an async
+        listener is a task each time: spawned, held and ended per chunk to read one
+        field. Only a turn's end gets one now.
         """
-        if event.type != "turn/end" or session.id in running:
+        return consider(session) if event.type == "turn/end" else None
+
+    async def consider(session: Session) -> None:
+        # Here rather than in the sync half: in the task's one step with the `start`
+        # that claims the session, so two ends heard in one turn of the loop cannot
+        # both start a pass.
+        if session.id in running:
             return
         trigger = due(
             session,

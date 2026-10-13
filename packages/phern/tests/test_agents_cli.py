@@ -37,7 +37,7 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import break_the_provider, private_runtime, serving
+from daemon_helpers import break_the_provider, private_runtime, serving, until
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
@@ -425,9 +425,7 @@ async def test_shutdown_waits_for_the_daemon_to_actually_be_gone(
         stopped = await _ph("agents", "shutdown")
         assert stopped.exit_code == 0, stopped.output
         assert "daemon stopped" in stopped.output
-        with anyio.fail_after(5):
-            while daemon.path.exists():
-                await anyio.sleep(0.02)
+        await until(lambda: not daemon.path.exists(), what="the daemon's socket to go", seconds=5)
 
 
 async def test_a_follow_ends_when_the_daemon_goes_away(

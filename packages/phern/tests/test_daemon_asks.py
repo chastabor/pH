@@ -121,9 +121,11 @@ async def test_every_attached_front_end_is_asked_and_the_first_answer_wins(
         assert outcome == "allowed-once"
         assert len(fast) == 1 and len(slow) == 1, "both were asked"
         assert [one.type for one in root.session.events].count("approval/decided") == 1
-        with anyio.fail_after(5):
-            while not [one for one in settled if one[0] == "ask.settled"]:
-                await anyio.sleep(0.01)
+        await until(
+            lambda: [one for one in settled if one[0] == "ask.settled"],
+            what="the ask to settle",
+            seconds=5,
+        )
 
 
 async def test_a_detached_client_is_no_longer_asked(tmp_path: Path) -> None:
@@ -483,9 +485,7 @@ async def test_re_attaching_while_a_question_is_open_does_not_ask_twice(
 
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(ask_a_person, root)
-            with anyio.fail_after(5):
-                while not posed:
-                    await anyio.sleep(0.01)
+            await until(lambda: posed, what="the ask to be posed", seconds=5)
 
             await client.call("session/attach", sessionId=root.id)
             await anyio.sleep(0.05)

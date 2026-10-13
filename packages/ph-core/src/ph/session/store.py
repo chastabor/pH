@@ -60,7 +60,11 @@ events.declare(
     "session/event",
     "emit",
     owner="ph.session",
-    doc="Post-commit append feed.",
+    doc=(
+        "Post-commit append feed, once per event of every session, each streamed chunk "
+        "included. Filter synchronously and return an awaitable only for what you act "
+        "on: an async listener is a task per event."
+    ),
 )
 events.declare(
     "session/flush",

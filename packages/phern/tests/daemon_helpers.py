@@ -34,7 +34,7 @@ from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer
 from ph.session import Session
 from ph.session_profile import BASE as PROFILE_BASE
-from ph.testing import StubAgent, admitted_child, logged_events, not_none
+from ph.testing import StubAgent, admitted_child, logged_events, not_none, settled
 from ph_app import verbs
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
@@ -176,21 +176,14 @@ class _Daemon:
 Daemon = _Daemon
 
 
-async def until(done: Callable[[], bool], *, what: str, seconds: float = 10.0) -> None:
-    """Poll until `done()`, or fail saying what was being waited for.
+async def until(done: Callable[[], object], *, what: str, seconds: float = 10.0) -> None:
+    """`ph.testing.settled`, with the longer bound a daemon's waits need.
 
-    Here rather than in one test file because four of them wrote the loop out —
-    and this module's own docstring makes the argument: a copy that gets missed
-    fails as a *hang*, which is the least legible failure a suite has. The
-    message matters as much as the wait: `fail_after` raises a bare
-    `TimeoutError`, so a call site's `what=` reached nothing without this.
+    A daemon's roots are a socket and a supervisor's task group away, so its suites
+    wait on the order of seconds where an in-process one waits on milliseconds. The
+    loop and the failure that names the wait are `settled`'s, not a copy.
     """
-    try:
-        with anyio.fail_after(seconds):
-            while not done():
-                await anyio.sleep(0.01)
-    except TimeoutError:
-        pytest.fail(f"timed out waiting for {what}")
+    await settled(done, what, seconds=seconds)
 
 
 def age(server: DaemonServer) -> None:

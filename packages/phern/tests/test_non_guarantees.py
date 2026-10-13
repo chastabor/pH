@@ -38,9 +38,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import anyio
 import pytest
-from daemon_helpers import running
+from daemon_helpers import running, until
 from typer.testing import CliRunner
 
 from ph_app.cli import app
@@ -161,9 +160,7 @@ async def test_a_roots_own_crash_is_contained_and_the_process_is_the_boundary(
         # crash this test provokes.
         setattr(broken.agent, "run", explode)  # noqa: B010
         await supervisor.prompt("broken", "go")
-        with anyio.fail_after(10):
-            while not broken.recovery.failed:
-                await anyio.sleep(0.01)
+        await until(lambda: broken.recovery.failed, what="the broken root's ladder to be spent")
 
         # The ladder is spent, the give-up is in *its* log, and the daemon is
         # still answering — which is the containment the row claims.
@@ -172,8 +169,9 @@ async def test_a_roots_own_crash_is_contained_and_the_process_is_the_boundary(
         assert daemon.running.status().roots == 2
 
         await supervisor.prompt("healthy", "and you?")
-        with anyio.fail_after(10):
-            while not any(
+        await until(
+            lambda: any(
                 event.type == "assistant/message" for event in healthy.session.events_from(0)
-            ):
-                await anyio.sleep(0.01)
+            ),
+            what="the healthy root's answer",
+        )

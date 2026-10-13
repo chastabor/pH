@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ph.cordis import Context, events, plugin, settled
+from ph.cordis import Context, events, plugin, remove_identical, settled
 
 pytestmark = pytest.mark.anyio
 
@@ -410,3 +410,17 @@ def test_disposing_one_registration_leaves_its_twin_where_it_was() -> None:
     root.emit("test/emit", 1)
 
     assert heard == ["twice", "between"], "the disposer took the wrong registration"
+
+
+def test_undoing_the_later_of_two_claims_of_one_object_leaves_the_earlier_in_place() -> None:
+    """`remove_identical` takes the newest occurrence. A registry that holds one object
+    claimed twice (`claim_entry`, `ScopedEntries`) undoes claims newest first, so the
+    newest occurrence is the later claim's own: taken from the front, the earlier claim's
+    object moved behind everything claimed between the two. Sabotage: scan from the
+    front."""
+    shared, between = object(), object()
+    entries = [shared, between, shared]
+
+    remove_identical(entries, shared)
+
+    assert entries == [shared, between]
