@@ -878,7 +878,15 @@ Run against llama.cpp on localhost: Qwen3.8-27B, 16,384 tokens per slot, 5 slots
 `./test.sh smoke` beside `test_local_server.py`):
 - History is seeded and sized from the probed window and the first reply's count.
 - A result past half the window ends with a readout at 50–74%, naming the context
-  file. Nothing joins the context after the cell, and compaction does not run.
+  file. Nothing joins the context after the cell but context snapshots, which carry
+  no readout, and compaction does not run before the readout's result.
+  - *A flake, fixed 2026-10-13:* a compaction later in the turn shadowed the prompt
+    context sent before it, so the next step sent rlm's session facts again as an
+    appended snapshot, which the test counted as a notice. Snapshots are excused now,
+    unless one carries the readout. Six live runs passed (none compacted mid-turn,
+    so the case itself was checked against a run's log instead). Two live sabotages
+    were caught: a plain notice beside the readout, and the readout sent as a
+    snapshot.
 - Told how from a cell, the model tombstones a section through
   `tools.context_tombstone`. The edit lands `via: tool`, and the listing leaves what
   the model is sent.

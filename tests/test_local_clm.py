@@ -6,7 +6,8 @@
 * **that a readout reaches a real model at its share of a real window.** The window
   is the slot's, probed from `/props`; the count is the provider's, system prompt and
   tool schema included (`TokenMeter.baseline`). A result that takes the context past
-  half of it ends with the readout line, and nothing else is added to the context.
+  half of it ends with the readout line, and the readout adds nothing else to the
+  context.
 * **that a model edits its context when told how** — once through the context tools
   from a cell, once by editing the context file in a cell — each landing as a
   `clm/revised` before the call's result.
@@ -35,7 +36,9 @@ from local_server import LIVE, cells_after, live_agent, output_of
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.keys import LLM, TOKEN_METER
-from ph.session import SurfaceIntent
+from ph.llm.types import text_of
+from ph.session import SurfaceIntent, derive_event_message
+from ph.system_prompt.assembly import is_context_snapshot
 from ph.testing import (
     MountProfile,
     assistant_payload,
@@ -175,13 +178,23 @@ async def test_a_result_past_half_the_window_ends_with_a_readout(
     assert str(ctx.require(CLM_MIRROR).path(agent.session, agent)) in readout
     # The readout rides on the result: no message is *appended* after the cell. A
     # compaction later in the turn — the model reading on past the readout — lands
-    # as a replacement, which is compaction's doing and not a notice.
+    # as a replacement, which is compaction's doing and not a notice. Nor is the
+    # prompt context it shadowed, sent again as a snapshot (rlm's session facts):
+    # that is the providers' text, and the readout is not among it.
     appended = [
-        event
+        message
         for event in agent.session.select("user/message")
         if event.seq > cells[0].seq and event.surface_op == "append"
+        if (message := derive_event_message(event)) is not None
     ]
-    assert not appended, "a notice was added to the context beside the readout"
+    notices = [
+        message
+        for message in appended
+        if not is_context_snapshot(message) or "[context: " in text_of(message.content)
+    ]
+    assert not notices, "a notice was added to the context beside the readout: " + "; ".join(
+        f"{message.source!r}: {text_of(message.content)[:200]!r}" for message in notices
+    )
     early = [e for e in agent.session.select("compaction/summarized") if e.seq < crossing.seq]
     assert not early, "compaction ran before the result that carried the readout"
 
