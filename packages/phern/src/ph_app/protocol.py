@@ -81,7 +81,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -196,6 +196,16 @@ there. Every other method about a root still requires its id (decision 55): only
 session that does not exist yet has none to give. A 0.7 client always sends one and
 is unaffected; a client that omits it against a 0.7 daemon is refused
 `invalid_params`, and restarting the daemon on the same release fixes that.
+
+**9 (0.9.0): a route's sampling is one value, and a skill says what its child
+owes.** No method changed; three replies embed core models that did. A `ModelRoute`,
+in `models/list` and `daemon/status`'s `startsOn`, carries `sampling: {temperature,
+topP, ...}` where it carried `temperature`, and may carry `efforts`. A `Skill`, in
+`skills/list`, carries `effort`, `accepts` and `output`, always. And `session/new`'s
+`header` is a format-4 session header. A 0.8 client refuses a 0.9 daemon's header and
+its skill list at attach, and a route that sets either new field; a 0.9 client refuses
+a 0.8 daemon's header. Restarting the daemon on the same release fixes both. Released
+with the session log's format 4, so each number moves once.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

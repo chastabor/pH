@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-clm"
-version = "0.8.0"
+version = "0.9.0"
 description = "pH plugin: the model edits its own context — tombstone, replace and rewrite sections of the surface, with the originals kept in the log."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,7 +27,7 @@ classifiers = [
 # Nothing but the core: every edit is a surface `replace` ph-core already folds,
 # so a log written with this package opens and derives the same context on an
 # install without it.
-dependencies = ["ph-core==0.8.0"]
+dependencies = ["ph-core==0.9.0"]
 
 [project.urls]
 Homepage = "https://github.com/chastabor/pH"

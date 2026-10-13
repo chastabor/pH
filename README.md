@@ -358,6 +358,69 @@ attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` �
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Upgrading from 0.8
+
+0.9 lets the model edit its own context (`ph-clm`, a new member), runs a child on the
+model it is asked onto and hands back a checked value, and gives each route its own
+sampling and reasoning efforts. What that changes for an 0.8 setup:
+
+- **Restart the daemon.** It speaks protocol 9: a route in `models/list` carries
+  `sampling` and may carry `efforts`, a skill in `skills/list` carries `effort`,
+  `accepts` and `output`, and `session/new`'s header is format 4, so a client and a
+  daemon from different releases refuse each other at attach. `phern agents
+  shutdown`, and the next command that needs one starts the new one.
+- **Sessions from 0.8 do not carry over.** The session log is format 4, and a
+  format-3 log is refused when it is opened (`session header version must be 4, got
+  3`) rather than migrated: a request header carries its sampling as one value. Finish
+  what is running on 0.8 first. The old logs stay where they are, as plain JSONL.
+- **A route's sampling moves under `sampling:`.** A route in `$PH_HOME/profiles` that
+  says `temperature: 0.7` now says `sampling: {temperature: 0.7}`, beside `topP`,
+  `topK`, `minP`, `presencePenalty` and `frequencyPenalty`; a flat `temperature` is
+  refused. A setting the route's API does not take is dropped with a warning and
+  named under "Model settings" in `phern doctor`. An OpenAI-compatible server that
+  takes `topK` or `minP` says so with `samplingExtras: [topK, minP]` on its profile,
+  as the shipped `llama` does.
+- **A reasoning effort is sent only where its route says how.** A route's `efforts`
+  map each effort's name to the request fields that mean it on that model —
+  `none: {chat_template_kwargs: {enable_thinking: false}}` for Qwen on llama.cpp — and
+  `default` sends nothing. One a route does not define is not sent, as in 0.8, but
+  now with a warning, a `phern doctor` line and, for a child, a note to its parent.
+  `rlm.run(thinking=...)` asks for one.
+- **A child runs on the model it is asked onto.** `rlm.run(model=...)` or a skill's
+  `model:` names a key, or a kind such as `classify` or `light`; a skill's model this
+  profile cannot run falls back to its parent's, with a note to the parent. List
+  `classify` and `light` among your models to serve the shipped `categorize` skill,
+  and `phern doctor`'s "Model kinds" says what each runs on. A child given an
+  `output` schema hands back a checked JSON value (`rlm.run(output=...)`,
+  `rlm.wait`).
+- **New: `ph-clm`, the `rlm-clm` profile, `/diff` and `phern revisions`.** `--profile
+  rlm-clm` lets the model tombstone, replace, rewrite and restore sections of its
+  context, with the originals kept in the log; the TUI's `/diff` (F3) shows what
+  changed, and `phern revisions <id>` prints every revision as a JSON line. A request
+  that would overflow the whole window is compacted, and its oversized tool results
+  spilled, before it is sent rather than after the provider refuses it.
+- **The Code Mode tool is `python`**, not `ipython`: a preset, rule or profile of
+  yours that names the tool needs the new name.
+- **For code built on pH:**
+  - `LlmCallConfig`, `GenerateOptions` and `AgentOptions` carry `sampling: Sampling`
+    where they carried `temperature`, and `GenerateOptions` carries `effort_fields`,
+    which an adapter merges with `wire_effort`, where it carried `reasoning_effort`.
+    `ResolvedModel.reasoning` is `.sampling`, and `resolved(...)` takes `sampling=`.
+    `EpochHeader.adapter_defaults` is `withheld`, and `LlmCallConfigAdapterDefaults`
+    is gone.
+  - `SubagentRequest` names its model with `choice: ModelChoice` where it took
+    `provider`, `model` and `model_key`. `child_route`, `child_model_key` and
+    `downgrade_text` are gone, for `child_options` and `admission_notes`.
+  - `Context.detach` takes a required `at_dispose` (`cancel`, `finish` or `leave`), an
+    `emit` listener runs owned by its own scope, and `drain` no longer waits for jobs
+    (`ctx.jobs.settled()` does).
+  - A `CompactionEngine` implements `trigger_fraction()`. A surface replacement goes
+    through `ph.session.revise` (`substitute`, `rewrite`, `rewrite_many`), and
+    `balanced_cuts`, `cuts_over` and `safe_cutoff` moved from
+    `ph_stabilize.compaction` to `ph.session`.
+  - `ph_app.wire.one_line` is `ph.text.one_line`, and `ph_rlm.presentation`'s
+    `IPYTHON` names are `PYTHON`, `PYTHON_DESCRIPTION` and `CellDetails`.
+
 ## Upgrading from 0.7
 
 0.8 asks the session store less: a stored log is found once and read once, never on
@@ -590,7 +653,7 @@ enumerated list of platform gaps — which is empty on both platforms today.
 ## Building a release
 
 Every member is released together, at one version: each pins the others exactly
-(`ph-core==0.8.0`), so a change in any of them is a release of all eight.
+(`ph-core==0.9.0`), so a change in any of them is a release of all eight.
 
 ```bash
 # 1. The version, everywhere it is written: `version` and the `==` pins between
