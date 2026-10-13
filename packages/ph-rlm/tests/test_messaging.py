@@ -50,6 +50,7 @@ from ph.testing import (
     result_text,
     resume_stored,
     run_tool,
+    settle_background,
     stored_events,
     tool_result_payload,
 )
@@ -399,7 +400,7 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
     """
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
-    await ctx.drain()
+    await settle_background(ctx)
     assert ctx.require(AGENTS).get(run.session_id) is None, "the child should have settled"
 
     result = await _send(
@@ -410,7 +411,7 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
     # Checked before draining: the woken child settles again once its job runs.
     assert ctx.require(AGENTS).get(run.session_id) is not None, "the child was not woken"
 
-    await ctx.drain()
+    await settle_background(ctx)
     # The child's log says it was *woken*, distinctly from a child still on its
     # first task, so a parent reading its children can tell the two apart.
     records = [
@@ -436,7 +437,7 @@ async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) ->
     """
     ctx, session, parent = await family_ctx(rateCapacity=99)
     await _spawn(ctx, parent, "scout")
-    await ctx.drain()
+    await settle_background(ctx)
 
     for index in range(4):
         sent = await _send(
@@ -448,7 +449,7 @@ async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) ->
             receiver_name="scout",
         )
         assert sent.is_error is False
-        await ctx.drain()
+        await settle_background(ctx)
 
     assert [job for job in ctx.require(JOBS).list() if job.kind == "subagent"] == []
 
@@ -470,7 +471,7 @@ async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime
     waking one behind that record would make the record false."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
-    await ctx.drain()
+    await settle_background(ctx)
     assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user") is True
 
     # Both doors: the service refuses because `forget()` dropped the run, and the
@@ -684,7 +685,7 @@ async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: MountedRunt
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
     grandchild = await _spawn(ctx, child, "recon")
-    await ctx.drain()
+    await settle_background(ctx)
 
     seen = await run_tool(
         ctx, OBSERVE_GET_TOOL, {"agent_id": run.session_id}, agent=parent, session=session
@@ -709,7 +710,7 @@ async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: MountedRunt
 async def test_an_observe_read_is_capped(family_ctx: MountedRuntime) -> None:
     ctx, session, parent = await family_ctx(observeMaxMessages=1)
     run = await _spawn(ctx, parent, "scout")
-    await ctx.drain()
+    await settle_background(ctx)
 
     seen = await run_tool(
         ctx,

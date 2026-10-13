@@ -54,7 +54,7 @@ async def test_a_canceled_mount_still_disposes() -> None:
     with anyio.move_on_after(0.02):
         async with mounted(EMPTY) as ctx:
             await ctx.effect(lambda: partial(released.append, "lease"), label="lease")
-            ctx.detach(listener(), label="a listener that outlives the turn")
+            ctx.detach(listener(), label="a listener that outlives the turn", at_dispose="cancel")
             await anyio.sleep(30)
 
     assert settled == ["listener"], "the drain still waited for what it is there to wait for"
@@ -68,22 +68,30 @@ async def test_a_listener_that_never_settles_does_not_hold_the_unwind() -> None:
     Shielding the drain without bounding it would trade a skipped unwind for a
     shutdown that never finishes, which is the trade `daemon/server.py` refuses
     in so many words. The budget is `DRAIN_SECONDS`, derived from the unwind's
-    own so the two cannot drift apart.
+    own so the two cannot drift apart. What the drain leaves, the unwind stops:
+    the listener was detached on the root, and the root's dispose cancels it.
     """
     released: list[str] = []
+    stopped: list[str] = []
 
     async def never() -> None:
-        await anyio.sleep(30)
+        try:
+            await anyio.sleep(30)
+        except anyio.get_cancelled_exc_class():
+            stopped.append("never")
+            raise
 
     started = anyio.current_time()
     with patch.object(context_module, "DRAIN_SECONDS", 0.02):
         async with mounted(EMPTY) as ctx:
             await ctx.effect(lambda: partial(released.append, "lease"), label="lease")
-            ctx.detach(never(), label="a listener that will not settle")
+            ctx.detach(never(), label="a listener that will not settle", at_dispose="cancel")
     spent = anyio.current_time() - started
 
     assert released == ["lease"], "the unwind ran rather than waiting forever"
     assert spent < 1.0, f"the drain spent more than its budget: {spent:.3f}s"
+    await anyio.sleep(0.01)
+    assert stopped == ["never"], "left running after the mount it was detached on"
 
 
 async def test_opening_a_session_makes_its_teardown_durable() -> None:

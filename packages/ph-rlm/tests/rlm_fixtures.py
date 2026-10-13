@@ -331,7 +331,7 @@ class ModelGate:
     held list shrinks as they are released.
 
     The `gate` fixture below is what opens it again, and that is not tidiness: a
-    child left parked here makes the mount's `drain()` wait forever, so one failed
+    call left parked here holds every wait on its job open, so one failed
     assertion becomes a hung suite. Written as a `finally` in each test, that is a
     rule the fourth test has to remember — so it lives here, beside the fixtures
     every rlm suite shares.

@@ -41,7 +41,14 @@ A job whose own body triggers its owner's teardown would otherwise report
 ## Cancellation is cooperative
 
 `Job.cancel()` sets a token. A body that never reads it **will run to
-completion**, and `ctx.drain()` still waits for it.
+completion**, past a teardown too.
+
+A teardown does not wait for jobs. `ctx.drain()` leaves them to their owners,
+whose stops in `dispose` keep the work: a subagent is suspended with its inbox and
+resumed later, and a refinement writes nothing and is considered again at the next
+turn. Waiting first would spend up to `DRAIN_SECONDS` of every teardown on work
+that rarely finishes in it. A caller that does want to wait has
+`ctx.jobs.settled()`.
 
 That is a deliberate limit rather than an oversight: pre-emption in Python means
 killing a thread or a process, and a seam that promised it would be promising
@@ -55,6 +62,7 @@ ctx.jobs.start(work, *, scope=..., kind=..., label=...,
                slot=(key, limit), on_queued=...)          # -> Job
 ctx.jobs.get(job_id)      ctx.jobs.list(...)
 ctx.jobs.cancel(job_id)   ctx.jobs.forget(job_id)
+await ctx.jobs.settled()  ctx.jobs.in_flight              # wait out every body
 ctx.jobs.bind(...)                                        # attach to a task group
 ```
 
@@ -62,10 +70,10 @@ A `Job` carries `id`, `kind`, `label`, `state`, `token`, `result`, `error` and
 `release`.
 
 `bind` is how the seam gets a task group to run in. **Without one bound, a job
-runs inline** — which is what makes `ctx.jobs` usable in a one-shot `phern -p` run
-where there is no supervisor, and is also why `Context.detach()` exists: an
-admission path that started a job inline would block on the very work it was
-trying to detach.
+runs on `Context.detach()`**, with `at_dispose="leave"`: its owner stops it, and
+`drain` does not wait for it. That is what makes `ctx.jobs` usable in a one-shot
+`phern -p` run where there is no supervisor; running the body inline instead would
+block the admission path on the very work it was trying to detach.
 
 ## Slots: more work than should run at once
 
@@ -89,8 +97,8 @@ failure cannot wedge everything behind it.
   to the parent's log there.
 * **Canceling a queued job stops the wait.** A body parked on a limiter is not
   running, so it reads no cancel token; `Job.cancel` cancels the wait itself.
-  Without that a canceled job sits behind work that may never settle and
-  `ctx.drain()` waits for it — a cancellation that hangs the shutdown.
+  Without that a canceled job sits behind work that may never settle, holding
+  its place in the queue and `settled()` open.
 * **A queue is dropped once nobody holds a place in it**, by a refcount rather
   than a scan of the job table: `forget` is the owner's call, so a settled job may
   legitimately still be in that table and a scan would answer "somebody is still

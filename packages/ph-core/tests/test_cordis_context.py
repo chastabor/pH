@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import warnings
 import weakref
 from functools import partial
 from unittest.mock import patch
@@ -17,21 +18,26 @@ from unittest.mock import patch
 import anyio
 import pytest
 
+from ph.cancel import raced
 from ph.cordis import (
     ABANDONED_LEDGER,
     Context,
     Disposer,
     InactiveScopeError,
+    Listener,
     ServiceConflictError,
     ServiceNotFoundError,
+    events,
     plugin,
     releasing,
 )
 from ph.cordis import context as context_module
 from ph.seams.scope_invariant import violations as scope_violations
-from ph.testing import raising
+from ph.testing import raising, settled
 
 pytestmark = pytest.mark.anyio
+
+events.declare("test/emit", "emit", owner="tests")
 
 
 async def test_services_resolve_most_specific_first() -> None:
@@ -620,7 +626,7 @@ async def test_drain_ignores_a_canceled_detached_task() -> None:
     the exception alone.
     """
     root = Context()
-    settled: list[str] = []
+    ended: list[str] = []
 
     async def stopped_by_somebody_else() -> None:
         current = asyncio.current_task()
@@ -629,14 +635,171 @@ async def test_drain_ignores_a_canceled_detached_task() -> None:
         await anyio.sleep(30)
 
     async def ordinary() -> None:
-        settled.append("ordinary")
+        ended.append("ordinary")
 
-    root.detach(stopped_by_somebody_else(), label="stopped")
-    root.detach(ordinary(), label="ordinary")
+    root.detach(stopped_by_somebody_else(), label="stopped", at_dispose="cancel")
+    root.detach(ordinary(), label="ordinary", at_dispose="cancel")
 
     await root.drain()
 
-    assert settled == ["ordinary"], "the drain carried on to the task that had not stopped"
+    assert ended == ["ordinary"], "the drain carried on to the task that had not stopped"
+
+
+async def test_a_drain_that_runs_out_returns_and_leaves_the_rest_to_its_owner() -> None:
+    """Past its budget the drain stops waiting and returns, touching nothing it waited
+    on: stopping that is its owner's, at `dispose`. Held in `raced`, as a refinement
+    was at its model call when jobs were still drained, a task took the cancel `gather`
+    handed it for its own, and the error `gather` then raised escaped the drain.
+    Sabotage: wait with `gather` again."""
+    root = Context()
+    finished: list[str] = []
+    release = anyio.Event()
+
+    async def held_in_raced() -> None:
+        await raced(None, release.wait)
+        finished.append("finished")
+
+    root.detach(held_in_raced(), label="a listener held in raced", at_dispose="cancel")
+    with patch.object(context_module, "DRAIN_SECONDS", 0.02):
+        await root.drain()
+
+    assert finished == [], "left running, neither stopped nor let return"
+    release.set()
+    await root.drain()
+    assert finished == ["finished"]
+
+
+async def test_a_drain_does_not_wait_for_work_another_owner_stops() -> None:
+    """`leave` work is out of the drain's pool: whoever stops it in `dispose` decides
+    how long it gets, as a job's owner does. Waiting here spent the whole drain share
+    of every teardown with a job running, on work that rarely finished in it and was
+    stopped the same way afterwards. Sabotage: pool `leave` work with the rest."""
+    root = Context()
+    release = anyio.Event()
+    finished: list[str] = []
+
+    async def owned_elsewhere() -> None:
+        await release.wait()
+        finished.append("finished")
+
+    root.detach(owned_elsewhere(), label="a job", at_dispose="leave")
+    started = anyio.current_time()
+    with patch.object(context_module, "DRAIN_SECONDS", 1.0):
+        await root.drain()
+
+    assert anyio.current_time() - started < 0.5, "the drain waited on work it does not stop"
+    assert finished == []
+    release.set()
+    await settled(lambda: finished == ["finished"], "the job to finish on its own")
+
+
+def _until_stopped(ended: list[str]) -> Listener:
+    """An async listener that runs until something cancels it, and records that."""
+
+    async def listener(value: int) -> None:
+        try:
+            await anyio.sleep(30)
+        except anyio.get_cancelled_exc_class():
+            ended.append("canceled")
+            raise
+
+    return listener
+
+
+async def test_an_async_listener_is_stopped_by_the_scope_that_registered_it() -> None:
+    """An `emit` listener's task is detached on the scope that registered the listener,
+    and that scope's dispose stops it; the scope that emitted owns none of it. Nothing
+    owned it before, so past the drain's budget it ran on after its row had gone: a
+    row and an agent, as the harness's auto-refine listener and the agent whose turn
+    it hears. Sabotage: detach it with `at_dispose="leave"`."""
+    root = Context()
+    row = Context(root, label="row")
+    agent = root.scope("agent")
+    ended: list[str] = []
+    row.on("test/emit", _until_stopped(ended))
+
+    agent.emit("test/emit", 1)
+    await agent.dispose()
+    await anyio.sleep(0.01)
+    assert ended == [], "the emitter's dispose stopped work it never owned"
+
+    await row.dispose()
+    with patch.object(context_module, "DRAIN_SECONDS", 0.2):
+        await root.drain()
+    assert ended == ["canceled"], "left running after the scope that registered it"
+
+
+async def test_a_listener_its_scope_hears_while_unwinding_never_runs() -> None:
+    """A scope's listeners still hear events while it unwinds, until their `off` runs,
+    and the stop of a task one starts then joins the unwind under way, landing before
+    the task's first step: a scope that is going starts nothing. Sabotage: register it
+    through `add_disposer`, which refuses a scope that is down and so raised out of
+    `emit` into the teardown; let `_unwind` pop its last effect, the newcomer, in place
+    of the one it ran; or spawn the listener wrapped in `_as_owner`, which a stop that
+    soon leaves never awaited."""
+    root = Context()
+    row = Context(root, label="row")
+    ran: list[int] = []
+
+    async def listener(value: int) -> None:
+        ran.append(value)
+        await anyio.sleep(30)
+
+    row.on("test/emit", listener)
+    row.add_disposer(lambda: row.emit("test/emit", 1), label="announces its going")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await row.dispose()
+        with patch.object(context_module, "DRAIN_SECONDS", 0.2):
+            await root.drain()
+        # A turn of the loop, which a listener nobody stopped would take to start.
+        await anyio.sleep(0.01)
+        gc.collect()
+
+    assert ran == [], "a listener its scope stopped before it ran ran anyway"
+    unawaited = [str(one.message) for one in caught if "never awaited" in str(one.message)]
+    assert unawaited == [], "a stopped listener was left never awaited"
+
+
+async def test_a_finished_listener_leaves_nothing_on_its_scope() -> None:
+    """The stop goes once the work is over. The auto-refine listener is spawned for
+    every event of every session, so a stop kept per spawn would grow its row by one
+    per streamed chunk. Sabotage: drop the removal from `detach`'s done callback."""
+    root = Context()
+    row = Context(root, label="row")
+    heard: list[int] = []
+
+    async def listener(value: int) -> None:
+        heard.append(value)
+
+    row.on("test/emit", listener)
+    before = len(row._effects)
+    for value in range(3):
+        row.emit("test/emit", value)
+    await root.drain()
+
+    assert heard == [0, 1, 2]
+    assert len(row._effects) == before, "a finished listener left its stop behind"
+
+
+async def test_a_dispose_waits_for_detached_work_it_was_told_to_finish() -> None:
+    """`finish` is a stop that waits: the dispose returns once the work has, and what
+    the scope held before the work began is released after it. The schedule index's
+    writer is this shape, since a batch is a write already promised. Sabotage: queue
+    a cancel for `finish` as for `cancel`."""
+    root = Context()
+    order: list[str] = []
+    await root.effect(lambda: partial(order.append, "lease"), label="lease")
+
+    async def write() -> None:
+        await anyio.sleep(0.05)
+        order.append("written")
+
+    root.detach(write(), label="a write", at_dispose="finish")
+    await root.dispose()
+
+    assert order == ["written", "lease"], "the dispose did not wait for the work, in its place"
 
 
 async def _acquired_into_a_dying_scope(disposer: Disposer) -> None:
@@ -793,7 +956,7 @@ async def test_a_seeded_budget_covers_the_drain_as_well_as_the_unwind() -> None:
     async def never() -> None:
         await anyio.sleep(30)
 
-    root.detach(never(), label="a listener that will not settle")
+    root.detach(never(), label="a listener that will not settle", at_dispose="cancel")
     root.unwind_by(anyio.current_time() + 0.02)
 
     started = anyio.current_time()

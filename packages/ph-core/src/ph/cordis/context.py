@@ -40,7 +40,6 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Sequence
-from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, TypeAlias, cast, overload
@@ -83,6 +82,15 @@ Listener: TypeAlias = Callable[..., object]
 tree take different ones — but the return is `object` for `Disposer`'s reason:
 `_invoke` hands it to `is_bailed` and `maybe_await`, both of which take `object`,
 and every chain's answer is made good by `settled`."""
+
+AtDispose: TypeAlias = Literal["cancel", "finish", "leave"]
+"""What the scope `detach` was called on does, at its dispose, with that work still
+running. `cancel` stops it: an `emit` listener's task, whose row going away ends what
+it was for. `finish` waits for it inside the unwind's budget: a writer whose batch is
+a write already promised. `leave` does neither, for work something else stops: a
+job's owner cancels its token, and a second, harder stop from the scope that only
+runs it would land before that owner's own. Nor does `drain` wait for it: how long
+it gets is that owner's to say too."""
 
 type MaybeAwaitable[T] = T | Awaitable[T]
 """A `T`, or a `T` that has to be awaited first — what `maybe_await` takes.
@@ -192,7 +200,7 @@ class Hook:
     global_: bool = False
 
 
-def _invoke(hook: Hook, *args: object) -> object:
+def _invoke(hook: Hook, *args: object, detach_for: str | None = None) -> object:
     """Call one listener as an effect of the scope that registered it (P6-25).
 
     **The one place ownership is established for a dispatch.** A function rather
@@ -200,10 +208,15 @@ def _invoke(hook: Hook, *args: object) -> object:
     what it never writes.
 
     Sync and async are one path. A listener returning an awaitable gets it back
-    wrapped in `_as_owner`, so whoever awaits or spawns it receives a coroutine that
-    binds itself; one returning a value has already run inside the binding. Callers
-    need no idea which kind they have, which is what lets `emit` spawn and `serial`
-    await the same result.
+    wrapped in `_as_owner`, so whoever awaits it receives a coroutine that binds
+    itself; one returning a value has already run inside the binding. Callers need
+    no idea which kind they have.
+
+    **`emit` spawns instead, inside the binding** (`detach_for`, the event's name).
+    A task copies the context it is created in, so it runs as the owner with no
+    wrapper, and a stop landing before its first step means it never runs. Wrapped,
+    the listener only started at that step, to be cancelled at its first `await`
+    after its scope had gone, and a stop sooner than that left it never awaited.
 
     The binding is spelled inline rather than through `running` because `emit` fires
     once per streamed chunk, where even a context manager's own frame is too much.
@@ -218,13 +231,15 @@ def _invoke(hook: Hook, *args: object) -> object:
     token = _ACTIVATING.set(pair)
     try:
         result = hook.callback(*args)
-        # `None` first, and it is most of the win. A listener that returns nothing
-        # is the overwhelming case, and `inspect.isawaitable` runs a second time in
-        # `emit` on the value this just returned — so the awaitability question
-        # costs more per listener than the binding it was added to serve.
-        if result is None:
+        # `None` first, and it is most of the win: a listener that returns nothing
+        # is the overwhelming case, and the awaitability question costs more per
+        # listener than the binding it was added to serve.
+        if result is None or not inspect.isawaitable(result):
+            return result
+        if detach_for is not None:
+            owner.detach(result, label=f"listener for {detach_for}", at_dispose="cancel")
             return None
-        return _as_owner(hook.ctx, result) if inspect.isawaitable(result) else result
+        return _as_owner(owner, result)
     finally:
         _ACTIVATING.reset(token)
 
@@ -305,8 +320,8 @@ DRAIN_SECONDS = GRACE_SECONDS / 2
 
 **Derived from `GRACE_SECONDS` rather than declared beside it**, because the two
 are spent back to back by a host tearing a mount down and the relation is the
-whole point: a listener still running here has already been told its scope is
-going, while the effects behind it are worktrees, leases and child processes
+whole point: a listener still running here is stopped by its own scope's unwind
+anyway, while the effects behind it are worktrees, leases and child processes
 that outlive the process if nobody hands them back. When both cannot be
 afforded, the unwind is the one that must run. Written as a literal, that
 sentence would stop being true the first time somebody raised the grace period.
@@ -527,6 +542,10 @@ class _Runtime:
     dependents: list[_Dependent] = field(default_factory=list)
     dirty: bool = True
     background: set[asyncio.Future[Any]] = field(default_factory=set)
+    """Detached tasks `drain` waits for: every `detach` but `leave`'s."""
+    elsewhere: set[asyncio.Future[Any]] = field(default_factory=set)
+    """Detached tasks with `leave`, which `drain` does not wait for. Held only so the
+    loop's weak reference is not their last: asyncio keeps none of its own."""
     unwind_deadline: float | None = None
     """The instant this tree's unwind must finish by, or `None` when none is set.
 
@@ -923,11 +942,12 @@ class running:
 async def _as_owner(scope: Context, awaitable: Awaitable[object]) -> object:
     """Await something as an effect of `scope`, binding when the body *runs*.
 
-    An `async def` listener called by `emit` only *builds* a coroutine — the body
-    runs later on a task, and a task copies the context at creation, which is after a
-    binding around the *call* has been reset. Wrapping the awaitable moves the
+    An `async def` listener only *builds* a coroutine when `_invoke` calls it — the
+    body runs later, when `serial`, `parallel` or `waterfall` awaits it, which is after
+    the binding around the *call* has been reset. Wrapping the awaitable moves the
     binding inside the body, where it is the coroutine's own first act rather than
-    something its creator did before handing it over.
+    something its creator did before handing it over. `emit` needs no wrapper: it
+    spawns inside the binding instead (`_invoke`).
     """
     # Through `running` rather than the inline pair `_invoke` uses: this is
     # already an extra coroutine frame around an `await`, so a generator's
@@ -1395,18 +1415,27 @@ class Context:
         def release() -> object:
             if effect.done:
                 return None
-            # **Marked before removed**, which is also what keeps `remove` — an
-            # `==` search — from taking an equal twin: two `add_disposer` calls
-            # with one bound method and one label produce equal `_Effect`s, and
-            # this line makes *this* one unequal to the others before the search
-            # runs. `Context.on` has no such mutation and matches by identity
-            # instead (A8).
+            # Marked before removed, so the unwind finds it claimed if it gets
+            # here first. By identity: two `add_disposer` calls with one bound
+            # method and one label produce equal `_Effect`s (A8).
             effect.done = effect.ran = True
-            with suppress(ValueError):  # already removed by dispose()
-                self._effects.remove(effect)
+            self._remove_effect(effect)
             return effect.dispose()
 
         return release
+
+    def _remove_effect(self, effect: _Effect) -> None:
+        """Take `effect` off this scope's list by identity; nothing if it is gone.
+
+        The newest is checked first, because it is the usual one: `_unwind` removes
+        what it ran from the end, and a detached task's stop is most often the last
+        thing its scope took on.
+        """
+        effects = self._effects
+        if effects and effects[-1] is effect:
+            effects.pop()
+        else:
+            remove_identical(effects, effect)
 
     async def effect(
         self, enter: Callable[[], MaybeAwaitable[Disposer]], *, label: str = ""
@@ -1698,7 +1727,10 @@ class Context:
                 # own business, and the traceback is the account of it.
                 log.exception("ph.cordis: effect %r failed to dispose", effect.label)
             effect.ran = True
-            self._effects.pop()
+            # **That effect, not the last one.** A `detach` during the await above
+            # appends its stop here even though this scope is down (`_hold`), and
+            # a bare `pop()` took that newcomer unrun in place of this one.
+            self._remove_effect(effect)
 
     def _leave_tree(self) -> None:
         """Unlink from the parent and drop what this scope served. Cannot fail.
@@ -1830,11 +1862,14 @@ class Context:
         """Dispatch synchronously, ignoring listener return values.
 
         A listener that returns a coroutine is scheduled and not awaited, which
-        is cordis's behavior. **A listener that raises is logged, and the dispatch
-        goes on**: an emitted event records something that already happened, so no
-        listener may un-happen it, nor keep the listeners after it from hearing it.
-        A listener that must be able to refuse belongs on a `serial` or `waterfall`
-        event, which is where every refusal in the tree already lives.
+        is cordis's behavior, as detached work of the scope that registered it:
+        that scope's dispose cancels it if it is still running, and the
+        emitter's own ends nothing. **A listener that raises is logged, and the
+        dispatch goes on**: an emitted event records something that already
+        happened, so no listener may un-happen it, nor keep the listeners after it
+        from hearing it. A listener that must be able to refuse belongs on a
+        `serial` or `waterfall` event, which is where every refusal in the tree
+        already lives.
 
         **The mode's rule, not each producer's.** It was a `contained=True` each
         producer passed, and about half of them never did: a raising listener on
@@ -1845,16 +1880,10 @@ class Context:
         event_registry.check(event, "emit")
         for hook in self._hooks(event, scope=scope):
             try:
-                result = _invoke(hook, *args)
+                # An async listener is spawned by `_invoke`, inside its binding.
+                _invoke(hook, *args, detach_for=event)
             except Exception:
                 log.exception("ph.cordis: %s listener failed", event)
-                continue
-            if result is not None and inspect.isawaitable(result):
-                # `None` first for `_invoke`'s reason: this is the second of the
-                # two awaitability checks per listener, on the per-chunk path.
-                # `_invoke` already wrapped it, so the task binds when the body
-                # runs rather than inheriting whatever was current at `_spawn`.
-                self._spawn(result, event)
 
     async def serial(
         self,
@@ -2029,15 +2058,23 @@ class Context:
         value = cast("T", await frame(0, *args))
         return value, producers[-1].ctx.plugin_name if producers else ""
 
-    def detach(self, coro: Any, *, label: str) -> None:  # noqa: ANN401
-        """Run `coro` outside the caller's lifetime, tracked and drained.
+    def detach(self, coro: Any, *, label: str, at_dispose: AtDispose) -> None:  # noqa: ANN401
+        """Run `coro` outside the caller's lifetime, held, and stopped as `at_dispose` says.
 
         For work that must outlive the call that started it and must not be
-        awaited by it: an async `emit` listener, a subagent running while its
-        parent keeps working. `drain()` is what makes this honest — the task is
-        in a pool the host awaits at shutdown, so "fire and forget" does not mean
-        "lost on exit". A failure is logged at its own boundary, because there is
-        no caller left to raise into.
+        awaited by it: an async `emit` listener, a job running on after the step
+        that started it. The task is held, so "fire and forget" does not mean
+        collected mid-flight, and a failure is logged at its own boundary, because
+        there is no caller left to raise into.
+
+        **This scope stops it, unless `leave` names another owner.** With `cancel`
+        or `finish` the stop is an effect of this scope, registered now, so it
+        unwinds in the place its start earned: after what this scope took on later,
+        before what it already held. That work is also what `drain()` waits for, so
+        a host's teardown gives it its chance to finish first. `leave` registers no
+        stop and is not drained: a job's owner stops it through its token. Required
+        rather than defaulted, because who stops the work is the one thing a caller
+        of this cannot leave to chance.
 
         With no running loop the coroutine is closed rather than leaked, and the
         drop is logged: a sync host that cannot run it should not silently hold a
@@ -2049,21 +2086,59 @@ class Context:
             coro.close()
             log.warning("ph.cordis: dropped detached %s (no event loop)", label)
             return
-        self._runtime.background.add(task)
+        if at_dispose == "leave":
+            pool, held = self._runtime.elsewhere, None
+        else:
+            pool, held = self._runtime.background, self._hold(task, at_dispose, label)
+        pool.add(task)
 
         def done(finished: asyncio.Future[Any]) -> None:
-            self._runtime.background.discard(finished)
+            pool.discard(finished)
+            if held is not None and not held.done:
+                # Over, so nothing is owed. Dropped rather than released, which
+                # would call the stop: for `finish`, a coroutine nobody awaits.
+                held.done = held.ran = True
+                self._remove_effect(held)
             if not finished.cancelled() and finished.exception() is not None:
                 log.error("ph.cordis: detached %s failed", label, exc_info=finished.exception())
 
         task.add_done_callback(done)
 
-    def _spawn(self, coro: object, event: str) -> None:
-        """Track a fire-and-forget coroutine returned by an `emit` listener."""
-        self.detach(coro, label=f"listener for {event}")
+    def _hold(
+        self, task: asyncio.Future[Any], at_dispose: Literal["cancel", "finish"], label: str
+    ) -> _Effect:
+        """Make stopping `task` this scope's newest effect, whether it is active or not.
+
+        Not `add_disposer`, which refuses a scope that is down — and a scope's
+        listeners still hear events while its children unwind, because their
+        `off` runs with the effects after them. A refusal there raised out of
+        `emit` into whatever was being disposed; appended instead, the stop runs
+        in the unwind already under way. Past an unwind cut short by its deadline
+        nothing runs it, and the task goes on as it always did.
+        """
+        if at_dispose == "cancel":
+            effect = _Effect(dispose=task.cancel, label=label)
+        else:
+
+            async def finished() -> None:
+                await asyncio.wait({task})
+
+            effect = _Effect(dispose=finished, label=label)
+        self._effects.append(effect)
+        return effect
 
     async def drain(self) -> None:
-        """Await every detached coroutine: async `emit` listeners, and `detach()`.
+        """Await the detached work this tree stops itself: async `emit` listeners,
+        and every `detach()` but `leave`'s.
+
+        **Not `leave`'s, because its owner's stop costs nothing a wait would save.**
+        A job's owner stops it in `dispose`: a child is suspended with its inbox and
+        resumed later, a refinement writes nothing and is considered again at the
+        next turn. Waiting here was five seconds of every teardown with a job
+        running, spent on work that rarely finishes in them (a refinement is a
+        review call and a plan call, minutes on a local model) and is stopped the
+        same way afterwards. A listener is different: its scope's cancel loses
+        what it was doing, so the wait is its one chance to finish.
 
         **Shielded and bounded, exactly as `dispose` is and for its reason.** The
         two are called as a pair by a host unwinding a mount, and `dispose`
@@ -2089,14 +2164,18 @@ class Context:
         add up to it rather than to a multiple of it. The share still applies, so
         a drain cannot eat an unwind's time either.
 
-        **`gather(return_exceptions=True)` for the distinction, not for
-        concurrency**: `detach` hands every one of these to `ensure_future`, so
-        they are already running and awaiting them in turn would not serialize
-        anything (measured identical). What `gather` adds is that a member's
-        failure or cancellation comes back as a *result* — awaiting each in turn
-        re-raised it, so one listener canceled on its own account ended the drain
-        for all of them. Failures are logged by the done callback `detach`
-        attached, so nothing is swallowed twice.
+        **`asyncio.wait`, so the deadline ends the wait and nothing else.**
+        `detach` hands every one of these to `ensure_future`, so they are already
+        running and awaiting them in turn would not serialize anything (measured
+        identical); and `wait` raises nothing a member did, so one listener
+        canceled on its own account does not end the drain for all of them.
+        Failures are logged by the done callback `detach` attached, so nothing is
+        swallowed twice. What is still running at the deadline is left to its
+        owner, whose `dispose` stops it. It was `gather`, which hands its waiter's
+        cancellation to every member and then raises one made from the last of
+        them: a member running an anyio task group (`raced`) took that for its own
+        and returned, the error carried no message, and the scope below let it
+        through to the caller, past the `dispose` behind it.
         """
         if not self._runtime.background:
             # Nothing to wait on, so nothing to protect. The scope below costs a
@@ -2107,7 +2186,7 @@ class Context:
             # Already inside a teardown's shield. That is `dispose`'s rule and
             # this is its second reader: another scope here would be a shield
             # against nothing, at the cost `_UNWINDING` records.
-            await self._settle()
+            await self.settled()
             return
         share = anyio.current_time() + DRAIN_SECONDS
         whole = self._runtime.unwind_deadline
@@ -2116,16 +2195,22 @@ class Context:
         budget_token = _UNWIND_BUDGET.set(budget)
         try:
             with anyio.CancelScope(deadline=budget, shield=True):
-                await self._settle()
+                await self.settled()
         finally:
             _UNWIND_BUDGET.reset(budget_token)
             _UNWINDING.reset(token)
 
-    async def _settle(self) -> None:
-        """Await the detached pool until it is empty. `drain` is the only caller."""
+    async def settled(self) -> None:
+        """Wait until the pool `drain` waits on is empty: unbounded and unshielded.
+
+        `drain` is this under a shield and a deadline, for a teardown. A caller that
+        wants the wait itself, a test above all, bounds it as it chooses, and a
+        deadline it sets reaches in here, where `drain`'s shield would make it inert
+        and its own deadline would end the wait without saying so.
+        """
         while self._runtime.background:
             settling = set(self._runtime.background)
-            await asyncio.gather(*settling, return_exceptions=True)
+            await asyncio.wait(settling)
             # Discarded here as well as by the done callback, so the loop ends on
             # what this call awaited rather than on when `call_soon` ran them.
             self._runtime.background -= settling

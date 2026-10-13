@@ -568,16 +568,81 @@ two of them as proposed, and Charles settled the third.
     token, which under-counts digit-heavy output on Qwen; a request it misses is still
     refused once and recovered as before.
 
-- **A drain that times out on a running refinement fails the teardown.** Seen in the
-  live probe above: a summary makes an automatic refinement due (`harness.auto.due`),
-  `turn/end` starts it, and with no task group bound to the jobs seam it runs on
-  `ctx.detach`, so `ctx.drain()` waits on its model call (minutes on a local 27B model)
-  until its deadline. A `CancelledError` then reaches pytest's runner (and a
-  `ClosedResourceError` after it). A shielded deadline scope around `asyncio.gather`
-  alone does not leak it (checked), so the cancel comes from elsewhere. No kept test
-  hits it today: the smoke tests' turns write no summary.
-  - *Cost of waiting:* a teardown error in a live test whose turn compacts, and
-    possibly the same at a daemon's shutdown while a refinement runs.
+- **A drain that times out on a running refinement fails the teardown: fixed
+  2026-10-12.** Seen in the live probe above: a summary makes an automatic refinement
+  due (`harness.auto.due`), `turn/end` starts it, and with no task group bound to the
+  jobs seam it runs on `ctx.detach`, so `ctx.drain()` waits on its model call (minutes
+  on a local 27B model) until its deadline. A `CancelledError` then reached pytest's
+  runner (and a `ClosedResourceError` after it).
+  - *The cause:* `drain` waited with `asyncio.gather`, which hands its waiter's
+    cancellation (the deadline, as anyio's cancel of the draining task) to every task
+    it waits on and, once they end, raises a `CancelledError` made from the last of
+    them. The pass sat in `raced`'s anyio task group, which claims a cancel that reads
+    as anyio's and returns, so the job ended as if finished and gather's error carried
+    no message. The drain's scope claims only its own cancellation, so the error
+    escaped, and `ph_app.runtime.mounted` skipped the `dispose` behind it: leases,
+    worktrees and kernels left held. Any detached task running a task group at the
+    deadline did the same; the shielded scope around a plain `gather` that was checked
+    before had no such task in it.
+  - *What was built:* `drain` waits with `asyncio.wait`, which hands its cancellation
+    to nothing and raises nothing a task did. Its deadline now ends the wait and
+    nothing else: what is still running is left to its owner, whose `dispose` stops
+    it (a refinement through its token, a child's drive by the provider's `suspend`,
+    which keeps its inbox). A stop added in drain at its deadline was tried and
+    dropped: it cancelled owned work before its owner's own stop, so a child's drive
+    would dispose its agent, clearing its inbox, before `suspend` reached it (read
+    from the code, not reproduced). Found with
+    it: a pass stopped at a mount's unwind ends after the jobs row has gone, and its
+    `require(JOBS)` made it `failed`; it reads the row with `get`, as `_quiesce` does.
+    The gates: `test_cordis_context.py` and `test_harness_planner.py`, which holds an
+    automatic pass at its model call through a drain and a `dispose`.
+  - *What changes:* a teardown that runs out still spends the whole drain share on a
+    pass (`DRAIN_SECONDS`) before `dispose` stops it.
+  - *Then every detached task got an owner: built 2026-10-12.* Without one, a task
+    still running past the drain's budget outlived the teardown, as an async listener
+    that never ended would. `Context.detach` takes a required `at_dispose`
+    (`AtDispose`: `cancel`, `finish`, `leave`) and registers the stop as an effect of
+    the scope it is called on, so it unwinds in its place. `emit` detaches a
+    listener's task on the scope that registered the listener, with `cancel`; the
+    one shipped async `emit` listener is the harness's auto-refine check, on its row.
+    The schedule index writer uses `finish`, so its row's dispose waits for a batch
+    already promised. Jobs use `leave`: their owner stops them through the token.
+    This replaced the planned last-resort sweep, since every listener has a scope.
+    - *What it needed:* a scope still hears events while it unwinds, until its
+      listeners' `off` runs, so the stop is appended past `add_disposer`'s refusal of
+      a scope that is down; `_unwind` then removes the effect it ran rather than
+      `pop()`ing whatever came last. `emit` spawns a listener's task inside
+      `_invoke`'s binding instead of wrapping it in `_as_owner`, since a task copies
+      the context it is created in: a stop before its first step then means it never
+      runs, where a wrapped one started only to be cancelled, or was reported never
+      awaited.
+    - *The gates:* four tests in `test_cordis_context.py`; `test_schedule.py`, where
+      a write held behind the lock lands before the row's dispose returns; and
+      `test_runtime.py`, where the never-settling listener is stopped by the root.
+  - *Then jobs left the drain's pool: built 2026-10-13.* A teardown spent up to
+    `DRAIN_SECONDS` on every running job before its owner stopped it anyway, and a job
+    rarely finished in that window (a refinement is a review call and a plan call,
+    minutes on a local model). The wait was not a graceful shutdown: the graceful stop
+    is the owner's, in `dispose`, and keeps the work. A child is suspended with its
+    inbox and readmitted later, and a refinement writes nothing and is considered
+    again at the next turn. `detach(..., at_dispose="leave")` now keeps a task out of
+    what `drain` waits for, since whoever stops it decides how long it gets; jobs are
+    the one `leave` caller. Nothing new waits for a stopped job to wind down, and
+    nothing did before: the owners' stops do not wait, and the wind-down has nothing
+    durable left to do.
+    - *What changes:* `phern -p` no longer waits on a working child or a pass; the
+      print-run test now asserts the run leaves before the drain window. Work that
+      would have finished inside the window is redone instead: the child's
+      interrupted step on readmission, the pass at the next turn.
+    - *The wait, for a caller that wants one:* `JobService.settled()` waits out every
+      body started, counted rather than read from the table, which drops an abandoned
+      job while its body may still run. `Context.settled()` is drain's wait without
+      its shield and deadline, so a test's own deadline reaches it, and
+      `ph.testing.settle_background(ctx)` loops the two under one; the job,
+      subagent, messaging and planner tests that used `drain` to wait use it now.
+    - *The gates:* `test_cordis_context.py` (a drain does not wait on `leave` work),
+      `test_seams.py` (`settled` counts bodies), `test_harness_planner.py` (a
+      teardown stops an automatic pass without waiting) and `test_modes.py`.
 
 - **A fallback badge on a child's row in the TUI.** `ChildRow` shows a downgrade today;
   a model fallback reaches the parent's tool result and the log, but not the panel.

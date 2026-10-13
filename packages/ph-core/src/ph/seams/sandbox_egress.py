@@ -33,8 +33,9 @@ seam appends `sandbox/denied` to that agent's session — which is how the TUI
 comes to show a person exactly which host to allow.
 
 **Plain `asyncio` streams, deliberately, in a codebase that is otherwise anyio.**
-The server outlives every call and dies with its row, so it cannot be a detached
-coroutine (`ctx.drain` would wait on it forever) and runs as a task of its own.
+The server outlives every call and dies with its row, so it is not a detached
+coroutine that `ctx.drain` waits on (it would wait forever) and runs as a task of
+its own.
 A task anyio did not start is a *foreign* task to anyio, and a task group with
 half-closes and deadlines inside one fails in anyio's own machinery
 (`InvalidStateError`, measured); the stream API the standard library gives every
@@ -223,11 +224,11 @@ class EgressProxy:
     """The filtering proxy: one unix socket (and, asked for, one loopback port), one
     `permits` question per connection.
 
-    **Its own task, not `ctx.detach`.** A detached coroutine is one `ctx.drain`
-    waits for, and the hosts drain *before* they dispose — so a server that runs
-    until its row unmounts would hold every shutdown open. The listener's lifetime
-    is the row's, ended by `aclose` from the row's disposer, and nothing else
-    needs to know it exists.
+    **Its own task, not `ctx.detach`.** A coroutine detached to be stopped by its
+    scope is one `ctx.drain` waits for, and the hosts drain *before* they dispose —
+    so a server that runs until its row unmounts would hold every shutdown open. The
+    listener's lifetime is the row's, ended by `aclose` from the row's disposer, and
+    nothing else needs to know it exists.
     """
 
     path: Path

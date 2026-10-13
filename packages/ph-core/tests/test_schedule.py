@@ -528,6 +528,39 @@ async def test_a_contended_write_waits_off_the_loop_and_lands(tmp_path: Path) ->
 
 
 @pytest.mark.anyio
+async def test_a_write_still_waiting_at_dispose_lands_before_the_dispose_returns(
+    tmp_path: Path,
+) -> None:
+    """The writer is its row's to finish, not just the drain's to wait for.
+
+    A batch still behind the lock when the drain's share ran out, or noted after
+    the drain, had no owner: the row's dispose returned with the write still
+    queued behind the lock, and a process exiting then lost it. Held with
+    `finish`, so the dispose is the flush behind the drain.
+
+    Sabotage: detach the writer with `at_dispose="leave"`.
+    """
+    root = Context()
+    index = _index(tmp_path)
+    writer = IndexWriter(index, root)
+    held = FileLock(f"{index.path}.lock", thread_local=False)
+    held.acquire()
+
+    async def release_later() -> None:
+        await anyio.sleep(0.2)
+        held.release()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(release_later)
+        writer.record("s1", next_at=1_000, now=0)
+        await root.dispose()
+        landed = index.read().get("s1")
+
+    assert landed is not None, "the dispose returned with the write still waiting"
+    assert landed.next_at == 1_000
+
+
+@pytest.mark.anyio
 async def test_the_newest_change_per_session_is_the_one_that_lands(tmp_path: Path) -> None:
     """K10 — the index holds one entry per session, so only the newest change counts.
 

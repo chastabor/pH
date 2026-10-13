@@ -470,22 +470,22 @@ async def test_a_print_run_suspends_a_child_still_working_when_its_turn_ends(
 
     `rlm.run` hands back an admission and does not wait, and the parent's run ends
     when its own inbox is empty, so a one-shot can finish its turn while a child is
-    still working. Its mount then unwinds: the drain waits for the child's drive
-    for at most `DRAIN_SECONDS`, and the provider suspends what is left (`queued`,
+    still working. Its mount then unwinds without waiting on the child's drive: the
+    drain leaves jobs to their owners, and the provider suspends the child (`queued`,
     `SUSPENDED_DETAIL`), keeping it resumable and spending no restart attempt. The
     parent is not driven again, so the printed answer is the one its turn gave, and
     the child's work waits for a host that readmits it (DESIGN.md §8, "A one-shot
     run does not sweep children").
 
     Held at its model call, the child is mid-turn when the parent's turn ends, and
-    the drain's window is shortened so the test does not spend the real five
-    seconds waiting out a child that never finishes.
+    the drain's window is long, so a run that waited on the drive would take it.
 
     Sabotage: drop the `suspend` disposer from `ph_rlm.subagents.apply`, and the
     parent's teardown revokes the child instead: it ends `canceled`, and no later
-    start resumes its work.
+    start resumes its work. Or let the drain wait on `leave` work, and the run
+    waits out the whole window first.
     """
-    drain = 0.5
+    drain = 10.0
     monkeypatch.setattr(cordis_context, "DRAIN_SECONDS", drain)
     original = FakeAdapter.stream
     child_working = anyio.Event()
@@ -523,7 +523,7 @@ async def test_a_print_run_suspends_a_child_still_working_when_its_turn_ends(
     assert asked == ["parent delegates", "child", "parent answers"], (
         "the parent was driven again after its turn"
     )
-    assert elapsed >= drain, "the run left without waiting for the child's drive"
+    assert elapsed < drain, "the run waited on a child its provider suspends anyway"
 
     parent, _events = read_session(stored_log(tmp_path / "sessions", "delegator"))
     async with mounted(compose_profile("headless")) as ctx:

@@ -1258,10 +1258,46 @@ async def test_a_job_runs_and_reports() -> None:
     assert service.get(job.id) is job
 
     # `start` hands back a handle, not an outcome — a job outliving the step that
-    # started it is the whole point of the seam. `drain()` is what settles it.
-    await root.drain()
+    # started it is the whole point of the seam. `settled()` is the wait for one.
+    await service.settled()
     assert job.state == "done"
     assert job.result == 42
+
+
+async def test_settled_waits_for_every_body_even_one_whose_owner_has_gone() -> None:
+    """`settled()` is the wait a teardown no longer does. It counts bodies rather than
+    reading the table, which drops an abandoned job while its body may still be
+    running: one that never reads its token runs to completion past its owner.
+    Sabotage: return from `settled` once the table is empty, or never count a body
+    down."""
+    root = Context()
+    service = JobService(ctx=root)
+    owner = root.scope("owner")
+    gate = anyio.Event()
+
+    async def ignores_its_token(_job: Job) -> None:
+        await gate.wait()
+
+    holder = await service.start(
+        kind="t", label="holds", run=ignores_its_token, slot=("k", 1), scope=owner
+    )
+    queued = await service.start(
+        kind="t", label="waits", run=ignores_its_token, slot=("k", 1), scope=owner
+    )
+    assert service.in_flight == 2, "a body spawned and not yet run is still owed"
+    await settled(lambda: state_of(holder) == "running", "the first job to take the slot")
+
+    await owner.dispose()
+    await settled(lambda: state_of(queued) == "canceled", "the queued job to stop waiting")
+    assert service.list() == [], "the abandoned jobs stayed in the table"
+    with anyio.move_on_after(0.05) as waited:
+        await service.settled()
+    assert waited.cancelled_caught, "settled returned while a body was still running"
+
+    gate.set()
+    with anyio.fail_after(1):
+        await service.settled()
+    assert service.in_flight == 0
 
 
 async def test_start_does_not_wait_for_the_body() -> None:
@@ -1284,7 +1320,7 @@ async def test_start_does_not_wait_for_the_body() -> None:
     job = await service.start(kind="test", label="slow", run=body)
     assert state_of(job) == "running", "start waited for the body"
     release.set()
-    await root.drain()
+    await service.settled()
     assert state_of(job) == "done"
     assert job.result == "eventually"
     assert entered.is_set()
@@ -1312,7 +1348,7 @@ async def test_a_job_is_an_effect_of_the_scope_that_owns_it() -> None:
     assert job.token.canceled, "the owner went away and the work was not canceled"
     assert service.get(job.id) is None, "the entry outlived its owner"
     release.set()
-    await root.drain()
+    await service.settled()
 
 
 async def test_releasing_a_finished_job_does_not_report_it_canceled() -> None:
@@ -1327,7 +1363,7 @@ async def test_releasing_a_finished_job_does_not_report_it_canceled() -> None:
     owner = root.scope("owner")
 
     job = await service.start(kind="test", label="brief", run=lambda _job: 7, scope=owner)
-    await root.drain()
+    await service.settled()
     assert job.state == "done"
 
     assert service.forget(job.id) is True
@@ -1368,7 +1404,7 @@ async def test_a_slot_queues_the_overflow_rather_than_refusing_it() -> None:
 
     assert [job.state for job in jobs] == ["running", "queued", "queued"]
     gate.set()
-    await root.drain()
+    await service.settled()
     assert [job.state for job in jobs] == ["done"] * 3
     assert ran == [job.id for job in jobs], "admission order, not arrival at the limiter"
 
@@ -1383,11 +1419,11 @@ async def test_a_failed_job_frees_its_slot() -> None:
 
     first = await service.start(kind="test", label="boom", run=explode, slot=("k", 1))
     second = await service.start(kind="test", label="after", run=lambda _job: "ran", slot=("k", 1))
-    # Bounded: a slot the failure kept is a `drain()` that never returns, and a
+    # Bounded: a slot the failure kept is a `settled()` that never returns, and a
     # test that reports this bug as a hung suite is the least legible failure
     # there is — `daemon_helpers.until` makes the same argument for its own copy.
     await settled(lambda: second.state == "done", "the second job to take the freed slot")
-    await root.drain()
+    await service.settled()
 
     assert first.state == "failed"
     assert second.state == "done", "the failure kept the slot"
@@ -1434,7 +1470,7 @@ async def test_canceling_a_queued_job_stops_the_wait_and_takes_no_slot() -> None
     cannot reach it — `Job.cancel` cancels the wait itself.
 
     Without this a canceled job stays queued behind work that may never settle,
-    and `drain()` waits for it: a cancellation that hangs the shutdown.
+    and `settled()` waits for it: a cancellation that never ends.
 
     **Settled while the slot is still held**, which is the whole assertion. An
     earlier version opened the gate first and then checked the job had not run —
@@ -1463,7 +1499,7 @@ async def test_canceling_a_queued_job_stops_the_wait_and_takes_no_slot() -> None
     assert ran == [first.id], "a canceled job ran anyway"
 
     gate.set()
-    await root.drain()
+    await service.settled()
     assert first.state == "done"
 
 
@@ -1493,7 +1529,7 @@ async def test_on_queued_fires_only_when_there_is_a_wait() -> None:
     await settled(lambda: waited == ["b"], "the second job to report waiting")
 
     gate.set()
-    await root.drain()
+    await service.settled()
     assert first.state == "done"
 
 
@@ -1508,7 +1544,7 @@ async def test_a_queue_is_dropped_once_nobody_holds_a_place() -> None:
     service = JobService(ctx=root)
 
     job = await service.start(kind="test", label="brief", run=lambda _job: 1, slot=("k", 2))
-    await root.drain()
+    await service.settled()
 
     assert job.state == "done"
     assert service.get(job.id) is job, "the entry stays until its owner forgets it"
@@ -1538,7 +1574,7 @@ async def test_a_deployment_cap_bounds_a_kind_across_every_producer() -> None:
     assert loose.state == "done", "an uncapped kind waits for nothing"
 
     gate.set()
-    await root.drain()
+    await service.settled()
     assert [first.state, second.state] == ["done", "done"]
 
 
@@ -1566,7 +1602,7 @@ async def test_a_producers_slot_is_taken_before_the_deployments() -> None:
     assert sorted(ran) == ["a1", "b1"], "one parent's queue took the other's capacity"
 
     gate.set()
-    await root.drain()
+    await service.settled()
 
 
 async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
@@ -1575,8 +1611,7 @@ async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
     `abandon` guarded on `running` while the only states were running-or-settled,
     and a whole kind became `queued` the day a deployment cap shipped — so the
     job left the table, kept its place in the queue, and would have taken a slot
-    to run work whose owner was already gone. `ctx.drain()` waits for it, so the
-    symptom is a teardown that never returns.
+    to run work whose owner was already gone, holding `settled()` open until it had.
     """
     root = Context()
     service = JobService(ctx=root)
@@ -1597,7 +1632,7 @@ async def test_disposing_an_owner_stops_a_job_that_is_still_queued() -> None:
     assert ran == [holder.id], "a job whose owner went away ran anyway"
 
     gate.set()
-    await root.drain()
+    await service.settled()
 
 
 async def test_a_job_that_never_starts_gives_its_place_back() -> None:
@@ -1643,7 +1678,7 @@ async def test_one_producers_slot_key_cannot_collide_with_anothers() -> None:
 
     assert sorted(ran) == ["alpha", "beta"]
     gate.set()
-    await root.drain()
+    await service.settled()
 
 
 async def test_a_job_with_no_slot_is_untouched_by_the_mechanism() -> None:
@@ -1652,7 +1687,7 @@ async def test_a_job_with_no_slot_is_untouched_by_the_mechanism() -> None:
     service = JobService(ctx=root)
 
     job = await service.start(kind="test", label="plain", run=lambda _job: "fine")
-    await root.drain()
+    await service.settled()
 
     assert (job.state, job.result) == ("done", "fine")
     assert service._queues == {}, "no slot and no cap for this kind reaches no queue"
@@ -1667,7 +1702,7 @@ async def test_a_canceled_job_reports_canceled() -> None:
         return "partial"
 
     job = await service.start(kind="test", label="a job", run=body)
-    await root.drain()
+    await service.settled()
     assert job.state == "canceled"
 
 

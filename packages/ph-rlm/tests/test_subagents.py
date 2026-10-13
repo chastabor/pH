@@ -124,6 +124,7 @@ from ph.testing import (
     reconciled_call,
     resume_stored,
     run_tool,
+    settle_background,
     skill,
     stored_events,
     stored_types,
@@ -293,7 +294,7 @@ async def test_the_admission_is_logged_before_any_status(delegating: MountedRunt
     failure seen from the other side."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     kinds = [event.type for event in _log_of(ctx, run) if event.type.startswith("subagent/")]
     assert kinds[0] == ADMITTED
@@ -332,7 +333,7 @@ async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
 
     monkeypatch.setattr("ph_rlm.subagents.record_started", watched)
     await _spawn(ctx, parent, "work")
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert len(seen) == 1, "the child never started"
     assert ADMITTED in seen[0], "a child started and its own log on disk does not say so"
@@ -360,7 +361,7 @@ async def test_a_child_whose_admission_cannot_be_written_is_not_started(
     ctx.on("session/flush", refuse)
     with pytest.raises(SubagentSpawnError, match="could not be written"):
         await _spawn(ctx, parent, "never")
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert gate.arrived == 0, "the child ran without its admission on disk"
     (state,) = ctx.require(SUBAGENTS).children(session.id).values()
@@ -412,7 +413,7 @@ async def test_the_child_gets_the_task_labeled_as_the_parents(delegating: Mounte
     """`[task from parent]` is what the child's own prompt recognizes."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "count the files")
-    await ctx.drain()
+    await settle_background(ctx)
 
     child_session = ctx.require(SESSIONS).get(run.session_id)
     assert child_session is not None
@@ -585,7 +586,7 @@ async def test_a_child_that_never_replies_is_announced(delegating: MountedRuntim
     """Silence is indistinguishable from a hang, so it is reported."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say nothing")
-    await ctx.drain()
+    await settle_background(ctx)
 
     delivered = _notices(session)
     assert delivered, "the parent was never told the child finished"
@@ -600,7 +601,7 @@ async def test_the_notice_reaches_the_parents_context_on_its_next_step(
     """Delivered means the model actually sees it, not that it sits in a queue."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say nothing")
-    await ctx.drain()
+    await settle_background(ctx)
 
     await parent.prompt("what did the child say?")
     claimed = [
@@ -623,7 +624,7 @@ async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mount
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say something")
     reply_to_parent(not_none(ctx.require(SESSIONS).get(run.session_id)))
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert _notices(session) == [], "a child that replied was announced as silent"
     # The status record still lands: only the redundant notice is suppressed.
@@ -635,7 +636,7 @@ async def test_the_child_status_reaches_its_own_log(delegating: MountedRuntime) 
     log hears of the child only as a notice in its inbox."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     statuses = _statuses(ctx, run)
     assert statuses[0] == "running"
@@ -675,7 +676,7 @@ async def test_a_childs_outcome_is_on_disk_before_its_parent_is_told(
 
     session.observe(watch)
     children.append(await _spawn(ctx, parent))
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert len(seen) == 1, "the parent was never told the child finished"
     stored, held = seen[0]
@@ -712,7 +713,7 @@ async def test_a_childs_spend_is_counted_from_its_own_answers(
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     answers = [event for event in _log_of(ctx, run) if event.type == "assistant/message"]
     spent = sum(not_none(reported_usage(event)).total for event in answers)
@@ -732,7 +733,7 @@ async def test_the_children_are_read_from_their_own_logs(delegating: MountedRunt
     ctx, session, parent = await delegating()
     first = await _spawn(ctx, parent, "one", name="alpha")
     second = await _spawn(ctx, parent, "two", name="beta")
-    await ctx.drain()
+    await settle_background(ctx)
 
     children = ctx.require(SUBAGENTS).children(session.id)
     assert list(children) == [first.id, second.id], "in admission order"
@@ -810,10 +811,10 @@ async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRun
     ctx.on("session/flush", note)
 
     run = await _spawn(ctx, parent, "answer twice")
-    await ctx.drain()
+    await settle_background(ctx)
     assert await ctx.require(SUBAGENTS).rehydrate(run.id)
     not_none(ctx.require(AGENTS).get(run.session_id)).steer(user_text("and once more"))
-    await ctx.drain()
+    await settle_background(ctx)
     assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user")
 
     # The child's own log tells the whole story…
@@ -841,7 +842,7 @@ async def test_a_settled_child_releases_its_agent_scope(delegating: MountedRunti
     per delegation. The terminal result survives the release."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "finish and go")
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert ctx.require(AGENTS).get(run.session_id) is None, "the child agent was never disposed"
     # And a caller that awaits after the release still gets the outcome.
@@ -869,7 +870,7 @@ async def test_every_record_of_a_child_is_required_reading(delegating: MountedRu
     bring back a child that ended."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent)
-    await ctx.drain()
+    await settle_background(ctx)
     await ctx.require(SUBAGENTS).delete(not_none(parent.session), run.id, reason="user")
 
     by_type = {
@@ -968,7 +969,7 @@ async def test_a_rehydrated_child_is_narrowed_again(delegating: MountedRuntime) 
     run = await _spawn(ctx, parent, skills=("review",))
     assert [one.name for one in ctx.require(SKILLS).list(run.scope)] == ["review"]
 
-    await ctx.drain()
+    await settle_background(ctx)
     assert ctx.require(AGENTS).get(run.session_id) is None, "the child should have settled"
 
     assert await ctx.require(SUBAGENTS).rehydrate(run.id)
@@ -1046,7 +1047,7 @@ async def test_a_clean_child_leaves_nothing_behind(
     """
     ctx, _session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "finish and go")
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert _marks(ctx, run) == ["the child has not settled cleanly", ""]
     # The *closing* half is what the disposal policy reads, and the reason is
@@ -1112,7 +1113,7 @@ async def test_a_failed_child_tells_its_parent_where_the_tree_is(
     child = not_none(ctx.require(AGENTS).get(run.session_id), "the child agent")
     root = not_none(ctx.require(WORKSPACE).of(child.id), "the child workspace").root
     _breaks(child)
-    await ctx.drain()
+    await settle_background(ctx)
 
     (told,) = _notices(session)
     assert "failed" in told
@@ -1140,7 +1141,7 @@ async def test_a_child_with_no_tree_is_announced_without_naming_one(
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "fail with no workspace")
     _breaks(ctx.require(AGENTS).get(run.session_id))
-    await ctx.drain()
+    await settle_background(ctx)
 
     (told,) = _notices(session)
     assert "failed" in told
@@ -1447,7 +1448,7 @@ async def test_a_child_that_replied_before_a_restart_is_not_announced_as_silent(
     revived_ctx, revived, _parent = await _restart(mount, session.id)
     await _until(gate.twice, "the readmitted child to reach the model")
     gate.release_all()
-    await revived_ctx.drain()
+    await settle_background(revived_ctx)
 
     assert _statuses(revived_ctx, run)[-1] == "done"
     assert _notices(revived) == [], "a child that replied before the restart was announced"
@@ -1559,7 +1560,7 @@ async def test_a_settled_child_is_not_canceled_when_its_parent_goes(
     """
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "finish first")
-    await ctx.drain()
+    await settle_background(ctx)
 
     await ctx.require(AGENTS).dispose(parent.id)
 
@@ -2055,7 +2056,7 @@ async def test_a_re_addressed_child_comes_back_to_its_own_work(
     first = ctx.require(WORKSPACE).of(run.session_id)
     assert first is not None and first.kind == "worktree"
     (first.root / "child-work.txt").write_text("what the first answer produced\n", encoding="utf-8")
-    await ctx.drain()
+    await settle_background(ctx)
     assert not first.root.exists(), "the checkout goes; the branch is what survives"
 
     assert await ctx.require(SUBAGENTS).ensure_addressable(run.session_id) is True
@@ -2089,7 +2090,7 @@ async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
         PROVIDER_NAME, SubagentRequest(prompt="look only", parent=parent, access="read")
     )
     assert not_none(ctx.require(WORKSPACE).of(run.session_id)).kind == "worktree-ephemeral"
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert await ctx.require(SUBAGENTS).ensure_addressable(run.session_id) is True
 

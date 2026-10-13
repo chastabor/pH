@@ -809,8 +809,8 @@ class RlmChildProvider:
             # Queued, never ran: `Job.cancel` stops the wait for a slot it will
             # now never take. A body parked on a limiter reads no token, so
             # without this a revoked child stays queued behind children that may
-            # never settle and `ctx.drain()` waits for it — a revocation that
-            # hangs the teardown. Harmless for a child already running: its agent
+            # never settle, holding its place and `JobService.settled()` until a
+            # slot frees. Harmless for a child already running: its agent
             # is what stops that one, one line down.
             self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:

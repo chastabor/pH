@@ -21,7 +21,9 @@ Two halves of "this job is over", deliberately distinct:
   owner's teardown would otherwise report `canceled` for work that completed.
 
 Cancellation is cooperative: `Job.cancel()` sets a token, and a body that never
-reads it will run to completion regardless — `ctx.drain()` still waits for it.
+reads it will run to completion regardless, past a teardown too: `ctx.drain()` does
+not wait for jobs, whose owners stop them in `dispose`. `settled()` is the wait for
+a caller that wants one.
 
 **Slots are how a producer bounds its own concurrency** (`slot=`). Work that
 arrives faster than it should run is queued rather than refused: the caller asked
@@ -170,18 +172,52 @@ class JobService:
     _jobs: dict[str, Job] = field(default_factory=dict)
     _queues: dict[_Key, _Queue] = field(default_factory=dict)
     _scope: TaskGroup | None = None
+    _bodies: int = 0
+    """Job bodies spawned and not yet ended, queued ones included: what `settled`
+    waits out. A count rather than the table, which drops an abandoned job while
+    its body may still be on its way out."""
+    _quiet: anyio.Event | None = None
+    """Set when `_bodies` reaches zero, for whoever is in `settled` then."""
 
     def bind(self, task_group: TaskGroup) -> None:
         """Adopt the task group jobs run in.
 
-        Optional. Without one, a job runs on `ctx.detach` — the pool
-        `ctx.drain()` awaits — which is still honest for a headless one-shot
-        (nothing is dropped; shutdown waits) and, unlike running the body
-        inline, does not make `start()` block until the job finishes. A job that
-        outlives the step that started it is the entire point of the seam, so
-        `start` returning early is the contract rather than an optimization.
+        Optional. Without one, a job runs on `ctx.detach` with `leave`, so a
+        teardown stops it through its owner rather than waiting on it: nothing is
+        dropped, since the owner's stop keeps the work (a child is suspended and
+        resumed later, a refinement is considered again), and a one-shot does not
+        spend its drain on work that rarely finishes in it. Unlike running the
+        body inline, it does not make `start()` block until the job finishes. A
+        job that outlives the step that started it is the entire point of the
+        seam, so `start` returning early is the contract rather than an
+        optimization.
         """
         self._scope = task_group
+
+    @property
+    def in_flight(self) -> int:
+        """Job bodies started here and not yet ended, queued ones included."""
+        return self._bodies
+
+    async def settled(self) -> None:
+        """Wait until every job body started here has ended.
+
+        For a caller that chooses to wait, which no teardown does: `ctx.drain()`
+        leaves jobs to their owners. Unbounded, because how long a job may take is
+        the caller's to say; a body that never reads its token holds this until
+        it finishes.
+        """
+        while self._bodies:
+            if self._quiet is None:
+                self._quiet = anyio.Event()
+            await self._quiet.wait()
+
+    def _ended(self) -> None:
+        """One body over; wake whoever is in `settled` once none are left."""
+        self._bodies -= 1
+        if not self._bodies and self._quiet is not None:
+            self._quiet.set()
+            self._quiet = None
 
     async def start(
         self,
@@ -232,7 +268,7 @@ class JobService:
                 # waiting for a slot has a parked body and, once it is out of
                 # this table, no owner left to stop it: it would take a slot
                 # nobody wants, run work whose owner is gone, and hold
-                # `ctx.drain()` open until it did. This read `== "running"` while
+                # `settled()` open until it did. This read `== "running"` while
                 # the only states were running-or-settled, and a whole kind
                 # became `queued` the day a deployment cap shipped.
                 if job.state in UNSETTLED:
@@ -261,6 +297,9 @@ class JobService:
                 job.error = error
                 log.debug("ph.seams.jobs: job %s failed", job.id, exc_info=True)
             finally:
+                # First, so nothing below can strand the count; nothing below
+                # awaits either, so a waiter in `settled` wakes after all of it.
+                self._ended()
                 if job.state == "running":
                     # **Derived, not caught** (L4). `except Exception` misses a
                     # `BaseException` — a foreign cancel, a `BaseExceptionGroup`
@@ -288,7 +327,15 @@ class JobService:
             if self._scope is not None:
                 self._scope.start_soon(body)
             else:
-                self.ctx.detach(body(), label=f"job {job.id}")
+                # `leave`: the `effect` above is this job's stop, on its owner, and
+                # cancels its token. A cancel from this seam's own scope would be
+                # a second stop landing ahead of the owner's, and this row
+                # unwinds before the agents that own its jobs. It keeps the job
+                # out of what `drain` waits for, too (`AtDispose`).
+                self.ctx.detach(body(), label=f"job {job.id}", at_dispose="leave")
+            # Counted once it is sure to run, and before it can: neither spawn
+            # runs the body before this line.
+            self._bodies += 1
         except BaseException:
             # **A job that never reaches its body gives its places back here, or
             # nothing ever does.** `body`'s `finally` is the only other release,

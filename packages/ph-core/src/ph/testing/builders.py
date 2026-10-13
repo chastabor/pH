@@ -26,7 +26,7 @@ from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..host import host_config_path, load_host_config
 from ..json import JsonValue, as_str, dumps
-from ..keys import SESSION_PERSISTENCE, SESSIONS, SKILLS, TOOLS
+from ..keys import JOBS, SESSION_PERSISTENCE, SESSIONS, SKILLS, TOOLS
 from ..llm.types import (
     ContentBlock,
     ContextForm,
@@ -170,6 +170,29 @@ async def settled(check: Callable[[], object], what: str) -> None:
                 await anyio.sleep(0.005)
     except TimeoutError:
         pytest.fail(f"timed out waiting for {what}")
+
+
+async def settle_background(ctx: Context) -> None:
+    """Wait out the work a test left running: every detached task, then every job.
+
+    `ctx.drain()` did this until jobs left its pool, and it was never quite a wait:
+    shielded, so a test's own deadline could not reach it, and bounded, so work still
+    running after `DRAIN_SECONDS` was left without a word for the assertions behind
+    it to trip on. Looped, because each can start the other: a child's drive ends by
+    waking listeners, and a listener can start a job.
+    """
+    # `ph.testing` is shipped, and its helpers import where pytest is not installed.
+    import pytest  # noqa: PLC0415
+
+    jobs = ctx.get(JOBS)
+    try:
+        with anyio.fail_after(10):
+            await ctx.settled()
+            while jobs is not None and jobs.in_flight:
+                await jobs.settled()
+                await ctx.settled()
+    except TimeoutError:
+        pytest.fail("timed out waiting for background jobs and detached tasks to end")
 
 
 def simple_tool(

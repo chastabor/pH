@@ -445,7 +445,9 @@ class IndexWriter:
     **Started on demand and finished when nothing is noted**, not a task that
     lives as long as the row: `Context.drain` awaits detached work, so a writer
     that never ended would hold every drain to its deadline — while one that ends
-    makes `drain` the flush, which is what a host shutting down wants.
+    makes `drain` the flush, which is what a host shutting down wants. The row's
+    dispose is the flush behind it: a batch still going when drain's share ran
+    out, or noted after it, is waited for there rather than left to the process.
 
     **A claim travels with the batch it covers** (S18): taken with the first new
     appointment noted, and closed by that batch's write.
@@ -473,7 +475,9 @@ class IndexWriter:
         self._pending[session_id] = (next_at, now)
         if not self._writing:
             self._writing = True
-            self.ctx.detach(self._drain(), label="schedule index writer")
+            # `finish`: a change noted here is a write already promised, so the
+            # row's dispose waits for it where a cancel would drop the batch.
+            self.ctx.detach(self._drain(), label="schedule index writer", at_dispose="finish")
 
     async def _drain(self) -> None:
         # No await between the emptiness check and clearing the flag, so a change

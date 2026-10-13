@@ -24,15 +24,23 @@ from typing import Any
 
 import anyio
 import pytest
-from rlm_fixtures import HARNESS_ROW
+from rlm_fixtures import HARNESS_ROW, ModelGate
 
 from ph.cordis import Context
+from ph.cordis import context as cordis_context
 from ph.keys import AGENTS, COMMANDS, JOBS, LLM_FAKE, SESSIONS
-from ph.llm.fake import FakeAdapter
 from ph.llm.types import GenerateOptions
 from ph.session import Session, SurfaceIntent
 from ph.session.events import SessionEvent, SurfaceReplace
-from ph.testing import FAKE_OPTIONS, MountProfile, block_text, log_event, settled, user_payload
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    block_text,
+    log_event,
+    settle_background,
+    settled,
+    user_payload,
+)
 from ph_rlm.harness import (
     CONSIDERED,
     REFINED,
@@ -114,7 +122,7 @@ async def test_the_planner_call_is_not_a_turn(refining: Refining) -> None:
     before = len(session.events)
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     planner_request = next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
     assert planner_request.purpose == "refine"
@@ -154,7 +162,7 @@ async def test_the_planner_prompt_carries_the_state_the_history_and_the_tail(
     await ctx.require(COMMANDS).dispatch(
         "/refine focus on the test commands", session=session, agent=agent
     )
-    await ctx.drain()
+    await settle_background(ctx)
 
     prompt = block_text(
         next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
@@ -180,7 +188,7 @@ async def test_only_the_tail_of_a_long_conversation_is_sent(refining: Refining) 
     say(session, "the last thing said", "m2")
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     prompt = block_text(
         next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
@@ -206,7 +214,7 @@ async def test_the_conversation_is_what_the_model_saw(refining: Refining) -> Non
     )
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     prompt = block_text(
         next(one for one in requests if one.system == REFINEMENT_SYSTEM_PROMPT)
@@ -232,7 +240,7 @@ async def test_the_command_schedules_a_job_and_the_refinement_lands(refining: Re
     # Nothing has been applied yet: the command returned before the model did.
     assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is None
 
-    await ctx.drain()
+    await settle_background(ctx)
     entry = ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests")
     assert entry is not None and entry.content == "uv run pytest"
 
@@ -273,7 +281,7 @@ async def test_a_user_pass_skips_the_review_gate(refining: Refining) -> None:
     requests = script(ctx, review=NO, planner=json.dumps(PROPOSAL))
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert [one.system for one in requests] == [REFINEMENT_SYSTEM_PROMPT]
     assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is not None
@@ -286,7 +294,7 @@ async def test_a_pass_that_proposes_nothing_is_recorded_and_visible(refining: Re
     script(ctx, planner=json.dumps({"summary": "nothing durable here", "edits": []}))
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     considered = [event for event in session.events if event.type == CONSIDERED]
     assert len(considered) == 1
@@ -310,7 +318,7 @@ async def test_a_planner_that_returns_junk_records_it_instead_of_raising(
     requests = script(ctx, planner="I'm afraid I can't do that.")
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     (considered,) = [event for event in session.events if event.type == CONSIDERED]
     assert "not JSON" in considered.data["reason"]
@@ -338,7 +346,7 @@ async def test_a_reply_wrapped_in_prose_is_corrected_rather_than_declined(
     ctx.require(LLM_FAKE).respond = respond
 
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert [event for event in session.events if event.type == REFINED], "the refinement applied"
 
@@ -350,7 +358,7 @@ async def test_a_second_pass_is_refused_while_one_is_running(refining: Refining)
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     second = await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     assert second is not None and "already running" in second
-    await ctx.drain()
+    await settle_background(ctx)
     assert len([event for event in session.events if event.type == REFINED]) == 1
 
 
@@ -363,35 +371,50 @@ async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     assert [job.kind for job in ctx.require(JOBS).list()] == ["refine"]
 
-    await ctx.drain()
+    await settle_background(ctx)
     assert ctx.require(JOBS).list() == []
     # Forgotten because it finished, not canceled: the refinement still landed.
     assert [event for event in session.events if event.type == REFINED] != []
 
 
 async def test_a_canceled_pass_ends_rather_than_running_on(
-    refining: Refining, monkeypatch: pytest.MonkeyPatch
+    refining: Refining, gate: ModelGate
 ) -> None:
     """A job's cancellation is cooperative, so a pass that never read its token ran its
     model call on after its scope went: past a mount's bounded teardown, which then
     cancelled it under the test. Sabotage: await the pass without racing the token,
     and the canceled job never ends."""
     ctx, session, agent = await refining()
-    asked: list[object] = []
-
-    async def held(*_args: object) -> Any:  # noqa: ANN401
-        asked.append(_args)
-        await anyio.sleep_forever()
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(FakeAdapter, "stream", held)
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     (job,) = ctx.require(JOBS).list()
-    await settled(lambda: asked, "the pass to reach its model call")
+    await settled(lambda: gate.arrived, "the pass to reach its model call")
 
     ctx.require(JOBS).cancel(job.id)
 
     await settled(lambda: ctx.require(JOBS).list() == [], "the canceled pass to end")
+
+
+async def test_a_teardown_stops_an_automatic_pass_through_its_owner_without_waiting(
+    refining: Refining, gate: ModelGate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A teardown does not wait on a pass: the drain leaves jobs to their owners, so it
+    returns at once, and the `dispose` behind it stops the pass through its token,
+    `canceled` though the jobs row has gone by the time it ends. Held at its model call,
+    as a pass is for minutes on a local model, it used to hold every teardown for the
+    whole drain share and then be stopped anyway. Sabotage: let `drain` wait on `leave`
+    work, or `require` the jobs row as the pass ends."""
+    ctx, session, _agent = await refining(turnsBetweenRefinements=1, cooldownMinutes=0)
+    monkeypatch.setattr(cordis_context, "DRAIN_SECONDS", 2.0)
+    turn(session)
+    await settled(lambda: gate.arrived, "the automatic pass to reach its model call")
+    (job,) = ctx.require(JOBS).list()
+
+    started = anyio.current_time()
+    await ctx.drain()
+    assert anyio.current_time() - started < 0.5, "the drain waited on a pass its owner stops"
+    await ctx.dispose()
+
+    await settled(lambda: job.state == "canceled", "the pass to stop once its owner went")
 
 
 # ------------------------------------------------------------ the trigger --
@@ -443,7 +466,7 @@ async def test_a_refinement_itself_starts_the_cooldown(refining: Refining) -> No
     for index in range(30):
         turn(session, index)
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
 
     assert [event for event in session.events if event.type == REFINED] != []
     assert due(session) is None
@@ -472,7 +495,7 @@ async def test_auto_refine_fires_at_the_threshold_and_stays_local(refining: Refi
 
     for index in range(3):
         turn(session, index)
-        await ctx.drain()
+        await settle_background(ctx)
 
     entry = ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests")
     assert entry is not None and entry.scope == "local"
@@ -489,7 +512,7 @@ async def test_a_declined_review_costs_one_cheap_call(refining: Refining) -> Non
 
     for index in range(6):
         turn(session, index)
-        await ctx.drain()
+        await settle_background(ctx)
 
     assert [one.system for one in ctx.require(LLM_FAKE).requests].count(
         REFINEMENT_SYSTEM_PROMPT
@@ -512,7 +535,7 @@ async def test_a_veto_stops_it_before_any_model_call(refining: Refining) -> None
     ctx.on("harness/before-refine", refuse)
 
     turn(session)
-    await ctx.drain()
+    await settle_background(ctx)
     assert ctx.require(LLM_FAKE).requests == []
     (auto,) = [event for event in session.events if event.type == CONSIDERED]
     assert auto.data["reason"] == "vetoed: this deployment does not refine (trigger: turns)"
@@ -520,7 +543,7 @@ async def test_a_veto_stops_it_before_any_model_call(refining: Refining) -> None
     # And the trigger is on the payload, so a listener can tell the automatic
     # passes from a human's `/refine`.
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
     assert ctx.require(LLM_FAKE).requests == []
     asked = [event for event in session.events if event.type == CONSIDERED][-1]
     assert asked.data["reason"] == "vetoed: this deployment does not refine (trigger: user)"
@@ -532,11 +555,11 @@ async def test_auto_refine_can_be_turned_off(refining: Refining) -> None:
 
     for index in range(3):
         turn(session, index)
-        await ctx.drain()
+        await settle_background(ctx)
 
     assert ctx.require(LLM_FAKE).requests == []
     # The command still works: turning the automatic pass off is not turning the
     # harness off.
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
-    await ctx.drain()
+    await settle_background(ctx)
     assert ctx.require(HARNESS).state(session).entry("procedure", "run-the-tests") is not None

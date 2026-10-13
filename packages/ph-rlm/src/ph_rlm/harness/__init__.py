@@ -260,8 +260,12 @@ async def apply(ctx: Context, config: Config) -> None:
                 running.discard(request.session.id)
                 # Released, not abandoned: the work is over, so the entry goes
                 # rather than sitting in the table until the agent does. Without
-                # this an auto-refining session accretes one job per pass.
-                ctx.require(JOBS).forget(job.id)
+                # this an auto-refining session accretes one job per pass. `get`,
+                # as `_quiesce` reads it: a pass its owner stopped at a mount's
+                # unwind ends after the row that holds the table has gone.
+                jobs = ctx.get(JOBS)
+                if jobs is not None:
+                    jobs.forget(job.id)
 
         running.add(request.session.id)
         try:
