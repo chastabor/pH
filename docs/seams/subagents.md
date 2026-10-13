@@ -131,7 +131,7 @@ nothing to fall back to, so the seam refuses it at a spawn and ends it at a rest
 and a provider builds only a child that has a route, served by an adapter here.
 
 The child runs with its route's call settings (`reasoningEffort`, `maxTokens` and its
-sampling settings, `temperature` among them) the way a root started on the key does, and none of its parent's: a
+`sampling`, `temperature` among it) the way a root started on the key does, and none of its parent's: a
 temperature tuned for the parent's model is not one for this. A child on its
 parent's route runs with its parent's options. Its reasoning effort is the one the
 spawn names, else one its skills agree on (`Skill.effort`, resolved by `resolve_model`;

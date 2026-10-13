@@ -218,7 +218,7 @@ async def test_the_correction_keeps_the_rest_of_the_request() -> None:
     )
 
     first, correction = seen
-    for field in ("max_tokens", "stop", "purpose", "session_id", "system", "temperature"):
+    for field in ("max_tokens", "stop", "purpose", "session_id", "system", "sampling"):
         assert getattr(correction, field) == getattr(first, field), field
 
 

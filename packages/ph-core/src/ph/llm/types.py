@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Annotated, Any, Final, Literal, Protocol, TypeAlias, TypedDict, TypeGuard
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Final, Literal, TypeAlias, TypeGuard, cast
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -26,7 +26,6 @@ from ..wire import WireDataclass, WireModel, validation_errors, wire_alias
 
 __all__ = [
     "DEFAULT_EFFORT",
-    "FIELD_OF",
     "AssistantMessage",
     "AttachmentRef",
     "BlockEnd",
@@ -50,8 +49,7 @@ __all__ = [
     "PluginSource",
     "ReasoningBlock",
     "ReasoningDelta",
-    "Sampled",
-    "SamplingFields",
+    "Sampling",
     "SamplingSetting",
     "StreamChunk",
     "TextBlock",
@@ -76,13 +74,9 @@ __all__ = [
     "is_error_finish",
     "is_token_delta",
     "new_message_id",
-    "sampling_fields",
-    "sampling_of",
     "text_of",
-    "uncarried",
     "unmapped_effort",
     "wire_effort",
-    "wire_sampling",
 ]
 
 
@@ -526,50 +520,50 @@ takes some of them (`ResolvedModel.sampling`), and one a route's API cannot carr
 dropped with a warning rather than refused."""
 
 
-class Sampled(Protocol):
-    """Anything carrying the sampling settings: a route, an agent's options, a call
-    config, a request."""
+class Sampling(WireModel):
+    """The sampling settings, as one value every layer carries whole: a route sets it
+    (`ModelRoute.sampling`), an agent's options and the logged call config carry it, and
+    a request sends it. A setting added here reaches all of them, where six fields on
+    each layer had to be added on each and copied between them by hand.
 
-    @property
-    def temperature(self) -> float | None: ...
-    @property
-    def top_p(self) -> float | None: ...
-    @property
-    def top_k(self) -> int | None: ...
-    @property
-    def min_p(self) -> float | None: ...
-    @property
-    def presence_penalty(self) -> float | None: ...
-    @property
-    def frequency_penalty(self) -> float | None: ...
+    Each field's alias is its `SamplingSetting`, so a route's YAML, a warning and
+    `phern doctor` spell a setting one way (`topP`). Unset is `None`, and absent from
+    what an adapter sends.
+    """
 
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
 
-class SamplingFields(TypedDict):
-    """The sampling settings as keyword arguments, for building one carrier from another:
-    `GenerateOptions(..., **sampling_fields(header.config))`. One spelling of the copy,
-    so a setting added here reaches every layer that carries them."""
+    def is_empty(self) -> bool:
+        """Whether this sets nothing: what a route or a header that sets none carries,
+        and leaves off its wire form, which is then as it was before there was one."""
+        return not self.settings()
 
-    temperature: float | None
-    top_p: float | None
-    top_k: int | None
-    min_p: float | None
-    presence_penalty: float | None
-    frequency_penalty: float | None
+    def settings(self) -> dict[SamplingSetting, float | int]:
+        """The settings this sets, by name. Unset is absent, so an adapter sends nothing
+        for it."""
+        return cast("dict[SamplingSetting, float | int]", self.to_wire())
 
+    def uncarried(self, carried: frozenset[SamplingSetting]) -> dict[SamplingSetting, float | int]:
+        """The settings this sets that a route carrying `carried` cannot send, by the value
+        asked: what the `llm` seam drops and `phern doctor` names, by one rule."""
+        return {name: value for name, value in self.settings().items() if name not in carried}
 
-SamplingField: TypeAlias = Literal[
-    "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty"
-]
+    def without(self, settings: Collection[str]) -> Sampling:
+        """This, with `settings` unset: the one drop rule, for the call config the loop
+        logs and for a request that reaches the seam another way."""
+        kept = {name: value for name, value in self.settings().items() if name not in settings}
+        return Sampling.model_validate(kept)
 
-FIELD_OF: Mapping[SamplingSetting, SamplingField] = {
-    "temperature": "temperature",
-    "topP": "top_p",
-    "topK": "top_k",
-    "minP": "min_p",
-    "presencePenalty": "presence_penalty",
-    "frequencyPenalty": "frequency_penalty",
-}
-"""Each setting's attribute on everything `Sampled`."""
+    def on_wire(self, wire: Mapping[SamplingSetting, str]) -> dict[str, float | int]:
+        """The settings this sets that a wire names, under its names: an adapter's
+        request fields, from its own map of what its API takes."""
+        return {wire[name]: value for name, value in self.settings().items() if name in wire}
+
 
 DEFAULT_EFFORT: Final = "default"
 """The reasoning effort that asks for the provider's own: nothing is sent, so the
@@ -585,37 +579,8 @@ wrote them (`ModelRoute.efforts`): opaque to all but the adapter that merges the
 CallSetting: TypeAlias = SamplingSetting | Literal["reasoningEffort"]
 """A call setting a route may be unable to carry, spelled as a route sets it: a
 sampling setting its API does not take, or a reasoning effort its profile does not say
-how to send (`ModelRoute.efforts`). What `EpochHeader.withheld` is keyed by, and each
-one's alias on `LlmCallConfig`."""
-
-
-def sampling_fields(settings: Sampled) -> SamplingFields:
-    """`settings`' sampling settings, as keyword arguments for another carrier."""
-    return {
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "top_k": settings.top_k,
-        "min_p": settings.min_p,
-        "presence_penalty": settings.presence_penalty,
-        "frequency_penalty": settings.frequency_penalty,
-    }
-
-
-def sampling_of(settings: Sampled) -> dict[SamplingSetting, float | int]:
-    """The sampling settings `settings` sets, by name. Unset is absent, so an adapter
-    sends nothing for it."""
-    fields = sampling_fields(settings)
-    return {
-        setting: value
-        for setting, field_name in FIELD_OF.items()
-        if (value := fields[field_name]) is not None
-    }
-
-
-def uncarried(settings: Sampled, carried: frozenset[SamplingSetting]) -> list[SamplingSetting]:
-    """The sampling settings `settings` sets that a route carrying `carried` cannot
-    send: what the `llm` seam drops and `phern doctor` names, by one rule."""
-    return [setting for setting in sampling_of(settings) if setting not in carried]
+how to send (`ModelRoute.efforts`). What `EpochHeader.withheld` is keyed by: a sampling
+setting's alias on `Sampling`, and the effort's on `LlmCallConfig`."""
 
 
 def unmapped_effort(effort: str | None, efforts: Collection[str]) -> TypeGuard[str]:
@@ -625,16 +590,8 @@ def unmapped_effort(effort: str | None, efforts: Collection[str]) -> TypeGuard[s
     return effort is not None and effort != DEFAULT_EFFORT and effort not in efforts
 
 
-def wire_sampling(settings: Sampled, wire: Mapping[SamplingSetting, str]) -> dict[str, float | int]:
-    """The settings `settings` sets that a wire names, under its names: an adapter's
-    request fields, from its own map of what its API takes."""
-    return {
-        wire[setting]: value for setting, value in sampling_of(settings).items() if setting in wire
-    }
-
-
 class LlmCallConfig(WireModel):
-    """The conversation's call configuration: route plus sampling scalars.
+    """The conversation's call configuration: route plus its sampling.
 
     Separated from `GenerateOptions` because this is the part that is *durable* —
     it is what `request/header` snapshots and what header equality compares, so
@@ -644,14 +601,29 @@ class LlmCallConfig(WireModel):
     provider: str
     model: str
     reasoning_effort: str | None = None
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
+    sampling: Sampling = Field(default_factory=Sampling, exclude_if=Sampling.is_empty)
     max_tokens: int | None = None
     stop: list[str] | None = None
+
+    def without(self, settings: Collection[CallSetting]) -> LlmCallConfig:
+        """This, with `settings` unset: what a route that cannot carry them is sent.
+
+        `asking` is its inverse, and the two are the one place a `CallSetting` is told
+        apart: a sampling setting is `sampling`'s, and `reasoningEffort` is this model's
+        own."""
+        effort = None if "reasoningEffort" in settings else self.reasoning_effort
+        return self.model_copy(
+            update={"sampling": self.sampling.without(settings), "reasoning_effort": effort}
+        )
+
+    def asking(self, withheld: Mapping[CallSetting, float | int | str]) -> LlmCallConfig:
+        """This, with what `without` took off asked for again (`EpochHeader.withheld`):
+        validated, since what comes back from a log is only a value."""
+        restored = {name: value for name, value in withheld.items() if name != "reasoningEffort"}
+        data = {**self.to_wire(), "sampling": {**self.sampling.settings(), **restored}}
+        if "reasoningEffort" in withheld:
+            data["reasoningEffort"] = withheld["reasoningEffort"]
+        return LlmCallConfig.model_validate(data)
 
 
 class ToolSchema(WireModel):
@@ -840,12 +812,7 @@ class GenerateOptions:
     sends none and the provider's default applies. Request body like any other, so an
     `llm/stream` listener that moves a request to another route owns them, as it owns
     `max_tokens`: the request names no effort to look up on the new one."""
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
+    sampling: Sampling = field(default_factory=Sampling)
     max_tokens: int | None = None
     stop: tuple[str, ...] = ()
     response_schema: dict[str, Any] | None = None

@@ -497,7 +497,10 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
 
 def resolve_row(row: Row) -> dict[str, JsonValue]:
     """One row as it would mount: its config through its plugin's model, defaults
-    included, and every field stated — the ones a document may leave out too.
+    included, and every field stated — the ones a document may leave out too. A route's
+    unset `sampling` is the exception, left off as everywhere it is written
+    (`Sampling.is_empty`); absent and empty read back as one value, so a saved profile
+    and the named one still compare.
 
     Interpolated as a mount interpolates, so a `${env:...}` setting reads as the value
     it would run with. A row whose plugin takes no config says `config: null`, which

@@ -43,11 +43,11 @@ from ph.llm.types import (
     GenerateOptions,
     LlmCallConfig,
     LlmFailure,
+    Sampling,
     TextBlock,
     TextDelta,
     ToolCallBlock,
     create_user_message,
-    sampling_of,
 )
 from ph.session import SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.system_prompt.assembly import PromptContext, PromptSection
@@ -189,7 +189,8 @@ async def test_a_route_s_sampling_settings_reach_the_request_and_its_header(
     `seed_config` or `_build_request`."""
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
-    options = replace(FAKE, temperature=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5)
+    sampling = Sampling(temperature=0.6, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5)
+    options = replace(FAKE, sampling=sampling)
 
     await ctx.require(AGENTS).create(session, options).prompt("hello")
 
@@ -197,13 +198,7 @@ async def test_a_route_s_sampling_settings_reach_the_request_and_its_header(
     assert header is not None
     request = ctx.require(LLM_FAKE).requests[-1]
     for carried in (header.config, request):
-        assert sampling_of(carried) == {
-            "temperature": 0.6,
-            "topP": 0.95,
-            "topK": 20,
-            "minP": 0.0,
-            "presencePenalty": 1.5,
-        }
+        assert carried.sampling == sampling
 
 
 async def test_a_setting_the_route_cannot_carry_is_withheld_in_the_header_it_logs(
@@ -217,7 +212,8 @@ async def test_a_setting_the_route_cannot_carry_is_withheld_in_the_header_it_log
     fake = ctx.require(LLM_FAKE)
     fake.route = ResolvedModel(sampling=frozenset({"temperature"}))
     session = ctx.require(SESSIONS).create("s")
-    agent = ctx.require(AGENTS).create(session, replace(FAKE, temperature=0.6, top_k=20))
+    asked = Sampling(temperature=0.6, top_k=20)
+    agent = ctx.require(AGENTS).create(session, replace(FAKE, sampling=asked))
 
     with caplog.at_level(logging.WARNING, logger="ph.llm"):
         await agent.prompt("first")
@@ -225,7 +221,7 @@ async def test_a_setting_the_route_cannot_carry_is_withheld_in_the_header_it_log
 
     header = session.request_header()
     assert header is not None
-    assert sampling_of(header.config) == {"temperature": 0.6}
+    assert header.config.sampling == Sampling(temperature=0.6)
     assert header.withheld == {"topK": 20}
     assert [e.type for e in session.events].count("request/header") == 1
     warned = [record for record in caplog.records if "does not take topK" in record.getMessage()]
@@ -234,9 +230,9 @@ async def test_a_setting_the_route_cannot_carry_is_withheld_in_the_header_it_log
     fake.route = ResolvedModel(sampling=frozenset({"temperature", "topK"}))
     await agent.prompt("third")
 
-    assert fake.requests[-1].top_k == 20, "a withheld setting was not asked for again"
+    assert fake.requests[-1].sampling == asked, "a withheld setting was not asked for again"
     header = session.request_header()
-    assert header is not None and (header.config.top_k, header.withheld) == (20, None)
+    assert header is not None and (header.config.sampling, header.withheld) == (asked, None)
 
 
 OFF = {"chat_template_kwargs": {"enable_thinking": False}}
@@ -366,7 +362,9 @@ async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:
         proposal: RequestProposal, next_: Callable[..., Awaitable[Any]]
     ) -> LlmCallConfig:
         config = await next_()
-        return LlmCallConfig(provider=config.provider, model="rerouted", temperature=0.1)
+        return LlmCallConfig(
+            provider=config.provider, model="rerouted", sampling=Sampling(temperature=0.1)
+        )
 
     ctx.on("agent/request", reroute)
     await ctx.require(AGENTS).create(session, FAKE).prompt("hello")
@@ -374,7 +372,7 @@ async def test_agent_request_waterfall_can_reroute(mount: MountProfile) -> None:
     header = session.request_header()
     assert header is not None
     assert header.config.model == "rerouted"
-    assert header.config.temperature == 0.1
+    assert header.config.sampling == Sampling(temperature=0.1)
 
 
 async def test_the_request_derives_its_messages_after_the_waterfall(mount: MountProfile) -> None:

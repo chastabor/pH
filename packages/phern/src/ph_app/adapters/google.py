@@ -73,7 +73,6 @@ from ph.llm.types import (
     is_error_finish,
     text_of,
     wire_effort,
-    wire_sampling,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -477,7 +476,7 @@ class GoogleAdapter:
                 }
             ]
         generation: dict[str, Any] = {}
-        generation.update(wire_sampling(options, SAMPLING_WIRE))
+        generation.update(options.sampling.on_wire(SAMPLING_WIRE))
         max_tokens = options.max_tokens or self.config.default_max_tokens
         if max_tokens is not None:
             generation["maxOutputTokens"] = max_tokens

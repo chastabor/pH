@@ -24,7 +24,7 @@ from ph.agent.types import AgentOptions
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.keys import AGENTS, SESSIONS
-from ph.llm.types import text_of
+from ph.llm.types import Sampling, text_of
 from ph.session import Session, SessionEvent
 from ph.testing import MountProfile, result_text
 from ph_app.profiles import PROFILE_DIR, resolve_profile
@@ -150,7 +150,12 @@ async def live_agent(
     session = ctx.require(SESSIONS).create(name)
     agent = ctx.require(AGENTS).create(
         session,
-        AgentOptions(provider="llama", model=route, max_tokens=2048, temperature=TEMPERATURE),
+        AgentOptions(
+            provider="llama",
+            model=route,
+            max_tokens=2048,
+            sampling=Sampling(temperature=TEMPERATURE),
+        ),
     )
     assert isinstance(agent, ReactLoopAgent)
     return ctx, agent

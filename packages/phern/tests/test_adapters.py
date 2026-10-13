@@ -50,6 +50,7 @@ from ph.llm.types import (
     MediaBlock,
     Message,
     ReasoningBlock,
+    Sampling,
     TextBlock,
     TextDelta,
     ToolCallBlock,
@@ -721,12 +722,14 @@ def _sampled(provider: str, *, settings: bool = True) -> GenerateOptions:
         return asked
     return replace(
         asked,
-        temperature=0.6,
-        top_p=0.95,
-        top_k=20,
-        min_p=0.05,
-        presence_penalty=1.5,
-        frequency_penalty=0.2,
+        sampling=Sampling(
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.05,
+            presence_penalty=1.5,
+            frequency_penalty=0.2,
+        ),
     )
 
 

@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, get_args
 
 import pytest
+from pydantic import ValidationError
 
 from ph.cordis import Context, running
 from ph.json import JsonObject
@@ -25,11 +26,15 @@ from ph.llm.adapter import apply as llm_apply
 from ph.llm.types import (
     BlockEnd,
     BlockStart,
+    CallSetting,
     Finish,
     FinishReason,
     GenerateOptions,
+    LlmCallConfig,
     LlmFailure,
     ReasoningDelta,
+    Sampling,
+    SamplingSetting,
     StreamChunk,
     TextBlock,
     TextDelta,
@@ -388,19 +393,58 @@ async def test_a_setting_the_route_cannot_carry_is_dropped_with_one_warning(
                 provider=provider,
                 model="m",
                 messages=(user_text("hi"),),
-                temperature=0.6,
-                top_p=0.9,
-                top_k=20,
+                sampling=Sampling(temperature=0.6, top_p=0.9, top_k=20),
             )
             async for _chunk in await runtime.stream(options):
                 pass
 
-    assert [(one.temperature, one.top_p, one.top_k) for one in sent["strict"]] == [
-        (0.6, 0.9, None)
-    ] * 2
-    assert sent["unsaid"][0].top_k == 20, "a route that said nothing lost a setting"
+    assert [one.sampling for one in sent["strict"]] == [Sampling(temperature=0.6, top_p=0.9)] * 2
+    assert sent["unsaid"][0].sampling.top_k == 20, "a route that said nothing lost a setting"
     warned = [
         record.getMessage() for record in caplog.records if "does not take" in record.getMessage()
     ]
     assert len(warned) == 1 and "strict/m does not take topK" in warned[0], warned
     await root.dispose()
+
+
+def test_each_sampling_field_is_spelled_as_its_setting() -> None:
+    """`Sampling.settings` names each setting by its field's alias, which has to be the
+    `SamplingSetting` a route, a warning and `phern doctor` spell it as. Sabotage: add a
+    field without its setting, or a setting without its field."""
+    aliases = {field.alias for field in Sampling.model_fields.values()}
+
+    assert aliases == set(get_args(SamplingSetting))
+
+
+def test_sampling_is_one_value_on_the_wire_and_absent_when_unset() -> None:
+    """A call config that sets no sampling is written as it was before there was a
+    `sampling`; one that sets some nests it, and a format-3 header's flat setting is
+    refused rather than dropped. Sabotage: drop `exclude_if` from the field."""
+    unset = LlmCallConfig(provider="p", model="m")
+    tuned = LlmCallConfig(provider="p", model="m", sampling=Sampling(top_p=0.8))
+
+    assert unset.to_wire() == {"provider": "p", "model": "m"}
+    assert tuned.to_wire()["sampling"] == {"topP": 0.8}
+    assert LlmCallConfig.model_validate(tuned.to_wire()) == tuned
+    with pytest.raises(ValidationError, match="topP"):
+        LlmCallConfig.model_validate({"provider": "p", "model": "m", "topP": 0.8})
+
+
+def test_what_a_header_withholds_is_asked_for_again_whole() -> None:
+    """`LlmCallConfig.asking` undoes `without`: what a route could not carry, a sampling
+    setting or a reasoning effort, is asked for again on the next request, so a route
+    that comes to carry it sends it. The pair is the one place a `CallSetting` is split
+    into `sampling`'s and the config's own. Sabotage: leave the effort, or the sampling,
+    out of `asking`."""
+    config = LlmCallConfig(
+        provider="p",
+        model="m",
+        reasoning_effort="high",
+        sampling=Sampling(temperature=0.6, top_k=20),
+    )
+    withheld: dict[CallSetting, float | int | str] = {"topK": 20, "reasoningEffort": "high"}
+
+    sent = config.without(withheld)
+
+    assert sent == LlmCallConfig(provider="p", model="m", sampling=Sampling(temperature=0.6))
+    assert sent.asking(withheld) == config

@@ -77,7 +77,6 @@ from ..llm.types import (
     ToolCallBlock,
     create_assistant_message,
     create_user_message,
-    sampling_fields,
 )
 from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
@@ -696,7 +695,7 @@ class ReactLoopAgent:
             system=header.system,
             tools=tuple(header.tools or ()),
             effort_fields=None if effort is None else efforts.get(effort),
-            **sampling_fields(header.config),
+            sampling=header.config.sampling,
             max_tokens=header.config.max_tokens,
             stop=tuple(header.config.stop or ()),
             session_id=session.id,
@@ -709,12 +708,7 @@ def _request_proposal(header: EpochHeader) -> LlmCallConfig:
     setting is its answer at the time, so a profile that learns to carry one sends it
     without a person setting it twice.
     """
-    if not header.withheld:
-        return header.config
-    data = header.config.model_dump(by_alias=True, exclude_none=True)
-    for setting, value in header.withheld.items():
-        data[setting] = value
-    return LlmCallConfig.model_validate(data)
+    return header.config.asking(header.withheld) if header.withheld else header.config
 
 
 def _last_turn_of(session: Session) -> int:

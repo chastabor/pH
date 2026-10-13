@@ -19,6 +19,7 @@ import pytest
 from rlm_fixtures import (
     MESSAGING_ROW,
     PROVIDER_ROW,
+    ModelGate,
     MountedRuntime,
     logs_after_a_crash,
     reply_to_parent,
@@ -489,8 +490,14 @@ async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime
     assert ctx.require(AGENTS).get(run.session_id) is None
 
 
-async def test_a_send_outside_the_family_is_refused_by_a_guard(family_ctx: MountedRuntime) -> None:
-    """C7: the guard is deny-only and runs last, so nothing re-permits it."""
+async def test_a_send_outside_the_family_is_refused_by_a_guard(
+    family_ctx: MountedRuntime, gate: ModelGate
+) -> None:
+    """C7: the guard is deny-only and runs last, so nothing re-permits it.
+
+    The child is held at its model call while its own child is spawned. Left to run,
+    the fake model let it finish its turn and be released mid-spawn, and the spawn was
+    refused because its parent had gone."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
@@ -680,11 +687,16 @@ def test_what_counts_as_a_reply_to_the_parent(
 # ------------------------------------------------------------------ observe --
 
 
-async def test_observe_is_bounded_by_the_same_reach_rule(family_ctx: MountedRuntime) -> None:
+async def test_observe_is_bounded_by_the_same_reach_rule(
+    family_ctx: MountedRuntime, gate: ModelGate
+) -> None:
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
+    # Held while its own child is spawned under it, which a child that had finished
+    # and been released would refuse; let go once both exist.
     grandchild = await _spawn(ctx, child, "recon")
+    gate.release_all()
     await settle_background(ctx)
 
     seen = await run_tool(

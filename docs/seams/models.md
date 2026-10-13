@@ -16,10 +16,19 @@ nowhere a profile could say. The row lists them by key:
       fast: {provider: anthropic, model: claude-haiku-4-5-20251001}
 ```
 
-Each route may carry `reasoningEffort`, its `efforts`, `maxTokens` and the sampling settings model
-makers recommend (`temperature`, `topP`, `topK`, `minP`, `presencePenalty`,
-`frequencyPenalty`), which a root started on it gets as its agent settings, and so does a child an agent starts
-on it, by key or as the whole route (`child_options`), rather than its parent's. A
+Each route may carry `reasoningEffort`, its `efforts`, `maxTokens` and, under `sampling`, the
+settings model makers recommend (`temperature`, `topP`, `topK`, `minP`,
+`presencePenalty`, `frequencyPenalty`):
+
+```yaml
+      local: {provider: llama, model: qwen, sampling: {temperature: 0.7, topP: 0.8, topK: 20}}
+```
+
+A root started on a route gets these as its agent settings, and so does a child an agent
+starts on it, by key or as the whole route (`child_options`), rather than its parent's.
+`sampling` is one value (`Sampling`) every layer carries whole: the agent's options, the
+call config each `request/header` records, and the request. Before session format 4 the
+six settings sat flat on the route and the header; a format-3 log is refused. A
 child whose skill names a key this mount cannot run falls back to its parent's route
 and says so (`ModelFallback`, in [subagents](subagents.md)), and a readmitted child
 resolves its route again against the list as it is then, falling back the same way

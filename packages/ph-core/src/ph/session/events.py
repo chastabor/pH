@@ -38,7 +38,7 @@ __all__ = [
     "now_ms",
 ]
 
-SESSION_FORMAT_VERSION = 3
+SESSION_FORMAT_VERSION = 4
 """The on-disk format version, stamped into every header and checked on load.
 
 A single monotonic integer with no major/minor split. Bump exactly when an older
@@ -69,6 +69,12 @@ records are in the sub-agent's own log, and a parent's log holds none;
 format-2 reader would read a child's `subagent/admitted` as the child having admitted
 a child of its own, and a format-2 root's children as records this build no longer
 reads, so a format-2 log is refused, not migrated.
+
+**4 (0.9.0): a request header's sampling is one value.** `LlmCallConfig` carries the
+six sampling settings as `sampling: {temperature, topP, ...}` rather than six fields
+beside `model`, as a route now sets them (`Sampling`). Each side refuses the other's
+header as having fields it does not know, so a format-3 log is refused here by name
+rather than at its first `request/header`.
 """
 
 SURFACE_EVENT_TYPES: frozenset[str] = frozenset(

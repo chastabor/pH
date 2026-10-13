@@ -13,11 +13,11 @@ a listener's signature *is* the contract: the limits and permissions plugins
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 from ..cancel import Cancellation
-from ..llm.types import LlmCallConfig, LlmFailure, Message, sampling_fields
+from ..llm.types import LlmCallConfig, LlmFailure, Message, Sampling
 from ..wire import WireDataclass
 
 if TYPE_CHECKING:
@@ -244,12 +244,7 @@ class AgentOptions:
     provider: str = ""
     model: str = ""
     max_tokens: int | None = None
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
+    sampling: Sampling = field(default_factory=Sampling)
     reasoning_effort: str | None = None
     model_key: str = ""
     """The session's name for this route (`ph.seams.models`), `""` for one it does not
@@ -261,6 +256,6 @@ class AgentOptions:
             provider=self.provider,
             model=self.model,
             reasoning_effort=self.reasoning_effort,
-            **sampling_fields(self),
+            sampling=self.sampling,
             max_tokens=self.max_tokens,
         )

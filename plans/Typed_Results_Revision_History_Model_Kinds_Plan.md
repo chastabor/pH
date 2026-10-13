@@ -400,6 +400,14 @@ two of them as proposed, and Charles settled the third.
   layer copies them as it does `temperature` (`ModelEntry.options`, `seed_config`,
   `_build_request`, compaction's `_replay`); `sampling_of` reads them by the name a
   route spells (`SamplingSetting`).
+  - *Since consolidated (2026-10-13):* the six are one value, `Sampling`, which each
+    layer carries whole as `sampling` and which holds the rules over them
+    (`settings`, `uncarried`, `without`, `on_wire`). The drop rule the seam wrote twice,
+    for the logged header and for a request reaching it another way, is
+    `Sampling.without` for both. `Sampled`, `SamplingFields`, `FIELD_OF` and the free
+    functions are gone. On the wire it nests (`sampling: {temperature, topP}`), and an
+    unset one is absent, so a route or header that sets none is written as before; the
+    session format is 4, and a format-3 log is refused.
 - `ResolvedModel.sampling` says what a route's API takes; `resolved()` requires it.
   OpenAI-compatible: `temperature`, `topP` and the penalties, plus `topK` and `minP`
   where a profile lists them in `samplingExtras` (the shipped `llama.yaml` does);
@@ -458,7 +466,10 @@ two of them as proposed, and Charles settled the third.
 - `ph.llm.adapter.resolved()` requires `sampling`, so an adapter outside this repository
   that calls it must say what its wire takes.
 - `ModelRoute`, `AgentOptions`, `LlmCallConfig` and `GenerateOptions` gain five optional
-  fields; a header with none set is written as before.
+  fields; a header with none set is written as before. *Then (2026-10-13)* one
+  `sampling` field instead: a route's sampling moves under `sampling:` in its YAML, a
+  flat `temperature` on a route is refused, and every log from before is refused as
+  format 3. Code building these types passes `sampling=Sampling(...)`.
 - A route on the OpenAI wire sends `top_k` and `min_p` only where its profile lists them
   in `samplingExtras`; the shipped `llama.yaml` does, and a person's own overlay of a
   llama.cpp or vLLM route has to add them.

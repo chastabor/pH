@@ -65,13 +65,7 @@ from ..cordis import (
     plugin,
 )
 from ..keys import LLM, MODELS, MOUNT
-from ..llm.types import (
-    DEFAULT_EFFORT,
-    EffortFields,
-    sampling_fields,
-    uncarried,
-    unmapped_effort,
-)
+from ..llm.types import DEFAULT_EFFORT, EffortFields, Sampling, unmapped_effort
 from ..session import Session
 from ..session_profile import OverrideSource, override
 from ..wire import WireModel
@@ -142,10 +136,10 @@ class UnrunnableChoice(ModelChoiceError):
 class ModelRoute(WireModel):
     """One route: the provider that serves it, the model, and its call settings.
 
-    The sampling settings (`temperature` to `frequency_penalty`) are what a model maker
-    recommends, kept beside the model they were tuned for. Each is sent where the
-    route's API takes it and dropped with a warning where it does not
-    (`ResolvedModel.sampling`); unset is unsent, so the server's own flags decide.
+    `sampling` is what a model maker recommends, kept beside the model it was tuned for:
+    `sampling: {temperature: 0.7, topP: 0.8}`. Each setting is sent where the route's
+    API takes it and dropped with a warning where it does not (`ResolvedModel.sampling`);
+    unset is unsent, so the server's own flags decide.
     """
 
     provider: str = Field(min_length=1)
@@ -169,12 +163,7 @@ class ModelRoute(WireModel):
     wire form is as it was.
 
     `dict[str, Any]` rather than `JsonObject`, which pydantic cannot build (`ph.json`)."""
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
+    sampling: Sampling = Field(default_factory=Sampling, exclude_if=Sampling.is_empty)
     max_tokens: int | None = None
 
     @property
@@ -328,7 +317,7 @@ class ModelEntry(WireModel):
             provider=route.provider,
             model=route.model,
             max_tokens=route.max_tokens,
-            **sampling_fields(route),
+            sampling=route.sampling,
             reasoning_effort=route.reasoning_effort,
             model_key=self.key,
         )
@@ -509,13 +498,13 @@ def narrows(mounted: Config, asked: Config, _reach: ChildReach) -> ChildLimit:
 def dropped_settings(ctx: Context, models: ModelList) -> list[tuple[str, str]]:
     """`phern doctor`'s rows for each listed route that sets what it cannot send, which
     every request on it goes without, with a warning: a sampling setting its API does
-    not take (A1, `uncarried`), where its adapter has said what it takes, and a
+    not take (A1, `Sampling.uncarried`), where its adapter has said what it takes, and a
     reasoning effort its `efforts` do not define (`unmapped_effort`)."""
     llm = ctx.get(LLM)
     rows: list[tuple[str, str]] = []
     for key, route in models.routes.items():
         carried = llm.resolve_model(route.provider, route.model).sampling if llm else None
-        if carried is not None and (dropped := uncarried(route, carried)):
+        if carried is not None and (dropped := route.sampling.uncarried(carried)):
             takes = ", ".join(sorted(carried)) or "none"
             rows.append((key, f"{', '.join(dropped)} dropped: {route.label} takes {takes}"))
         effort, efforts = route.reasoning_effort, route.efforts or {}

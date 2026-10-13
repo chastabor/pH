@@ -21,7 +21,7 @@ from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
 from ph.json import JsonValue, as_obj, as_seq, as_str
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SKILLS, SUBAGENTS, TOOLS
-from ph.llm.types import Message, text_of
+from ph.llm.types import Message, Sampling, text_of
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
@@ -264,7 +264,9 @@ async def test_a_readmitted_child_resolves_what_its_spawn_named_as_its_list_is_n
     comes back on `fake-7` at 0.2.
     """
     ctx = await mount(
-        models_overlay(careful={"provider": "fake", "model": "fake-8", "temperature": 0.5})
+        models_overlay(
+            careful={"provider": "fake", "model": "fake-8", "sampling": {"temperature": 0.5}}
+        )
     )
     provider = _Readmitting(StubSubagentProvider(root=ctx))
     ctx.require(SUBAGENTS).register_provider("stub", provider)
@@ -275,7 +277,7 @@ async def test_a_readmitted_child_resolves_what_its_spawn_named_as_its_list_is_n
         "choice": {"key": "careful"},
         "reasoningEffort": "high",
         "modelKey": "careful",
-        "route": {"provider": "fake", "model": "fake-7", "temperature": 0.2},
+        "route": {"provider": "fake", "model": "fake-7", "sampling": {"temperature": 0.2}},
     }
     await _from_an_earlier_process(ctx, parent.session, admission=admission)
 
@@ -285,7 +287,7 @@ async def test_a_readmitted_child_resolves_what_its_spawn_named_as_its_list_is_n
     assert child_options(request) == AgentOptions(
         provider="fake",
         model="fake-8",
-        temperature=0.5,
+        sampling=Sampling(temperature=0.5),
         reasoning_effort="high",
         model_key="careful",
     )

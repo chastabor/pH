@@ -7,7 +7,7 @@ has an assertion here, and they are **relationships rather than digits**.
 
 Absolute token counts move with the length of the temporary directory — the
 workspace path is rendered into the session context snapshot, so it is part of
-what the model reads and therefore part of the count. Asserting 143,268 would
+what the model reads and therefore part of the count. Asserting 144,294 would
 make the guard fail on a machine with a longer `TMPDIR`, which is a property of
 the runner and not of pH. The committed `prefix_bench.json` records the run the
 report's table was rendered from; its *shape* is checked here so the record
@@ -107,7 +107,7 @@ def test_the_window_does_not_change_an_unstabilized_run(
 
     Both `rlm` rows are byte-identical measurements. An unstabilized profile has
     no mechanism that consults the context window, so a session that outgrows it
-    simply keeps growing — which is what the 8 192 row is: 143 268 tokens sent
+    simply keeps growing — which is what the 8 192 row is: 144 294 tokens sent
     against an 8 192-token budget.
     """
     wide, narrow = _row(measured, "rlm", 200_000), _row(measured, "rlm", 8_192)

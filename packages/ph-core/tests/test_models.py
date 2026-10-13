@@ -16,6 +16,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, ProfileDocument, load_profile_documents
 from ph.keys import DIAGNOSTICS, LLM_FAKE, MODELS
 from ph.llm.adapter import ResolvedModel
+from ph.llm.types import Sampling
 from ph.seams.models import (
     MODEL_KINDS,
     Config,
@@ -178,7 +179,7 @@ async def test_doctor_names_a_setting_a_route_cannot_carry(mount: MountProfile) 
     """A1: a route that sets a sampling setting its API does not take works, and `phern
     doctor` says which it drops, so the person learns before reading a warning in a
     log. Sabotage: leave the section out, or name a setting the route carries."""
-    route = {"provider": "fake", "model": "fake-1", "temperature": 0.6, "topK": 20}
+    route = {"provider": "fake", "model": "fake-1", "sampling": {"temperature": 0.6, "topK": 20}}
     ctx = await mount(models_overlay(main=route))
     ctx.require(LLM_FAKE).route = ResolvedModel(sampling=frozenset({"temperature"}))
 
@@ -186,7 +187,7 @@ async def test_doctor_names_a_setting_a_route_cannot_carry(mount: MountProfile) 
 
     assert report["Model settings"] == [("main", "topK dropped: fake/fake-1 takes temperature")]
     entry = ctx.require(MODELS).entry("main", ModelRoute.model_validate(route))
-    assert (entry.options().temperature, entry.options().top_k) == (0.6, 20)
+    assert entry.options().sampling == Sampling(temperature=0.6, top_k=20)
 
 
 async def test_doctor_names_an_effort_a_route_does_not_define(mount: MountProfile) -> None:

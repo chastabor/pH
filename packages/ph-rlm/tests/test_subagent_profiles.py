@@ -36,6 +36,7 @@ from ph.keys import (
 )
 from ph.llm.adapter import ResolvedModel
 from ph.llm.fake import FakeAdapter
+from ph.llm.types import Sampling
 from ph.paths import canonical
 from ph.seams.models import ModelChoice, choose
 from ph.seams.sandbox import SandboxPolicy, allowed_paths_of
@@ -130,14 +131,14 @@ TUNED: JsonObject = {
             "main": {
                 "provider": "fake",
                 "model": "fake-1",
-                "temperature": 0.9,
+                "sampling": {"temperature": 0.9},
                 "maxTokens": 64,
                 "reasoningEffort": "low",
             },
             "careful": {
                 "provider": "fake",
                 "model": "fake-7",
-                "temperature": 0.2,
+                "sampling": {"temperature": 0.2},
                 "maxTokens": 777,
                 "reasoningEffort": "high",
             },
@@ -169,7 +170,8 @@ async def test_a_child_on_a_listed_route_runs_with_that_route_s_settings(
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == choose(ctx, ModelChoice(key="careful")).options()
     route = as_obj(_admitted(ctx, parent)["route"])
-    assert (route["model"], route["temperature"], route["maxTokens"]) == ("fake-7", 0.2, 777)
+    sampling = as_obj(route["sampling"])
+    assert (route["model"], sampling["temperature"], route["maxTokens"]) == ("fake-7", 0.2, 777)
 
 
 async def test_a_listed_route_that_sets_nothing_takes_nothing_from_the_parent(
@@ -246,7 +248,7 @@ async def test_a_whole_route_the_list_does_not_hold_takes_nothing_from_the_paren
 
     child = not_none(ctx.require(AGENTS).get(run.session_id))
     assert child.options == choose(ctx, unlisted).options()
-    assert (child.options.temperature, child.options.model_key) == (None, "")
+    assert (child.options.sampling, child.options.model_key) == (Sampling(), "")
 
 
 async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(

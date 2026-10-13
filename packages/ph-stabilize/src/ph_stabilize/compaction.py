@@ -102,7 +102,6 @@ from ph.llm.types import (
     ToolResultBlock,
     create_message,
     create_user_message,
-    sampling_fields,
     text_of,
 )
 from ph.seams.compaction import CompactionError, CompactionResult, CompactionTrigger
@@ -1142,7 +1141,7 @@ class SummarizeEngine:
             messages=(*plan.messages, _instruction_message(instruction)),
             system=header.system,
             tools=tuple(header.tools or ()),
-            **sampling_fields(header.config),
+            sampling=header.config.sampling,
             stop=tuple(header.config.stop or ()),
             max_tokens=self.config.max_tokens,
             session_id=session.id,

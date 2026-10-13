@@ -59,7 +59,6 @@ from ph.llm.types import (
     is_error_finish,
     text_of,
     wire_effort,
-    wire_sampling,
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.uploads import FileHandle
@@ -409,7 +408,7 @@ class OpenAiCompatibleAdapter:
                 for tool in options.tools
             ]
         body.update(
-            wire_sampling(options, {setting: SAMPLING_WIRE[setting] for setting in self.sampling})
+            options.sampling.on_wire({setting: SAMPLING_WIRE[setting] for setting in self.sampling})
         )
         max_tokens = options.max_tokens or self.profile.default_max_tokens
         if max_tokens is not None:

@@ -52,6 +52,7 @@ from local_server import LIVE, TEMPERATURE, answer_of, get_json, server_props, s
 from ph.agent.types import AgentOptions
 from ph.json import as_int, as_obj
 from ph.keys import AGENTS, LLM, SESSIONS
+from ph.llm.types import Sampling
 from ph.session import Session
 from ph.testing import MountProfile
 from ph_app.attach import ingest, prompt_message
@@ -89,7 +90,9 @@ def _options(model: str) -> AgentOptions:
     would be a test of that model's instruction following. The vision test is
     the one exception and says why.
     """
-    return AgentOptions(provider="llama", model=model, max_tokens=BUDGET, temperature=TEMPERATURE)
+    return AgentOptions(
+        provider="llama", model=model, max_tokens=BUDGET, sampling=Sampling(temperature=TEMPERATURE)
+    )
 
 
 def _usage(session: Session) -> list[dict[str, Any]]:

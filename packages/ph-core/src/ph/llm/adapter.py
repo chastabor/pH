@@ -15,25 +15,22 @@ sees it, so a consumer never handles two shapes for the same failure.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable, Collection, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from ..cordis import Context, Running, events, plugin, running
 from ..keys import LLM
 from .types import (
-    FIELD_OF,
     CallSetting,
     Finish,
     FinishReason,
     GenerateOptions,
     LlmCallConfig,
     LlmFailure,
+    Sampling,
     SamplingSetting,
     StreamChunk,
-    sampling_fields,
-    sampling_of,
-    uncarried,
     unmapped_effort,
 )
 
@@ -334,7 +331,7 @@ class LlmRuntime:
         self, config: LlmCallConfig, route: ResolvedModel, efforts: Collection[str]
     ) -> tuple[LlmCallConfig, dict[CallSetting, float | int | str]]:
         """`config` as `route` can carry it, and what it withholds, by the values asked:
-        a sampling setting its API does not take (`uncarried`), and a reasoning effort
+        a sampling setting its API does not take (`Sampling.uncarried`), and a reasoning effort
         its profile's `efforts` do not define (`unmapped_effort`). Each with a warning the
         first time, since someone asked for it.
 
@@ -344,10 +341,10 @@ class LlmRuntime:
         (`_carried`), and sends an effort only as the `effort_fields` it is given."""
         withheld: dict[CallSetting, float | int | str] = {}
         if route.sampling is not None:
-            asked = sampling_of(config)
-            for setting in uncarried(config, route.sampling):
-                withheld[setting] = asked[setting]
-                self._uncarried(config.provider, config.model, setting, route.sampling)
+            dropped = self._uncarried(
+                config.provider, config.model, config.sampling, route.sampling
+            )
+            withheld.update(dropped.items())
         effort = config.reasoning_effort
         if unmapped_effort(effort, efforts):
             withheld["reasoningEffort"] = effort
@@ -359,35 +356,38 @@ class LlmRuntime:
                 config.model,
                 ", ".join(efforts) or "none",
             )
-        return (_without(config, withheld) if withheld else config), withheld
+        return (config.without(withheld) if withheld else config), withheld
 
     def _carried(self, request: GenerateOptions) -> GenerateOptions:
         """`request` as its route can carry it: a sampling setting its API does not take
         is dropped, with a warning the first time (`ResolvedModel.sampling`)."""
-        if not sampling_of(request):
+        if request.sampling.is_empty():
             return request
         carried = self.resolve_model(request.provider, request.model).sampling
         if carried is None:
             return request
-        request, dropped = _carried_by(request, carried)
-        for setting in dropped:
-            self._uncarried(request.provider, request.model, setting, carried)
-        return request
+        dropped = self._uncarried(request.provider, request.model, request.sampling, carried)
+        return replace(request, sampling=request.sampling.without(dropped)) if dropped else request
 
     def _uncarried(
         self,
         provider: str,
         model: str,
-        setting: SamplingSetting,
+        sampling: Sampling,
         carried: frozenset[SamplingSetting],
-    ) -> None:
-        self._warn_once(
-            "ph.llm: %s/%s does not take %s, so it is not sent; it takes %s",
-            provider,
-            model,
-            setting,
-            ", ".join(sorted(carried)) or "none",
-        )
+    ) -> dict[SamplingSetting, float | int]:
+        """What of `sampling` a route carrying `carried` cannot send, by the value asked,
+        each warned about the first time: both drop paths' one step."""
+        dropped = sampling.uncarried(carried)
+        for setting in dropped:
+            self._warn_once(
+                "ph.llm: %s/%s does not take %s, so it is not sent; it takes %s",
+                provider,
+                model,
+                setting,
+                ", ".join(sorted(carried)) or "none",
+            )
+        return dropped
 
     def _warn_once(self, message: str, *args: object) -> None:
         said = message % args
@@ -411,27 +411,6 @@ class LlmRuntime:
             return _normalized(handle.adapter.stream(request), request, handle.by)
 
         return await self.ctx.waterfall("llm/stream", options, inner=inner)
-
-
-def _carried_by(
-    request: GenerateOptions, carried: frozenset[SamplingSetting]
-) -> tuple[GenerateOptions, list[SamplingSetting]]:
-    """`request` without the sampling settings its route does not take, and which."""
-    dropped = uncarried(request, carried)
-    if not dropped:
-        return request, dropped
-    fields = sampling_fields(request)
-    for setting in dropped:
-        fields[FIELD_OF[setting]] = None
-    return replace(request, **fields), dropped
-
-
-def _without(config: LlmCallConfig, withheld: Iterable[CallSetting]) -> LlmCallConfig:
-    """`config` without the settings `withheld`, which `CallSetting` names by alias."""
-    data = config.model_dump(by_alias=True)
-    for setting in withheld:
-        data[setting] = None
-    return LlmCallConfig.model_validate(data)
 
 
 async def _normalized(

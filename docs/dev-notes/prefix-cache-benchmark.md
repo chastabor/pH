@@ -6,7 +6,7 @@ system prompt is byte-identical and that each request extends the last — but i
 puts no number on what that is worth, and no number on what `stabilize` costs
 or saves. This is that measurement.
 
-**Headline: under context pressure, stabilization cuts tokens sent by 88 % and
+**Headline: under context pressure, stabilization cuts tokens sent by 87 % and
 keeps the prefix cache, so what a provider bills falls by as much.** The pressure
 in this workload is one cell result a turn larger than the window, and
 `compaction-summarize` clips each one before the request that would carry it.
@@ -20,10 +20,10 @@ what changed, and when that trade still applies.
 
 | context window | profile | requests | tokens/turn | sent | cacheable | uncached |
 | --- | --- | --- | --- | --- | --- | --- |
-| 200,000 | `rlm` | 6 | 23,878 | 143,268 | 75.0% | 35,868 |
-| 200,000 | `rlm-stable` | 6 | 24,279 | 145,674 | 75.1% | 36,270 |
-| 8,192 | `rlm` | 6 | 23,878 | 143,268 | 75.0% | 35,868 |
-| 8,192 | `rlm-stable` | 6 | 2,846 | 17,074 | 75.9% | 4,120 |
+| 200,000 | `rlm` | 6 | 24,049 | 144,294 | 75.0% | 36,039 |
+| 200,000 | `rlm-stable` | 6 | 24,450 | 146,700 | 75.2% | 36,441 |
+| 8,192 | `rlm` | 6 | 24,049 | 144,294 | 75.0% | 36,039 |
+| 8,192 | `rlm-stable` | 6 | 3,017 | 18,100 | 76.3% | 4,291 |
 
 *cacheable* is the share of everything sent that a provider could serve from the
 previous request's prefix: the longest common run of messages, and only when the
@@ -68,7 +68,7 @@ rewritten, so a provider re-reads only what the turn added, and the hit rate is
 
 The two `rlm` rows are identical measurements. An unstabilized profile has no
 mechanism that reacts to the budget, so a session that outgrows it simply keeps
-growing: the 8 192 row sends 143 268 tokens against an 8 192-token window, and
+growing: the 8 192 row sends 144 294 tokens against an 8 192-token window, and
 against a real provider the last four requests would be refused outright. That
 is the gap `stabilize` exists to close, and it is worth seeing as a number
 rather than as a design intention.
@@ -112,7 +112,7 @@ Each turn's cell result, about 16 600 tokens, is larger than the 8 192 window by
 itself. At the next step's start `compaction-summarize` sees that the request
 carrying it would fill the whole window, and clips it first: the result is spilled
 to a file and replaced by a pointer before it is ever sent. Tokens per turn fall by
-88 % (23 878 → 2 846), and the hit rate does not fall at all (75.9 %), because
+87 % (24 049 → 3 017), and the hit rate does not fall at all (76.3 %), because
 nothing that was already sent is rewritten: each request still extends the last.
 
 Before that check (2026-10-12), the request went out over the window, and a summary
@@ -126,8 +126,8 @@ the clip three turns fit.
 
 ## Finding 6 — the saving reaches the bill
 
-Uncached tokens: **35 868, 36 270, 35 868** for the three rows the clip leaves
-alone, a spread of 1.1 %, and **4 120** for `rlm-stable` at 8 192. Because the clip
+Uncached tokens: **36 039, 36 441, 36 039** for the three rows the clip leaves
+alone, a spread of 1.1 %, and **4 291** for `rlm-stable` at 8 192. Because the clip
 keeps the prefix, the tokens it saves are ones a provider would have billed at full
 rate, not ones its cache would have served. (The summarizing run before it saved
 almost only cached tokens: its four rows were within 1.8 % of each other.)
@@ -171,5 +171,5 @@ The table above is rendered from `tests/prefix_bench.json`, the run it records.
 The tests assert the findings as **relationships rather than digits**: absolute
 counts move with the length of the temporary directory, because the workspace
 path is rendered into the session context snapshot and is therefore part of what
-the model reads. A guard on 143 268 would fail on a machine with a longer
+the model reads. A guard on 144 294 would fail on a machine with a longer
 `TMPDIR`, which is a property of the runner and not of pH.

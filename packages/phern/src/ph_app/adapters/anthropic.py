@@ -61,7 +61,6 @@ from ph.llm.types import (
     UsageChunk,
     is_error_finish,
     wire_effort,
-    wire_sampling,
 )
 from ph.seams.uploads import FileHandle
 from ph.session import now_ms
@@ -371,7 +370,7 @@ class AnthropicAdapter:
                 # not.
                 tools[-1]["cache_control"] = _breakpoint()
             body["tools"] = tools
-        body.update(wire_sampling(options, SAMPLING_WIRE))
+        body.update(options.sampling.on_wire(SAMPLING_WIRE))
         if options.stop:
             body["stop_sequences"] = list(options.stop)
         wire_effort(body, options)
