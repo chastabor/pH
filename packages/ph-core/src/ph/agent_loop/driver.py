@@ -199,6 +199,13 @@ class ReactLoopAgent:
             wakeup and self._phase.kind != "idle" and self._phase.canceled is not None
         )
         self.inbox.append("next-turn" if waking_after_abort else target, message)
+        if wakeup:
+            # The wake the table in `ph.agent.inbox` promises, said out loud. This
+            # loop runs only when something calls `run()`, so the host that holds
+            # it — a daemon's root task, an rpc server between prompts — is what
+            # hears this and runs it. Said after the append, so a listener that
+            # runs the agent at once finds the message pending.
+            self.ctx.emit("agent/woken", self)
 
     def followup(self, message: Message) -> None:
         """Deliver at the next turn boundary and wake the agent."""

@@ -30,13 +30,22 @@ from .repair import (
     interrupted_turn_closers,
     repaired,
 )
-from .resume import Resumption, resume_session, resumption_of, resumptions
+from .resume import (
+    CutTurnOwner,
+    Resumption,
+    cut_short_note,
+    cut_turn_owner,
+    resume_session,
+    resumption_of,
+    resumptions,
+)
 
 __all__ = [
     "MAX_DEPTH",
     "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN",
     "ClaimingStore",
+    "CutTurnOwner",
     "JsonlArchive",
     "JsonlSessionStore",
     "LineageError",
@@ -48,6 +57,8 @@ __all__ = [
     "UndeclaredIntentError",
     "append_records",
     "claim_session",
+    "cut_short_note",
+    "cut_turn_owner",
     "interrupted_turn_closers",
     "lineage_faults",
     "materialize",

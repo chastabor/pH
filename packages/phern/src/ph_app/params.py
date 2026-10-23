@@ -276,3 +276,15 @@ class ProbeParams(WireModel):
     """`daemon/probe` (P13-12): which of the three questions to answer."""
 
     name: ProbeName
+
+
+class ResumeParams(WireModel):
+    """`sessions/resume` (P13-03): which stored roots to mount again.
+
+    `sessions` names them; `all_owed` is every root the live-roots index says owes
+    work and this daemon does not hold. A root whose ladder is spent is skipped
+    unless `force`, since mounting it would be one more attempt per restart."""
+
+    sessions: list[str] = Field(default_factory=list)
+    all_owed: bool = False
+    force: bool = False

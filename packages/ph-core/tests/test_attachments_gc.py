@@ -229,7 +229,7 @@ async def test_a_store_that_cannot_be_listed_collects_nothing(tmp_path: Path) ->
         """A store whose listing fails. The reader is inherited and holds no logs,
         so there is nothing for the fold to find if it wrongly got that far."""
 
-        def stored(self, *, limit: int = 50) -> list[StoredSession]:
+        def stored(self, *, limit: int | None = 50) -> list[StoredSession]:
             raise OSError("no store")
 
     store, _refs = await _stored(tmp_path, PNG)

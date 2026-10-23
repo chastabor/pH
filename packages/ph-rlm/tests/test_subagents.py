@@ -1406,7 +1406,7 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
         if event.type == "user/message" and TASK_PREFIX in repr(event.data)
     ]
     assert len(tasks) == 2, "the task was not presented again, so the retry answers nothing"
-    assert "the harness stopped while you were working on this" in tasks[-1]
+    assert "the harness stopped while you were working" in tasks[-1]
     assert "this is attempt 2" in tasks[-1]
 
 

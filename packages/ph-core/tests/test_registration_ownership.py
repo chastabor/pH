@@ -1516,6 +1516,7 @@ UNBOUND: dict[str, str] = {
     "InboxNotifications.claimed": "a callback back into the caller that supplied it",
     "InboxNotifications.discarded": "a callback back into the caller that supplied it",
     "InboxNotifications.inserted": "a callback back into the caller that supplied it",
+    "Ladder.spent": "a host's pure fold over a stored log's events, run by a rebuild off the loop",
     "RequestErrorAction.granted": (
         "the granting row's record of a retry the loop took; appends through its own "
         "writer and registers nothing"

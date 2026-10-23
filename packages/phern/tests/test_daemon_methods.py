@@ -138,7 +138,7 @@ def test_every_handler_answers_with_the_reply_its_verb_declares() -> None:
             f"{method} answers with {resolved} where its verb declares {row.verb.reply}"
         )
         checked += 1
-    assert checked == len(METHODS) + len(MUTATIONS) - len(projections) == 29
+    assert checked == len(METHODS) + len(MUTATIONS) - len(projections) == 30
 
 
 def test_the_one_method_with_no_reply_is_a_notify_and_not_a_verb() -> None:
@@ -193,7 +193,7 @@ def test_every_method_about_one_root_requires_its_id() -> None:
     with no id is a new session the daemon names (protocol 8)."""
     daemon_level = {"initialize", "daemon/hello", "daemon/config", "shutdown"}
     daemon_level |= {"daemon/status", "daemon/lifetime", "daemon/probe"}
-    daemon_level |= {"sessions/list", "sessions/browse", "sessions/owed"}
+    daemon_level |= {"sessions/list", "sessions/browse", "sessions/owed", "sessions/resume"}
     for method, row in {**METHODS, **MUTATIONS}.items():
         if method in daemon_level:
             assert not issubclass(row.verb.params, SessionParams), method

@@ -1,7 +1,7 @@
 # Phase 13 — Stable restart
 
-**Status:** planned 2026-10-22; wave one landed the same day (P13-01, P13-02, P13-08,
-P13-12). Fourteen rows in four waves.
+**Status:** planned 2026-10-22; waves one and two landed the same day (P13-01, P13-02,
+P13-08, P13-12; P13-03 to P13-07, P13-10). Fourteen rows in four waves.
 
 **Gate:** `ruff` + `ruff format` + `mypy` across the tree, and `./test.sh test` green,
 plus the SIGKILL gates listed under "Gates" once each wave lands.
@@ -88,8 +88,16 @@ sets it.
 | P13-02 | `sessions/owed` and `phern agents owed [--rebuild] [--check]` | `verbs.SESSIONS_OWED`, `Supervisor.owed`, `JsonlArchive` |
 | P13-08 | A failed write is an ops record, an `unwritten` list in `daemon/status`, readiness no, and exit 3 from `phern daemon` | `write_on_unwind`, `Supervisor._flush`, `cli.daemon` |
 | P13-12 | `--probe-bind host:port`, `daemon/probe`, `phern agents probe`, the heartbeat, `sd_notify` | `ph_app.daemon.probes`, `ph_app.daemon.notify`, `DaemonServer.probe` |
+| P13-03 | `sessions/resume`, `phern agents resume [IDS] [--all] [--force]`, `phern daemon --resume-owed`; readiness waits for the first pass | `Supervisor.resume_owed`, `DaemonServer.resumed`, `_resume_at_boot` |
+| P13-04 | A cut-short turn nobody will send again is continued, bounded by the root's own ladder; `--continue-interrupted` widens it to a person's | `Supervisor._continue_interrupted`, `recovery.ROOT_RESUME_LIMIT`, `interrupted_resumes` |
+| P13-05 | A waking delivery says `agent/woken`; a child's ending notice is one, and wakes an idle parent in the daemon and in rpc mode; a child the sweep gives up on tells its parent so | `ReactLoopAgent.send`, `_deliver_notice`, `SubagentService._end_child`, `RpcServer._drive` |
+| P13-06 | A root held for a credential holds its children; the key that arrives readmits them | `Supervisor._start`, `credential_supplied` |
+| P13-07 | A schedule fires through the seam's door: claim, deliver, one write, then the index, and the index only over a written log; a scheduled prompt carries the schedule's source | `ph.seams.schedule.fire_due`, `scheduled_source` |
+| P13-10 | The repair a resume wrote is flushed before any work; the turn's answer is on disk before an autonomous gate runs, by the gate's own durable record | `Supervisor._start`, `test_goals` |
 
-Tests: `packages/ph-core/tests/test_live_index.py`, `packages/phern/tests/test_daemon_live.py`.
+Tests: `packages/ph-core/tests/test_live_index.py`, `packages/phern/tests/test_daemon_live.py`,
+`packages/phern/tests/test_daemon_resume.py`, and the rows added to `test_child_logs.py`,
+`test_schedule.py`, `test_goals.py` and `test_modes.py`.
 
 ---
 
@@ -111,6 +119,16 @@ until the next barrier. So `owed` hands the rebuild its own entries for mounted 
 — nothing mounted, so the store is a guess — is not repeated by every unasked
 `owed`, the schedule index's `_tried` rule.
 
+**The two indexes share one file format.** `ph.seams._json_index.JsonIndex` holds the
+reading, the version check, the lock, the rewrite, the no-op-first rule and the
+rebuild merge; `ScheduleIndex` and `LiveIndex` each add their name, version and entry,
+and the schedule index keeps its claims. A format change is still not a migration:
+a file of another version reads as empty and incomplete and is rebuilt once.
+
+**A rebuild lists every stored log.** `SessionArchive.stored` takes `limit=None` for
+all of them. The listing is flat across families, so under the 500 cap sub-agent
+logs could crowd out the very root a rebuild after a crash exists to find.
+
 **The read half of the JSONL backend is its own class.** Two readers need the
 store's reads with nothing to write: the daemon rebuilding at boot with no root
 mounted, and a test reading what a run left. Both built a `JsonlSessionStore` with
@@ -124,6 +142,68 @@ is the one fold, and `Inbox.__init__` is now written in terms of it.
 **The probe accept loop ends on a closed listener, not a cancel.** Teardown closes
 the TCP listener under its `serve`, which raises `ClosedResourceError` from `accept`;
 the task treats that as the end of the job rather than letting it reach the group.
+
+**A resume is a mount, and the pass only chooses which.** `resume_owed` reads the
+owed listing and calls `start` per root; everything a resume does — the repair, the
+flush of it, the continuation, the children, the ring — is in `_start`, so a client
+attaching, a schedule waking and the resume pass cannot drift. The pass is one root at
+a time because `_mount` serializes mounts anyway, and a root that will not mount is a
+`refused` row with the reason, not a failed pass. A spent root is `spent` and left on
+disk unless forced: mounting it rings nothing, and a resumer that runs every minute
+would otherwise mount it every minute.
+
+**The driver says when it was woken.** `followup`, `steer` and `interject` carried a
+`wakeup` flag nothing in a host read; the daemon rang its own doorbell from `prompt`
+and nowhere else, so a child's ending notice — delivered by `inject`, "without
+waking" — left an idle parent "running" on a pending message forever. `send` now
+emits `agent/woken` for a waking delivery and the notice is a `steer`. The daemon's
+listener, registered as soon as the root exists, turns that into its ring, so what a
+mount itself delivers rings too; `prompt` no longer rings on its own. rpc mode
+delivers and then drives through one path (`RpcServer._drive`) that a wake takes as
+well, under a per-session lock, so a prompt arriving during a woken turn joins it
+rather than meeting "already has active work". Both hosts check the inbox before
+they drive: a ring whose message a running turn already took would open an empty
+turn.
+
+**The resume record says which turn it cut.** `session/resumed` carries `turn` when
+its repair closed one (`Resumption.turn`). `interrupted` alone also covers a repair
+that only settled an intent left open between turns, and a resumer that walked back
+to the last `turn/start` from there ran a finished turn again. Who the cut turn was
+owed to is a core fold beside the record (`cut_turn_owner`: `person` or
+`unattended`), walked back over one turn rather than the log, and the wording an
+agent is told is shared with a readmitted child (`cut_short_note`).
+
+**The root's ladder is folded from records the resume already writes.** A
+`session/resumed` that names a `turn` is a restart that cut one short, and an
+`assistant/message` forgives the restarts before it — the child's rule
+(`restarts_since_progress`) stated over the root's own log, walked back from the tail
+to the last answer. Past `ROOT_RESUME_LIMIT`
+the root is failed with the ladder's own record (`supervisor/failed`), so `status`,
+the live-roots index and `resume_owed` all read it, and a successful turn later
+clears it as it clears a crash ladder (`_drive` writes `recovered` for a failed
+ladder with no attempts too). Which turns are continued unasked: a goal open, or a
+turn owed to nobody at a keyboard — a schedule's, a child's notice, an earlier
+continuation. A scheduled prompt is therefore delivered under the schedule's
+own source (`scheduled_source`), where it used to be indistinguishable from the
+person's.
+
+**The live index's `failed` is the host's fact.** A rebuild from the logs read only
+the hold records and wrote every root back as not failed, which would have handed a
+resumer one more attempt per restart. `rebuild_live_index` requires the host's
+`Ladder` — the record types and the fold — and the daemon passes `recovery.LADDER`.
+
+**A schedule fires through the seam's door.** `fire_due` claims, delivers, writes
+the log once and then tells the index, which the supervisor used to do by hand — and
+the seam used to reindex inside `claim`, so the file could say "later" while the
+tick was still in a buffer. One write is enough: the tick precedes the prompt in the
+log, and the turn's first request is a fail-closed barrier that writes both, so no
+run bills without its tick on disk. A write that fails leaves the index where it was
+and marks the root unwritten. `docs/seams/schedule.md` has the crash table.
+
+**The repair is written before any work.** A resume that synthesized closers held
+them in the buffer until the next barrier, which a root that ran no turn never
+reached, so every boot repaired the same turn; `_start` writes the root once, right
+after the continuation or give-up is decided.
 
 ---
 
@@ -140,6 +220,31 @@ run the act twice once the in-memory key was lost.
 on disk before its write because a lost appointment is silence. A lost live entry is
 also silence, but the orchestrator has `rebuild` and the index carries `complete`;
 the mark can come later if a rebuild ever proves too slow to lean on.
+
+**The continuation is a message, not a record.** The plan had a supervisor record
+per continuation beside the ladder. The ladder folds from `session/resumed`, which is
+already written, and the continuation itself is a `user/message` tagged as the
+supervisor's, which a transcript draws as a notice naming the attempt; a third record
+would have said the same thing twice.
+
+**No barrier on turn stopping.** The plan put a flush on `agent/turn-stopping`, first
+in line, so a turn's answer was durable before the autonomous gates ran. A gate's own
+record is a durable intent (`shell/command`), written whole before the gate starts,
+which already carries the answer; the barrier was a second write on every turn for
+nothing. `test_goals` pins that the answer is on disk before a gate runs.
+
+**A scheduled prompt's source changed.** It was `{"kind": "user"}`, the person's words
+as if just typed. It is the schedule seam's plugin source now, so a resumer can tell
+it from a person's and a transcript shows which schedule sent it. A log reader that
+drew every `user/message` as the person's own words now draws a schedule's as a
+notice.
+
+**The SIGKILL gates for this wave are not yet on the restart host.** The wave's rows
+are gated in-process (`test_daemon_resume.py`): a stored log left mid-turn by one
+supervisor and mounted by the next, a notice delivered to an idle parent, a tick with
+the flush refused. `tests/mass_restart_host.py` still leaves no open goal and no
+schedule, so the three kill-shaped gates below for this wave are owed with wave
+four's.
 
 ---
 

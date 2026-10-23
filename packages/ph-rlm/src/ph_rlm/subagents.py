@@ -54,6 +54,7 @@ from ph.cordis import Context, InactiveScopeError, plugin
 from ph.json import JsonValue, dumps
 from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.types import PluginSource, create_user_message
+from ph.persistence import cut_short_note
 from ph.seams.subagents import (
     PARENT_TEARDOWN,
     SUSPENDED_DETAIL,
@@ -74,6 +75,7 @@ from ph.seams.subagents import (
     record_ended,
     record_started,
     record_waiting,
+    said_text,
     settle_value,
 )
 from ph.seams.workspace import discards_writes, project_access, workspace_survivors
@@ -582,7 +584,7 @@ class RlmChildProvider:
             elif not replied_to_parent(own):
                 notice = ChildNotice(
                     text=f"[rlm child {run.name} ({run.id}) completed without sending a "
-                    f"reply.{_said(answer)}]",
+                    f"reply.{said_text(answer)}]",
                     summary=f"{run.name} finished without replying",
                 )
             # The child's ending is on its own disk before its parent is handed the
@@ -629,7 +631,7 @@ class RlmChildProvider:
             "error",
             notice=ChildNotice(
                 text=f"[rlm child {run.name} ({run.id}) failed: {message}"
-                f"{self._evidence(child)}{_said(answer)}]",
+                f"{self._evidence(child)}{said_text(answer)}]",
                 summary=f"{run.name} failed",
             ),
             detail=message,
@@ -908,17 +910,7 @@ def _task_text(prompt: str, restarts: int) -> str:
     """
     if restarts < 1:
         return f"{TASK_PREFIX}\n\n{prompt}"
-    return (
-        f"{TASK_PREFIX}\n\n{prompt}\n\n[the harness stopped while you were working on "
-        f"this, so the turn above was cut short; this is attempt {restarts + 1}. "
-        "Anything you finished is in your transcript — continue from there rather "
-        "than starting over.]"
-    )
-
-
-def _said(answer: str) -> str:
-    """A notice's account of what a child last said, or nothing when it said nothing."""
-    return f" Last assistant text: {answer}" if answer else ""
+    return f"{TASK_PREFIX}\n\n{prompt}\n\n{cut_short_note(restarts + 1)}"
 
 
 @plugin(

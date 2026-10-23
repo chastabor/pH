@@ -51,7 +51,13 @@ from . import verbs
 from .console import TypeOption, console, detail, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import EventFrame, Followed
-from .params import CancelScheduleParams, CreateScheduleParams, OwedParams, ProbeParams
+from .params import (
+    CancelScheduleParams,
+    CreateScheduleParams,
+    OwedParams,
+    ProbeParams,
+    ResumeParams,
+)
 from .payloads import DaemonStatusReply, StatusFacts
 from .protocol import (
     Cursor,
@@ -731,6 +737,55 @@ def owed(
     console.print(f"[dim]source: {note}[/dim]")
     if check and any(not row.mounted for row in listing.sessions):
         raise typer.Exit(code=2)
+
+
+@agents_app.command()
+def resume(
+    sessions: Annotated[
+        list[str] | None,
+        typer.Argument(help="Roots to mount again; with --all, every owed root as well."),
+    ] = None,
+    all_owed: Annotated[
+        bool,
+        typer.Option("--all", help="Every root the live-roots index says owes work."),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Mount a root whose ladder is spent as well."),
+    ] = False,
+) -> None:
+    """Mount stored roots that still owe work, so each carries on without a client
+    (P13-03).
+
+    What an orchestrator runs after the daemon is up — a unit's `ExecStartPost`, a
+    person after a reboot — and the whole of a resume is the mount: the log is
+    repaired, the children are readmitted, a turn the crash cut short is continued
+    (P13-04), and a prompt nobody claimed is rung. One row per root says what became
+    of it; exit 1 if any was refused, so a unit shows the pass did not fully land.
+    """
+    named = list(sessions or [])
+    if not named and not all_owed:
+        fail("[red]name a session, or pass --all[/red]", code=2)
+    report = _ask(
+        lambda client: client.call(
+            verbs.SESSIONS_RESUME, ResumeParams(sessions=named, all_owed=all_owed, force=force)
+        )
+    )
+    if not report.sessions:
+        console.print("[dim]no root owes work[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("session")
+    table.add_column("outcome")
+    table.add_column("status")
+    table.add_column("detail")
+    for row in report.sessions:
+        table.add_row(row.session_id, row.outcome, row.status or "—", row.detail or "")
+    console.print(table)
+    if not report.trusted:
+        console.print("[yellow]the live-roots index could not vouch for itself[/yellow]")
+    if any(row.outcome == "refused" for row in report.sessions):
+        raise typer.Exit(code=1)
 
 
 @agents_app.command()

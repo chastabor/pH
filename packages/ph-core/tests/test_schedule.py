@@ -168,6 +168,30 @@ def test_the_claim_is_written_before_the_caller_can_deliver() -> None:
     assert ticks[0].data["firedAt"] == made + 90_000
 
 
+def test_a_claim_leaves_the_index_to_the_caller(tmp_path: Path) -> None:
+    """P13-07. The index used to be told at the claim, before the tick was on disk:
+    a kill between the two left the file saying "later" over a log saying "due",
+    and the run was lost. `claim` appends and returns; the caller writes the log,
+    delivers, and then `reindex`es — so the file never gets ahead of the log.
+
+    Sabotage: reindex inside `claim`, and the entry moves before the caller has
+    written anything.
+    """
+    index = _index(tmp_path)
+    service = ScheduleService(index=index)
+    session = Session("s1")
+    service.create(session, Schedule(id="a", kind="interval", spec=str(MINUTE), prompt="tick"))
+    made = service.states(session)["a"].created_at
+    before = index.read()["s1"].next_at
+
+    claimed = service.claim(session, now=made + 90_000)
+
+    assert [one.id for one in claimed] == ["a"]
+    assert index.read()["s1"].next_at == before, "the index moved before the log was written"
+    service.reindex(session, now=made + 90_000)
+    assert index.read()["s1"].next_at == made + 2 * MINUTE
+
+
 def test_an_interval_does_not_drift_when_a_tick_lands_late() -> None:
     """Due, not claimed, is what the next one counts from.
 
@@ -585,7 +609,8 @@ async def test_the_newest_change_per_session_is_the_one_that_lands(tmp_path: Pat
 
 
 def _failing_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ph.seams.schedule_index.write_atomic", raising(OSError("disk full")))
+    # Where the index file is written: the base both indexes share.
+    monkeypatch.setattr("ph.seams._json_index.write_atomic", raising(OSError("disk full")))
 
 
 def test_only_a_rebuild_writes_an_index_that_vouches_for_itself(tmp_path: Path) -> None:

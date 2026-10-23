@@ -391,7 +391,7 @@ class TursoSessionStore:
                 continue
             yield session_id, gated(events, gate)
 
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+    def stored(self, *, limit: int | None = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
 
         A directory scan, the same shape as JSONL's — which is the point of one

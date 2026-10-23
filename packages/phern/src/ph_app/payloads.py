@@ -47,6 +47,7 @@ from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
 from ph.seams.live_index import Hold as RootHold
+from ph.seams.live_index import LiveEntry
 from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
@@ -1025,6 +1026,25 @@ class OwedRoot(WireModel):
     failed: bool = False
     """Its ladder was spent: it owes work and a resumer must not loop on it."""
 
+    @classmethod
+    def of(cls, entry: LiveEntry, *, mounted: bool, status: str) -> OwedRoot:
+        """The row for one index entry, with what only the daemon knows beside it.
+
+        The one place the entry's fields are carried onto the wire, so a field added
+        to `LiveEntry` is added here once rather than at every site that lists one.
+        `family` stays off: it is where the log is filed, which a client never opens.
+        """
+        return cls(
+            session_id=entry.session_id,
+            holds=list(entry.holds),
+            updated=entry.updated,
+            cwd=entry.cwd,
+            profile=entry.profile,
+            failed=entry.failed,
+            mounted=mounted,
+            status=status,
+        )
+
 
 class OwedListing(WireModel):
     """`sessions/owed` — every root that owes work, by the index."""
@@ -1034,6 +1054,34 @@ class OwedListing(WireModel):
     """Whether the index could vouch for itself when read (`LiveSurvey.trusted`)."""
     rebuilt: bool
     """Whether this reply rebuilt the index from the logs first."""
+
+
+ResumeOutcome: TypeAlias = Literal["resumed", "mounted", "held", "spent", "refused"]
+"""What `sessions/resume` did with one root (P13-03). `resumed`: mounted by this
+pass. `mounted`: this daemon already held it. `held`: mounted, and waiting on a
+credential or a profile decision before anything runs. `spent`: its ladder is spent
+and `force` was not passed, so it was left on disk. `refused`: the mount raised —
+held by another process, not a root, a log that will not read — and `detail` says."""
+
+
+class ResumedRoot(WireModel):
+    """One root a resume pass was asked about."""
+
+    session_id: str
+    outcome: ResumeOutcome
+    status: str = ""
+    """`Root.status` once mounted, else `""`."""
+    detail: str = ""
+    """Why, for `held`, `spent` and `refused`."""
+
+
+class ResumeReport(WireModel):
+    """`sessions/resume` — what became of each root asked for."""
+
+    sessions: list[ResumedRoot] = Field(default_factory=list)
+    trusted: bool
+    """Whether the index the pass read could vouch for itself (`OwedListing.trusted`):
+    an `all_owed` pass over an unvouched index may have missed a root."""
 
 
 class ProbeReply(WireModel):

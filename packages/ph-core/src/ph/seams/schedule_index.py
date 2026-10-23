@@ -52,20 +52,19 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
-import json
 import logging
 import os
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import anyio
 
-from ..locks import LockBusy, file_lock
-from ..paths import make_directories, replace_durably, write_atomic
+from ..paths import make_directories, replace_durably
+from ._json_index import JsonIndex
 
 if TYPE_CHECKING:
     from ..cordis import Context
@@ -93,21 +92,6 @@ of the access pattern a directory of files is good at.
 
 CLAIMS_NAME = "schedules.claims"
 """The directory of `Claim`s, beside the index they vouch for."""
-
-_VERSION = 2
-"""2 added `complete`. A version-1 file reads as incomplete, so it is rebuilt once."""
-
-_LOCK_TIMEOUT = 5.0
-"""How long a write waits for the file lock before giving up (K10).
-
-**Patient, because the wait is a worker thread's.** It was cut to a quarter
-second while `record` ran on the event loop — every caller reaches it from the
-loop, so the wait was time the daemon served nothing, including every other
-root's schedules. `IndexWriter` moved the write off the loop, and a wait there
-costs a thread and delays only the writes queued behind it, so waiting out
-another host's write is worth more than dropping this one. Giving up is still
-the answer past it: an index that cannot be written costs a late run.
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,58 +149,35 @@ class Claim:
 
 
 @dataclass(slots=True)
-class ScheduleIndex:
-    """The index as a value, so a caller states where it lives and nothing guesses."""
+class ScheduleIndex(JsonIndex[Appointment]):
+    """The index as a value, so a caller states where it lives and nothing guesses.
 
-    root: Path
+    The file's reading, locking, rewriting and rebuild merge are `JsonIndex`'s, which
+    the live-roots index shares. What is this index's own is its entry and its claims.
+    """
 
-    @property
-    def path(self) -> Path:
-        return self.root / INDEX_NAME
+    NAME: ClassVar[str] = INDEX_NAME
+    VERSION: ClassVar[int] = 2
+    """2 added `complete`. A version-1 file reads as incomplete, so it is rebuilt once."""
+    WHAT: ClassVar[str] = "the schedule index"
 
     @property
     def claims(self) -> Path:
         return self.root / CLAIMS_NAME
-
-    def read(self) -> dict[str, Appointment]:
-        """Every appointment on record. Empty when there is nothing to say.
-
-        **Every failure reads as empty**, deliberately: a missing file is the
-        ordinary state of a `$PH_HOME` nobody has scheduled in, and a corrupt one
-        is a cache that lost its contents. Both mean "this file cannot tell you
-        what is due", and the answer here is an empty one rather than an exception
-        on the daemon's boot path. Both also read as incomplete (`survey`).
-        """
-        return self._load()[0]
 
     def survey(self) -> Survey:
         """The appointments, and whether this file can vouch for them (S18)."""
         appointments, complete = self._load()
         return Survey(appointments, complete, self._abandoned())
 
-    def _load(self) -> tuple[dict[str, Appointment], bool]:
-        """The appointments on record, and whether the file says it is complete."""
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}, False
-        except (OSError, ValueError):
-            log.warning("ph.seams.schedule_index: could not read %s", self.path, exc_info=True)
-            return {}, False
-        if not isinstance(raw, dict) or raw.get("version") != _VERSION:
-            return {}, False
-        found: dict[str, Appointment] = {}
-        for session_id, entry in (raw.get("sessions") or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            next_at, updated = entry.get("nextAt"), entry.get("updated")
-            if (
-                isinstance(session_id, str)
-                and isinstance(next_at, int)
-                and isinstance(updated, int)
-            ):
-                found[session_id] = Appointment(session_id, next_at, updated)
-        return found, raw.get("complete") is True
+    def _decode(self, key: str, raw: Mapping[str, Any]) -> Appointment | None:
+        next_at, updated = raw.get("nextAt"), raw.get("updated")
+        if isinstance(next_at, int) and isinstance(updated, int):
+            return Appointment(key, next_at, updated)
+        return None
+
+    def _encode(self, entry: Appointment) -> dict[str, Any]:
+        return {"nextAt": entry.next_at, "updated": entry.updated}
 
     def _abandoned(self) -> tuple[Path, ...]:
         """Every claim whose writer is gone: one this process can lock."""
@@ -311,19 +272,8 @@ class ScheduleIndex:
 
         Whether the file now holds `changes`.
         """
-        # **The no-op is decided before the lock, not inside it** (K10). This is
-        # called on every session open — every fork, every subagent — precisely
-        # because reconciling an entry that is already right should cost
-        # nothing, and it was paying a lock acquisition to discover that. Reading
-        # first is safe: `read` treats every failure as empty and `_write` is an
-        # atomic rename, so there is no torn state to observe, and a racing
-        # writer only means the re-check under the lock finds nothing to do.
-        if not _moves(self.read(), changes):
-            return True
 
-        def apply(found: dict[str, Appointment]) -> bool:
-            if not _moves(found, changes):
-                return False
+        def apply(found: dict[str, Appointment]) -> None:
             for session_id, (next_at, now) in changes.items():
                 if next_at is None:
                     found.pop(session_id, None)
@@ -331,9 +281,8 @@ class ScheduleIndex:
                     current = found.get(session_id)
                     if current is None or current.next_at != next_at:
                         found[session_id] = Appointment(session_id, next_at, now)
-            return True
 
-        return self._rewrite(apply, vouch=False)
+        return self._change(lambda found: _moves(found, changes), apply)
 
     def replace(
         self, read: Mapping[str, Appointment | None], *, since: Survey, vouch: bool = True
@@ -354,19 +303,7 @@ class ScheduleIndex:
         from `since`, the file as the rebuild began, was written since by a
         writer who knew better.
         """
-        before = since.appointments
-
-        def apply(found: dict[str, Appointment]) -> bool:
-            for session_id, appointment in read.items():
-                if found.get(session_id) != before.get(session_id):
-                    continue
-                if appointment is None:
-                    found.pop(session_id, None)
-                else:
-                    found[session_id] = appointment
-            return True
-
-        if not self._rewrite(apply, vouch=vouch):
+        if not self._merge(read, before=since.appointments, vouch=vouch):
             return False
         if not vouch:
             return True
@@ -374,38 +311,6 @@ class ScheduleIndex:
             with suppress(FileNotFoundError):
                 path.unlink()
         return True
-
-    def _rewrite(self, apply: Callable[[dict[str, Appointment]], bool], *, vouch: bool) -> bool:
-        """Read, `apply`, and write back, under the lock. Whether the file holds the
-        change; `apply` returns `False` when there is nothing to write.
-
-        `vouch` marks the file complete, which only a rebuild may. Otherwise the file
-        keeps the `complete` it had.
-        """
-        try:
-            with file_lock(f"{self.path}.lock", timeout=_LOCK_TIMEOUT, what="the schedule index"):
-                found, complete = self._load()
-                if apply(found):
-                    self._write(found, complete=vouch or complete)
-        except LockBusy:
-            log.warning("ph.seams.schedule_index: %s is locked; not written", self.path)
-            return False
-        except OSError:
-            log.warning("ph.seams.schedule_index: could not write %s", self.path, exc_info=True)
-            return False
-        return True
-
-    def _write(self, found: dict[str, Appointment], *, complete: bool) -> None:
-        """Serialize and rename, so a reader never sees a half-written index."""
-        document: dict[str, Any] = {
-            "version": _VERSION,
-            "complete": complete,
-            "sessions": {
-                one.session_id: {"nextAt": one.next_at, "updated": one.updated}
-                for one in found.values()
-            },
-        }
-        write_atomic(self.path, json.dumps(document, indent=2))
 
 
 def _moves(found: Mapping[str, Appointment], changes: Mapping[str, tuple[int | None, int]]) -> bool:
@@ -431,8 +336,8 @@ class IndexRecorder(Protocol):
 class IndexWriter:
     """`ScheduleIndex.record` without the wait on the event loop (K10).
 
-    Every caller — `create`, `cancel`, `claim`, the `session/created` reconcile —
-    is synchronous and on the loop, and `record` is a file lock, a read and an
+    Every caller — `create`, `cancel`, the tick's `reindex`, the `session/created`
+    reconcile — is synchronous and on the loop, and `record` is a file lock, a read and an
     atomic rewrite. So `record` here only notes the change, and a writer hands
     everything noted so far to `record_all` in one worker-thread hop.
 

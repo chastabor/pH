@@ -76,6 +76,7 @@ from ..params import (
     ProbeParams,
     PromptParams,
     PutAttachmentParams,
+    ResumeParams,
     ShellParams,
     SnapshotParams,
     StageParams,
@@ -101,6 +102,7 @@ from ..payloads import (
     PresetApplied,
     ProbeReply,
     RepeatOutcome,
+    ResumeReport,
     RootDescription,
     RootListing,
     RootStatusReply,
@@ -686,6 +688,13 @@ class _Connection:
         # supervisor's own answer.
         return await self.server.supervisor.owed(rebuild=params.rebuild)
 
+    async def _sessions_resume(self, params: ResumeParams) -> ResumeReport:
+        # Unkeyed, like `session/new`: `start` is idempotent by id, so a pass sent
+        # twice mounts each root once and says `mounted` the second time.
+        return await self.server.supervisor.resume_owed(
+            params.sessions, all_owed=params.all_owed, force=params.force
+        )
+
     async def _daemon_probe(self, params: ProbeParams) -> ProbeReply:
         return self.server.probe(params.name)
 
@@ -1253,6 +1262,7 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.DAEMON_LIFETIME, _Connection._daemon_lifetime),
         _unkeyed(verbs.DAEMON_PROBE, _Connection._daemon_probe),
         _unkeyed(verbs.SESSIONS_OWED, _Connection._sessions_owed),
+        _unkeyed(verbs.SESSIONS_RESUME, _Connection._sessions_resume),
         _announcing(verbs.SHUTDOWN, _Connection._shutdown),
     )
 )
@@ -1317,6 +1327,11 @@ class DaemonServer:
 
     Armed when the last client leaves and cleared by the next one's first frame,
     so the window is "since you left" rather than "since the daemon started"."""
+    resumed: bool = True
+    """Whether the first resume pass has finished (P13-03) — true from the start
+    when none was asked for. `serve(resume_owed=True)` builds the server without it
+    and the pass sets it, and readiness is no in between: an orchestrator that sends
+    work to a daemon still mounting what the last one owed would race the mounts."""
     served: bool = False
     """Whether any client has ever spoken to this daemon (P9-06).
 
@@ -1487,8 +1502,9 @@ class DaemonServer:
         (P13-12): the TCP responder and `daemon/probe` call this and nothing else.
 
         *startup* is the unix listener serving. *ready* is startup, the socket still
-        this daemon's, no root the daemon could not write, and the lease directory
-        writable. *live* is a heartbeat the
+        this daemon's, no root the daemon could not write, the lease directory
+        writable, and the first resume pass finished when one was asked for
+        (P13-03). *live* is a heartbeat the
         event loop stamped within `STALE_HEARTBEATS` intervals, the socket still
         this daemon's, and the scheduler no later than `SCHEDULER_GRACE_SECONDS`
         past its own plan. Each reason is a sentence an operator reads off a 503.
@@ -1508,6 +1524,8 @@ class DaemonServer:
             leases = self._leases_writable()
             if leases:
                 reasons.append(leases)
+            if not self.resumed:
+                reasons.append("the first resume pass has not finished")
         if name == "live":
             stale = STALE_HEARTBEATS * int(HEARTBEAT_SECONDS * 1000)
             if now - self.heartbeat_at > stale:
@@ -1913,6 +1931,8 @@ async def serve(
     started: Callable[[DaemonServer], None] | None = None,
     signals: bool = False,
     probe: str | None = None,
+    resume_owed: bool = False,
+    continue_interrupted: bool = False,
 ) -> int:
     """Run the supervisor until `shutdown`. Returns how many roots could not be
     written when it stopped (P13-08) — the exit status `phern daemon` reports.
@@ -1920,6 +1940,11 @@ async def serve(
     `probe` is a `host:port` to answer the startup, readiness and liveness probes on
     over TCP (P13-12, `ph_app.daemon.probes`); `None` answers them on the unix
     socket only.
+
+    `resume_owed` runs `Supervisor.resume_owed` over every owed root once the
+    socket is accepting (P13-03), with readiness no until the pass ends — the pass
+    `phern agents resume --all` would run, for a unit with no `ExecStartPost`.
+    `continue_interrupted` is `Supervisor.continue_interrupted` (P13-04).
 
     `ready` is an `anyio.Event` set once the socket is accepting, so a caller —
     a test, or `phern agents` starting a daemon on demand — can wait for the door
@@ -1992,6 +2017,7 @@ async def serve(
             passivate_after=passivate_after,
             wake_within=wake_within,
             check_invariants=check_invariants,
+            continue_interrupted=continue_interrupted,
         )
         try:
             server = DaemonServer(
@@ -2004,6 +2030,7 @@ async def serve(
                 keep_alive=keep_alive,
                 identity=identity,
                 probe_address=_bound_address(probes) if probes is not None else "",
+                resumed=not resume_owed,
             )
             # The jobs that end on a clock, each its own task and asleep until its
             # next moment rather than polling (`ph_app.daemon.planner`). Release,
@@ -2040,6 +2067,11 @@ async def serve(
             async with listener:
                 tasks.start_soon(listener.serve, server._handle)
                 server.serving = True
+                if resume_owed:
+                    # After the door is open, so a client that attaches mid-pass
+                    # shares the mount rather than waiting for the pass; readiness
+                    # says no until it ends.
+                    tasks.start_soon(_resume_at_boot, server)
                 if ready is not None:
                     ready.set()
                 await server.stop.wait()
@@ -2099,6 +2131,33 @@ async def serve(
             if probes is not None:
                 await probes.aclose()
     return len(supervisor.unwritten)
+
+
+async def _resume_at_boot(server: DaemonServer) -> None:
+    """`--resume-owed`: the pass over every owed root, once, with readiness no until
+    it ends. Whatever it finds is said in the daemon's log, one line per root, the
+    way `phern agents resume` prints it — nobody is attached to be told otherwise."""
+    try:
+        report = await server.supervisor.resume_owed(all_owed=True)
+    except Exception:
+        log.exception("ph_app.daemon: the resume pass failed")
+    else:
+        for row in report.sessions:
+            log.info(
+                "ph_app.daemon: resume pass: %s %s status=%s detail=%s",
+                row.session_id,
+                row.outcome,
+                row.status or "-",
+                row.detail or "-",
+            )
+        if not report.sessions:
+            log.info("ph_app.daemon: resume pass: no root owes work")
+        elif not report.trusted:
+            log.warning(
+                "ph_app.daemon: resume pass: the live-roots index could not vouch for itself"
+            )
+    finally:
+        server.resumed = True
 
 
 async def _keep_probing(server: DaemonServer, probes: MultiListener[SocketStream]) -> None:

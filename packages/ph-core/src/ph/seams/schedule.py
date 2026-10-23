@@ -30,16 +30,17 @@ from one stamp.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, TypeAlias
+from typing import Literal, NamedTuple, TypeAlias
 
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_int, as_str
 from ..keys import SCHEDULE
+from ..llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource
 from ..paths import resolve_roots
-from ..session import Session, SessionEvent, SessionFoldCache, now_ms
+from ..session import Session, SessionEvent, SessionFoldCache, now_ms, session_written
 from ..session.writers import log_writer
 from ..wire import WireModel
 from .invariants import contribute_fold_cache
@@ -52,14 +53,17 @@ __all__ = [
     "CREATED",
     "FOLDED",
     "TICK",
+    "Fired",
     "Schedule",
     "ScheduleKind",
     "ScheduleService",
     "ScheduleState",
     "apply",
     "due_at",
+    "fire_due",
     "next_at",
     "rebuild_index",
+    "scheduled_source",
     "schedules",
     "state_to_wire",
 ]
@@ -450,6 +454,12 @@ class ScheduleService:
         the ordering that makes a crash cost a skipped run rather than a
         repeated one. A caller that never delivers has still recorded that it
         meant to, which is what an operator needs to see.
+
+        **A host fires through `fire_due`**, which keeps the order the rest of the
+        rule needs — deliver, write, then tell the index (P13-07). The index used to
+        be told here, straight after the append, while the tick it answered for was
+        still in this log's buffer: a kill between the two left an index saying
+        "later" over a log saying "due", and the run was lost.
         """
         claimed: list[Schedule] = []
         for state in self.live(session):
@@ -460,11 +470,6 @@ class ScheduleService:
             # carriers is one that can disagree.
             _LOG.append(session, TICK, {"id": state.schedule.id, "dueAt": moment, "firedAt": now})
             claimed.append(state.schedule)
-        if claimed:
-            # After the appends, so the fold this reads has the ticks in it: an
-            # index written from the pre-claim state would name a moment that has
-            # just been served and wake the root again for it.
-            self.reindex(session, now=now)
         return claimed
 
     def reindex(self, session: Session, *, now: int | None = None, new: bool = False) -> None:
@@ -485,6 +490,72 @@ class ScheduleService:
             return
         stamp = now if now is not None else now_ms()
         self.index.record(session.id, next_at=self.next_due(session, now=stamp), now=stamp, new=new)
+
+
+class Fired(NamedTuple):
+    """What one `fire_due` did."""
+
+    schedules: list[Schedule]
+    """What came due and was delivered, in the order it was claimed."""
+    written: bool
+    """Whether the log took the ticks and the prompts. When not, the index was left
+    where it was, and the host says the log is unwritable."""
+
+
+async def fire_due(
+    ctx: Context,
+    session: Session,
+    *,
+    now: int,
+    deliver: Callable[[Schedule], Awaitable[object]],
+) -> Fired:
+    """Fire whatever is due on `session`: claim, deliver, write, then tell the index
+    (P13-07) — the door every host fires a schedule through, so the order is the
+    seam's and not each host's.
+
+    **The tick before the prompt**, in the log: `claim` appends it before `deliver`
+    can put anything in the inbox, so a reader never finds a scheduled prompt
+    without the record saying why it came.
+
+    **One write, after delivery.** A prompt is no effect until a turn sends it, and
+    that turn's first model request is a barrier (`session-checkpoint-policy`) that
+    writes the log whole and in order — the tick first — and refuses the request
+    when it cannot. So no run bills without its tick on disk, and this write is what
+    turns a kill before that request into a late run rather than a skipped one.
+
+    **The index last, and only over a written log.** Told at the claim, it said
+    "later" over a log whose tick was still in a buffer, and a kill there lost the
+    run. A write that fails leaves it where it was, so the moment is still due to
+    whatever reads it next.
+    """
+    service = ctx.require(SCHEDULE)
+    claimed = service.claim(session, now=now)
+    if not claimed:
+        return Fired([], written=True)
+    for schedule in claimed:
+        await deliver(schedule)
+    written = await session_written(ctx, session)
+    if written:
+        service.reindex(session, now=now)
+    return Fired(claimed, written)
+
+
+def scheduled_source(schedule: Schedule) -> PluginSource:
+    """The source a scheduled prompt is delivered under: this seam's, naming the
+    schedule, where a person's own prompt says `user` (P13-04).
+
+    A scheduled turn is an ordinary turn (`Supervisor.tick`), and its prompt is the
+    person's words — but delivered by the schedule, hours after they were typed,
+    with nobody at the keyboard. A reader of the log tells the two apart by the
+    source: a transcript draws it as the schedule's notice rather than as something
+    the person just said, and a resumer that finds the turn cut short knows nobody
+    is waiting to send it again.
+    """
+    return PluginSource(
+        plugin="ph.seams.schedule",
+        form="notice",
+        summary=f"scheduled: {schedule.id}"[:CONTEXT_SUMMARY_MAX_CHARS],
+    )
 
 
 def _soonest(states: Iterable[ScheduleState], *, now: int) -> int | None:

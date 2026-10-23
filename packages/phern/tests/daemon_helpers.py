@@ -50,6 +50,7 @@ __all__ = [
     "break_the_provider",
     "daemon_in_thread",
     "private_runtime",
+    "route_needs",
     "running",
     "serving",
     "set_phase",
@@ -503,6 +504,20 @@ def break_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         yield  # pragma: no cover
 
     monkeypatch.setattr(FakeAdapter, "stream", exploding)
+
+
+def route_needs(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+    """Make the fake route name credential `key`, which nothing in the test supplies —
+    what a restart that lost a stored key looks like to a root or a child (T5)."""
+    from ph.llm.adapter import ResolvedModel
+    from ph.llm.fake import FakeAdapter
+
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        FakeAdapter,
+        "resolve_model",
+        lambda self, provider, model: ResolvedModel(context_window=8192, credential=key),
+    )
 
 
 def logged(session: Session) -> list[str]:

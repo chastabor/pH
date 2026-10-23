@@ -734,6 +734,21 @@ def daemon(
             help="Answer startup, readiness and liveness probes over HTTP here (host:port).",
         ),
     ] = None,
+    resume_owed: Annotated[
+        bool,
+        typer.Option(
+            "--resume-owed",
+            help="Mount every stored root that still owes work once the socket is up.",
+        ),
+    ] = False,
+    continue_interrupted: Annotated[
+        bool,
+        typer.Option(
+            "--continue-interrupted",
+            help="On resume, continue a person's cut-short turn too, not only a goal's "
+            "or a schedule's.",
+        ),
+    ] = False,
 ) -> None:
     """Run the supervisor: roots that outlive the clients watching them (P5-01).
 
@@ -747,6 +762,11 @@ def daemon(
     an interpreter of its own, and fan-out across many roots multiplies without
     it. A parent's own fair share is `rlm-subagent-provider`'s `maxConcurrent`,
     and both apply. Neither refuses a delegation — the overflow queues.
+
+    `--resume-owed` is the pass `phern agents resume --all` runs, run by the daemon
+    itself once its socket is up, for a unit with nothing to run it from (P13-03);
+    readiness is no until it ends. `--continue-interrupted` widens what a resume
+    continues unasked to a person's own cut-short turn (P13-04).
     """
     # A late load: a command pays only for what it runs (`test_app_layering.py`).
     from .daemon.server import DaemonUnavailable, serve  # noqa: PLC0415
@@ -815,6 +835,8 @@ def daemon(
                 # `phern agents shutdown` does, instead of the way `kill -9` does.
                 signals=True,
                 probe=probe_bind,
+                resume_owed=resume_owed,
+                continue_interrupted=continue_interrupted,
             )
         )
         if unwritten:

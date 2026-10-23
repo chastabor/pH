@@ -398,6 +398,36 @@ async def test_a_run_whose_gates_pass_is_achieved_and_stops(mount: MountProfile)
 
 
 @pytest.mark.anyio
+async def test_the_turns_answer_is_on_disk_before_a_gate_runs(mount: MountProfile) -> None:
+    """P13-10. No model request follows a turn's last answer, so no request barrier
+    covers it, and the gate the autonomous policy runs next — a build, a test suite —
+    can take the process down. The gate's own record is a durable intent
+    (`shell/command`), written whole before the gate starts, which carries the answer
+    with it: no barrier of its own on `agent/turn-stopping` is needed, nor its write
+    on every turn.
+
+    Sabotage: make `shell/command` a buffered intent, and nothing writes the answer
+    before the gate runs.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("durable")
+    flushed: list[tuple[str, ...]] = []
+    ctx.on("session/flush", lambda target: flushed.append(tuple(e.type for e in target.events)))
+    agent = ctx.require(AGENTS).create(session, AgentOptions(provider="fake", model="fake-1"))
+
+    await ctx.require(COMMANDS).dispatch(
+        "/autonomous ship it -- true", session=session, agent=agent
+    )
+    await agent.prompt("go")
+
+    before_gate = [
+        types for types in flushed if "shell/command" in types and "shell/result" not in types
+    ]
+    assert before_gate, "nothing wrote the gate's record before it ran"
+    assert "assistant/message" in before_gate[0], "the answer was not on disk before the gate"
+
+
+@pytest.mark.anyio
 async def test_stop_abandons_the_open_goal(mount: MountProfile) -> None:
     """`/autonomous stop` reaches the third outcome.
 

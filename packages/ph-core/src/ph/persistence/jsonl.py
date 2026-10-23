@@ -466,7 +466,7 @@ class JsonlArchive:
     ) -> Iterator[tuple[str, list[SessionEvent]]]:
         return logs_holding(self.root, types, gate=gate)
 
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+    def stored(self, *, limit: int | None = 50) -> list[StoredSession]:
         """What is on record, most recently touched first.
 
         One `stat` per entry — the directory scan's own — and one short read for

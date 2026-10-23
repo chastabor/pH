@@ -12,9 +12,10 @@ and the `session/resumed` writer is this module, not whichever backend is mounte
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 from ..cordis import DEPLOYMENT, Context
-from ..json import as_int, as_str
+from ..json import as_int, as_obj, as_str
 from ..keys import SESSIONS, TOOLS
 from ..session import Session, SessionEvent, SessionHeader, declared_intents, open_intents
 from ..session.writers import log_writer
@@ -22,7 +23,21 @@ from .repair import CallOutcome, interrupted_turn_closers, unresolved_calls
 
 _LOG = log_writer(__name__)
 
-__all__ = ["Resumption", "resume_session", "resumption_of", "resumptions"]
+__all__ = [
+    "CutTurnOwner",
+    "Resumption",
+    "cut_short_note",
+    "cut_turn_owner",
+    "resume_session",
+    "resumption_of",
+    "resumptions",
+]
+
+CutTurnOwner: TypeAlias = Literal["person", "unattended"]
+"""Who a turn a crash cut short was owed to (P13-04). `person`: a prompt in it was a
+person's words, and that person is at a keyboard somewhere to send it again.
+`unattended`: every prompt in it came from something that will not — a schedule, a
+child's notice, a supervisor's own continuation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +49,12 @@ class Resumption:
     events: int
     """How many events the store held when it began: all of the log that survived."""
     interrupted: bool
+    """Whether the repair closed anything: a turn, or an intent left open between turns."""
     closed: int
+    turn: int | None = None
+    """The turn the repair closed, or `None` when the crash cut none — an intent left
+    open between turns is `interrupted` without one. What a resumer asks before it
+    continues a turn (P13-04)."""
 
     @classmethod
     def of(cls, event: SessionEvent) -> Resumption:
@@ -44,6 +64,7 @@ class Resumption:
             events=as_int(data.get("events")),
             interrupted=data.get("interrupted") is True,
             closed=as_int(data.get("closed")),
+            turn=as_int(data.get("turn")) if "turn" in data else None,
         )
 
 
@@ -59,6 +80,39 @@ def resumption_of(session: Session) -> Resumption | None:
     if event is None or event.seq < session.header.first_own_seq:
         return None
     return Resumption.of(event)
+
+
+def cut_turn_owner(session: Session) -> CutTurnOwner | None:
+    """Who the turn this log's last resume closed was owed to, or `None` when it closed
+    no turn (`Resumption.turn`).
+
+    Read from the cut turn's own prompts, walking back from the last event that
+    survived to its `turn/start` — the length of one turn, not of the log. A `user`
+    source anywhere in it makes it a person's; anything else is `unattended`.
+    """
+    resumed = resumption_of(session)
+    if resumed is None or resumed.turn is None:
+        return None
+    for seq in range(resumed.events - 1, session.header.first_own_seq - 1, -1):
+        event = session.at(seq)
+        if event is None or event.type == "turn/start":
+            break
+        if event.type == "user/message" and as_obj(event.data.get("source")).get("kind") == "user":
+            return "person"
+    return "unattended"
+
+
+def cut_short_note(attempt: int, *, limit: int | None = None) -> str:
+    """What an agent whose turn a restart cut short is told when the turn is
+    presented again — a readmitted child, and a root whose turn is continued. One
+    wording, so the two cannot come to describe one interruption differently."""
+    of = f" of {limit}" if limit is not None else ""
+    return (
+        "[the harness stopped while you were working, so the turn above was cut short; "
+        f"this is attempt {attempt}{of}. Anything you finished is in your transcript — "
+        "continue from there rather than starting over, and check a tool call whose "
+        "outcome reads as unknown before repeating it.]"
+    )
 
 
 def resumptions(session: Session) -> list[Resumption]:
@@ -89,6 +143,7 @@ async def resume_session(
     """
     calls, intents = await _reconciled(ctx, session_id, header, events)
     closers = interrupted_turn_closers(events, calls, intents=intents)
+    cut = next((closer for closer in closers if closer.type == "turn/end"), None)
     revived = Session(session_id, seed=[*events, *closers], header=header, durable=len(events))
     # `durable=len(events)`: **what the store already holds is `events`, and
     # nothing else.** The closers are synthesized here; they are in the log and
@@ -112,6 +167,9 @@ async def resume_session(
                 "events": len(events),
                 "interrupted": bool(closers),
                 "closed": len(closers),
+                # Which turn, when one was cut: a resumer continues a turn, not an
+                # intent repair settled between turns.
+                **({"turn": as_int(cut.data.get("turn"))} if cut is not None else {}),
             },
         )
         # After the resume is recorded and before anyone holds the session: what a

@@ -48,7 +48,7 @@ from rlm_fixtures import HOST_INTERPRETER
 
 from ph.cordis import Profile, ProfileDocument
 from ph.cordis import context as cordis_context
-from ph.keys import SESSION_TELEMETRY, SUBAGENTS
+from ph.keys import SESSION_TELEMETRY, SESSIONS, SUBAGENTS
 from ph.llm.fake import FakeAdapter
 from ph.llm.types import (
     BlockEnd,
@@ -69,8 +69,10 @@ from ph.seams.subagents import (
     STATUS,
     SUSPENDED_DETAIL,
     UNRECOVERABLE_DETAIL,
+    ChildNotice,
     SubagentService,
     child_state_of,
+    record_ended,
 )
 from ph.session import child_session_id
 from ph.testing import (
@@ -80,10 +82,12 @@ from ph.testing import (
     noted,
     raising,
     searches_into,
+    settled,
     stored_log,
 )
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
 from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_transcript
+from ph_app.modes.rpc_mode import RpcServer
 from ph_app.profiles import compose_profile
 from ph_app.protocol import PROTOCOL_VERSION, request, result_of
 from ph_app.runtime import mounted
@@ -354,6 +358,45 @@ async def test_every_host_sweeps_the_children_a_stopped_run_left_working(
     assert state.status == "error", f"the child was left {state.status}"
     assert state.detail == UNRECOVERABLE_DETAIL
     assert bounds == [CHILD_RETRY_LIMIT], "the daemon's own ladder bound, not another"
+
+
+async def test_a_childs_ending_runs_a_turn_between_rpc_prompts(profile: Profile) -> None:
+    """P13-05 in rpc mode. Between prompts the served agent is idle and nothing else
+    runs it, so a readmitted child's result sat in its inbox until the peer's next
+    prompt ran both as one turn. The driver says `agent/woken` for the notice, and
+    the server runs the turn on its own task, telling the peer as a prompt would.
+
+    Sabotage: drop the `agent/woken` listener from `RpcServer._prompt`, and the
+    notice waits for the next prompt.
+    """
+    out = io.StringIO()
+    async with AsyncExitStack() as exits, anyio.create_task_group() as tasks:
+        server = RpcServer(profile=profile, exits=exits, out=out, tasks=tasks)
+        await server.handle(dict(request(1, "session/new", {"sessionId": "woken"})))
+        await server.handle(
+            dict(request(2, "session/prompt", {"sessionId": "woken", "prompt": "hi"}))
+        )
+        served = server._served["woken"]
+        session = served.ctx.require(SESSIONS).require("woken")
+        child = admitted_child(served.ctx, session, "r1")
+        before = len(session.events)
+
+        await record_ended(
+            served.ctx, child, "done", notice=ChildNotice(text="[r1 finished]", summary="done")
+        )
+
+        await settled(
+            lambda: any(e.type == "turn/end" for e in session.events_from(before)),
+            "the woken turn to run",
+        )
+        assert any(e.type == "assistant/message" for e in session.events_from(before))
+        tasks.cancel_scope.cancel()
+    statuses = [
+        frame["params"]["status"]
+        for frame in (json.loads(line) for line in out.getvalue().splitlines())
+        if frame.get("method") == "session.status"
+    ]
+    assert statuses == ["running", "idle", "running", "idle"], "the peer was told of the turn"
 
 
 async def test_a_signal_stops_an_rpc_server_waiting_on_its_peer(profile: Profile) -> None:

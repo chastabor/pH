@@ -35,23 +35,20 @@ ladder is spent still owes its work, and a resumer must know not to loop on it.
 
 from __future__ import annotations
 
-import json
 import logging
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Literal, TypeAlias, get_args
+from typing import Any, ClassVar, Literal, TypeAlias, get_args
 
 import anyio
 from anyio.abc import TaskGroup
 
 from ..agent.inbox import replay_pending
-from ..json import as_bool, as_int, as_obj, as_seq, as_str
-from ..locks import LockBusy, file_lock
-from ..paths import write_atomic
-from ..persistence.protocol import SURVEY_LIMIT, SessionArchive
-from ..session import SessionEvent, SessionHeader, open_turn_at
+from ..json import as_bool, as_int, as_seq, as_str
+from ..persistence.protocol import SessionArchive
+from ..session import SessionEvent, open_turn_at
 from ..wire import literal_lookup
+from ._json_index import JsonIndex
 from .goals import SET as GOAL_SET
 from .goals import SETTLED as GOAL_SETTLED
 from .goals import GoalState, fold_goal_event, open_goal
@@ -62,6 +59,7 @@ __all__ = [
     "HOLD_TYPES",
     "INDEX_NAME",
     "Hold",
+    "Ladder",
     "LiveEntry",
     "LiveIndex",
     "LiveIndexWriter",
@@ -91,15 +89,26 @@ HOLD_TYPES: frozenset[str] = frozenset(
 """The records a root's holds are folded from — all a rebuild reads of a root's log,
 so it validates five types and not every streamed chunk."""
 
+
+@dataclass(frozen=True, slots=True)
+class Ladder:
+    """A host's retry ladder, as a rebuild reads it: the record types it is folded
+    from, and the fold over a root's own events that says whether it is spent
+    (`LiveEntry.failed`).
+
+    The host's and not this seam's, because the ladder is the host's: which records
+    say a root was retried and gave up is `ph_app.daemon.recovery`'s to declare. A
+    rebuild must be handed one — a rebuild that did not ask would write every root
+    back as not failed, which is one more attempt per restart from a resumer that
+    trusts the file."""
+
+    types: frozenset[str]
+    spent: Callable[[Sequence[SessionEvent]], bool]
+
+
 INDEX_NAME = "live.json"
 """One file per `$PH_HOME`, beside `schedules.json`: read whole by whoever resumes,
 written only when a root's holds move."""
-
-_VERSION = 1
-
-_LOCK_TIMEOUT = 5.0
-"""How long a write waits for the file lock — a worker thread's wait, so patient
-(`schedule_index._LOCK_TIMEOUT` says why)."""
 
 
 def ordered_holds(found: Iterable[Hold]) -> tuple[Hold, ...]:
@@ -164,41 +173,28 @@ class LiveSurvey:
 
 
 @dataclass(slots=True)
-class LiveIndex:
-    """The index as a value, so a caller states where it lives and nothing guesses."""
+class LiveIndex(JsonIndex[LiveEntry]):
+    """The index as a value, so a caller states where it lives and nothing guesses.
 
-    root: Path
+    The file's reading, locking, rewriting and rebuild merge are `JsonIndex`'s, shared
+    with the schedule index, so a missing, corrupt or older file reads as empty and
+    incomplete here exactly as there.
+    """
 
-    @property
-    def path(self) -> Path:
-        return self.root / INDEX_NAME
-
-    def read(self) -> dict[str, LiveEntry]:
-        """Every root on record. Empty when there is nothing to say."""
-        return self.survey().entries
+    NAME: ClassVar[str] = INDEX_NAME
+    VERSION: ClassVar[int] = 1
+    WHAT: ClassVar[str] = "the live-roots index"
 
     def survey(self) -> LiveSurvey:
-        """The entries, and whether the file can vouch for them.
+        """The entries, and whether the file can vouch for them."""
+        entries, complete = self._load()
+        return LiveSurvey(entries, complete)
 
-        **Every failure reads as empty and incomplete**, as the schedule index reads:
-        a missing file is the ordinary state of a `$PH_HOME` where nothing has run,
-        and a corrupt one is a cache that lost its contents.
-        """
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return LiveSurvey({}, complete=False)
-        except (OSError, ValueError):
-            log.warning("ph.seams.live_index: could not read %s", self.path, exc_info=True)
-            return LiveSurvey({}, complete=False)
-        document = as_obj(raw)
-        if as_int(document.get("version")) != _VERSION:
-            return LiveSurvey({}, complete=False)
-        entries = {
-            session_id: LiveEntry.from_json(session_id, as_obj(entry))
-            for session_id, entry in as_obj(document.get("sessions")).items()
-        }
-        return LiveSurvey(entries, complete=as_bool(document.get("complete")))
+    def _decode(self, key: str, raw: Mapping[str, Any]) -> LiveEntry:
+        return LiveEntry.from_json(key, raw)
+
+    def _encode(self, entry: LiveEntry) -> dict[str, Any]:
+        return entry.to_json()
 
     def record(self, session_id: str, entry: LiveEntry | None) -> bool:
         """Set or clear one root's entry. Blocking — see `LiveIndexWriter`."""
@@ -206,78 +202,24 @@ class LiveIndex:
 
     def record_all(self, changes: Mapping[str, LiveEntry | None]) -> bool:
         """Set or clear several roots' entries — `None` clears: one read, and at most
-        one rewrite. Whether the file now holds `changes`.
+        one rewrite. Whether the file now holds `changes`. An entry that differs only
+        in `updated` is no change."""
 
-        The no-op is decided before the lock (the schedule index's K10), and an entry
-        that differs only in `updated` is no change.
-        """
-        if not _moves(self.read(), changes):
-            return True
-
-        def apply(found: dict[str, LiveEntry]) -> bool:
-            if not _moves(found, changes):
-                return False
+        def apply(found: dict[str, LiveEntry]) -> None:
             for session_id, entry in changes.items():
                 if entry is None:
                     found.pop(session_id, None)
                 else:
                     found[session_id] = entry
-            return True
 
-        return self._rewrite(apply, vouch=False)
+        return self._change(lambda found: _moves(found, changes), apply)
 
     def replace(
         self, read: Mapping[str, LiveEntry | None], *, since: LiveSurvey, vouch: bool = True
     ) -> bool:
-        """Write a rebuild's answer and mark the file complete. Whether it was written.
-
-        `read` holds each root whose log the rebuild read: its entry, or `None` for a
-        root that owes nothing. **What the rebuild did not read, it keeps** — a log
-        it could not read is no evidence the work is done. **What moved while it
-        read, it keeps as moved**: an entry that differs from `since` was written
-        meanwhile by a host that knew better.
-
-        `vouch` is whether the rebuild read the store the deployment keeps its logs
-        in; one that read a guessed directory writes what it found and leaves the
-        file as complete as it was.
-        """
-        before = since.entries
-
-        def apply(found: dict[str, LiveEntry]) -> bool:
-            for session_id, entry in read.items():
-                if found.get(session_id) != before.get(session_id):
-                    continue
-                if entry is None:
-                    found.pop(session_id, None)
-                else:
-                    found[session_id] = entry
-            return True
-
-        return self._rewrite(apply, vouch=vouch)
-
-    def _rewrite(self, apply: Callable[[dict[str, LiveEntry]], bool], *, vouch: bool) -> bool:
-        try:
-            with file_lock(f"{self.path}.lock", timeout=_LOCK_TIMEOUT, what="the live-roots index"):
-                found = self.survey()
-                if apply(found.entries):
-                    self._write(found.entries, complete=vouch or found.complete)
-        except LockBusy:
-            log.warning("ph.seams.live_index: %s is locked; not written", self.path)
-            return False
-        except OSError:
-            log.warning("ph.seams.live_index: could not write %s", self.path, exc_info=True)
-            return False
-        return True
-
-    def _write(self, found: Mapping[str, LiveEntry], *, complete: bool) -> None:
-        """Serialize and rename, so a reader never sees a half-written index. Keys
-        sorted, so two writers writing the same facts write the same bytes."""
-        document: dict[str, Any] = {
-            "version": _VERSION,
-            "complete": complete,
-            "sessions": {one.session_id: one.to_json() for one in found.values()},
-        }
-        write_atomic(self.path, json.dumps(document, indent=2, sort_keys=True))
+        """Write a rebuild's answer, by `JsonIndex._merge`'s rule, marking the file
+        complete when `vouch`. Whether it was written."""
+        return self._merge(read, before=since.entries, vouch=vouch)
 
 
 def _moves(found: Mapping[str, LiveEntry], changes: Mapping[str, LiveEntry | None]) -> bool:
@@ -344,17 +286,14 @@ class LiveIndexWriter:
             self._idle.set()
 
 
-def holds_of(
-    header: SessionHeader, events: Iterable[SessionEvent], *, children_live: bool
-) -> tuple[Hold, ...]:
+def holds_of(own: Sequence[SessionEvent], *, children_live: bool) -> tuple[Hold, ...]:
     """What a stored root's log says it still owes — the fold a rebuild runs.
 
-    `events` needs only `HOLD_TYPES`. Over the root's **own** events
-    (`first_own_seq`): a fork inherits its source's transcript, not its source's
-    open turn, goal or queue. `children_live` is the caller's, because it is a
-    question about other logs (`stored_children_live`).
+    `own` is the root's **own** events (`first_own_seq`), and needs only
+    `HOLD_TYPES`: a fork inherits its source's transcript, not its source's open
+    turn, goal or queue. `children_live` is the caller's, because it is a question
+    about other logs (`stored_children_live`).
     """
-    own = [event for event in events if event.seq >= header.first_own_seq]
     goals: dict[str, GoalState] = {}
     for event in own:
         fold_goal_event(goals, event)
@@ -383,8 +322,8 @@ def rebuild_live_index(
     *,
     now: int,
     since: LiveSurvey,
+    ladder: Ladder,
     live: Mapping[str, LiveEntry | None] | None = None,
-    limit: int = SURVEY_LIMIT,
     vouch: bool = True,
 ) -> bool:
     """Rebuild `index` from every stored root, for an index that cannot vouch for
@@ -393,23 +332,29 @@ def rebuild_live_index(
     `since` is the survey the caller decided on, so the file is not read again to
     learn what it already knows. `live` is what a host knows of the roots it holds
     mounted: their logs lag the host until the next barrier, so their entries are
-    taken from it rather than from disk. A log that will not read is logged and
-    kept as the file had it (`replace`), so a damaged family costs its own entry's
-    freshness and not the rebuild.
+    taken from it rather than from disk. `ladder` is the host's own fold for
+    `failed` (`Ladder`). A log that will not read is logged and kept as the file had
+    it (`replace`), so a damaged family costs its own entry's freshness and not the
+    rebuild.
+
+    **Every stored log, with no cap**, as the schedule index's rebuild reads. The
+    listing is flat across families, so sub-agent logs sit in it beside the roots
+    and are skipped one header each; under a cap they would crowd out the roots it
+    exists to find, and a root that died busy would be missed after the crash this
+    rebuild is for.
     """
     read: dict[str, LiveEntry | None] = dict(live or {})
-    for row in store.stored(limit=limit):
+    types = HOLD_TYPES | ladder.types
+    for row in store.stored(limit=None):
         if row.delegating_parent is not None or row.session_id in read:
             continue
         try:
-            header, events = store.read_own(
-                row.session_id, family=row.family or None, types=HOLD_TYPES
-            )
+            header, events = store.read_own(row.session_id, family=row.family or None, types=types)
+            own = [event for event in events if event.seq >= header.first_own_seq]
             holds = holds_of(
-                header,
-                events,
-                children_live=stored_children_live(store, row.session_id, header.family),
+                own, children_live=stored_children_live(store, row.session_id, header.family)
             )
+            failed = ladder.spent(own)
         except Exception:
             log.warning(
                 "ph.seams.live_index: could not read %s; its entry stands",
@@ -424,6 +369,7 @@ def rebuild_live_index(
                 updated=now,
                 family=header.family,
                 cwd=header.cwd or "",
+                failed=failed,
             )
             if holds
             else None

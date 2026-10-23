@@ -65,7 +65,7 @@ MARKER_NAME = ".ph-runtime.json"
 _LOCK_TIMEOUT = 900.0
 """How long to wait for another process building the same venv (F5).
 
-Generous on purpose, and the opposite trade from `schedule_index._LOCK_TIMEOUT`:
+Generous on purpose, and the opposite trade from `ph.seams._json_index.LOCK_TIMEOUT`:
 that one bounds a stall on the event loop, where giving up costs a late run and
 waiting costs the daemon. This runs in a worker thread, once, and what it is
 waiting for is a `uv pip install` of the guest and every configured skill —

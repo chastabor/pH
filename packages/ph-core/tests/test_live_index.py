@@ -10,15 +10,26 @@ empty and untrusted rather than as an exception on a daemon's boot path.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from ph.agent.inbox import Inbox, InboxNotifications, replay_pending
 from ph.seams.goals import SET, SETTLED, Goal
-from ph.seams.live_index import LiveEntry, LiveIndex, holds_of, rebuild_live_index
+from ph.seams.live_index import (
+    Ladder,
+    LiveEntry,
+    LiveIndex,
+    LiveSurvey,
+    holds_of,
+    rebuild_live_index,
+)
 from ph.seams.subagents import ADMITTED, STATUS
-from ph.session import Session, SessionHeader
+from ph.session import Session, SessionEvent, SessionHeader
 from ph.session.store import child_session_id
 from ph.testing import StoredLogs, log_event, user_payload
+
+NO_LADDER = Ladder(types=frozenset(), spent=lambda _events: False)
+"""A host with no retry ladder, for the rebuilds whose subject is something else."""
 
 
 def _root(session_id: str = "root") -> Session:
@@ -61,7 +72,7 @@ def test_holds_of_reads_every_hold_off_a_log() -> None:
     log_event(root, "turn/start", {"turn": 1})
     log_event(root, SET, Goal(id="g1", objective="ship it").to_wire())
     _splice(root, "and then this", "m1")
-    assert holds_of(root.header, root.events, children_live=True) == (
+    assert holds_of(root.events, children_live=True) == (
         "turn",
         "goal",
         "children",
@@ -82,7 +93,7 @@ def test_a_root_that_owes_nothing_has_no_holds() -> None:
     )
     log_event(root, SETTLED, {"id": "g1", "outcome": "achieved", "detail": ""})
     log_event(root, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-    assert holds_of(root.header, root.events, children_live=False) == ()
+    assert holds_of(root.events, children_live=False) == ()
 
 
 def test_replay_pending_is_the_inbox_constructors_own_fold() -> None:
@@ -153,13 +164,47 @@ def test_a_rebuild_writes_what_every_root_log_says(tmp_path: Path) -> None:
     log_event(done, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     index = LiveIndex(tmp_path)
     index.record("done", LiveEntry("done", ("turn",), updated=1))
-    assert rebuild_live_index(index, StoredLogs(busy, done, child), now=9, since=index.survey())
+    assert rebuild_live_index(
+        index, StoredLogs(busy, done, child), now=9, since=index.survey(), ladder=NO_LADDER
+    )
     survey = index.survey()
     assert survey.complete
     assert set(survey.entries) == {"busy"}
     assert survey.entries["busy"].holds == ("turn", "children")
     assert survey.entries["busy"].family == busy.header.family
     assert survey.entries["busy"].cwd == "/tmp/work"
+
+
+def test_a_rebuild_carries_the_hosts_ladder(tmp_path: Path) -> None:
+    """`failed` is the host's fact — which records say a root gave up are the
+    host's to declare — so a rebuild is handed the host's fold for it (`Ladder`),
+    reads those records beside the holds, and writes a spent root back `failed`.
+
+    Sabotage: read only `HOLD_TYPES` in the rebuild, and the spent root is written
+    back as owing a fresh attempt.
+    """
+    spent, fresh = _root("spent"), _root("fresh")
+    for root in (spent, fresh):
+        log_event(root, "turn/start", {"turn": 1})
+    log_event(spent, "supervisor/failed", {"attempts": 3, "reason": "kept stopping"})
+    seen: list[list[str]] = []
+
+    def gave_up(events: Sequence[SessionEvent]) -> bool:
+        types = [event.type for event in events]
+        seen.append(types)
+        return "supervisor/failed" in types
+
+    index = LiveIndex(tmp_path)
+    assert rebuild_live_index(
+        index,
+        StoredLogs(spent, fresh),
+        now=9,
+        since=index.survey(),
+        ladder=Ladder(types=frozenset({"supervisor/failed"}), spent=gave_up),
+    )
+    entries = index.read()
+    assert entries["spent"].failed and not entries["fresh"].failed
+    assert any("supervisor/failed" in types for types in seen), "the ladder's records were not read"
 
 
 def test_a_rebuild_keeps_the_entry_of_a_log_it_cannot_read(tmp_path: Path) -> None:
@@ -171,7 +216,7 @@ def test_a_rebuild_keeps_the_entry_of_a_log_it_cannot_read(tmp_path: Path) -> No
     kept = LiveEntry("torn", ("goal",), updated=1)
     index.record("torn", kept)
     assert rebuild_live_index(
-        index, StoredLogs(torn, fine, broken="torn"), now=9, since=index.survey()
+        index, StoredLogs(torn, fine, broken="torn"), now=9, since=index.survey(), ladder=NO_LADDER
     )
     entries = index.read()
     assert entries["torn"] == kept
@@ -197,6 +242,38 @@ def test_a_rebuild_takes_a_mounted_roots_entry_from_its_host(tmp_path: Path) -> 
     index = LiveIndex(tmp_path)
     said = LiveEntry("root", ("turn",), updated=5, profile="work")
     assert rebuild_live_index(
-        index, StoredLogs(root), now=9, since=index.survey(), live={"root": said}
+        index,
+        StoredLogs(root),
+        now=9,
+        since=index.survey(),
+        live={"root": said},
+        ladder=NO_LADDER,
     )
     assert index.read()["root"].profile == "work"
+
+
+def test_a_file_of_another_version_reads_as_empty_and_incomplete(tmp_path: Path) -> None:
+    """The shared base's rule (`JsonIndex._load`): an older or newer format is not
+    converted, it is rebuilt from the logs once, as the schedule index's is."""
+    index = LiveIndex(tmp_path)
+    index.path.write_text(
+        '{"version": 99, "complete": true, "sessions": {"root": {"holds": ["turn"]}}}',
+        encoding="utf-8",
+    )
+    survey = index.survey()
+    assert survey.entries == {}
+    assert not survey.complete
+
+
+def test_a_rebuild_lists_every_stored_log_with_no_cap(tmp_path: Path) -> None:
+    """Sub-agent logs share the listing with roots, so a capped listing could fill up
+    with children and leave out the root that died busy."""
+    root = _root()
+    log_event(root, "turn/start", {"turn": 1})
+    children = [_child(root, f"c{n}", status="done") for n in range(3)]
+    store = StoredLogs(*children, root)
+    assert rebuild_live_index(
+        LiveIndex(tmp_path), store, now=9, since=LiveSurvey({}, False), ladder=NO_LADDER
+    )
+    assert store.limits == [None]
+    assert LiveIndex(tmp_path).read()["root"].holds == ("turn",)

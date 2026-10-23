@@ -653,6 +653,7 @@ def test_every_agents_command_is_registered() -> None:
         "status",
         "doctor",
         "owed",
+        "resume",
         "probe",
         "shutdown",
     }

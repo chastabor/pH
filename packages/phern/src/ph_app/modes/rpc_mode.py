@@ -14,17 +14,21 @@ reader parse one format.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any, TextIO
 
 import anyio
+from anyio.abc import TaskGroup
 
 from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
+from ph.llm.types import user_text
 from ph.seams.models import ModelChoice, start_on
 from ph.session import Session, SessionEvent, SessionForkError
 from ph.wire import WireModel
@@ -52,6 +56,8 @@ from ..runtime import mount_session, mounted, open_root, read_start
 from ..sessions import RecordedStart
 
 __all__ = ["RpcServer", "run_rpc"]
+
+log = logging.getLogger("ph_app.modes.rpc")
 
 
 # The stdio transport's own params (P8-07) — the two whose contract differs from
@@ -88,6 +94,10 @@ class _Served:
     """What it is opened with (`open_root`): its start as read before the mount, and
     once it is open, its own id and family."""
     agent: AgentDriver | None = None
+    driving: anyio.Lock = field(default_factory=anyio.Lock)
+    """Held while this server drives the agent (`RpcServer._drive`): a prompt and a
+    wake take turns, so one waits out the other's `run()` rather than meeting
+    "already has active work"."""
 
 
 @dataclass(slots=True)
@@ -106,6 +116,9 @@ class RpcServer:
     out: TextIO
     choice: ModelChoice = field(default_factory=ModelChoice)
     """What `phern --mode rpc --provider/--model` asked for; empty is the profile default."""
+    tasks: TaskGroup | None = None
+    """Where a turn nobody prompted runs — a parent woken by a child's ending notice
+    between prompts (P13-05). `None`, as a test builds one, runs none."""
     _served: dict[str, _Served] = field(default_factory=dict)
     _deployment: Context | None = None
 
@@ -220,6 +233,39 @@ class RpcServer:
 
         ctx.on("session/event", emit)
 
+    def _woken(self, served: _Served, agent: object) -> None:
+        """A waking message reached a served agent's inbox (P13-05): the daemon's
+        ring, for a transport that drives the agent itself. Between prompts the
+        agent is idle and nothing else would run it — a readmitted child's result
+        sat there until the peer's next prompt ran both as one turn."""
+        if agent is served.agent and self.tasks is not None:
+            self.tasks.start_soon(self._run_woken, served)
+
+    async def _run_woken(self, served: _Served) -> None:
+        """`_drive` on the server's own task, where a raise would end the server: a
+        failure is logged, and the next wake or prompt drives again."""
+        try:
+            await self._drive(served)
+        except Exception:
+            log.exception("ph_app.modes.rpc: a woken turn failed")
+
+    async def _drive(self, served: _Served) -> None:
+        """Run the served agent until its inbox is empty, telling the peer — what a
+        prompt and a wake both do, one at a time (`_Served.driving`). Nothing pending
+        runs nothing: a wake whose message a turn in flight already took, or a prompt
+        a woken turn already answered."""
+        async with served.driving:
+            agent = served.agent
+            if agent is None or agent.session is None or not agent.inbox.has_pending:
+                return
+            session = agent.session
+            self._notify(SessionStatusNotice(session_id=session.id, status="running"))
+            try:
+                await agent.run()
+                await served.ctx.require(SESSIONS).flush(session)
+            finally:
+                self._notify(SessionStatusNotice(session_id=session.id, status="idle"))
+
     async def _prompt(self, params: _PromptParams) -> dict[str, Any]:
         served = await self._mount(params.session_id)
         ctx = served.ctx
@@ -242,11 +288,12 @@ class RpcServer:
                 command=f"session/prompt {asked.spelled}" if named else asked.flags,
             )
             agent = served.agent = ctx.require(AGENTS).create(session, entry.options())
+            ctx.on("agent/woken", partial(self._woken, served))
             await resume_children(ctx, agent)
-        self._notify(SessionStatusNotice(session_id=session.id, status="running"))
-        await agent.prompt(params.prompt)
-        await ctx.require(SESSIONS).flush(session)
-        self._notify(SessionStatusNotice(session_id=session.id, status="idle"))
+        # Delivered, then driven through the one path a wake also takes, so a woken
+        # turn in flight takes this prompt too rather than racing it.
+        agent.followup(user_text(params.prompt))
+        await self._drive(served)
         return {"sessionId": session.id, "events": len(session.events)}
 
 
@@ -260,23 +307,33 @@ async def run_rpc(
     """Serve JSON-RPC until stdin closes."""
     source = stdin if stdin is not None else sys.stdin
     sink = out if out is not None else sys.stdout
-    async with AsyncExitStack() as exits:
-        server = RpcServer(profile=profile, exits=exits, out=sink, choice=choice)
-        while True:
-            # Abandoned on cancel, so a signal stops a server waiting for its peer's
-            # next line rather than waiting for it as well. The thread stays blocked
-            # in `readline`, and the host leaving through the signal is what ends it
-            # (`ph.resources.run_until_signaled`).
-            line = await anyio.to_thread.run_sync(source.readline, abandon_on_cancel=True)
-            if not line:
-                return
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                request = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            await server.handle(request)
-            if request.get("method") == "shutdown":
-                return
+    async with AsyncExitStack() as exits, anyio.create_task_group() as tasks:
+        server = RpcServer(profile=profile, exits=exits, out=sink, choice=choice, tasks=tasks)
+        try:
+            await _serve_lines(server, source)
+        finally:
+            # A turn a child's notice woke (P13-05) ends with the peer: cancelled
+            # before the group waits for it, and the mounts unwind after.
+            tasks.cancel_scope.cancel()
+
+
+async def _serve_lines(server: RpcServer, source: TextIO) -> None:
+    """Answer each line of `source` until it closes or says `shutdown`."""
+    while True:
+        # Abandoned on cancel, so a signal stops a server waiting for its peer's
+        # next line rather than waiting for it as well. The thread stays blocked
+        # in `readline`, and the host leaving through the signal is what ends it
+        # (`ph.resources.run_until_signaled`).
+        line = await anyio.to_thread.run_sync(source.readline, abandon_on_cancel=True)
+        if not line:
+            return
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            request = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        await server.handle(request)
+        if request.get("method") == "shutdown":
+            return

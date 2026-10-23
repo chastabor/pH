@@ -227,6 +227,11 @@ async def test_a_spent_child_is_ended_in_its_own_log(mount: MountProfile) -> Non
     last = stored_events(ctx, child_id)[-1]
     assert (last.type, last.data["status"]) == (STATUS, "error")
     assert not [one for one in parent.session.events if one.type.startswith("subagent/")]
+    # And the parent, promised a report, gets one (P13-05): on the child's ending,
+    # and in the parent's inbox — the one thing of the child's that reaches its log.
+    assert state.notice is not None and exhausted_detail(3) in state.notice.text
+    assert state.name in state.notice.text and state.run_id in state.notice.text
+    assert _notices(parent.session, state.notice) == 1
 
 
 async def test_readmission_finds_the_provider_that_admitted_the_child(
@@ -822,10 +827,17 @@ async def test_an_ending_carries_its_notice_to_the_parent(mount: MountProfile) -
     assert parent.session is not None
     child = admitted_child(ctx, parent.session, "r1")
     notice = ChildNotice(text="[the child finished]", summary="finished")
+    woken: list[object] = []
+    ctx.on("agent/woken", woken.append)
 
     await record_ended(ctx, child, "done", notice=notice)
 
     assert _notices(parent.session, notice) == 1
+    # Delivered as a wake (P13-05): a parent idle past the turn that waited — resumed
+    # by a restart, its child readmitted and finishing later — has nothing else to
+    # run it, and a host that drives agents on demand hears this.
+    assert woken == [parent]
+    assert parent.inbox.has_pending
     await _as_an_earlier_process_left_them(ctx, parent.session, child)
     stored = await ctx.require(SUBAGENTS).load_children(
         parent.session.id, parent.session.header.family

@@ -21,11 +21,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import running, until
+from daemon_helpers import route_needs, running, until
 
 from ph.keys import COMMANDS, CREDENTIALS, SESSIONS
-from ph.llm.adapter import ResolvedModel
-from ph.llm.fake import FakeAdapter
 from ph.llm.types import AttachmentRef
 from ph.persistence import interrupted_turn_closers
 from ph.seams.commands import CommandDefinition
@@ -333,12 +331,7 @@ ROOT_KEY = "PH_T5_ROOT_KEY"
 @pytest.fixture
 def keyed_route(monkeypatch: pytest.MonkeyPatch) -> None:
     """The daemon's own route names `ROOT_KEY`, which nothing here supplies."""
-    monkeypatch.delenv(ROOT_KEY, raising=False)
-    monkeypatch.setattr(
-        FakeAdapter,
-        "resolve_model",
-        lambda self, provider, model: ResolvedModel(context_window=8192, credential=ROOT_KEY),
-    )
+    route_needs(monkeypatch, ROOT_KEY)
 
 
 def _awaited(daemon: Any) -> dict[str, str]:  # noqa: ANN401

@@ -230,8 +230,9 @@ class SessionArchive(Protocol):
         """
         ...
 
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
-        """What is on record, most recently touched first."""
+    def stored(self, *, limit: int | None = 50) -> list[StoredSession]:
+        """What is on record, most recently touched first — at most `limit` rows, or
+        every one for `None`: a rebuild that must find every root asks for all."""
         ...
 
     def holding(

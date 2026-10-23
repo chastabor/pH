@@ -931,12 +931,17 @@ class StoredLogs:
         """What `family` each read of each session was given, the latest winning."""
         self.whole: list[str] = []
         """The sessions read whole (`read`), in order."""
+        self.limits: list[int | None] = []
+        """The `limit` each listing was asked with, in order."""
 
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+    def stored(self, *, limit: int | None = 50) -> list[StoredSession]:
+        self.limits.append(limit)
         rows = [
             stored_row(one.id, one.header, float(index))
             for index, one in enumerate(self.sessions.values())
         ]
+        if limit is None:
+            return rows
         return rows * limit if self.truncate else rows[:limit]
 
     def holding(

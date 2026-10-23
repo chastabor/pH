@@ -210,6 +210,7 @@ __all__ = [
     "record_started",
     "record_waiting",
     "restarts_since_progress",
+    "said_text",
     "settle_value",
     "stored_tree",
 ]
@@ -1126,16 +1127,11 @@ async def record_ended(
     """
     fields: dict[str, JsonValue] = dict(extra)
     problem = settle_value(child).problem if status == "done" else ""
-    admission = child.projection(ADMITTED, _admission_of) if problem else None
-    if admission is not None:
+    failed = _failed_notice(child, problem, summary="returned no value") if problem else None
+    if failed is not None:
         status = "error"
         fields["detail"] = problem
-        answer = last_answer(child)
-        said = f" Last assistant text: {answer}" if answer else ""
-        notice = ChildNotice(
-            text=f"[child {admission.name} ({admission.run_id}) failed: {problem}.{said}]",
-            summary=f"{admission.name} returned no value",
-        )
+        notice = failed
     if notice is not None:
         fields["notice"] = notice.to_wire()
     event = _append_status(child, status, **fields)
@@ -1150,8 +1146,39 @@ async def record_ended(
     return event
 
 
+def said_text(answer: str) -> str:
+    """A notice's account of what a child last said, or nothing when it said nothing —
+    one wording for every notice that carries it, the providers' among them."""
+    return f" Last assistant text: {answer}" if answer else ""
+
+
+def _failed_notice(child: Session, why: str, *, summary: str) -> ChildNotice | None:
+    """What a child that failed tells its parent: which child, why, and what it last
+    said — read from the child's own log, which holds its name and run id. `summary`
+    follows its name. `None` for a log no admission names, which has no parent to tell.
+
+    One wording for the door's own failure (`record_ended`, a child that owed a value)
+    and the sweep's give-up (`SubagentService._end_child`)."""
+    admission = child.projection(ADMITTED, _admission_of)
+    if admission is None:
+        return None
+    said = said_text(last_answer(child))
+    return ChildNotice(
+        text=f"[child {admission.name} ({admission.run_id}) failed: {why}.{said}]",
+        summary=f"{admission.name} {summary}",
+    )
+
+
 def _deliver_notice(parent: AgentDriver, notice: ChildNotice) -> None:
-    """A child's ending notice into `parent`'s inbox, without waking it.
+    """A child's ending notice into `parent`'s inbox, and the parent woken (P13-05).
+
+    **Woken, not injected.** A parent mid-turn, blocked in the tool that waits for the
+    child, takes it at its next step either way. The parent this is for is the one
+    that is *idle*: resumed past the turn that was waiting, by a restart that closed
+    that turn, with the child readmitted and finishing later. `inject` left the
+    result in its inbox with nothing to run it, and the parent sat "running" on a
+    pending message for the life of the daemon. `steer` says `agent/woken`, which a
+    host that drives the agent on demand hears.
 
     **Not flushed here**: a child never writes its parent's log, and it need not. The
     notice is on the child's ending, on the child's disk, so one the parent's log lost
@@ -1160,7 +1187,7 @@ def _deliver_notice(parent: AgentDriver, notice: ChildNotice) -> None:
     missing. And a parent that read it had written it first, at the barrier before the
     request that read it, so it is never delivered twice.
     """
-    parent.inject(_notice_message(notice.text, notice.summary, notice.id))
+    parent.steer(_notice_message(notice.text, notice.summary, notice.id))
 
 
 ReturnedVia: TypeAlias = Literal["tool", "text"]
@@ -2181,23 +2208,36 @@ class SubagentService:
             briefed=briefed,
         )
 
-    async def _end_child(self, session_id: str, detail: str) -> None:
-        """End, in its own log, a child the seam is giving up on.
+    async def _end_child(self, session_id: str, detail: str, *, tell_parent: bool = False) -> None:
+        """End, in its own log, a child the seam is giving up on — and tell its parent.
 
         **A child with an admission and no ending is one nothing can release.**
         Its log says it was admitted, so `child_is_live` reads it as working, and
         its parent is held out of passivation by a child that no longer exists
         (K3, K4). It has to *end*, and only its log can end it.
 
+        **The parent was promised a report** (P13-05): the delegating tool told it the
+        child "reports back by message", and a child the sweep gives up on — spent,
+        unresumable, without a provider — used to end in silence, leaving the parent
+        waiting on a reply nobody would write. With `tell_parent` the ending carries a
+        notice saying which child, why, and what it last said (`_failed_notice`),
+        delivered the way any ending's is. A spawn refused at admission does not: its
+        refusal is the caller's answer already.
+
         Best effort, and never raised: this is how the seam gives up on a child —
         refused, unresumable, spent — and a root coming back must not be held
         hostage by a log it could not write. A child whose spawn was refused before
         it had a log leaves nothing to end.
         """
-        try:
-            await self._write_child(
-                session_id, lambda child: record_ended(self.ctx, child, "error", detail=detail)
+
+        async def end(child: Session) -> SessionEvent:
+            notice = (
+                _failed_notice(child, detail, summary="was given up on") if tell_parent else None
             )
+            return await record_ended(self.ctx, child, "error", detail=detail, notice=notice)
+
+        try:
+            await self._write_child(session_id, end)
         except Exception:
             log.exception("ph.seams.subagents: %s could not be ended in its own log", session_id)
 
@@ -2857,6 +2897,7 @@ class SubagentService:
                     else UNRECOVERABLE_DETAIL
                     if interrupted
                     else "no provider here can start this child; its transcript is on disk",
+                    tell_parent=True,
                 )
                 continue
             try:
@@ -2866,11 +2907,17 @@ class SubagentService:
                 run = await self._readmit_one(state, request, readmitter)
             except Exception as error:
                 log.exception("ph.seams.subagents: %s could not be readmitted", state.run_id)
-                await self._end_child(state.session_id, f"this child could not be resumed: {error}")
+                await self._end_child(
+                    state.session_id,
+                    f"this child could not be resumed: {error}",
+                    tell_parent=True,
+                )
                 continue
             if run is None:
                 await self._end_child(
-                    state.session_id, "the provider that owns this child could not resume it"
+                    state.session_id,
+                    "the provider that owns this child could not resume it",
+                    tell_parent=True,
                 )
                 continue
             await self._sweep_readmitted(run, retry_limit=retry_limit)

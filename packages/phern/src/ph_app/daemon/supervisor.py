@@ -55,9 +55,9 @@ from ph.keys import (
     TOOLS,
     WORKSPACE,
 )
-from ph.llm.types import AttachmentRef
+from ph.llm.types import AttachmentRef, PluginSource, create_user_message
 from ph.paths import resolve_roots
-from ph.persistence import JsonlArchive, resumption_of
+from ph.persistence import JsonlArchive, cut_short_note, cut_turn_owner, resumption_of
 from ph.persistence.protocol import SessionArchive, SessionPersistence
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
@@ -86,7 +86,9 @@ from ph.seams.schedule import (
     Schedule,
     ScheduleService,
     ScheduleState,
+    fire_due,
     rebuild_index,
+    scheduled_source,
     state_to_wire,
 )
 from ph.seams.schedule_index import Appointment, ScheduleIndex
@@ -120,6 +122,8 @@ from ..payloads import (
     OwedRoot,
     ProfileAsk,
     ProfileAskReply,
+    ResumedRoot,
+    ResumeReport,
     RootDescription,
     RootDetail,
     SessionChildrenNotice,
@@ -147,10 +151,12 @@ from .projections import commands_of, family_of, family_rows, readings_of, scree
 from .recovery import (
     CHILD_RETRY_LIMIT,
     FAILED,
+    LADDER,
     PASSIVATE_AFTER,
     PASSIVATED,
     RECOVERED,
     RETRY,
+    ROOT_RESUME_LIMIT,
     UNREACHABLE,
     VERIFY_AFTER,
     VIOLATED,
@@ -158,6 +164,7 @@ from .recovery import (
     WAKE_WITHIN,
     Recovery,
     floored,
+    interrupted_resumes,
     recovery_of,
     resume_children,
 )
@@ -515,6 +522,14 @@ class Root:
     `recheck`: watchers are no term of what holds the daemon, so asking that again
     (and possibly reading the schedule index to answer) would change nothing.
     `Supervisor.start` points it at the releaser's notice."""
+
+    @property
+    def held(self) -> bool:
+        """Whether this root waits on a person before anything runs: a credential its
+        route names (T5), or a decision about its moved profile (S6). Its task drives
+        nothing while held, and its children are not readmitted under it (P13-06);
+        whatever lifts the hold rings."""
+        return self.needs_credential is not None or self.held_on_profile
 
     @property
     def needs_credential(self) -> str | None:
@@ -1001,6 +1016,14 @@ class Supervisor:
     """How long after a pass that could not mount a session for its appointment the
     next tries again, one step per consecutive failing pass, the last repeated
     (`recovery.WAKE_RETRY_DELAYS` says why there is a retry at all)."""
+    continue_interrupted: bool = False
+    """Whether a resume continues a *person's* turn the restart cut short, as it
+    continues a goal's or a schedule's (P13-04, `phern daemon --continue-interrupted`).
+
+    Off by default: a person whose prompt was interrupted is at a keyboard somewhere
+    and sends it again, and a turn run unasked on their behalf is one they did not
+    ask for. On for a deployment where nobody is — a fleet of roots driven only
+    over the wire, where every prompt is a client's."""
     roots: dict[str, Root] = field(default_factory=dict)
     recheck_lifetime: Callable[[], None] = _nothing
     """Say that what holds the *daemon* may have moved — `serve` points this at
@@ -1315,6 +1338,24 @@ class Supervisor:
                 exits.callback(dispose)
             root.recheck = self._recheck
             root.unwatched = self.releaser.notice
+
+            def woken(agent_: object) -> None:
+                """A message that asks this root to run reached its inbox (P13-05).
+
+                The driver says so for every waking delivery — a prompt, a steer, a
+                child's ending notice, the continuation of a cut-short turn — and
+                this is where the daemon turns that into a ring, so a result a
+                readmitted child hands an idle parent is run rather than left pending
+                for the life of the daemon. Registered as soon as there is a root to
+                ring, so what this mount itself delivers rings too: the wake channel
+                holds the ring until the task starts. A ring the task cannot act on
+                yet — held, or mid-turn — is dropped by `_run`, and the message is
+                still in the inbox.
+                """
+                if agent_ is agent:
+                    root.ring()
+
+            ctx.on("agent/woken", woken)
             # `/profile` (S7) the same way, and for the same reason: saving and
             # switching a session's profile are this host's, not a row's.
             commands = ctx.get(COMMANDS)
@@ -1358,6 +1399,18 @@ class Supervisor:
                 asks and starting.change is not None and starting.change.worth_asking
             )
             _say_profile_moved(root)
+            # **A turn the restart cut short is continued, or given up on** (P13-04),
+            # and the repair that closed it is written once (P13-10). The closers
+            # the resume synthesized are in the buffer, not on disk: left there, a
+            # second kill before the first barrier found the same open turn and
+            # repaired it again, and a root that ran no turn repaired at every boot.
+            # Written here, before any work, so the record of the crash — and the
+            # continuation, or the give-up — is on disk ahead of what follows it.
+            resumed = resumption_of(session)
+            if resumed is not None and resumed.interrupted:
+                if resumed.turn is not None:
+                    self._continue_interrupted(root)
+                await self._flush(root)
             # **Nothing starts without its credentials** (T5): asked before the
             # root can be driven and before its children are readmitted, so a key
             # a restart lost holds the work that needs it, by name, rather than
@@ -1371,7 +1424,12 @@ class Supervisor:
             # `resume_children`. In the table first, because a readmitted child
             # starts a drive job owned by this root's scope. Not while held on its
             # profile: a "yes" starts the root again, which would cut them short.
-            if not root.held_on_profile:
+            # **Nor while held on a credential** (P13-06): a child readmitted under
+            # a root that cannot run would spend its ladder on a key a person could
+            # supply in a second, and the one that arrives readmits them
+            # (`credential_supplied`). They stay live in their own logs meanwhile,
+            # which is what keeps the root mounted and on the live-roots index.
+            if not root.held:
                 await self._resume_children(root)
             _say_what_waits(root)
 
@@ -1615,11 +1673,9 @@ class Supervisor:
             async for _ in root.waiting:
                 # Held for a credential (T5) or a profile decision (S6): the message
                 # stays in the inbox, and whatever releases the hold rings again.
-                if (
-                    root.agent.status != "idle"
-                    or root.needs_credential is not None
-                    or root.held_on_profile
-                ):
+                # A ring whose message a running turn already took is a ring for
+                # nothing: `run()` on an empty inbox opens and closes an empty turn.
+                if root.agent.status != "idle" or not root.agent.inbox.has_pending or root.held:
                     continue
                 await self._drive(root)
 
@@ -1744,7 +1800,8 @@ class Supervisor:
         if self.roots.get(root.id) is not root:
             return
         root.held_on_profile = False
-        await self._resume_children(root)
+        if not root.held:
+            await self._resume_children(root)
         root.publish(root.status_notice())
         root.ring()
 
@@ -1838,7 +1895,10 @@ class Supervisor:
         if held and root.needs_credential is None:
             root.ring()
         subagents = root.ctx.get(SUBAGENTS)
-        if subagents is not None:
+        # Not while the root itself still waits — on another name, or on its
+        # profile (P13-06): the hold that kept its children out of `_start` keeps
+        # them out here, and the decision that lifts it readmits them.
+        if subagents is not None and not root.held:
             revived = await subagents.readmit_waiting(root.agent, retry_limit=CHILD_RETRY_LIMIT)
             if revived:
                 log.info(
@@ -1870,10 +1930,12 @@ class Supervisor:
             try:
                 await root.agent.run()
                 await root.ctx.require(SESSIONS).flush(root.session)
-                if root.recovery.attempts:
+                if root.recovery.attempts or root.recovery.failed:
                     # Only after a ladder was actually climbed, so an ordinary
                     # turn writes nothing. This is what clears the count, and it
-                    # has to be a record only success can write.
+                    # has to be a record only success can write. `failed` with no
+                    # attempts is the resume ladder's give-up (P13-04), which a
+                    # person's prompt that ran clears the same way.
                     root.recovered()
                     await self._flush(root)
                 return
@@ -2116,6 +2178,7 @@ class Supervisor:
                         since=survey,
                         live=live,
                         vouch=vouched,
+                        ladder=LADDER,
                     )
                 )
             except Exception:
@@ -2125,19 +2188,120 @@ class Supervisor:
         rows: list[OwedRoot] = []
         for entry in sorted(survey.entries.values(), key=lambda one: one.session_id):
             held = self.roots.get(entry.session_id)
-            rows.append(
-                OwedRoot(
-                    session_id=entry.session_id,
-                    holds=list(entry.holds),
-                    updated=entry.updated,
-                    mounted=held is not None,
-                    status=held.status if held is not None else "stored",
-                    cwd=entry.cwd,
-                    profile=entry.profile,
-                    failed=entry.failed,
-                )
-            )
+            status = held.status if held is not None else "stored"
+            rows.append(OwedRoot.of(entry, mounted=held is not None, status=status))
         return OwedListing(sessions=rows, trusted=survey.complete, rebuilt=rebuilt)
+
+    async def resume_owed(
+        self, sessions: Sequence[str] = (), *, all_owed: bool = False, force: bool = False
+    ) -> ResumeReport:
+        """Mount the roots named, and every owed root with `all_owed`, so each carries
+        on without a client (P13-03): `sessions/resume`, `phern agents resume`, and
+        the pass `phern daemon --resume-owed` runs once its door is open.
+
+        Each goes through `start`, which is the whole of a resume already: the log
+        repaired, children readmitted, a cut-short turn continued (P13-04), a
+        pending prompt rung. This only chooses which, and says what became of each.
+        A root whose ladder is spent is left on disk unless `force`: mounting it
+        rings nothing, and a resumer that runs every minute would otherwise mount
+        it every minute. One at a time, as `_mount` orders them anyway, and one that
+        will not mount — held by another process, not a root, a log that will not
+        read — costs its own row and not the pass.
+        """
+        listing = await self.owed()
+        spent = {row.session_id for row in listing.sessions if row.failed}
+        owed = [row.session_id for row in listing.sessions] if all_owed else []
+        wanted = dict.fromkeys([*sessions, *owed])
+        rows = [await self._resume_one(one, spent=one in spent and not force) for one in wanted]
+        return ResumeReport(sessions=rows, trusted=listing.trusted)
+
+    async def _resume_one(self, session_id: str, *, spent: bool) -> ResumedRoot:
+        """One root of a resume pass, and the row that says what became of it."""
+        mounted = self.roots.get(session_id)
+        if mounted is not None:
+            return ResumedRoot(session_id=session_id, outcome="mounted", status=mounted.status)
+        if spent:
+            return ResumedRoot(
+                session_id=session_id,
+                outcome="spent",
+                detail="its ladder is spent; it waits for a person, or for `force`",
+            )
+        try:
+            root = await self.start(session_id)
+        except Exception as error:
+            log.warning("ph_app.daemon: could not resume %s: %s", session_id, error_message(error))
+            return ResumedRoot(
+                session_id=session_id, outcome="refused", detail=error_message(error)
+            )
+        if (name := root.needs_credential) is not None:
+            detail = f"waiting for credential {name}"
+        elif root.held_on_profile:
+            detail = "waiting for a decision about its profile"
+        else:
+            return ResumedRoot(session_id=session_id, outcome="resumed", status=root.status)
+        return ResumedRoot(session_id=session_id, outcome="held", status=root.status, detail=detail)
+
+    def _continue_interrupted(self, root: Root) -> None:
+        """Put a turn the restart cut short back to work, or give the root up (P13-04).
+
+        **Which turns.** One nobody will send again: a goal is open, or the turn was
+        owed to nobody at a keyboard (`cut_turn_owner`) — a schedule's, a child's
+        notice, this supervisor's own earlier continuation — or `continue_interrupted`
+        widens it to a person's. A person's interrupted prompt is otherwise left: they are at
+        a keyboard somewhere, and the transcript shows the turn closed
+        `interrupted`. A prompt the turn had not claimed is not this case at all —
+        it is still in the inbox, and the ring at the end of `_start` runs it.
+
+        **How many times.** The root's ladder is `interrupted_resumes`, the twin of
+        a child's (`restarts_since_progress`): an answer forgives the restarts
+        before it, and past `ROOT_RESUME_LIMIT` the root is failed in its log, so
+        `status` says so, the live-roots index carries it, and a resumer skips it.
+
+        **What it is told** is what a readmitted child is told (`cut_short_note`):
+        that the turn above was cut short, which attempt this is, and to carry on from
+        the transcript rather than start over — tagged as this supervisor's, not the
+        person's, so a transcript draws it as a notice. Delivered for the next turn,
+        which the ring at the end of `_start` starts.
+        """
+        if root.recovery.failed:
+            return
+        goals = root.ctx.get(GOALS)
+        unasked = (
+            self.continue_interrupted
+            or (goals is not None and goals.open(root.session) is not None)
+            or cut_turn_owner(root.session) == "unattended"
+        )
+        if not unasked:
+            log.info(
+                "ph_app.daemon: root %s: its turn was cut short; left for the person who sent it",
+                root.id,
+            )
+            return
+        attempt = interrupted_resumes(root.session)
+        if attempt > ROOT_RESUME_LIMIT:
+            root.give_up(
+                f"its turn was cut short by {attempt} restarts in a row with no answer between",
+                attempts=attempt,
+            )
+            return
+        log.warning(
+            "ph_app.daemon: root %s: its turn was cut short; continuing it (attempt %d of %d)",
+            root.id,
+            attempt,
+            ROOT_RESUME_LIMIT,
+        )
+        root.agent.followup(
+            create_user_message(
+                content=[
+                    {"type": "text", "text": cut_short_note(attempt, limit=ROOT_RESUME_LIMIT)}
+                ],
+                source=PluginSource(
+                    plugin="ph_app.daemon.supervisor",
+                    form="notice",
+                    summary="the turn was cut short by a restart; continuing it",
+                ),
+            )
+        )
 
     def _index(self) -> ScheduleIndex | None:
         """The index this daemon reads, or `None` when nothing indexes.
@@ -2371,13 +2535,17 @@ class Supervisor:
     async def tick(self, *, now: int | None = None) -> list[str]:
         """Fire whatever is due on every mounted root (P5-06). Returns their ids.
 
-        **Claim then deliver, never the other way round.** `ScheduleService.claim`
-        appends `schedule/tick` before returning, so a crash between the two
-        costs a skipped run rather than a repeated one — and a repeated run of a
-        scheduled prompt bills twice and puts a turn in the transcript nobody
-        asked for. The delivery is `prompt`, which is the same path a person's
-        message takes, so a scheduled turn is an ordinary turn with a record
-        saying why it started.
+        **Through the seam's door** (`fire_due`, P13-07), which keeps the order a
+        crash needs: the tick ahead of the prompt in the log, one write after
+        delivery, and the index told only once both are on disk. A write that fails
+        marks the root unwritten here; the index stays where it was, and the turn
+        the prompt starts is refused at its first request barrier, so no run happens
+        without its tick on disk.
+
+        The delivery is `prompt`, which is the same path a person's message takes,
+        so a scheduled turn is an ordinary turn with a record saying why it started
+        — under the schedule's own source (`scheduled_source`), so a reader tells it
+        from a person's.
 
         One stamp for the whole pass, so two schedules due in the same second
         agree about what "now" was.
@@ -2385,30 +2553,31 @@ class Supervisor:
         stamp = now if now is not None else now_ms()
         fired: list[str] = []
         for root in list(self.roots.values()):
-            schedule = root.ctx.get(SCHEDULE)
-            if schedule is None:
+            if root.ctx.get(SCHEDULE) is None:
                 continue
-            # The whole per-root body, not just the claim: `claim` barely raises
-            # (a bad expression logs and declines) where `prompt` and `_flush` are
-            # the two calls that genuinely fail. One bad root must not take the
-            # whole pass down.
+            # The whole per-root body: `claim` barely raises (a bad expression logs
+            # and declines) where `prompt` and the write are the two calls that
+            # genuinely fail. One bad root must not take the whole pass down.
             try:
-                claimed = schedule.claim(root.session, now=stamp)
-                for entry in claimed:
-                    log.info("ph_app.daemon: root %s firing schedule %s", root.id, entry.id)
-                    # `next-turn`: a scheduled turn is an ordinary turn, which is
-                    # this method's own contract two paragraphs up and stops two
-                    # schedules due in one pass becoming one turn.
-                    await self.prompt(root.id, entry.prompt, reach="next-turn")
-                    fired.append(entry.id)
-                # Only when something was appended: adding `or schedule.live(...)`
-                # folds the whole log a second time to decide whether to flush a
-                # buffer the first fold has just left empty, on every pass.
-                if claimed:
-                    await self._flush(root)
+                done = await fire_due(
+                    root.ctx, root.session, now=stamp, deliver=partial(self._fire, root)
+                )
             except Exception:
                 log.exception("ph_app.daemon: root %s failed its schedule tick", root.id)
+                continue
+            if not done.written:
+                self.unwritable(root)
+            fired.extend(entry.id for entry in done.schedules)
         return fired
+
+    async def _fire(self, root: Root, entry: Schedule) -> None:
+        """Deliver one schedule's prompt to its root, for the next turn.
+
+        `next-turn`: a scheduled turn is an ordinary turn, which is `tick`'s own
+        contract, and it stops two schedules due in one pass becoming one turn.
+        """
+        log.info("ph_app.daemon: root %s firing schedule %s", root.id, entry.id)
+        await self.prompt(root.id, entry.prompt, reach="next-turn", source=scheduled_source(entry))
 
     def _verify_at(self, root: Root) -> int | None:
         """When `root` is due its check, epoch ms, or `None`: the check off, nothing
@@ -2647,6 +2816,7 @@ class Supervisor:
         *,
         attachments: Sequence[AttachmentRef] = (),
         reach: Literal["soonest", "next-turn"] = "soonest",
+        source: PluginSource | None = None,
     ) -> Root:
         """Splice a turn into the agent's inbox and wake its task.
 
@@ -2675,6 +2845,10 @@ class Supervisor:
         no `turn/start` is appended. What that costs a per-turn ceiling is on
         `CallBudget.turn_limit`, beside the setting it is about, rather than a
         third copy here.
+
+        `source` is whose words these are when not a person's just now — the
+        schedule's (`tick`). The wake is the driver's own: both deliveries say
+        `agent/woken`, which the root's listener turns into its ring (P13-05).
         """
         root = await self.start(root_id)
         # The client's own list comes first because it is what that person just
@@ -2683,14 +2857,13 @@ class Supervisor:
         taken = root.staged.take()
         if taken:
             root.publish(SessionStagedNotice(session_id=root.id))
-        message = prompt_message(text, [*attachments, *taken])
+        message = prompt_message(text, [*attachments, *taken], source=source)
         if reach == "next-turn":
             root.agent.followup(message)
         else:
             # The loop decides mid-turn-or-not, because the phase is its own and
             # a status read here could be stale by the time the verb lands.
             root.agent.interject(message)
-        root.ring()
         return root
 
     async def shell(

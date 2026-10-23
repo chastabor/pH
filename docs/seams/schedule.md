@@ -14,22 +14,26 @@ process holding it.
 A schedule is `schedule/created` until a matching `schedule/canceled`. A firing
 is `schedule/tick`, appended **before** the work is delivered.
 
-That ordering is A10's write-ahead applied to time. The tick and the prompt it
-delivers are appended together and reach disk in the flush that ends the
-scheduler's pass for that root (`Supervisor.tick`). What a crash costs depends on
-where it lands:
+That ordering is A10's write-ahead applied to time. A host fires through the seam's
+door, `fire_due` (P13-07): it claims, delivers, writes the log once, and only then
+tells the index, so the order is the seam's and not each host's. The tick precedes
+the prompt in the log, and the turn's first model request is a barrier that writes
+the log whole and in order, so no run bills without its tick on disk. What a crash
+costs depends on where it lands:
 
 | crash lands | on the next start | cost |
 |---|---|---|
-| before that flush | neither record is on disk, so the moment is still due and fires | a **late** run, never a lost one |
-| after the flush, before the turn's first model request | the tick is on disk and the prompt is in the inbox, which `_start` rings | the run happens, late |
+| before the door's write | neither record is on disk, so the moment is still due and fires | a **late** run, never a lost one |
+| after it, before the turn's first model request | the tick is on disk and the prompt is in the inbox, which `_start` rings | the run happens, late |
 | during the turn | repair closes the turn as interrupted; the tick is on disk, so the moment is not fired again | **one skipped run** |
 
-The model request is itself a barrier (`session-checkpoint-policy` flushes before
-every request), so no row can bill a run twice. Putting the record before the
-work is what rules out the fourth row, a turn that ran and left no tick, which
-would fire again and bill twice. So: **at-most-once, deliberately**, and the log
-says which.
+The index is told last, and only over a written log. Told at the claim, as it once
+was, it said "later" over a log whose tick was still in a buffer, and a kill there
+lost the run. Putting the record before the work is what rules out the fourth row,
+a turn that ran and left no tick, which would fire again and bill twice. So:
+**at-most-once, deliberately**, and the log says which. A scheduled prompt is
+delivered under the schedule's own source (`scheduled_source`), so a transcript —
+and a resumer (P13-04) — tell it from something the person just typed.
 
 ## Missed ticks coalesce
 
@@ -51,7 +55,8 @@ sleeping, and a caller can drive the whole thing from one stamp.
 ```text
 ctx.schedule.create(schedule, session=...)     # -> Schedule
 ctx.schedule.cancel(schedule_id, session=...)
-ctx.schedule.claim(..., now=...)               # the tick, written ahead
+fire_due(ctx, session, now=..., deliver=...)   # claim, deliver, write, then reindex
+ctx.schedule.claim(..., now=...)               # the tick, appended — fire_due's first step
 ctx.schedule.live(session)                     # what is still scheduled
 ctx.schedule.states(session)                   # the fold
 ctx.schedule.index()   ctx.schedule.reindex()
@@ -138,7 +143,7 @@ the store that can.
 |---|---|
 | `schedule/created` | with its kind and spec |
 | `schedule/canceled` | the matching end |
-| `schedule/tick` | **before** the work is delivered |
+| `schedule/tick` | **before** the work is delivered, and on disk before its turn's first request |
 
 There is no liveness record. Nothing here appends because time passed, and
 whether a daemon is still watching is a question asked of the daemon:

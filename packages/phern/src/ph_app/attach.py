@@ -29,6 +29,7 @@ from ph.llm.types import (
     ContentBlock,
     MediaBlock,
     Message,
+    PluginSource,
     TextBlock,
     create_user_message,
 )
@@ -106,17 +107,24 @@ class Tray:
         return len(self._refs)
 
 
-def prompt_message(text: str, attachments: Sequence[AttachmentRef] = ()) -> Message:
+def prompt_message(
+    text: str, attachments: Sequence[AttachmentRef] = (), *, source: PluginSource | None = None
+) -> Message:
     """One `user/message` carrying what the person typed and what they attached.
 
     The text first, then the media, which is the order a person writes in — "look
     at this" before the thing being looked at. Identical to what `agent.prompt`
     builds when nothing is attached, so a front end can use this uniformly rather
     than branching on whether the person passed a file.
+
+    `source` is for a prompt a person did not just send — a schedule's
+    (`scheduled_source`), whose words are the person's and whose moment is not.
     """
     content: list[ContentBlock] = [TextBlock(text=text)] if text else []
     content.extend(MediaBlock(attachment=one) for one in attachments)
-    return create_user_message(content=content, source={"kind": "user"})
+    return create_user_message(
+        content=content, source={"kind": "user"} if source is None else source
+    )
 
 
 async def stage_bytes(

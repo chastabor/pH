@@ -48,6 +48,12 @@ events.declare(
     "agent/inbox/discarded", "emit", owner="ph.agent", doc="A pending message was canceled."
 )
 events.declare(
+    "agent/woken",
+    "emit",
+    owner="ph.agent",
+    doc="A waking message entered the inbox; a host that drives the agent on demand runs it.",
+)
+events.declare(
     "agent/pre-step",
     "waterfall",
     PreStepRequest,

@@ -31,6 +31,7 @@ from ph_app.daemon.notify import notify, watchdog_interval
 from ph_app.daemon.probes import HEARTBEAT_SECONDS, STALE_HEARTBEATS, parse_bind
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import Supervisor
+from ph_app.payloads import OwedRoot
 
 pytestmark = pytest.mark.anyio
 
@@ -273,3 +274,15 @@ def test_the_watchdog_interval_is_half_of_what_systemd_asked(
     assert watchdog_interval() == 5.0
     monkeypatch.setenv("WATCHDOG_PID", "1")
     assert watchdog_interval() is None, "another process was asked to feed it"
+
+
+def test_an_owed_row_carries_the_entry_it_was_built_from() -> None:
+    """`OwedRoot.of` is the one place an index entry reaches the wire."""
+    entry = LiveEntry(
+        "root", ("turn", "goal"), updated=7, family="f", cwd="/w", profile="work", failed=True
+    )
+    row = OwedRoot.of(entry, mounted=False, status="stored")
+    assert row.session_id == "root"
+    assert row.holds == ["turn", "goal"]
+    assert (row.updated, row.cwd, row.profile, row.failed) == (7, "/w", "work", True)
+    assert (row.mounted, row.status) == (False, "stored")

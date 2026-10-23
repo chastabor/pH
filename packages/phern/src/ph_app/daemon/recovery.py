@@ -37,12 +37,14 @@ the inbox and running again is meaningful.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ph.keys import SUBAGENTS
-from ph.session import Session
+from ph.persistence import Resumption
+from ph.seams.live_index import Ladder
+from ph.session import Session, SessionEvent
 
 if TYPE_CHECKING:
     from ph.agent.types import AgentDriver
@@ -51,15 +53,19 @@ if TYPE_CHECKING:
 __all__ = [
     "CHILD_RETRY_LIMIT",
     "FAILED",
+    "LADDER",
     "RECOVERED",
     "RETRY",
     "RETRY_DELAYS",
+    "ROOT_RESUME_LIMIT",
     "UNREACHABLE",
     "VERIFY_AFTER",
     "VIOLATED",
     "WAKE_RETRY_DELAYS",
     "Recovery",
     "floored",
+    "interrupted_resumes",
+    "recovery_from",
     "recovery_of",
     "resume_children",
 ]
@@ -127,6 +133,42 @@ none. `spent` is the word worth sharing, and it costs nothing to say twice.
 """
 
 
+ROOT_RESUME_LIMIT = 3
+"""How many times a **root's** interrupted turn is continued before it is failed
+(P13-04): the root's twin of `CHILD_RETRY_LIMIT`, and the same number for the same
+reason — a turn cut short three times in a row by a restart is not unlucky but in
+front of something that keeps stopping.
+
+Counted by `interrupted_resumes`: resumes that had to close a turn, since the root
+last answered. An answer forgives the restarts before it, as a child's does
+(`restarts_since_progress`), so a long run that met two incidents an hour apart is
+two attempts and not a lifetime's. Past the bound the root is failed in its log
+(`supervisor/failed`), which `Root.status` reads as `failed` and the live-roots
+index carries, so a resumer that comes back every minute does not spend one more
+attempt per restart."""
+
+
+def interrupted_resumes(session: Session) -> int:
+    """How many of this log's resumes cut a turn short since the root last answered —
+    the root's ladder, folded from records the resume already writes.
+
+    A `session/resumed` that names a `turn` is a restart that cut one short
+    (`Resumption.turn`): one that only settled an intent between turns is not. An
+    `assistant/message` is an answer, which a turn that did nothing cannot produce.
+    Walked back from the tail to the last answer, so it costs the events since then
+    and not the log. Own events only, for `recovery_of`'s reason: a fork inherits its
+    source's transcript, not its restarts.
+    """
+    count = 0
+    for seq in range(session.seq - 1, session.header.first_own_seq - 1, -1):
+        event = session.at(seq)
+        if event is None or event.type == "assistant/message":
+            break
+        if event.type == "session/resumed" and Resumption.of(event).turn is not None:
+            count += 1
+    return count
+
+
 async def resume_children(ctx: Context, agent: AgentDriver) -> Sequence[str]:
     """Put back to work what `agent`'s session's children are owed (P5-04):
     readmitted, held, or ended, each in its own log. Returns the revived.
@@ -179,6 +221,14 @@ def recovery_of(session: Session) -> Recovery:
     transcript, and counting the parent's retries as the child's would hand a
     fresh root a spent ladder. `workspace_leaks` folds from the same boundary
     for the same reason.
+    """
+    return recovery_from(session.own_events())
+
+
+def recovery_from(events: Iterable[SessionEvent]) -> Recovery:
+    """The ladder's state, folded from a root's own events — `recovery_of`'s fold,
+    and the live-roots index's (`LADDER`), which reads a stored log with no
+    `Session` to ask.
 
     **Only `supervisor/recovered` resets the count.** Nothing the ladder itself
     can write may clear it — see `RECOVERED` for the unbounded loop that
@@ -189,7 +239,7 @@ def recovery_of(session: Session) -> Recovery:
     """
     attempts = 0
     failed = False
-    for event in session.own_events():
+    for event in events:
         if event.type == RECOVERED:
             attempts, failed = 0, False
         elif event.type == RETRY:
@@ -197,6 +247,13 @@ def recovery_of(session: Session) -> Recovery:
         elif event.type == FAILED:
             failed = True
     return Recovery(attempts=attempts, failed=failed)
+
+
+LADDER = Ladder(
+    types=frozenset({RETRY, FAILED, RECOVERED}), spent=lambda events: recovery_from(events).failed
+)
+"""This ladder, for the live-roots index's rebuild (`rebuild_live_index`): a root
+whose log says it gave up is written back `failed`, so a resumer skips it."""
 
 
 PASSIVATED = "supervisor/passivated"

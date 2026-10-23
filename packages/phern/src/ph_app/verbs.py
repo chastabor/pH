@@ -50,6 +50,7 @@ from .params import (
     ProbeParams,
     PromptParams,
     PutAttachmentParams,
+    ResumeParams,
     ShellParams,
     SnapshotParams,
     StageParams,
@@ -68,6 +69,7 @@ from .payloads import (
     OwedListing,
     PresetApplied,
     ProbeReply,
+    ResumeReport,
     RootDescription,
     RootListing,
     RootStatusReply,
@@ -110,6 +112,7 @@ __all__ = [
     "SESSIONS_BROWSE",
     "SESSIONS_LIST",
     "SESSIONS_OWED",
+    "SESSIONS_RESUME",
     "SESSION_ADOPT",
     "SESSION_ATTACH",
     "SESSION_CANCEL",
@@ -173,6 +176,8 @@ SESSIONS_BROWSE = Verb("sessions/browse", BrowseParams, SessionBrowse)
 SESSIONS_OWED = Verb("sessions/owed", OwedParams, OwedListing)
 """Every stored root that still owes work, and why (P13-02) — what a resumer asks
 before it asks for anything to be mounted."""
+SESSIONS_RESUME = Verb("sessions/resume", ResumeParams, ResumeReport)
+"""Mount the roots named, or every owed root, and say what became of each (P13-03)."""
 SESSION_NEW = Verb("session/new", NewSessionParams, NewSessionReply)
 SESSION_ATTACH = Verb("session/attach", SessionParams, AttachReply)
 SESSION_DETACH = Verb("session/detach", SessionParams, SessionDetached)
