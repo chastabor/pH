@@ -10,22 +10,30 @@ the seam's door, which puts the index after the log.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import route_needs, running, set_phase, supervised, unplugged, until
+from daemon_helpers import (
+    A_PERSON,
+    cut_turn,
+    left_mid_turn,
+    route_needs,
+    running,
+    set_phase,
+    supervised,
+    unplugged,
+    until,
+)
 
 from ph.json import as_obj, as_seq
 from ph.keys import GOALS, INTENTS, SCHEDULE
-from ph.llm.types import create_user_message
 from ph.persistence import resumption_of
 from ph.seams import schedule as schedule_module
 from ph.seams.goals import Goal
 from ph.seams.schedule import Schedule, ScheduleService, scheduled_source
 from ph.seams.subagents import ChildNotice, SubagentService, record_ended
-from ph.session import Session, SurfaceIntent
+from ph.session import Session
 from ph.session.kinds import SHELL_COMMAND
 from ph.testing import admitted_child, log_event, stored_types
 from ph_app.daemon.recovery import ROOT_RESUME_LIMIT, interrupted_resumes
@@ -34,36 +42,8 @@ from ph_app.wire import source_of
 
 pytestmark = pytest.mark.anyio
 
-A_PERSON: dict[str, Any] = {"kind": "user"}
 A_SCHEDULE = scheduled_source(Schedule(id="nightly", kind="interval", spec="60000", prompt="go"))
 KEY = "PH_P13_ROOT_KEY"
-
-
-def _cut_turn(root: Root, *, source: Any) -> None:  # noqa: ANN401
-    """Open a turn that claimed one prompt from `source` and never closed — what a
-    kill mid-turn leaves in the log."""
-    log_event(root.session, "turn/start", {"turn": 1})
-    log_event(root.session, "step/start", {"turn": 1, "step": 1})
-    message = create_user_message(content=[{"type": "text", "text": "go"}], source=source)
-    log_event(root.session, "user/message", message.to_wire(), SurfaceIntent("append"))
-
-
-async def _left_mid_turn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    session_id: str,
-    *,
-    source: Any,  # noqa: ANN401
-    before: Callable[[Root], None] | None = None,
-) -> None:
-    """A root whose log ends inside a turn from `source` (`_cut_turn`), written by a
-    daemon that then stops. `before` writes whatever the log holds ahead of the turn."""
-    async with supervised(tmp_path, monkeypatch) as first:
-        root = await first.start(session_id)
-        if before is not None:
-            before(root)
-        _cut_turn(root, source=source)
-        await first._flush(root)
 
 
 def _spliced(session: Session) -> list[object]:
@@ -102,7 +82,7 @@ async def test_a_turn_a_schedule_sent_is_continued_on_resume(
 
     Sabotage: drop `_continue_interrupted` from `_start`, and the root sits idle.
     """
-    await _left_mid_turn(tmp_path, monkeypatch, "sched", source=A_SCHEDULE)
+    await left_mid_turn(tmp_path, monkeypatch, "sched", source=A_SCHEDULE)
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("sched")
         await until(lambda: _answered(root), what="the continued turn to run")
@@ -124,7 +104,7 @@ async def test_a_persons_interrupted_turn_waits_for_them_unless_the_daemon_is_to
     until the next barrier — which a root that ran no turn never reached, so every
     boot repaired the same turn again.
     """
-    await _left_mid_turn(tmp_path, monkeypatch, "person", source=A_PERSON)
+    await left_mid_turn(tmp_path, monkeypatch, "person", source=A_PERSON)
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("person")
         assert not root.agent.inbox.has_pending and root.status == "idle"
@@ -138,7 +118,7 @@ async def test_a_persons_interrupted_turn_waits_for_them_unless_the_daemon_is_to
         root = await third.start("person")
         again = resumption_of(root.session)
         assert again is not None and not again.interrupted and again.closed == 0
-    await _left_mid_turn(tmp_path, monkeypatch, "person-told", source=A_PERSON)
+    await left_mid_turn(tmp_path, monkeypatch, "person-told", source=A_PERSON)
     async with supervised(tmp_path, monkeypatch) as told:
         told.continue_interrupted = True
         root = await told.start("person-told")
@@ -152,7 +132,7 @@ async def test_an_open_goal_is_reason_enough_to_continue(
     reached: the goal was open, its gates unrun, and nothing would run another turn.
     With a goal open the person's own cut-short prompt is continued too — they asked
     for the work to carry on until the gates pass."""
-    await _left_mid_turn(tmp_path, monkeypatch, "goal", source=A_PERSON, before=_open_goal)
+    await left_mid_turn(tmp_path, monkeypatch, "goal", source=A_PERSON, before=_open_goal)
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("goal")
         await until(lambda: _answered(root), what="the continued turn to run")
@@ -175,7 +155,7 @@ async def test_a_resume_that_only_settled_an_intent_continues_nothing(
     """
     async with supervised(tmp_path, monkeypatch) as first:
         root = await first.start("between")
-        _cut_turn(root, source=A_SCHEDULE)
+        cut_turn(root, source=A_SCHEDULE)
         log_event(root.session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
         await root.ctx.require(INTENTS).open(
             root.session, SHELL_COMMAND, {"command": "make", "surface": False}
@@ -210,7 +190,7 @@ async def test_the_root_ladder_gives_up_past_its_bound(
                 {"events": 1, "interrupted": True, "closed": 1, "turn": 1},
             )
 
-    await _left_mid_turn(tmp_path, monkeypatch, "looping", source=A_SCHEDULE, before=cut_before)
+    await left_mid_turn(tmp_path, monkeypatch, "looping", source=A_SCHEDULE, before=cut_before)
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("looping")
         assert root.status == "failed" and root.recovery.failed
@@ -236,7 +216,7 @@ async def test_resume_owed_mounts_what_is_owed_and_says_what_became_of_each(
     mounted whether or not it owes anything, a second pass finds them mounted, and
     an id that is not a root is refused with the reason rather than failing the pass.
     """
-    await _left_mid_turn(tmp_path, monkeypatch, "owed", source=A_SCHEDULE)
+    await left_mid_turn(tmp_path, monkeypatch, "owed", source=A_SCHEDULE)
     async with supervised(tmp_path, monkeypatch) as first:
         await first.start("quiet")
         family = await first.start("family")
@@ -270,7 +250,7 @@ async def test_readiness_waits_for_the_first_resume_pass(
         server.resumed = False
         reply = server.probe("ready")
         assert not reply.ok and any("resume pass" in reason for reason in reply.reasons)
-    await _left_mid_turn(tmp_path, monkeypatch, "booted", source=A_SCHEDULE)
+    await left_mid_turn(tmp_path, monkeypatch, "booted", source=A_SCHEDULE)
     async with running(tmp_path, resume_owed=True) as daemon:
         await until(lambda: daemon.running.resumed, what="the resume pass to finish")
         assert daemon.running.probe("ready").ok

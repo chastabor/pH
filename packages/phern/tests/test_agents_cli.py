@@ -37,9 +37,8 @@ from typing import Any
 
 import anyio
 import pytest
-from daemon_helpers import break_the_provider, private_runtime, serving, until
+from daemon_helpers import break_the_provider, private_runtime, run_phern, serving, until
 from pydantic import ValidationError
-from typer.testing import CliRunner
 
 from ph.cordis import Context
 from ph.json import JsonObject, as_obj
@@ -54,33 +53,11 @@ from ph_app.protocol import PROTOCOL_VERSION, Cursor, NoParams
 pytestmark = pytest.mark.anyio
 
 
-runner = CliRunner()
-
-
 async def _watchers(client: DaemonClient, session_id: str) -> int:
     """How many clients the daemon says are attached to this root."""
     listed = await client.call("sessions/list")
     row = next((one for one in listed["sessions"] if one["sessionId"] == session_id), None)
     return 0 if row is None else int(row["watchers"])
-
-
-async def _ph(*args: str) -> Any:  # noqa: ANN401
-    """One `ph …` invocation, off the loop the daemon is serving on."""
-
-    def invoke() -> Any:  # noqa: ANN401
-        # Wide and unstyled, because these assertions are about content. Rich
-        # wraps to 80 columns off a terminal, and a wrapped session id is a
-        # substring that is present and unfindable; `FORCE_COLOR` — which CI
-        # images and plenty of shells set — puts escape sequences *inside* the
-        # words, so `"interval 3600000" in output` is false for output that
-        # reads as exactly that.
-        return runner.invoke(
-            app,
-            list(args),
-            env={"COLUMNS": "200", "FORCE_COLOR": None, "NO_COLOR": "1", "TERM": "dumb"},
-        )
-
-    return await anyio.to_thread.run_sync(invoke)
 
 
 # ------------------------------------------------------------------ the seven --
@@ -97,11 +74,11 @@ async def test_send_queues_a_turn_and_attach_shows_the_answer(
     assertion holds: catch-up and the live stream are one rendering of one log.
     """
     async with serving(tmp_path, monkeypatch):
-        sent = await _ph("agents", "send", "alpha", "what is the answer")
+        sent = await run_phern("agents", "send", "alpha", "what is the answer")
         assert sent.exit_code == 0, sent.output
         assert "queued on alpha" in sent.output
 
-        followed = await _ph("agents", "attach", "alpha", "--until-idle")
+        followed = await run_phern("agents", "attach", "alpha", "--until-idle")
         assert followed.exit_code == 0, followed.output
         assert "user/message" in followed.output
         assert "what is the answer" in followed.output
@@ -125,9 +102,9 @@ async def test_until_idle_exits_non_zero_when_the_last_turn_errored(
     """
     break_the_provider(monkeypatch)
     async with serving(tmp_path, monkeypatch):
-        assert (await _ph("agents", "send", "sour", "answer me")).exit_code == 0
+        assert (await run_phern("agents", "send", "sour", "answer me")).exit_code == 0
 
-        followed = await _ph("agents", "attach", "sour", "--until-idle")
+        followed = await run_phern("agents", "attach", "sour", "--until-idle")
 
         assert followed.exit_code == 1, followed.output
         assert "the last turn ended in an error" in followed.output
@@ -139,9 +116,9 @@ async def test_until_idle_exits_zero_when_the_turn_completed(
 ) -> None:
     """The other half, so the exit code is a signal rather than a constant."""
     async with serving(tmp_path, monkeypatch):
-        assert (await _ph("agents", "send", "sweet", "answer me")).exit_code == 0
+        assert (await run_phern("agents", "send", "sweet", "answer me")).exit_code == 0
 
-        followed = await _ph("agents", "attach", "sweet", "--until-idle")
+        followed = await run_phern("agents", "attach", "sweet", "--until-idle")
 
         assert followed.exit_code == 0, followed.output
         assert "last turn" not in followed.output, "an ordinary ending is not annotated"
@@ -160,8 +137,8 @@ async def test_since_skips_the_history_a_client_already_has(
     """
     async with serving(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
-        await _ph("agents", "send", "resumed", "the first thing")
-        whole = await _ph("agents", "attach", "resumed", "--until-idle")
+        await run_phern("agents", "send", "resumed", "the first thing")
+        whole = await run_phern("agents", "attach", "resumed", "--until-idle")
         assert "the first thing" in whole.output
         # Asked over the wire rather than read off the supervisor or scraped
         # out of the table `status` draws: this file's whole claim is that a
@@ -171,8 +148,8 @@ async def test_since_skips_the_history_a_client_already_has(
             "sequence"
         ]
 
-        await _ph("agents", "send", "resumed", "the second thing")
-        rest = await _ph("agents", "attach", "resumed", "--since", str(head), "--until-idle")
+        await run_phern("agents", "send", "resumed", "the second thing")
+        rest = await run_phern("agents", "attach", "resumed", "--since", str(head), "--until-idle")
         assert rest.exit_code == 0, rest.output
         assert "the second thing" in rest.output
         assert "the first thing" not in rest.output
@@ -196,12 +173,12 @@ async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
     """
     async with serving(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
-        await _ph("agents", "send", "kept", "the first thing")
-        await _ph("agents", "attach", "kept", "--until-idle")
+        await run_phern("agents", "send", "kept", "the first thing")
+        await run_phern("agents", "attach", "kept", "--until-idle")
         cursor = as_obj((await client.call("session/status", sessionId="kept"))["cursor"])
-        await _ph("agents", "send", "kept", "the second thing")
+        await run_phern("agents", "send", "kept", "the second thing")
 
-        right = await _ph(
+        right = await run_phern(
             "agents",
             "attach",
             "kept",
@@ -214,7 +191,7 @@ async def test_a_full_cursor_is_verified_and_a_stale_one_skips_nothing(
         assert "the first thing" not in right.output, "a verified cursor resumes where it says"
         assert "history starts at" not in right.output
 
-        stale = await _ph(
+        stale = await run_phern(
             "agents", "attach", "kept", "--since", f"1:{cursor['sequence']}", "--until-idle"
         )
         assert stale.exit_code == 0, stale.output
@@ -229,10 +206,10 @@ async def test_status_prints_the_cursor_attach_can_take_back(
     """The two halves of a cursor were printed as two rows a script would have to
     reassemble; the `resume with` row is the one form `--since` can verify."""
     async with serving(tmp_path, monkeypatch):
-        await _ph("agents", "send", "shown", "hello")
-        await _ph("agents", "attach", "shown", "--until-idle")
+        await run_phern("agents", "send", "shown", "hello")
+        await run_phern("agents", "attach", "shown", "--until-idle")
 
-        shown = await _ph("agents", "status", "shown")
+        shown = await run_phern("agents", "status", "shown")
 
         assert shown.exit_code == 0, shown.output
         assert "resume with" in shown.output
@@ -297,14 +274,14 @@ async def test_agents_lists_every_root_the_daemon_is_running(
 ) -> None:
     """The bare command is the listing — the question a person asks first."""
     async with serving(tmp_path, monkeypatch):
-        empty = await _ph("agents")
+        empty = await run_phern("agents")
         assert empty.exit_code == 0, empty.output
         assert "no roots running" in empty.output
 
-        await _ph("agents", "send", "beta", "hello")
-        await _ph("agents", "attach", "beta", "--until-idle")
+        await run_phern("agents", "send", "beta", "hello")
+        await run_phern("agents", "attach", "beta", "--until-idle")
 
-        listed = await _ph("agents")
+        listed = await run_phern("agents")
         assert listed.exit_code == 0, listed.output
         assert "beta" in listed.output
         assert "idle" in listed.output
@@ -315,16 +292,16 @@ async def test_status_reports_one_root_in_detail(
 ) -> None:
     """What the listing has no room for: the ladder, and what is still to fire."""
     async with serving(tmp_path, monkeypatch):
-        await _ph("agents", "send", "gamma", "hello")
-        await _ph("agents", "attach", "gamma", "--until-idle")
+        await run_phern("agents", "send", "gamma", "hello")
+        await run_phern("agents", "attach", "gamma", "--until-idle")
 
-        detail = await _ph("agents", "status", "gamma")
+        detail = await run_phern("agents", "status", "gamma")
         assert detail.exit_code == 0, detail.output
         assert "root gamma" in detail.output
         assert "retry attempts" in detail.output
         assert "given up" in detail.output
 
-        missing = await _ph("agents", "status", "nobody")
+        missing = await run_phern("agents", "status", "nobody")
         assert missing.exit_code == 1
         assert "no session" in missing.output
 
@@ -339,20 +316,20 @@ async def test_schedule_creates_lists_and_cancels(
     CLI comes to be a transcription of a protocol.
     """
     async with serving(tmp_path, monkeypatch, scheduling=False):
-        empty = await _ph("agents", "schedule", "delta")
+        empty = await run_phern("agents", "schedule", "delta")
         # Listing refuses on a root nobody has started — the honest answer, and
         # the same one `session/snapshot` gives.
         assert empty.exit_code == 1
         assert "no session" in empty.output
 
-        made = await _ph(
+        made = await run_phern(
             "agents", "schedule", "delta", "--every", "3600000", "--prompt", "check the build"
         )
         assert made.exit_code == 0, made.output
         assert "interval 3600000" in made.output
         schedule_id = made.output.split("scheduled ")[1].split(" ")[0]
 
-        listed = await _ph("agents", "schedule", "delta")
+        listed = await run_phern("agents", "schedule", "delta")
         assert listed.exit_code == 0, listed.output
         assert schedule_id in listed.output
         assert "check the build" in listed.output
@@ -361,11 +338,11 @@ async def test_schedule_creates_lists_and_cancels(
         # of names.
         assert "—" not in listed.output
 
-        gone = await _ph("agents", "schedule", "delta", "--cancel", schedule_id)
+        gone = await run_phern("agents", "schedule", "delta", "--cancel", schedule_id)
         assert gone.exit_code == 0, gone.output
-        assert (await _ph("agents", "schedule", "delta")).output.count("no schedules") == 1
+        assert (await run_phern("agents", "schedule", "delta")).output.count("no schedules") == 1
 
-        again = await _ph("agents", "schedule", "delta", "--cancel", schedule_id)
+        again = await run_phern("agents", "schedule", "delta", "--cancel", schedule_id)
         assert again.exit_code == 1
         assert "no schedule" in again.output
 
@@ -381,11 +358,11 @@ async def test_a_schedule_needs_one_timing_and_something_to_say(
     firing on a rule its author did not write.
     """
     async with serving(tmp_path, monkeypatch, scheduling=False):
-        mute = await _ph("agents", "schedule", "eps", "--every", "60000")
+        mute = await run_phern("agents", "schedule", "eps", "--every", "60000")
         assert mute.exit_code == 2
         assert "--prompt" in mute.output
 
-        both = await _ph(
+        both = await run_phern(
             "agents", "schedule", "eps", "--every", "60000", "--cron", "* * * * *", "-p", "x"
         )
         assert both.exit_code == 2
@@ -402,7 +379,7 @@ async def test_doctor_reports_the_socket_the_daemon_actually_bound(
     daemon`, and the client has no way to guess it.
     """
     async with serving(tmp_path, monkeypatch, passivate_after=600.0) as daemon:
-        reported = await _ph("agents", "doctor")
+        reported = await run_phern("agents", "doctor")
         assert reported.exit_code == 0, reported.output
         assert str(daemon.path) in reported.output
         # Ten minutes, which the *default* (ninety) renders no part of: an
@@ -422,7 +399,7 @@ async def test_shutdown_waits_for_the_daemon_to_actually_be_gone(
     also when roots are flushed and leases released.
     """
     async with serving(tmp_path, monkeypatch) as daemon:
-        stopped = await _ph("agents", "shutdown")
+        stopped = await run_phern("agents", "shutdown")
         assert stopped.exit_code == 0, stopped.output
         assert "daemon stopped" in stopped.output
         await until(lambda: not daemon.path.exists(), what="the daemon's socket to go", seconds=5)
@@ -441,12 +418,12 @@ async def test_a_follow_ends_when_the_daemon_goes_away(
     """
     async with serving(tmp_path, monkeypatch) as daemon:
         client = await daemon.client()
-        await _ph("agents", "send", "watched", "hello")
+        await run_phern("agents", "send", "watched", "hello")
         followed: list[Any] = []
         async with anyio.create_task_group() as tasks:
 
             async def follow() -> None:
-                followed.append(await _ph("agents", "attach", "watched"))
+                followed.append(await run_phern("agents", "attach", "watched"))
 
             tasks.start_soon(follow)
             # Wait for the subscription itself rather than sleeping: a fixed
@@ -486,7 +463,7 @@ async def test_no_daemon_names_the_socket_and_how_to_start_one(
         ["agents", "doctor"],
         ["agents", "shutdown"],
     ):
-        result = await _ph(*command)
+        result = await run_phern(*command)
         assert result.exit_code == 1, f"{command}: {result.output}"
         assert "no daemon socket" in result.output, command
         assert "phern daemon" in result.output, command
@@ -504,7 +481,7 @@ async def test_a_socket_nobody_answers_is_told_apart_from_no_socket(
     """
     runtime = private_runtime(tmp_path, monkeypatch)
     (runtime / "daemon.sock").write_text("not a socket")
-    result = await _ph("agents", "doctor")
+    result = await run_phern("agents", "doctor")
     assert result.exit_code == 1
     assert "nothing is listening" in result.output
     assert "phern daemon" in result.output
@@ -534,7 +511,7 @@ async def test_a_reaped_socket_is_not_reported_as_one_never_started(
     reason to look for.
     """
     reaped_host()
-    result = await _ph("agents", "doctor")
+    result = await run_phern("agents", "doctor")
     assert result.exit_code == 1
     assert "no daemon socket" in result.output
     assert "logind removes" in result.output, "why it is absent"
@@ -552,7 +529,7 @@ async def test_an_ordinary_missing_socket_still_just_says_start_one(
     there teaches readers to skip the paragraph.
     """
     reaped_host(linger=True)
-    result = await _ph("agents", "doctor")
+    result = await run_phern("agents", "doctor")
     assert result.exit_code == 1
     assert "no daemon socket" in result.output
     assert "phern daemon" in result.output
@@ -571,7 +548,7 @@ async def test_doctor_prints_the_lifetime_the_daemon_reports(
     """
     reaped_host()
     async with serving(tmp_path, monkeypatch):
-        reported = await _ph("agents", "doctor")
+        reported = await run_phern("agents", "doctor")
         assert reported.exit_code == 0, reported.output
         assert "socket lifetime" in reported.output
         # The advice line rather than the bare word: this section is about
@@ -623,7 +600,7 @@ async def test_the_doctor_prints_the_same_holds_the_sidebar_does(
         assert rows["holds"] == "client", "and the asking connection holds it"
         assert rows["keep alive"] == "off"
 
-        reported = await _ph("agents", "doctor")
+        reported = await run_phern("agents", "doctor")
         assert reported.exit_code == 0, reported.output
         assert "daemon lifetime" in reported.output, "named apart from the socket's"
 
@@ -774,10 +751,10 @@ async def test_attach_reads_the_status_it_was_handed_rather_than_asking_again(
 
     monkeypatch.setattr(DaemonClient, "call", recording)
     async with serving(tmp_path, monkeypatch):
-        assert (await _ph("agents", "send", "asked", "answer me")).exit_code == 0
+        assert (await run_phern("agents", "send", "asked", "answer me")).exit_code == 0
         called.clear()
 
-        followed = await _ph("agents", "attach", "asked", "--until-idle")
+        followed = await run_phern("agents", "attach", "asked", "--until-idle")
 
         assert followed.exit_code == 0, followed.output
         assert "session/attach" in called
@@ -879,13 +856,13 @@ async def test_a_follow_leaves_out_the_keystroke_log_unless_asked(
     which is 196 ms a turn spent on output nobody reads.
     """
     async with serving(tmp_path, monkeypatch):
-        await _ph("agents", "send", "quiet", "hello")
-        default = await _ph("agents", "attach", "quiet", "--until-idle")
+        await run_phern("agents", "send", "quiet", "hello")
+        default = await run_phern("agents", "attach", "quiet", "--until-idle")
         assert default.exit_code == 0, default.output
         assert "assistant/chunk" not in default.output
         assert "assistant/message" in default.output
 
-        everything = await _ph("agents", "attach", "quiet", "--until-idle", "--all")
+        everything = await run_phern("agents", "attach", "quiet", "--until-idle", "--all")
         assert everything.exit_code == 0, everything.output
         assert "assistant/chunk" in everything.output
 
@@ -896,14 +873,14 @@ async def test_a_follow_filters_to_a_namespace_and_drills_into_one(
     """P6-33 through the follower: `--type` selects, and a namespace is not a
     substring. `log:turn` must bring turn boundaries and nothing else."""
     async with serving(tmp_path, monkeypatch):
-        await _ph("agents", "send", "picky", "hello")
+        await run_phern("agents", "send", "picky", "hello")
 
-        turns = await _ph("agents", "attach", "picky", "--until-idle", "--type", "turn")
+        turns = await run_phern("agents", "attach", "picky", "--until-idle", "--type", "turn")
         assert turns.exit_code == 0, turns.output
         assert "turn/start" in turns.output and "turn/end" in turns.output
         assert "assistant/message" not in turns.output, "a namespace is not everything"
 
-        one = await _ph("agents", "attach", "picky", "--until-idle", "--type", "turn/end")
+        one = await run_phern("agents", "attach", "picky", "--until-idle", "--type", "turn/end")
         assert one.exit_code == 0, one.output
         assert "turn/end" in one.output and "turn/start" not in one.output
 
@@ -919,8 +896,10 @@ async def test_a_named_namespace_overrides_the_per_delta_hush(
     on top would answer a question they did not ask.
     """
     async with serving(tmp_path, monkeypatch):
-        await _ph("agents", "send", "loud", "hello")
-        result = await _ph("agents", "attach", "loud", "--until-idle", "--type", "assistant/chunk")
+        await run_phern("agents", "send", "loud", "hello")
+        result = await run_phern(
+            "agents", "attach", "loud", "--until-idle", "--type", "assistant/chunk"
+        )
         assert result.exit_code == 0, result.output
         assert "assistant/chunk" in result.output, "asked for by name, and still hidden"
 
@@ -931,7 +910,7 @@ async def test_a_follow_refuses_the_other_vocabulary(
     """`bus:tools` follows nothing — this is a session log. Refused rather than
     answered with an empty stream, which would read as a quiet session."""
     async with serving(tmp_path, monkeypatch):
-        result = await _ph("agents", "attach", "wrong", "--type", "bus:tools")
+        result = await run_phern("agents", "attach", "wrong", "--type", "bus:tools")
         assert result.exit_code == 2, result.output
         assert "does not serve" in result.output
 

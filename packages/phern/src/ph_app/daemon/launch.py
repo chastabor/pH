@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -40,7 +41,7 @@ from ph.paths import PathRoots, resolve_roots
 
 from ..protocol import Refusal
 
-__all__ = ["DaemonAbsent", "Started", "ensure_daemon", "listening"]
+__all__ = ["DaemonAbsent", "Started", "ensure_daemon", "listening", "phern_argv"]
 
 log = logging.getLogger("ph_app.daemon.launch")
 
@@ -55,6 +56,19 @@ start while it is still starting, and they cannot tell that from the truth.
 LOCK_TIMEOUT = SPAWN_TIMEOUT + 5.0
 """How long the loser of a race waits for the winner's spawn — longer than the
 spawn it is serializing against, so one slow start is not two failures."""
+
+
+def phern_argv(*args: str) -> list[str]:
+    """How pH starts pH: the argv for another process of this one, given its words.
+
+    `sys.executable -m ph_app` rather than a bare `phern`: the caller may be running
+    from a virtualenv that is not on `PATH`, or from a checkout with no console
+    script installed at all, and a pH started from a *different* pH is one whose
+    profile, event vocabulary and wire version nobody chose. One spelling, here,
+    for the three callers that start one — the daemon a UI spawns, the terminal a
+    browser tab runs (`ph_app.cli.reinvoke`), and the daemon `phern service` starts.
+    """
+    return [sys.executable, "-m", "ph_app", *args]
 
 
 class DaemonAbsent(Refusal):
@@ -138,14 +152,14 @@ async def ensure_daemon(
         if await listening(path):
             return Started(path=path, spawned=False)
         log.info("ph_app.daemon: no daemon at %s; starting one", path)
-        _detach(list(argv))
-        await _await_socket(path)
+        process = _detach(list(argv))
+        await _await_socket(path, process)
         return Started(path=path, spawned=True)
     finally:
         await anyio.to_thread.run_sync(release)
 
 
-def _detach(argv: list[str]) -> None:
+def _detach(argv: list[str]) -> subprocess.Popen[bytes]:
     """Start the daemon as a process that outlives this one.
 
     The whole point of a daemon is that closing the terminal does not end the
@@ -160,7 +174,7 @@ def _detach(argv: list[str]) -> None:
     afterwards belongs in the logs and in `phern agents doctor`.
     """
     # argv is built by the caller's `spawn_command`, never from anything typed.
-    subprocess.Popen(
+    return subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -169,16 +183,28 @@ def _detach(argv: list[str]) -> None:
     )
 
 
-async def _await_socket(path: Path) -> None:
+async def _await_socket(path: Path, process: subprocess.Popen[bytes]) -> None:
     """Wait for something to answer, or say what we waited for and gave up on.
 
     Polls the *connect* rather than the file, because the file exists before
     `serve()` is listening — exactly the window a `path.exists()` poll lands in,
     and the reason `serve` takes a `ready` event for callers in the same process.
     A spawned daemon is in another one, so this is the honest test.
+
+    A daemon that exits before it listens — a profile that does not compose, a
+    flag it does not take, a socket it cannot bind — is said at once rather than
+    after the whole wait: its words went to the null device with the rest of its
+    output, so the exit status is what there is to report, and the fix is to run
+    the same command where its refusal can be read.
     """
     with anyio.move_on_after(SPAWN_TIMEOUT):
         while not await listening(path):
+            code = process.poll()
+            if code is not None:
+                raise DaemonAbsent(
+                    f"the daemon exited with status {code} before listening on {path}; "
+                    "run `phern daemon` with the same options in a terminal to see why"
+                )
             await anyio.sleep(0.02)
         return
     raise DaemonAbsent(

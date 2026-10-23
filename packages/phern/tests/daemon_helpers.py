@@ -24,18 +24,21 @@ from typing import Any, Literal
 import anyio
 import pytest
 from anyio.abc import TaskGroup
+from typer.testing import CliRunner, Result
 
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.keys import APPROVAL, COMMANDS, MOUNT, SANDBOX
-from ph.llm.types import StreamChunk
+from ph.llm.types import StreamChunk, create_user_message
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer
-from ph.session import Session
+from ph.session import Session, SurfaceIntent
 from ph.session_profile import BASE as PROFILE_BASE
-from ph.testing import StubAgent, admitted_child, logged_events, not_none, settled
+from ph.testing import StubAgent, admitted_child, log_event, logged_events, not_none, settled
 from ph_app import verbs
+from ph_app.agents import stop_daemon
+from ph_app.cli import app
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
@@ -48,9 +51,12 @@ __all__ = [
     "PROFILE",
     "Daemon",
     "break_the_provider",
+    "cut_turn",
     "daemon_in_thread",
+    "left_mid_turn",
     "private_runtime",
     "route_needs",
+    "run_phern",
     "running",
     "serving",
     "set_phase",
@@ -409,11 +415,10 @@ async def asking(path: Path) -> AsyncIterator[DaemonClient]:
 
 
 async def shut_down(path: Path) -> None:
-    """Stop a daemon that is *not* in this process, through its only handle."""
+    """Stop a daemon that is *not* in this process, through its only handle — the
+    exchange `phern agents shutdown` and `phern service stop` send, under its budget."""
     async with asking(path) as client:
-        await client.notify("shutdown")
-        with anyio.fail_after(20):
-            await client.closed.wait()
+        assert await stop_daemon(client), f"the daemon at {path} did not stop"
 
 
 async def daemon_status(path: Path) -> DaemonStatusReply:
@@ -551,3 +556,52 @@ async def run_command(root: Root, line: str) -> str:
 def logged_types(session_id: str) -> list[str]:
     """The types a session's log on disk holds, in order."""
     return [event.type for event in logged_events(session_id)]
+
+
+A_PERSON: dict[str, Any] = {"kind": "user"}
+"""A `user/message` source that is a person's own words."""
+
+
+def cut_turn(root: Root, *, source: Any = A_PERSON) -> None:  # noqa: ANN401
+    """Open a turn that claimed one prompt from `source` and never closed — what a
+    kill mid-turn leaves in the log."""
+    log_event(root.session, "turn/start", {"turn": 1})
+    log_event(root.session, "step/start", {"turn": 1, "step": 1})
+    message = create_user_message(content=[{"type": "text", "text": "go"}], source=source)
+    log_event(root.session, "user/message", message.to_wire(), SurfaceIntent("append"))
+
+
+async def left_mid_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: str,
+    *,
+    source: Any = A_PERSON,  # noqa: ANN401
+    before: Callable[[Root], None] | None = None,
+) -> None:
+    """A stored root whose log ends inside a turn from `source` (`cut_turn`), written
+    by a supervisor that then stops: a root that owes work and that nothing has
+    mounted. `before` writes whatever the log holds ahead of the turn."""
+    async with supervised(tmp_path, monkeypatch) as first:
+        root = await first.start(session_id)
+        if before is not None:
+            before(root)
+        cut_turn(root, source=source)
+        await first._flush(root)
+
+
+_RUNNER = CliRunner()
+
+
+async def run_phern(*args: str) -> Result:
+    """One `phern …` invocation, off the loop a daemon is serving on — each command
+    calls `anyio.run` of its own, which cannot start inside a running loop.
+
+    Wide and unstyled, because these assertions are about content. Rich wraps to 80
+    columns off a terminal, and a wrapped session id is a substring that is present
+    and unfindable; `FORCE_COLOR` — which CI images and plenty of shells set — puts
+    escape sequences *inside* the words, so `"interval 3600000" in output` is false
+    for output that reads as exactly that.
+    """
+    env = {"COLUMNS": "200", "FORCE_COLOR": None, "NO_COLOR": "1", "TERM": "dumb"}
+    return await anyio.to_thread.run_sync(lambda: _RUNNER.invoke(app, list(args), env=env))

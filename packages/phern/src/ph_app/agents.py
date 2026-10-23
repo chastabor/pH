@@ -13,6 +13,12 @@ seven, and it is where the two failures a person actually meets are told apart: 
 socket that is *absent* means nothing was started, and a socket that is *present
 but refuses* means something crashed and left its path behind.
 
+**`phern service` shares the spine.** `reach` is `_ask` without the exit — one
+exchange, or `Down` carrying the sentence that tells an absent socket from a dead
+daemon — and `stop_daemon` is `shutdown` without the printing. With the two tables
+(`print_owed`, `print_resume`) they are imported there, so the two clients cannot
+describe one daemon differently.
+
 **Nothing here re-derives what the daemon knows.** `doctor` reports the socket
 the daemon bound, the policy it was started with, the jobs it is running and
 whether that socket outlives a logout — all read back over the wire, because a
@@ -40,7 +46,6 @@ from rich.table import Table
 from ph.cancel import first_of
 from ph.json import JsonObject, as_obj, as_str
 from ph.lingering import lifetime
-from ph.paths import RuntimeDirError, resolve_roots
 from ph.resources import SHUTDOWN_SECONDS
 from ph.seams.schedule import ScheduleKind
 from ph.selectors import Selector, matches_any
@@ -48,7 +53,7 @@ from ph.session import now_ms
 from ph.text import duration, one_line
 
 from . import verbs
-from .console import TypeOption, console, detail, fail, section, selectors_or_exit
+from .console import TypeOption, console, detail, fail, roots_or_exit, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import EventFrame, Followed
 from .params import (
@@ -58,7 +63,7 @@ from .params import (
     ProbeParams,
     ResumeParams,
 )
-from .payloads import DaemonStatusReply, StatusFacts
+from .payloads import DaemonStatusReply, OwedListing, ResumeReport, StatusFacts
 from .protocol import (
     Cursor,
     DaemonError,
@@ -71,7 +76,7 @@ from .protocol import (
 )
 from .wire import describe, message_of, result_block, text_of_wire
 
-__all__ = ["agents_app"]
+__all__ = ["Down", "agents_app", "print_owed", "print_resume", "reach", "stop_daemon"]
 
 agents_app = typer.Typer(
     help="Talk to the supervisor: list, attach, send, schedule, status, doctor, shutdown.",
@@ -134,6 +139,38 @@ def _missing_socket(path: Path) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Down:
+    """Nothing answered on the daemon's socket. `why` is the sentence a person reads
+    — an absent socket, a dead daemon's leftover path, or a connection that closed
+    without an answer — and `cause` the error it was read from."""
+
+    why: str
+    cause: BaseException
+
+
+async def reach[T](path: Path, work: Exchange[T]) -> T | Down:
+    """Run one exchange against the daemon at `path`, or say that nothing answered.
+
+    Down is a value rather than a refusal so each client decides what it means:
+    `phern agents` exits with it (`_ask`), and `phern service` reports it or starts a
+    daemon. A daemon that answered "no" is a refusal either way, with the server's
+    own sentence, because only the server knows why.
+    """
+    try:
+        return await connected(path, work)
+    # The plain exceptions rather than groups because `connected` unwraps its own —
+    # a `typer.Exit` raised by a command's own exchange would otherwise reach the
+    # shell as an `ExceptionGroup` traceback instead of an exit code. `DaemonGone`
+    # first: it is a `DaemonError`, and nobody refused anything.
+    except DaemonGone as gone:
+        return Down(f"[yellow]{detail(gone)}[/yellow]", gone)
+    except DaemonError as refused:
+        fail(f"[red]the daemon refused:[/red] {detail(refused)}", cause=refused)
+    except OSError as failed:
+        return Down(_unreachable(path, failed), failed)
+
+
 def _ask[T](work: Exchange[T]) -> T:
     """Run one exchange against the daemon, or exit with a reason.
 
@@ -142,23 +179,10 @@ def _ask[T](work: Exchange[T]) -> T:
     and a daemon that answered "no". The last one keeps the server's own
     sentence, because the server is the only thing that knows why.
     """
-    try:
-        path = resolve_roots().daemon_socket()
-    except RuntimeDirError as error:
-        fail(f"[red]$PH_RUNTIME check failed:[/red] {detail(error)}", cause=error)
-    try:
-        return anyio.run(partial(connected, path, work))
-    # Not `error` again: Python unbinds an `except … as` name at the end of its
-    # block, so reusing it here is a read of a deleted variable. And these are
-    # the plain exceptions rather than groups because `connected` unwraps its
-    # own — a `typer.Exit` raised by a command's own exchange would otherwise
-    # reach the shell as an `ExceptionGroup` traceback instead of an exit code.
-    except DaemonGone as gone:
-        fail(f"[yellow]{gone}[/yellow]", cause=gone)
-    except DaemonError as refused:
-        fail(f"[red]the daemon refused:[/red] {detail(refused)}", cause=refused)
-    except OSError as unreachable:
-        fail(_unreachable(path, unreachable), cause=unreachable)
+    outcome = anyio.run(partial(reach, roots_or_exit().daemon_socket(), work))
+    if isinstance(outcome, Down):
+        fail(outcome.why, cause=outcome.cause)
+    return outcome
 
 
 # ------------------------------------------------------------------ rendering --
@@ -714,6 +738,14 @@ def owed(
     index, rebuilt from the logs when it cannot vouch for itself or `--rebuild` says to.
     """
     listing = _ask(lambda client: client.call(verbs.SESSIONS_OWED, OwedParams(rebuild=rebuild)))
+    print_owed(listing)
+    if check and any(not row.mounted for row in listing.sessions):
+        raise typer.Exit(code=2)
+
+
+def print_owed(listing: OwedListing) -> None:
+    """The owed table and where it came from, as `phern agents owed` and `phern
+    service status` both print it."""
     if not listing.sessions:
         console.print("[dim]no root owes work[/dim]")
     else:
@@ -735,8 +767,6 @@ def owed(
         else ("index" if listing.trusted else "index, unvouched")
     )
     console.print(f"[dim]source: {note}[/dim]")
-    if check and any(not row.mounted for row in listing.sessions):
-        raise typer.Exit(code=2)
 
 
 @agents_app.command()
@@ -771,6 +801,14 @@ def resume(
             verbs.SESSIONS_RESUME, ResumeParams(sessions=named, all_owed=all_owed, force=force)
         )
     )
+    print_resume(report)
+    if any(row.outcome == "refused" for row in report.sessions):
+        raise typer.Exit(code=1)
+
+
+def print_resume(report: ResumeReport) -> None:
+    """One row per root a resume pass was asked about, as `phern agents resume` and
+    `phern service` both print it."""
     if not report.sessions:
         console.print("[dim]no root owes work[/dim]")
         return
@@ -784,8 +822,6 @@ def resume(
     console.print(table)
     if not report.trusted:
         console.print("[yellow]the live-roots index could not vouch for itself[/yellow]")
-    if any(row.outcome == "refused" for row in report.sessions):
-        raise typer.Exit(code=1)
 
 
 @agents_app.command()
@@ -804,26 +840,31 @@ def probe(name: Annotated[ProbeName, typer.Argument(help="startup, ready or live
 
 @agents_app.command()
 def shutdown() -> None:
-    """Stop the daemon, and wait for it to actually be gone.
+    """Stop the daemon, and wait for it to actually be gone (`stop_daemon`)."""
+    if not _ask(stop_daemon):
+        fail("[yellow]shutdown sent; the daemon has not stopped yet[/yellow]")
+    console.print("[dim]daemon stopped[/dim]")
+
+
+async def stop_daemon(client: DaemonClient) -> bool:
+    """Send `shutdown` and wait for the daemon to close the connection: whether it
+    did within `SHUTDOWN_SECONDS`.
 
     `shutdown` is a notification by contract — a request awaiting a reply would
     be waiting on a frame the daemon is concurrently losing the ability to write
     — so the confirmation is the connection the daemon closes on its way out.
     Waiting for it rather than declaring success is the difference between "I
     asked" and "it stopped", and roots being flushed and leases released is
-    exactly what happens in that window.
+    exactly what happens in that window. The daemon removes its socket before its
+    connections close (`serve`'s teardown), so a closed connection is also a door
+    the next daemon finds clear.
+
+    The budget is the one teardown itself is bounded by, plus room for the
+    unwinding around it: a daemon still inside its grace period has not failed to
+    stop, it is stopping. Both halves are declared where they are spent, so this
+    cannot drift from what the daemon actually allows.
     """
-
-    async def work(client: DaemonClient) -> None:
-        await client.notify(verbs.SHUTDOWN, NoParams())
-        # The same budget teardown itself is bounded by, plus room for the
-        # unwinding around it: a daemon still inside its grace period has not
-        # failed to stop, it is stopping. Both halves are declared where they are
-        # spent, so this cannot drift from what the daemon actually allows.
-        with anyio.move_on_after(SHUTDOWN_SECONDS):
-            await client.closed.wait()
-        if not client.closed.is_set():
-            fail("[yellow]shutdown sent; the daemon has not stopped yet[/yellow]")
-
-    _ask(work)
-    console.print("[dim]daemon stopped[/dim]")
+    await client.notify(verbs.SHUTDOWN, NoParams())
+    with anyio.move_on_after(SHUTDOWN_SECONDS):
+        await client.closed.wait()
+    return client.closed.is_set()

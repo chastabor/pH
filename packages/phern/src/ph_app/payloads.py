@@ -1025,9 +1025,14 @@ class OwedRoot(WireModel):
     profile: str = ""
     failed: bool = False
     """Its ladder was spent: it owes work and a resumer must not loop on it."""
+    held: bool = False
+    """Mounted and waiting on a person — a credential, or a decision about its
+    profile (`Root.held`) — so nothing this daemon can do moves it. The daemon's
+    fact rather than a reading of `status`, whose order of precedence can put
+    another word in front of it."""
 
     @classmethod
-    def of(cls, entry: LiveEntry, *, mounted: bool, status: str) -> OwedRoot:
+    def of(cls, entry: LiveEntry, *, mounted: bool, status: str, held: bool = False) -> OwedRoot:
         """The row for one index entry, with what only the daemon knows beside it.
 
         The one place the entry's fields are carried onto the wire, so a field added
@@ -1043,6 +1048,7 @@ class OwedRoot(WireModel):
             failed=entry.failed,
             mounted=mounted,
             status=status,
+            held=held,
         )
 
 

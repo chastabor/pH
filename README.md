@@ -210,6 +210,13 @@ phern daemon --ephemeral                      # exit once no client, root or app
 The socket is `$PH_RUNTIME/daemon.sock`, per boot and per user. A stale socket
 from a crashed daemon is cleared; a live one is refused rather than stolen.
 
+The daemon never restarts itself. Under systemd or Kubernetes it tells the
+orchestrator when it is ready and alive (`Type=notify`, `--probe-bind host:port`)
+and resumes what the last daemon owed on its way up (`--resume-owed`). With no init
+system, `phern service start`, `status`, `watch` and `stop` do the orchestrator's
+part. [`contrib/`](contrib/README.md) has a unit and a manifest for each, and the
+`phern service` commands.
+
 ## What is running, and stopping it
 
 ```bash
@@ -220,6 +227,9 @@ phern agents attach <session> --until-idle    # exits 1 if the turn it stopped o
 phern agents send <session> "carry on"        # queue a turn, starting or resuming the root
 phern agents schedule <session> --every 3600000 --prompt "check the build"
 phern agents doctor                           # socket, pid, uptime, provider, roots, capabilities
+phern agents owed                             # the stored roots that still owe work, and why
+phern agents resume --all                     # mount them, so each carries on without a client
+phern agents probe ready                      # startup, ready or live: exit 0 for yes
 phern agents shutdown                         # stop it, and wait until it is actually gone
 ```
 

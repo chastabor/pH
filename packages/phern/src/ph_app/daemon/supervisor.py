@@ -270,8 +270,12 @@ NON_GUARANTEES: tuple[tuple[str, str], ...] = (
     ),
     (
         "restart",
-        "not rolling. Stopping the daemon stops every root; the next daemon resumes one "
-        "from its log when a client asks for it, or when a schedule of its own comes due",
+        "not rolling, and not this daemon's to do. Stopping the daemon stops every root, "
+        "and nothing here starts the next one: an init system or `phern service` does "
+        "(`contrib/`). The next daemon resumes owed roots when asked — `phern agents "
+        "resume --all`, `phern daemon --resume-owed`, `phern service start` — and "
+        "otherwise one from its log when a client asks for it, or when a schedule of its "
+        "own comes due",
     ),
     (
         "while the daemon is down",
@@ -2187,9 +2191,11 @@ class Supervisor:
             survey = await anyio.to_thread.run_sync(index.survey)
         rows: list[OwedRoot] = []
         for entry in sorted(survey.entries.values(), key=lambda one: one.session_id):
-            held = self.roots.get(entry.session_id)
-            status = held.status if held is not None else "stored"
-            rows.append(OwedRoot.of(entry, mounted=held is not None, status=status))
+            root = self.roots.get(entry.session_id)
+            if root is None:
+                rows.append(OwedRoot.of(entry, mounted=False, status="stored"))
+            else:
+                rows.append(OwedRoot.of(entry, mounted=True, status=root.status, held=root.held))
         return OwedListing(sessions=rows, trusted=survey.complete, rebuilt=rebuilt)
 
     async def resume_owed(

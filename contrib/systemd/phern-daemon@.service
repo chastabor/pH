@@ -1,0 +1,52 @@
+# phern-daemon@.service — one pH daemon per unix user, as a system service.
+# Installed as contrib/README.md says; enabled as phern-daemon@<user>.
+#
+# One instance per user, because one daemon serves one $PH_HOME and holds every
+# session lease under it; a second daemon on the same home refuses the leases the
+# first one holds. The instance name is the user it runs as.
+#
+# The daemon never restarts itself: Restart= below is the whole restart policy.
+# It tells systemd when it is ready (Type=notify), feeds the watchdog from its event
+# loop while its own liveness probe says yes, takes SIGTERM as `phern agents
+# shutdown`, and exits 3 when a stop could not write a session log's tail.
+
+[Unit]
+Description=pH agent daemon for %i
+Documentation=https://github.com/charlestabor/pH
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=%i
+# systemd sets $HOME from the passwd entry, so $PH_HOME defaults to ~%i/.ph.
+# /run/phern-%i is made 0700 and owned by %i; the socket and the journal live there.
+RuntimeDirectory=phern-%i
+RuntimeDirectoryMode=0700
+Environment=PH_RUNTIME=/run/phern-%i
+# Where `uv tool install phern` puts the command for this user. Edit if yours is
+# elsewhere; the daemon it starts is whatever `phern` resolves to on this PATH.
+Environment=PATH=/home/%i/.local/bin:/usr/local/bin:/usr/bin:/bin
+# PH_HOME, PHERN_DAEMON_OPTS, and any credential the profile's route names.
+EnvironmentFile=-/etc/phern/%i.env
+# --resume-owed: mount every stored root that still owes work once the socket is
+# up; readiness (and so READY=1) is no until that pass ends. $PHERN_DAEMON_OPTS is
+# split on whitespace and appended — the profile, --probe-bind, the job bound.
+ExecStart=/usr/bin/env phern daemon --resume-owed $PHERN_DAEMON_OPTS
+# What the pass found, in the journal, once the daemon is ready. The `-` keeps a
+# refused root from failing the start.
+ExecStartPost=-/usr/bin/env phern agents owed
+# The daemon's own stop budget is 15 s (SHUTDOWN_SECONDS); SIGKILL after that would
+# cut a flush. `mixed` sends SIGTERM to the daemon alone, so each sub-agent's
+# interpreter is stopped by the daemon's unwind rather than by a signal of its own.
+KillMode=mixed
+TimeoutStopSec=20
+# Liveness. The daemon stamps a heartbeat from its event loop every 5 s and sends
+# WATCHDOG=1 on each while the loop and the scheduler are moving; one that has
+# stopped is restarted here rather than reported as up.
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,8 @@
 # Phase 13 — Stable restart
 
 **Status:** planned 2026-10-22; waves one and two landed the same day (P13-01, P13-02,
-P13-08, P13-12; P13-03 to P13-07, P13-10). Fourteen rows in four waves.
+P13-08, P13-12; P13-03 to P13-07, P13-10), wave three on 2026-10-23 (P13-13, P13-14).
+Fourteen rows in four waves; wave four (P13-09, P13-11) remains.
 
 **Gate:** `ruff` + `ruff format` + `mypy` across the tree, and `./test.sh test` green,
 plus the SIGKILL gates listed under "Gates" once each wave lands.
@@ -94,10 +95,13 @@ sets it.
 | P13-06 | A root held for a credential holds its children; the key that arrives readmits them | `Supervisor._start`, `credential_supplied` |
 | P13-07 | A schedule fires through the seam's door: claim, deliver, one write, then the index, and the index only over a written log; a scheduled prompt carries the schedule's source | `ph.seams.schedule.fire_due`, `scheduled_source` |
 | P13-10 | The repair a resume wrote is flushed before any work; the turn's answer is on disk before an autonomous gate runs, by the gate's own durable record | `Supervisor._start`, `test_goals` |
+| P13-13 | `phern service start/stop/restart/status/resume/watch`: one verdict vocabulary (exit 0 ready, 1 down, 2 degraded), the daemon's options passed through as typed, a watcher on the scheduler's ladder; the agents client's spine shared (`reach`, `stop_daemon`); an owed row says `held` from the daemon; a spawned daemon that exits before listening is reported at once | `ph_app.service`, `agents.reach`, `OwedRoot.held`, `launch.phern_argv`, `launch._await_socket` |
+| P13-14 | A system unit template per user, a user unit with the linger advice, an env file, a Kubernetes sketch with the three probes, and the `restart` non-guarantee reworded | `contrib/`, `NON_GUARANTEES` |
 
 Tests: `packages/ph-core/tests/test_live_index.py`, `packages/phern/tests/test_daemon_live.py`,
-`packages/phern/tests/test_daemon_resume.py`, and the rows added to `test_child_logs.py`,
-`test_schedule.py`, `test_goals.py` and `test_modes.py`.
+`packages/phern/tests/test_daemon_resume.py`, `packages/phern/tests/test_service_cli.py`, and
+the rows added to `test_child_logs.py`, `test_schedule.py`, `test_goals.py`, `test_modes.py`
+and `test_daemon_launch.py`.
 
 ---
 
@@ -205,6 +209,57 @@ them in the buffer until the next barrier, which a root that ran no turn never
 reached, so every boot repaired the same turn; `_start` writes the root once, right
 after the continuation or give-up is decided.
 
+**The service client answers in three words.** Every `phern service` command exits
+0 ready, 1 down, 2 degraded, and one fold decides which (`Observed.of`): the
+readiness probe's own reasons, a root whose ladder is spent, a mounted root parked
+on a person, a stored root that owes work and is not mounted. "Parked on a person"
+is the daemon's fact, not the client's reading of a status word: an owed row carries
+`held` from `Root.held`, since `Root.status` puts other words in front of a hold.
+The verdict stays on the client: `ready` is "may be sent work" to a kubelet, and a
+root only a person can move must not pull a pod out of service.
+
+The client reaches the daemon through the agents client's spine. `agents.reach` is
+one exchange or `Down` — a value, not a refusal, so `status` reports it, `stop`
+finds the state it was asked for and `watch` acts on it — and `_ask` is `reach`
+plus the exit. `agents.stop_daemon` is the shutdown exchange both `stop` commands
+send; the daemon removes its socket before its connections close, so a closed
+connection is a clear door and nothing polls the path. The two tables are shared
+too. `start` is idempotent: a daemon already listening is joined and still asked to
+resume. A daemon it spawns gets `--resume-owed`, so readiness — what a probe port
+reports while `start` waits — covers the daemon's own pass rather than going yes with
+roots still unmounted, the ordering rejected for `ExecStartPost` below. The daemon's
+options are not spelled a second time; everything after `start`, `restart` or `watch`
+that is not the command's own option goes to `phern daemon` as typed, and its
+refusal of one is the daemon's.
+
+**A spawned daemon that exits before it listens is said at once.** The launcher
+waited the whole `SPAWN_TIMEOUT` for a daemon that had already ended on a usage
+error — thirty seconds for one wrong flag, and then the wrong sentence. It keeps
+the `Popen` and polls it beside the connect, and the exit status is what there is
+to say: the daemon's words went to the null device with the rest of its output.
+The interpreter-and-module prefix every self-start uses is the launcher's
+(`phern_argv`), which `cli.reinvoke` and the service client both build on.
+
+**The watcher waits on the scheduler's ladder.** `WAKE_RETRY_DELAYS` is a wait of
+the same shape — something tried, failed, and not different next second — so a pass
+that found the daemon ready waits its first rung, and each pass that found
+otherwise climbs one. It says something only when the verdict or its reasons
+change, so a daemon that stays ready for a week is one line. `--once` is one pass
+with the verdict as the exit code, for a cron slot. The watcher takes no signal
+handler, looping or not: it holds nothing a signal needs to unwind, and the daemon
+it started is a process of its own.
+
+**`contrib/` is templates, not a package.** The system unit is a template instance
+per unix user (`User=%i`, `RuntimeDirectory=phern-%i`, an env file under
+`/etc/phern`), the user unit carries the linger advice `phern doctor` prints, and
+both run `phern daemon --resume-owed` with `$PHERN_DAEMON_OPTS` appended and
+`ExecStartPost=-phern agents owed` for the journal. The Kubernetes sketch is one
+replica under `Recreate`, a volume for `$PH_HOME`, an `emptyDir` whose subdirectory
+the daemon makes 0700 for `$PH_RUNTIME`, and the three probes on `--probe-bind
+0.0.0.0:port`. `PATH` is set in the unit to where `uv tool install` puts `phern`,
+because `ExecStart`'s first word may not be a variable and `ExecSearchPath` needs a
+newer systemd than Ubuntu 22.04 ships.
+
 ---
 
 ## What was traded
@@ -238,6 +293,21 @@ as if just typed. It is the schedule seam's plugin source now, so a resumer can 
 it from a person's and a transcript shows which schedule sent it. A log reader that
 drew every `user/message` as the person's own words now draws a schedule's as a
 notice.
+
+**`ExecStartPost` runs `owed`, not `resume`.** The plan had the unit resume through
+`ExecStartPost=phern agents resume --all`. The daemon's own `--resume-owed` pass
+does the same work with readiness no until it ends, which is what `Type=notify`
+turns into "started"; a resume in `ExecStartPost` would have run after `READY=1`,
+so the unit was active with its roots still unmounted. What the post step is for
+now is the journal: the owed table once the pass is over, and with `-` so a refused
+root is a line there rather than a failed start that `Restart=on-failure` loops on.
+
+**Degraded includes "owed and not mounted".** The plan listed held, failed, damaged
+and unwritten. A stored root that owes work and is mounted by nobody is the state
+a resumer exists to end, and a `status` that called it ready would give an
+orchestrator nothing to act on; it is a reason with the fix named, and the one
+`watch` acts on without a restart. Damaged joins when P13-09 gives the listing the
+word.
 
 **The SIGKILL gates for this wave are not yet on the restart host.** The wave's rows
 are gated in-process (`test_daemon_resume.py`): a stored log left mid-turn by one

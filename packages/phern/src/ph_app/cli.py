@@ -15,7 +15,9 @@ generated from the declaration registry rather than hand-maintained.
 
 `phern daemon` runs the supervisor and `phern agents` is the client that talks to it —
 the two halves of Phase 5, and the only pair here where the thing you are
-addressing is a process rather than this one.
+addressing is a process rather than this one. `phern service` is the client an
+orchestrator, a cron slot or a person with no init system uses to start, stop,
+resume and watch it (P13-13).
 
 @module ph_app.cli
 """
@@ -43,7 +45,7 @@ from ph.cordis.events import events as event_registry
 from ph.json import JsonObject, as_obj
 from ph.keys import DIAGNOSTICS
 from ph.lingering import lifetime
-from ph.paths import RuntimeDirError, resolve_roots
+from ph.paths import resolve_roots
 from ph.resources import run_until_signaled
 from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.seams.models import ModelChoice, ModelChoiceError, ModelList
@@ -62,9 +64,11 @@ from .console import (
     err,
     fail,
     fail_unmounted,
+    roots_or_exit,
     section,
     selectors_or_exit,
 )
+from .daemon.launch import phern_argv
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import (
@@ -80,6 +84,7 @@ from .profiles import (
 from .profiles_cli import profiles_app
 from .revisions import revision_rows
 from .runtime import mounted
+from .service import service_app
 from .stored import load_session
 from .web import DEFAULT_HOST, DEFAULT_PORT
 from .workspaces import workspaces_app
@@ -114,6 +119,7 @@ app.add_typer(attachments_app, name="attachments")
 # profiles, S2). A group because a profile is a thing on disk a person manages
 # between sessions, not a question about the session they are in.
 app.add_typer(profiles_app, name="profiles")
+app.add_typer(service_app, name="service")
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "web", "trajectory"]
 
@@ -449,10 +455,7 @@ def doctor(
     patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
 ) -> None:
     """Report the path roots, then mount a profile and report what it composed."""
-    try:
-        roots = resolve_roots()
-    except RuntimeDirError as error:
-        fail(f"[red]$PH_RUNTIME check failed:[/red] {detail(error)}", cause=error)
+    roots = roots_or_exit()
     table = Table(title="pH path roots", show_header=True, header_style="bold")
     table.add_column("root")
     table.add_column("resolved")
@@ -787,10 +790,7 @@ def daemon(
     except ValidationError as error:
         said = validation_summary(error, root="config")
         fail(f"[red]the models row: {said}[/red]", code=2, cause=error)
-    try:
-        roots = resolve_roots(create=True)
-    except RuntimeDirError as error:
-        fail(f"[red]$PH_RUNTIME check failed:[/red] {detail(error)}", cause=error)
+    roots = roots_or_exit(create=True)
     socket_path = roots.daemon_socket()
     err.print(f"[dim]listening on {socket_path}[/dim]")
     # "names `enable-linger` when a daemon is configured without it" — the row's
@@ -872,12 +872,9 @@ def reinvoke(
     Two callers ask it — the daemon a UI spawns when no socket answers, and the
     terminal a browser tab runs — and they differ only in their leading verb. The
     tail is the same composition every time, so it is written once: an option
-    added here reaches both, where two spellings would silently reach one.
-
-    `sys.executable -m ph_app` rather than a bare `phern`: the caller may be running
-    from a virtualenv that is not on `PATH`, or from a checkout with no console
-    script installed at all, and a pH started from a *different* pH is one whose
-    profile, event vocabulary and wire version nobody chose.
+    added here reaches both, where two spellings would silently reach one. The
+    interpreter and module in front of it are the launcher's (`phern_argv`), which
+    `phern service start` uses with the caller's own daemon options behind it.
 
     `--patch` travels because the *other* process is the one that composes: a
     patch accepted here and dropped would silently ignore `phern --mode tui --patch
@@ -886,7 +883,7 @@ def reinvoke(
     profile's default, and a default spelled into the argv would be a choice
     nobody made.
     """
-    argv = [sys.executable, "-m", "ph_app", *args, "--profile", profile]
+    argv = phern_argv(*args, "--profile", profile)
     if provider is not None:
         argv += ["--provider", provider]
     if model is not None:

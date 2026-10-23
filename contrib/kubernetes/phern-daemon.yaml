@@ -1,0 +1,108 @@
+# phern-daemon — the pH daemon on Kubernetes, sketched.
+#
+# One replica with `Recreate`: one daemon serves one $PH_HOME and holds every
+# session lease under it, and a rolling update would run two on the same volume
+# for the length of the rollout. The resume pass is the daemon's own
+# (`--resume-owed`), since there is no ExecStartPost to run it from, and readiness
+# is no until the pass ends — so a Service in front of the socket port (if you add
+# one) routes nothing to a daemon still mounting what it owes.
+#
+# The three probes are the daemon's own (`ph_app.daemon.probes`): `/startup` once the
+# unix listener serves, `/ready` while nothing is unwritten and the lease directory
+# is writable, `/live` while the event loop and the scheduler are moving. Bound on
+# every interface because the kubelet is not on loopback; the bodies name no
+# credential and no prompt.
+#
+# No image is published. Build one from the checkout (`uv tool install
+# ./packages/phern` in a python:3.12 base is enough) and name it below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phern-daemon
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: phern-daemon
+  template:
+    metadata:
+      labels:
+        app: phern-daemon
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      # The daemon's own stop budget is 15 s; its unwind writes every log and
+      # releases every lease, and a SIGKILL inside it cuts a flush.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: phern
+          image: phern:0.9.0 # built from the checkout; see above
+          args:
+            - daemon
+            - --resume-owed
+            - --profile
+            - work
+            - --probe-bind
+            - 0.0.0.0:8750
+          env:
+            # Sessions, attachments, profile overlays and daemon.yaml: the volume.
+            - name: PH_HOME
+              value: /var/lib/phern
+            # A subdirectory of the emptyDir, so the daemon makes it itself, 0700.
+            - name: PH_RUNTIME
+              value: /run/phern/run
+            # A credential reaches the daemon only as environment and is never
+            # written down by it.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: phern-credentials
+                  key: anthropic-api-key
+                  optional: true
+          ports:
+            - name: probes
+              containerPort: 8750
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: probes
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: probes
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: probes
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            - name: home
+              mountPath: /var/lib/phern
+            - name: runtime
+              mountPath: /run/phern
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: phern-home
+        - name: runtime
+          emptyDir:
+            medium: Memory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: phern-home
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

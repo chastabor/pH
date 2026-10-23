@@ -1,0 +1,26 @@
+# phern-daemon.service — the pH daemon as a user service.
+# Installed as contrib/README.md says, `loginctl enable-linger` included: without
+# it logind ends this service, and removes $XDG_RUNTIME_DIR, at your last logout.
+#
+# The [Service] lines below are the system unit's, ../phern-daemon@.service, which
+# says why each one is there; only the paths differ.
+
+[Unit]
+Description=pH agent daemon
+Documentation=https://github.com/charlestabor/pH
+
+[Service]
+Type=notify
+# $PH_RUNTIME defaults to $XDG_RUNTIME_DIR/ph and $PH_HOME to ~/.ph.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/phern/daemon.env
+ExecStart=/usr/bin/env phern daemon --resume-owed $PHERN_DAEMON_OPTS
+ExecStartPost=-/usr/bin/env phern agents owed
+KillMode=mixed
+TimeoutStopSec=20
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

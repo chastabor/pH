@@ -36,7 +36,7 @@ from daemon_helpers import daemon_status, private_runtime, running, shut_down, u
 from ph.orphans import process_alive
 from ph.paths import resolve_roots
 from ph_app.cli import spawn_command
-from ph_app.daemon.launch import DaemonAbsent, ensure_daemon
+from ph_app.daemon.launch import SPAWN_TIMEOUT, DaemonAbsent, ensure_daemon, phern_argv
 
 pytestmark = pytest.mark.anyio
 
@@ -201,6 +201,23 @@ async def test_a_socket_that_exists_but_refuses_is_not_a_reason_to_spawn_twice(
     assert started.spawned, "a file is not a daemon"
 
     await shut_down(started.path)
+
+
+async def test_a_daemon_that_exits_before_listening_is_said_at_once() -> None:
+    """A flag the daemon does not take, a profile that does not compose, a socket
+    it cannot bind: each ends the process in under a second, and the spawner used to
+    wait the whole `SPAWN_TIMEOUT` before saying nothing was listening — thirty
+    seconds, for a person who typed one wrong option. Its output went to the null
+    device with the rest, so the exit status is what there is to say, and it is said
+    as soon as the process is gone.
+
+    Sabotage: drop the `poll` from `_await_socket`, and this takes thirty seconds
+    and names the wrong cause.
+    """
+    with anyio.fail_after(SPAWN_TIMEOUT / 2), pytest.raises(DaemonAbsent) as refused:
+        await ensure_daemon(argv=phern_argv("daemon", "--no-such-option"))
+    assert "exited with status 2 before listening" in str(refused.value)
+    assert "phern daemon" in str(refused.value), "the fix: run it where its refusal can be read"
 
 
 def _gone(pid: int) -> bool:

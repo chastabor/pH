@@ -30,6 +30,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from ph.paths import PathRoots, RuntimeDirError, resolve_roots
 from ph.selectors import Scheme, Selector, SelectorError, parse_all
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "err",
     "fail",
     "fail_unmounted",
+    "roots_or_exit",
     "section",
     "selectors_or_exit",
 ]
@@ -164,6 +166,19 @@ Here rather than in `cli.py` because `cli.py` imports the sub-apps, so a sub-app
 that wanted the alias would have to import back into it — the cycle this module
 was carved out to avoid, and which `profile_or_exit` already sits below.
 """
+
+
+def roots_or_exit(*, create: bool = False) -> PathRoots:
+    """The three path roots, or exit saying why `$PH_RUNTIME` would not do.
+
+    Every command that finds the daemon's socket, or binds it, resolves the roots
+    first, and a runtime directory that fails its checks — not ours, not 0700, a
+    symlink — is one refusal with one sentence wherever it is met.
+    """
+    try:
+        return resolve_roots(create=create)
+    except RuntimeDirError as error:
+        fail(f"[red]$PH_RUNTIME check failed:[/red] {detail(error)}", cause=error)
 
 
 def selectors_or_exit(patterns: Sequence[str], *, vocabulary: Scheme) -> list[Selector]:
