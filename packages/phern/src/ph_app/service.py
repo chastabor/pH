@@ -94,9 +94,12 @@ class Observed:
     @classmethod
     def of(cls, *, pid: int, uptime_ms: int, ready: ProbeReply, owed: OwedListing) -> Observed:
         """The readiness probe's own reasons, then what the owed listing adds: a
-        root whose ladder is spent, one held on a person, one nobody has mounted."""
+        root whose ladder is spent, one held on a person, one with a log that will
+        not read, one nobody has mounted."""
         rows = owed.sessions
-        unmounted = tuple(row.session_id for row in rows if not row.mounted and not row.failed)
+        unmounted = tuple(
+            row.session_id for row in rows if not row.mounted and row.left_by_a_pass() is None
+        )
         reasons = list(ready.reasons)
         if failed := [row.session_id for row in rows if row.failed]:
             reasons.append(
@@ -105,6 +108,12 @@ class Observed:
             )
         if held := [f"{row.session_id} ({row.status})" for row in rows if row.held]:
             reasons.append(f"root(s) held on a person: {', '.join(held)}")
+        damaged = [f"{row.session_id} ({', '.join(row.damaged)})" for row in rows if row.damaged]
+        if damaged:
+            reasons.append(
+                f"root(s) with a log that will not read: {', '.join(damaged)}; "
+                "`phern doctor sessions --repair` cuts it back to what does"
+            )
         if unmounted:
             reasons.append(
                 f"root(s) owe work and are not mounted: {', '.join(unmounted)}; "

@@ -5,11 +5,16 @@ from __future__ import annotations
 from .jsonl import (
     JsonlArchive,
     JsonlSessionStore,
+    LogDamage,
+    LogDamaged,
     append_records,
+    damage_in,
+    damaged_logs,
     read_records,
     read_session,
     records_in,
     session_path,
+    truncate_damaged,
 )
 from .lease import SessionBusy, claim_session
 from .lineage import (
@@ -49,6 +54,8 @@ __all__ = [
     "JsonlArchive",
     "JsonlSessionStore",
     "LineageError",
+    "LogDamage",
+    "LogDamaged",
     "NoStoredSession",
     "ReadOne",
     "ReadSome",
@@ -59,6 +66,8 @@ __all__ = [
     "claim_session",
     "cut_short_note",
     "cut_turn_owner",
+    "damage_in",
+    "damaged_logs",
     "interrupted_turn_closers",
     "lineage_faults",
     "materialize",
@@ -74,4 +83,5 @@ __all__ = [
     "resumptions",
     "session_path",
     "stored_session",
+    "truncate_damaged",
 ]

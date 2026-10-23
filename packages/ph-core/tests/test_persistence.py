@@ -39,12 +39,15 @@ from ph.locks import LockBusy, acquire_file_lock
 from ph.persistence.jsonl import (
     _TYPED,
     JsonlSessionStore,
+    LogDamaged,
     append_records,
+    damage_in,
     read_records,
     read_session,
     skim_session,
+    truncate_damaged,
 )
-from ph.persistence.lease import lease_path
+from ph.persistence.lease import SessionBusy, lease_path
 from ph.session import (
     SESSION_FORMAT_VERSION,
     BatchRef,
@@ -58,10 +61,12 @@ from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import (
     MountProfile,
     disk_fills_midway,
+    hold_session,
     log_event,
     noted,
     raising,
     searches_into,
+    splice_line,
     stored_log,
     user_payload,
     write_reference_fork,
@@ -844,16 +849,91 @@ def test_a_record_that_lost_only_its_newline_is_kept(tmp_path: Path) -> None:
     assert [event.seq for event in events] == [0, 1, 2]
 
 
+def _damaged_in_the_middle(tmp_path: Path, bad: bytes = b"{not a record\n") -> Path:
+    """`_torn` with nothing torn, and `bad` spliced in as its third line."""
+    path = _torn(tmp_path, "")
+    splice_line(path, bad)
+    return path
+
+
+def test_damage_is_found_where_the_reader_refuses_and_nowhere_it_does_not(
+    tmp_path: Path,
+) -> None:
+    """P13-09: `damage_in` is the strict read asked where it stops, so the two cannot
+    disagree about whether a file reads. A torn tail is not damage; a bad line with a
+    newline, and a record that is not an envelope this build validates, are, at their
+    line, with the bytes before them kept."""
+    assert damage_in(_torn(tmp_path, '{"type":"step/end","seq":2,"ti')) is None
+    assert damage_in(_torn(tmp_path, "")) is None
+    bad = _damaged_in_the_middle(tmp_path)
+    damage = damage_in(bad)
+    assert damage is not None and damage.line == 3
+    assert damage.kept == len(b"".join(bad.read_bytes().splitlines(keepends=True)[:2]))
+    assert "Expecting" in damage.reason and str(bad) not in damage.reason
+    envelope = _damaged_in_the_middle(tmp_path, b'{"type":"step/end","seq":"two"}\n')
+    found = damage_in(envelope)
+    assert found is not None and found.line == 3 and "seq" in found.reason
+
+
+def test_a_repair_cuts_the_log_back_to_what_reads_and_keeps_the_rest_beside_it(
+    tmp_path: Path,
+) -> None:
+    """`truncate_damaged` is a cut to the accepted prefix and nothing cleverer: the
+    whole file is copied aside first, the cut log reads the prefix and nothing else,
+    and a second copy takes a numbered name."""
+    bad = _damaged_in_the_middle(tmp_path)
+    damage = damage_in(bad)
+    assert damage is not None
+    original = bad.read_bytes()
+    copy = truncate_damaged(tmp_path, damage)
+    assert copy.name == "torn.jsonl.damaged" and copy.read_bytes() == original
+    _header, events = read_session(bad)
+    assert [event.seq for event in events] == [0], "the prefix before the bad line"
+    assert damage_in(bad) is None
+    assert len(list(bad.parent.glob("*.jsonl"))) == 1, "a copy is not a log"
+    again = _damaged_in_the_middle(tmp_path)
+    found = damage_in(again)
+    assert found is not None
+    assert truncate_damaged(tmp_path, found).name == "torn.jsonl.damaged-2"
+
+
+def test_a_repair_never_cuts_a_log_another_process_is_writing(tmp_path: Path) -> None:
+    """The cut is taken under the session's lease, in core, so no caller can reach it
+    without: a writer appending behind it would put `seq` backwards."""
+    bad = _damaged_in_the_middle(tmp_path)
+    damage = damage_in(bad)
+    assert damage is not None
+    original = bad.read_bytes()
+    with hold_session(tmp_path, "torn"), pytest.raises(SessionBusy):
+        truncate_damaged(tmp_path, damage)
+    assert bad.read_bytes() == original
+    assert not bad.with_name("torn.jsonl.damaged").exists()
+
+
+def test_a_log_with_no_header_before_its_damage_has_nothing_to_keep(tmp_path: Path) -> None:
+    """A prefix without a header is not a log, so there is no repair by truncation:
+    `kept` is 0 and the cut is refused by name."""
+    path = _torn(tmp_path, "")
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    path.write_text("".join(["{not a record\n", *lines[1:]]), encoding="utf-8")
+    damage = damage_in(path)
+    assert damage is not None and damage.line == 1 and damage.kept == 0
+    with pytest.raises(ValueError, match="nothing before line 1"):
+        truncate_damaged(tmp_path, damage)
+    headerless = tmp_path / "headerless.jsonl"
+    headerless.write_text("".join(lines[1:]), encoding="utf-8")
+    missing = damage_in(headerless)
+    assert missing is not None and missing.reason == "no session header line"
+    assert missing.kept == 0
+
+
 def test_a_malformed_line_before_the_last_still_refuses(tmp_path: Path) -> None:
     """The tolerance is for the one damage an append-only log can suffer. A bad line
     with a newline after it is some other damage, and skipping it would hand the
-    model a history missing its middle."""
-    path = _torn(tmp_path, "")
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    lines.insert(2, "{not a record\n")
-    path.write_text("".join(lines), encoding="utf-8")
-    with pytest.raises(ValueError, match=r"torn\.jsonl:3"):
-        read_session(path)
+    model a history missing its middle. The refusal says where (`LogDamaged`)."""
+    with pytest.raises(LogDamaged, match=r"torn\.jsonl:3") as refused:
+        read_session(_damaged_in_the_middle(tmp_path))
+    assert refused.value.damage.line == 3
 
 
 @pytest.mark.parametrize(

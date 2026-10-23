@@ -41,16 +41,23 @@ from pydantic import ValidationError
 from ..cordis import Context, plugin
 from ..json import JsonObject, dumps
 from ..keys import SESSIONS
-from ..paths import make_directories, resolve_roots, sync_directory, write_all
+from ..paths import (
+    free_sibling,
+    make_directories,
+    resolve_roots,
+    sync_directory,
+    write_all,
+    write_atomic,
+)
 from ..session import (
     BatchRef,
     Session,
     SessionEvent,
     SessionHeader,
 )
-from ..wire import WireModel
+from ..wire import WireModel, validation_summary
 from .families import children_under, locate_under, logs_under, path_under, stored_under
-from .lease import claim_session
+from .lease import claim_session, leased
 from .lineage import materialize
 from .protocol import (
     NoStoredSession,
@@ -152,7 +159,7 @@ def skim_stored(
     )
     if path is not None:
         with suppress(FileNotFoundError):
-            header, first, events = _read(path, upto, None, (f"{_TYPED}{kinds}",))
+            header, first, events = _read(path, upto, None, (f"{_TYPED}{kinds}".encode(),))
             return header, first, [event for event in events if event.type.startswith(kinds)]
     raise NoStoredSession(f"no stored session {session_id!r}")
 
@@ -822,6 +829,9 @@ _TYPED = '{"type":"'
 """How every line this backend writes begins: `to_wire` puts `type` first and
 `dumps` is compact, so a line's type can be read off its text (`skim_session`)."""
 
+_TYPED_LINE = _TYPED.encode()
+"""`_TYPED` as the reader meets it: a line in bytes, before it is decoded."""
+
 
 def read_session(
     path: Path, *, upto: int | None = None, types: frozenset[str] | None = None
@@ -866,19 +876,55 @@ def skim_session(path: Path, types: frozenset[str]) -> tuple[SessionHeader, list
     reads as another type. The last line is parsed whatever it names, so the
     torn-tail and torn-batch rules judge the tail as a strict read does.
     """
-    header, _first, events = _read(path, None, types, tuple(f'{_TYPED}{one}"' for one in types))
+    prefixes = tuple(f'{_TYPED}{one}"'.encode() for one in types)
+    header, _first, events = _read(path, None, types, prefixes)
     return header, events
+
+
+@dataclass(frozen=True, slots=True)
+class LogDamage:
+    """Where a stored log stops reading: the first line `read_session` refuses, why,
+    and how much before it a repair keeps (P13-09)."""
+
+    path: Path
+    line: int
+    """The refused line's number, from 1."""
+    reason: str
+    kept: int
+    """The bytes before the refused line — the longest prefix the reader accepts, and
+    what a repair truncates to. Zero when no header line reads ahead of it, since a
+    prefix with no header is not a log: then there is no repair."""
+
+
+class LogDamaged(ValueError):
+    """`read_session`'s refusal of a stored log, saying where (`damage`).
+
+    A `ValueError`, as every refusal of a log's content was before it had a type of
+    its own, so a caller that catches that still does. A caller that must tell a log
+    that will not read from any other failure — a sub-agent sweep isolating one bad
+    child (`ph.seams.subagents.stored_tree`), `phern doctor sessions` — catches this.
+    """
+
+    def __init__(self, damage: LogDamage) -> None:
+        super().__init__(f"{damage.path}:{damage.line}: {damage.reason}")
+        self.damage = damage
 
 
 def _read(
     path: Path,
     upto: int | None,
     types: frozenset[str] | None,
-    wanted: tuple[str, ...] | None,
+    wanted: tuple[bytes, ...] | None,
 ) -> tuple[SessionHeader, int | None, list[SessionEvent]]:
     """`read_session`'s loop, and `skim_session`'s when `wanted` holds the line
     prefixes of the types to keep — with the seq of the file's first event, which
     says whether it holds its own history (`lineage`).
+
+    **The one statement of what a log must be to be read.** Every refusal — a line
+    that is not a record, an envelope this build cannot validate, no header — is a
+    `LogDamaged` naming the line and the bytes before it, so `damage_in` is this loop
+    asked a question rather than a second copy of its rules. Read in bytes for that
+    count, each line decoded on its own.
 
     **A skim stops at `upto` without parsing to it.** The lines it passes are not
     parsed, so their seqs are not read; but a log's seqs run one per line from its
@@ -891,50 +937,61 @@ def _read(
     lines = 0  # event lines so far: the next one's seq is `first + lines` as written
     events: list[SessionEvent] = []
     tail: dict[str, Any] | None = None
-    passed: tuple[int, str] | None = None
-    with path.open("r", encoding="utf-8") as handle:
-        for number, line in enumerate(handle, start=1):
-            if (
-                wanted is not None
-                and header is not None
-                and first is not None
-                and (upto is None or first + lines < upto)
-                and line.startswith(_TYPED)
-                and not line.startswith(wanted)
-                and line.endswith("\n")
-            ):
-                # The last line passed while none parsed after it is the tail.
-                passed = (number, line)
+    tail_number = tail_start = 0
+    passed: tuple[int, int, bytes] | None = None
+    number = start = offset = 0
+    with path.open("rb") as handle:
+        try:
+            for number, raw in enumerate(handle, start=1):
+                start, offset = offset, offset + len(raw)
+                if (
+                    wanted is not None
+                    and header is not None
+                    and first is not None
+                    and (upto is None or first + lines < upto)
+                    and raw.startswith(_TYPED_LINE)
+                    and not raw.startswith(wanted)
+                    and raw.endswith(b"\n")
+                ):
+                    # The last line passed while none parsed after it is the tail.
+                    passed = (number, start, raw)
+                    lines += 1
+                    continue
+                if not raw.strip():
+                    continue
+                record = _parse(path, number, raw)
+                if record is None:
+                    break
+                if record.get("type") == HEADER_LINE_TYPE:
+                    header = SessionHeader.model_validate(record.get("header"))
+                    continue
+                if first is None and isinstance(seq := record.get("seq"), int):
+                    first = seq
                 lines += 1
-                continue
-            if not line.strip():
-                continue
-            record = _parse(path, number, line)
-            if record is None:
-                break
-            if record.get("type") == HEADER_LINE_TYPE:
-                header = SessionHeader.model_validate(record["header"])
-                continue
-            if first is None and isinstance(seq := record.get("seq"), int):
-                first = seq
-            lines += 1
-            if header is not None and upto is not None and record.get("seq", -1) >= upto:
-                # Read off the **raw** record, before `from_wire`: skipping the
-                # validate-and-freeze of the tail is the entire saving, and a
-                # bound applied after parsing would save nothing at all. Guarded
-                # on the header so a file that puts it after an event still
-                # yields one rather than raising "no session header line".
-                break
-            tail, passed = record, None
-            if types is not None and record.get("type") not in types:
-                continue
-            events.append(SessionEvent.from_wire(record))
+                if header is not None and upto is not None and record.get("seq", -1) >= upto:
+                    # Read off the **raw** record, before `from_wire`: skipping the
+                    # validate-and-freeze of the tail is the entire saving, and a
+                    # bound applied after parsing would save nothing at all. Guarded
+                    # on the header so a file that puts it after an event still
+                    # yields one rather than raising "no session header line".
+                    break
+                tail, passed = record, None
+                tail_number, tail_start = number, start
+                if types is not None and record.get("type") not in types:
+                    continue
+                events.append(SessionEvent.from_wire(record))
+        except ValueError as error:
+            raise _damaged(path, number, start, error, header=header is not None) from error
     if header is None:
-        raise ValueError(f"{path}: no session header line")
-    if passed is not None:
-        tail = _parse(path, *passed)
-    if upto is None and tail is not None:
-        last = SessionEvent.from_wire(tail)
+        raise LogDamaged(LogDamage(path, 1, "no session header line", 0))
+    try:
+        if passed is not None:
+            tail_number, tail_start, raw = passed
+            tail = _parse(path, tail_number, raw)
+        last = SessionEvent.from_wire(tail) if upto is None and tail is not None else None
+    except ValueError as error:
+        raise _damaged(path, tail_number, tail_start, error, header=True) from error
+    if last is not None:
         dropped = _unfinished_batch([last])
         if dropped:
             log.warning(
@@ -947,14 +1004,21 @@ def _read(
     return header, first, events
 
 
-def _parse(path: Path, number: int, line: str) -> dict[str, Any] | None:
-    """One line's record, or `None` for an unterminated last line: a write that did
-    not finish (F6). Anything else that is not a record refuses the log."""
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError as error:
-        if not line.endswith("\n"):
-            # Only the last line can lack its newline.
+def _damaged(path: Path, number: int, start: int, error: ValueError, *, header: bool) -> LogDamaged:
+    """The refusal of line `number`, which began `start` bytes in."""
+    reason = validation_summary(error) if isinstance(error, ValidationError) else str(error)
+    return LogDamaged(LogDamage(path, number, reason, start if header else 0))
+
+
+def _parse(path: Path, number: int, raw: bytes) -> dict[str, Any] | None:
+    """One line's record, or `None` for an unterminated last line that will not parse:
+    a write that did not finish (F6), cut anywhere — inside a multi-byte character
+    too. Anything else that is not a record raises `ValueError` with the reason."""
+    if not raw.endswith(b"\n"):
+        # Only the last line can lack its newline.
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except ValueError:
             log.warning(
                 "ph.persistence.jsonl: %s:%d is a write that did not finish; "
                 "reading the log without it",
@@ -962,10 +1026,64 @@ def _parse(path: Path, number: int, line: str) -> dict[str, Any] | None:
                 number,
             )
             return None
-        raise ValueError(f"{path}:{number}: {error}") from error
+    else:
+        record = json.loads(raw.decode("utf-8"))
     if not isinstance(record, dict):
-        raise ValueError(f"{path}:{number}: not a record")
+        raise ValueError("not a record")
     return record
+
+
+def damage_in(path: Path) -> LogDamage | None:
+    """Where a stored log stops reading, or `None` for one `read_session` takes whole.
+
+    The strict read itself, asked (`_read`): whatever a resume refuses, this finds, at
+    the line the resume would name. A torn last line is not damage — the reader drops
+    it, and the writer's first flush settles it (F6).
+    """
+    try:
+        _read(path, None, None, None)
+    except LogDamaged as damaged:
+        return damaged.damage
+    return None
+
+
+def damaged_logs(root: Path) -> tuple[int, list[LogDamage]]:
+    """Every stored log under `root` the strict reader refuses, and how many it read.
+
+    Every log, sub-agents' beside roots', through the listing this backend lists by
+    (`session_logs`), so what is scanned is what a daemon on this `$PH_HOME` would
+    find — `phern doctor sessions`.
+    """
+    logs = session_logs(root)
+    return len(logs), [found for path, _ in logs if (found := damage_in(path)) is not None]
+
+
+def truncate_damaged(root: Path, damage: LogDamage) -> Path:
+    """Cut a damaged log back to the prefix its reader accepts, keeping the whole file
+    beside it first, under its session's lease. Returns the copy.
+
+    **Under the lease** (`leased`), held for the cut and let go: a log a daemon or a
+    one-shot run is appending to raises `SessionBusy` rather than being truncated
+    beneath its writer, which would put `seq` backwards. Here rather than at the
+    caller, so a cut is safe however it is reached.
+
+    The copy is `<log>.damaged` (numbered past an earlier one, `free_sibling`), a
+    suffix the listing does not read, written durably (`write_atomic`) before the cut
+    so a repair loses nothing a person could not get back; then the log is truncated
+    and synced. Refuses, by `ValueError`, a log with nothing to keep.
+    """
+    if damage.kept == 0:
+        raise ValueError(f"{damage.path}: nothing before line {damage.line} reads; not repaired")
+    with leased(root, damage.path.stem):
+        copy = free_sibling(damage.path, ".damaged")
+        write_atomic(copy, damage.path.read_bytes())
+        fd = os.open(damage.path, os.O_WRONLY)
+        try:
+            os.ftruncate(fd, damage.kept)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return copy
 
 
 def _unfinished_batch(events: Sequence[SessionEvent]) -> int:

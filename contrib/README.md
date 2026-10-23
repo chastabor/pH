@@ -12,6 +12,7 @@ everywhere:
 | to resume what the last daemon owed | `phern daemon --resume-owed`, `phern agents resume --all`, `phern service start` |
 | to see what it owes | `GET /status`; `phern agents owed`; `phern service status` |
 | an exit it can branch on | 0 clean, 3 when a session log's tail could not be written |
+| to find and fix a log that will not read | `phern doctor sessions`, and `--repair` to cut it back to what does |
 
 Three shapes are here. Each is a template to edit, not a package to install.
 
@@ -87,6 +88,13 @@ scheduler's retry ladder, and a signal ends the watcher, not the daemon.
 - **Exit 3 is a lost tail.** A stop that could not write a session log says so in
   its exit status (and `ready` said no while it ran). `on-failure` restarts it, and
   the next daemon's resume repairs what this one could not write.
+- **The session lease is a kernel `flock`, or nothing.** A `$PH_HOME` on a
+  filesystem without `flock` refuses every lease rather than taking one a crash
+  would leave behind; `phern doctor` names the filesystem and proves the lock there.
+- **A damaged log is isolated, listed, and yours to repair.** A sub-agent log that
+  will not read leaves its root openable and listed `damaged` (`phern agents owed`,
+  `phern service status` says degraded); `phern doctor sessions --repair` cuts it
+  back to the prefix that reads and keeps the whole file beside it.
 - **Nothing fires while the daemon is down.** A schedule is kept while
   `phern daemon` runs and caught up on start, one run per missed window. Work that
   must happen whether or not the daemon is up belongs to cron or a timer.

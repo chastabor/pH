@@ -19,6 +19,7 @@ import pytest
 from daemon_helpers import left_mid_turn, private_runtime, route_needs, run_phern, serving
 
 from ph.paths import PathRoots, resolve_roots
+from ph.seams.live_index import Hold as RootHold
 from ph_app import service
 from ph_app.cli import app
 from ph_app.daemon.launch import DaemonAbsent
@@ -36,16 +37,24 @@ def _observed(*rows: OwedRoot, reasons: tuple[str, ...] = ()) -> Observed:
 
 
 def _row(
-    session_id: str, *, mounted: bool, status: str, failed: bool = False, held: bool = False
+    session_id: str,
+    *,
+    mounted: bool,
+    status: str,
+    failed: bool = False,
+    held: bool = False,
+    holds: Sequence[RootHold] = ("turn",),
+    damaged: Sequence[str] = (),
 ) -> OwedRoot:
     return OwedRoot(
         session_id=session_id,
-        holds=["turn"],
+        holds=list(holds),
         updated=1,
         mounted=mounted,
         status=status,
         failed=failed,
         held=held,
+        damaged=list(damaged),
     )
 
 
@@ -69,6 +78,12 @@ def test_the_verdict_names_each_way_a_daemon_is_degraded() -> None:
     assert owed.unmounted == ("a",) and "not mounted: a" in owed.degraded[0]
     busy = _observed(_row("a", mounted=True, status="running"))
     assert busy.verdict == "ready"
+    # A log that will not read (P13-09): degraded with the fix named, and a root
+    # listed for its damage alone is not one a resume pass would mount.
+    damaged = _observed(_row("a", mounted=False, status="stored", holds=(), damaged=("a-r1",)))
+    assert "will not read: a (a-r1)" in damaged.degraded[0]
+    assert "phern doctor sessions --repair" in damaged.degraded[0]
+    assert damaged.unmounted == ()
     # The contract an orchestrator branches on, stated rather than read back.
     assert EXIT == {"ready": 0, "down": 1, "degraded": 2}
 

@@ -38,7 +38,6 @@ from ..llm.types import (
     ToolResultBlock,
     text_of,
 )
-from ..locks import file_lock
 from ..paths import resolve_roots
 from ..persistence.families import locate_under
 from ..persistence.jsonl import (
@@ -48,7 +47,7 @@ from ..persistence.jsonl import (
     read_session,
     session_path,
 )
-from ..persistence.lease import lease_path
+from ..persistence.lease import leased
 from ..persistence.protocol import (
     NoStoredSession,
     StoredSession,
@@ -799,13 +798,14 @@ def write_stored_log(root: Path, header: SessionHeader, events: Sequence[Session
 def hold_session(root: Path, session_id: str) -> Iterator[Path]:
     """Hold one session's lease the way another process would; yields the log path.
 
-    Through `lease_path` rather than a hand-spelled lock file, for `stored_log`'s
-    reason one layer over: two suites each wrote `FileLock(f"{log}.lock")`, which
+    Through the lease's own door (`leased`) rather than a hand-spelled lock file,
+    for `stored_log`'s reason one layer over: two suites each wrote
+    `FileLock(f"{log}.lock")`, which
     was where the lease lived until it stopped being derived from the log at all.
     A test that spells the layout locks the wrong file the moment the layout
     moves, and then tests nothing while still passing.
     """
-    with file_lock(lease_path(root, session_id), timeout=-1, what="the session lease"):
+    with leased(root, session_id):
         yield stored_log(root, session_id)
 
 
@@ -822,6 +822,17 @@ def stored_log(root: Path, session_id: str, *, family: str | None = None) -> Pat
     inherits its parent's and should say so.
     """
     return locate_session(root, session_id) or session_path(root, session_id, family or session_id)
+
+
+def splice_line(path: Path, line: bytes = b"{not a record\n", *, at: int = 2) -> bytes:
+    """Put `line` into a stored log at index `at` — the header is 0 — and return what
+    the file holds now: damage no crash makes, since a crash only cuts a log's end, and
+    the kind a reader must refuse and `phern doctor sessions` must find (P13-09)."""
+    lines = path.read_bytes().splitlines(keepends=True)
+    lines.insert(at, line)
+    damaged = b"".join(lines)
+    path.write_bytes(damaged)
+    return damaged
 
 
 def as_kind[B](block: object, kind: type[B]) -> B:

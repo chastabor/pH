@@ -277,3 +277,41 @@ def test_a_rebuild_lists_every_stored_log_with_no_cap(tmp_path: Path) -> None:
     )
     assert store.limits == [None]
     assert LiveIndex(tmp_path).read()["root"].holds == ("turn",)
+
+
+# ------------------------------------------------------- P13-09: damaged logs --
+
+
+def test_a_rebuild_isolates_a_child_log_it_cannot_read_and_says_so(tmp_path: Path) -> None:
+    """One damaged child log used to raise through the tree read and lose the root's
+    entry. The root's own holds are folded as before, the child counts as not live —
+    what it owes is unknown — and the entry carries it as `damaged`; a root with
+    nothing else to say is listed for the damage alone, since a resume cannot answer
+    for it and a repair is what moves it.
+
+    Sabotage: remove the per-child catch in `stored_tree`, and `busy` loses its entry.
+    """
+    busy, quiet = _root("busy"), _root("quiet")
+    log_event(busy, "turn/start", {"turn": 1})
+    bad = _child(busy, "bad", status="running")
+    fine = _child(busy, "fine", status="done")
+    quiet_bad = _child(quiet, "torn", status="done")
+    index = LiveIndex(tmp_path)
+    store = StoredLogs(busy, bad, fine, quiet, quiet_bad, broken=bad.id)
+    assert rebuild_live_index(index, store, now=9, since=index.survey(), ladder=NO_LADDER)
+    entries = index.read()
+    assert entries["busy"].holds == ("turn",), "a child nobody can read is not live"
+    assert entries["busy"].damaged == (bad.id,)
+    assert "quiet" not in entries, "a readable, settled child owes nothing"
+    store = StoredLogs(busy, bad, fine, quiet, quiet_bad, broken=quiet_bad.id)
+    assert rebuild_live_index(index, store, now=9, since=index.survey(), ladder=NO_LADDER)
+    entries = index.read()
+    assert entries["quiet"].holds == () and entries["quiet"].damaged == (quiet_bad.id,)
+    assert entries["busy"].damaged == (), "the damage is this read's, not the file's"
+
+
+def test_damaged_survives_the_file(tmp_path: Path) -> None:
+    index = LiveIndex(tmp_path)
+    entry = LiveEntry("root", (), updated=1, damaged=("root-bad",))
+    assert index.record("root", entry)
+    assert index.read()["root"] == entry

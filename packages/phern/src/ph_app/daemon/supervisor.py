@@ -2135,14 +2135,14 @@ class Supervisor:
         if goals is not None and goals.open(root.session) is not None:
             holds.append("goal")
         subagents = root.ctx.get(SUBAGENTS)
-        if subagents is not None and any(
-            child_is_live(child) for child in subagents.children(root.id).values()
-        ):
-            holds.append("children")
-        if not holds:
-            return None
+        damaged: tuple[str, ...] = ()
+        if subagents is not None:
+            if any(child_is_live(child) for child in subagents.children(root.id).values()):
+                holds.append("children")
+            # A child log that will not read (P13-09): listed for it, holds or not.
+            damaged = subagents.unreadable(root.id)
         header = root.session.header
-        return LiveEntry(
+        entry = LiveEntry(
             session_id=root.id,
             holds=ordered_holds(holds),
             updated=now_ms(),
@@ -2150,7 +2150,9 @@ class Supervisor:
             cwd=header.cwd or "",
             profile=root.ctx.require(MOUNT).profile.name,
             failed=root.recovery.failed,
+            damaged=damaged,
         )
+        return entry if entry.listed else None
 
     async def owed(self, *, rebuild: bool = False) -> OwedListing:
         """Every root the live-roots index says owes work, and why (P13-02).
@@ -2210,27 +2212,42 @@ class Supervisor:
         pending prompt rung. This only chooses which, and says what became of each.
         A root whose ladder is spent is left on disk unless `force`: mounting it
         rings nothing, and a resumer that runs every minute would otherwise mount
-        it every minute. One at a time, as `_mount` orders them anyway, and one that
-        will not mount — held by another process, not a root, a log that will not
-        read — costs its own row and not the pass.
+        it every minute. So is one listed for a damaged log alone (P13-09): it holds
+        nothing a mount would resume, and only a repair moves it — unless it is
+        named, since a person naming a root means it. One at a time, as `_mount`
+        orders them anyway, and one that will not mount — held by another process,
+        not a root, a log that will not read — costs its own row and not the pass.
         """
         listing = await self.owed()
-        spent = {row.session_id for row in listing.sessions if row.failed}
-        owed = [row.session_id for row in listing.sessions] if all_owed else []
-        wanted = dict.fromkeys([*sessions, *owed])
-        rows = [await self._resume_one(one, spent=one in spent and not force) for one in wanted]
+        listed = {row.session_id: row for row in listing.sessions}
+        named = set(sessions)
+        wanted = dict.fromkeys([*sessions, *(listed if all_owed else ())])
+        rows = [
+            await self._resume_one(one, listed.get(one), force=force, named=one in named)
+            for one in wanted
+        ]
         return ResumeReport(sessions=rows, trusted=listing.trusted)
 
-    async def _resume_one(self, session_id: str, *, spent: bool) -> ResumedRoot:
+    async def _resume_one(
+        self, session_id: str, row: OwedRoot | None, *, force: bool, named: bool
+    ) -> ResumedRoot:
         """One root of a resume pass, and the row that says what became of it."""
         mounted = self.roots.get(session_id)
         if mounted is not None:
             return ResumedRoot(session_id=session_id, outcome="mounted", status=mounted.status)
-        if spent:
+        left = row.left_by_a_pass(force=force, named=named) if row is not None else None
+        if left == "spent":
             return ResumedRoot(
                 session_id=session_id,
                 outcome="spent",
                 detail="its ladder is spent; it waits for a person, or for `force`",
+            )
+        if left == "damaged" and row is not None:
+            return ResumedRoot(
+                session_id=session_id,
+                outcome="damaged",
+                detail=f"nothing to resume; a log beneath it will not read: "
+                f"{', '.join(row.damaged)} — `phern doctor sessions --repair`",
             )
         try:
             root = await self.start(session_id)

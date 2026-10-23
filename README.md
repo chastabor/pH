@@ -628,6 +628,8 @@ content hashing and is merely slower.
 ```bash
 phern doctor                                  # roots, platform, available profiles
 phern doctor --profile rlm-stable             # then mount it and let every row report
+phern doctor sessions                         # every stored log read strictly; the first refusing line named
+phern doctor sessions --repair                # cut each damaged log back to what reads, keeping the file beside it
 phern events                                  # the event producer/consumer matrix
 phern --mode trajectory --session <id|path>   # audit a log, mounting nothing
 phern revisions <id|path> > revisions.jsonl  # every change to the context, one JSON line each

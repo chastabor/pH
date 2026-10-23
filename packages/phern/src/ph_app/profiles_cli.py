@@ -33,7 +33,7 @@ from pydantic import ValidationError
 from ph.cordis import LoaderError, sparse_entries
 from ph.documents import decode_document
 from ph.json import as_seq, as_str, thaw_json
-from ph.paths import RuntimeDirError, resolve_roots, write_atomic
+from ph.paths import RuntimeDirError, free_sibling, resolve_roots, write_atomic
 from ph.persistence import LineageError, SessionBusy, materialize, stored_session
 from ph.persistence.jsonl import read_stored
 from ph.seams.skills import READ as SKILL_READ
@@ -449,9 +449,4 @@ def fold_profile(name: str, *, today: date | None = None) -> str:
 
 def _aside(directory: Path, when: str) -> Path:
     """Where a folded drop-in directory goes: dated, and never over an earlier one."""
-    candidate = directory.with_name(f"{directory.name}.folded-{when}")
-    count = 2
-    while candidate.exists():
-        candidate = directory.with_name(f"{directory.name}.folded-{when}-{count}")
-        count += 1
-    return candidate
+    return free_sibling(directory, f".folded-{when}")

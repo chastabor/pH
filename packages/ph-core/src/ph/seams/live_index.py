@@ -26,9 +26,11 @@ needs certainty rebuilds first (`LiveSurvey.trusted`).
 
 **What a hold means.** `turn`: the root's agent is mid-turn, or its log ends inside
 one. `inbox`: a prompt is pending that no turn has claimed. `goal`: an `/autonomous`
-goal is open. `children`: a sub-agent of this root is still live in its own log. A
-root with no hold is not in the file. `failed` rides beside the holds: a root whose
-ladder is spent still owes its work, and a resumer must know not to loop on it.
+goal is open. `children`: a sub-agent of this root is still live in its own log.
+`failed` rides beside the holds: a root whose ladder is spent still owes its work, and
+a resumer must know not to loop on it. `damaged` does too: a log beneath the root that
+will not read, so what it owes is unknown (P13-09). A root with no hold and nothing
+damaged is not in the file (`LiveEntry.listed`).
 
 @module ph.seams.live_index
 """
@@ -67,7 +69,7 @@ __all__ = [
     "holds_of",
     "ordered_holds",
     "rebuild_live_index",
-    "stored_children_live",
+    "stored_children",
 ]
 
 log = logging.getLogger("ph.seams.live_index")
@@ -137,6 +139,17 @@ class LiveEntry:
     failed: bool = False
     """The root's ladder was spent and nothing has succeeded since. It still owes
     its work; a resumer that retried it would be one more attempt per restart."""
+    damaged: tuple[str, ...] = ()
+    """Logs beneath this root that will not read, by session id (P13-09). What they
+    owe is unknown — a child mid-turn in a file nobody can open is counted as not
+    live — so a root is listed for its damage alone, with no holds, and nothing a
+    resume does moves it: `phern doctor sessions --repair` does."""
+
+    @property
+    def listed(self) -> bool:
+        """Whether this root belongs in the file: it holds work, or a log beneath it
+        will not read. Both writers ask this, so they cannot disagree."""
+        return bool(self.holds or self.damaged)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -146,6 +159,7 @@ class LiveEntry:
             "cwd": self.cwd,
             "profile": self.profile,
             "failed": self.failed,
+            "damaged": list(self.damaged),
         }
 
     @classmethod
@@ -159,6 +173,7 @@ class LiveEntry:
             cwd=as_str(raw.get("cwd")),
             profile=as_str(raw.get("profile")),
             failed=as_bool(raw.get("failed")),
+            damaged=tuple(as_str(one) for one in as_seq(raw.get("damaged"))),
         )
 
 
@@ -292,7 +307,7 @@ def holds_of(own: Sequence[SessionEvent], *, children_live: bool) -> tuple[Hold,
     `own` is the root's **own** events (`first_own_seq`), and needs only
     `HOLD_TYPES`: a fork inherits its source's transcript, not its source's open
     turn, goal or queue. `children_live` is the caller's, because it is a question
-    about other logs (`stored_children_live`).
+    about other logs (`stored_children`).
     """
     goals: dict[str, GoalState] = {}
     for event in own:
@@ -309,11 +324,15 @@ def holds_of(own: Sequence[SessionEvent], *, children_live: bool) -> tuple[Hold,
     return ordered_holds(found)
 
 
-def stored_children_live(store: SessionArchive, session_id: str, family: str) -> bool:
-    """Whether any sub-agent beneath `session_id` is still live in its own log — the
-    family as `load_children` reads it (`stored_tree`)."""
+def stored_children(
+    store: SessionArchive, session_id: str, family: str
+) -> tuple[bool, tuple[str, ...]]:
+    """Whether any sub-agent beneath `session_id` is still live in its own log, and
+    which logs beneath it would not read — the family as `load_children` reads it
+    (`stored_tree`), so a rebuild and a mount cannot disagree about either."""
     tree = stored_tree(store, session_id, family, set())
-    return any(child_is_live(state) for level in tree.values() for state in level.values())
+    live = any(child_is_live(state) for level in tree.states.values() for state in level.values())
+    return live, tuple(sorted(tree.unreadable))
 
 
 def rebuild_live_index(
@@ -333,9 +352,10 @@ def rebuild_live_index(
     learn what it already knows. `live` is what a host knows of the roots it holds
     mounted: their logs lag the host until the next barrier, so their entries are
     taken from it rather than from disk. `ladder` is the host's own fold for
-    `failed` (`Ladder`). A log that will not read is logged and kept as the file had
-    it (`replace`), so a damaged family costs its own entry's freshness and not the
-    rebuild.
+    `failed` (`Ladder`). A root whose own log will not read is logged and kept as the
+    file had it (`replace`), so it costs its own entry's freshness and not the
+    rebuild; a child's that will not read is the root's `damaged`, and the root is
+    listed for it whether or not it holds anything else.
 
     **Every stored log, with no cap**, as the schedule index's rebuild reads. The
     listing is flat across families, so sub-agent logs sit in it beside the roots
@@ -351,9 +371,8 @@ def rebuild_live_index(
         try:
             header, events = store.read_own(row.session_id, family=row.family or None, types=types)
             own = [event for event in events if event.seq >= header.first_own_seq]
-            holds = holds_of(
-                own, children_live=stored_children_live(store, row.session_id, header.family)
-            )
+            children_live, damaged = stored_children(store, row.session_id, header.family)
+            holds = holds_of(own, children_live=children_live)
             failed = ladder.spent(own)
         except Exception:
             log.warning(
@@ -362,16 +381,14 @@ def rebuild_live_index(
                 exc_info=True,
             )
             continue
-        read[row.session_id] = (
-            LiveEntry(
-                session_id=row.session_id,
-                holds=holds,
-                updated=now,
-                family=header.family,
-                cwd=header.cwd or "",
-                failed=failed,
-            )
-            if holds
-            else None
+        entry = LiveEntry(
+            session_id=row.session_id,
+            holds=holds,
+            updated=now,
+            family=header.family,
+            cwd=header.cwd or "",
+            failed=failed,
+            damaged=damaged,
         )
+        read[row.session_id] = entry if entry.listed else None
     return index.replace(read, since=since, vouch=vouch)

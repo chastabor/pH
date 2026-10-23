@@ -279,10 +279,18 @@ def test_the_watchdog_interval_is_half_of_what_systemd_asked(
 def test_an_owed_row_carries_the_entry_it_was_built_from() -> None:
     """`OwedRoot.of` is the one place an index entry reaches the wire."""
     entry = LiveEntry(
-        "root", ("turn", "goal"), updated=7, family="f", cwd="/w", profile="work", failed=True
+        "root",
+        ("turn", "goal"),
+        updated=7,
+        family="f",
+        cwd="/w",
+        profile="work",
+        failed=True,
+        damaged=("root-bad",),
     )
     row = OwedRoot.of(entry, mounted=False, status="stored")
     assert row.session_id == "root"
     assert row.holds == ["turn", "goal"]
     assert (row.updated, row.cwd, row.profile, row.failed) == (7, "/w", "work", True)
+    assert row.damaged == ["root-bad"]
     assert (row.mounted, row.status) == (False, "stored")

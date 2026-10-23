@@ -38,7 +38,8 @@ whichever thread took it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
@@ -48,7 +49,7 @@ from ..locks import LockBusy, acquire_file_lock
 if TYPE_CHECKING:
     from ..cordis import Context
 
-__all__ = ["LEASES", "SessionBusy", "claim_session", "lease_directory"]
+__all__ = ["LEASES", "SessionBusy", "claim_session", "lease_directory", "leased", "take_lease"]
 
 
 class SessionBusy(Exception):
@@ -89,6 +90,32 @@ def lease_path(root: Path, session_id: str) -> Path:
     return lease_directory(root) / f"{session_id}.lock"
 
 
+def take_lease(root: Path, session_id: str) -> Callable[[], None]:
+    """Take this session's lease now, or raise `SessionBusy`; returns its release.
+
+    The one place the lease's path, its zero wait and its refusal are spelled:
+    `claim_session` holds it for a scope's life, and `leased` for a block — the
+    repair of a damaged log (`truncate_damaged`), which must not cut a file beneath
+    the process appending to it.
+    """
+    try:
+        return acquire_file_lock(
+            lease_path(root, session_id), timeout=0, what=f'session "{session_id}"'
+        )
+    except LockBusy as busy:
+        raise SessionBusy(f'session "{session_id}" is already active in another process') from busy
+
+
+@contextmanager
+def leased(root: Path, session_id: str) -> Iterator[None]:
+    """Hold this session's lease for the block, or raise `SessionBusy`."""
+    release = take_lease(root, session_id)
+    try:
+        yield
+    finally:
+        release()
+
+
 async def claim_session(scope: Context, root: Path, session_id: str) -> None:
     """Hold this session's lease for as long as `scope` lives, or raise `SessionBusy`.
 
@@ -118,14 +145,7 @@ async def claim_session(scope: Context, root: Path, session_id: str) -> None:
     held.add(session_id)
 
     def acquire() -> Callable[[], None]:
-        try:
-            unlock = acquire_file_lock(
-                lease_path(root, session_id), timeout=0, what=f'session "{session_id}"'
-            )
-        except LockBusy as busy:
-            raise SessionBusy(
-                f'session "{session_id}" is already active in another process'
-            ) from busy
+        unlock = take_lease(root, session_id)
 
         def release() -> None:
             held.discard(session_id)

@@ -35,7 +35,16 @@ from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer
 from ph.session import Session, SurfaceIntent
 from ph.session_profile import BASE as PROFILE_BASE
-from ph.testing import StubAgent, admitted_child, log_event, logged_events, not_none, settled
+from ph.testing import (
+    StubAgent,
+    admitted_child,
+    log_event,
+    logged_events,
+    not_none,
+    settled,
+    splice_line,
+    stored_log,
+)
 from ph_app import verbs
 from ph_app.agents import stop_daemon
 from ph_app.cli import app
@@ -588,6 +597,18 @@ async def left_mid_turn(
             before(root)
         cut_turn(root, source=source)
         await first._flush(root)
+
+
+async def left_with_a_damaged_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stored root, `family`, whose one child's log has a line that is not a record
+    in its middle (P13-09), written by a supervisor that then stops. The child's log."""
+    async with supervised(tmp_path, monkeypatch) as first:
+        family = await first.start("family")
+        child = admitted_child(family.ctx, family.session, "r1")
+        await first._flush(family)
+    path = stored_log(resolve_roots().sessions_dir(), child.id, family="family")
+    splice_line(path)
+    return path
 
 
 _RUNNER = CliRunner()

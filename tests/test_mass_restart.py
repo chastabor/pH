@@ -48,13 +48,30 @@ from ph.llm.types import (
     content_from_wire,
     text_of,
 )
-from ph.persistence import interrupted_turn_closers
+from ph.paths import resolve_roots
+from ph.persistence import (
+    JsonlArchive,
+    damage_in,
+    damaged_logs,
+    interrupted_turn_closers,
+    truncate_damaged,
+)
 from ph.persistence.lease import SessionBusy, claim_session
 from ph.seams.credentials import waiting_for
-from ph.seams.subagents import ChildState
+from ph.seams.live_index import LiveIndex, rebuild_live_index
+from ph.seams.subagents import ADMITTED, ChildState
 from ph.session import Session, SessionEvent, declared_intents, open_intents, outcome_of
 from ph.session.kinds import APPROVAL_ASK, SHELL_COMMAND, TOOL_EFFECT
-from ph.testing import MountProfile, not_none, resume_stored, settled, stored_types
+from ph.testing import (
+    MountProfile,
+    not_none,
+    resume_stored,
+    settled,
+    splice_line,
+    stored_log,
+    stored_types,
+)
+from ph_app.daemon.recovery import LADDER
 
 pytestmark = pytest.mark.anyio
 
@@ -315,3 +332,72 @@ async def test_a_readmitted_childs_log_is_leased_by_the_process_that_resumed_it(
 
     with pytest.raises(SessionBusy):
         await claim_session(Context(), store.root, crashed["running"]["session"])  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------------------ P13-09 --
+
+
+def _damage_after_admission(crashed: dict[str, Any], line: bytes) -> Path:
+    """Splice `line` into the log of the child that was at the model, right after its
+    admission, so what a repair keeps is still a child's log. The log's path."""
+    path = stored_log(resolve_roots().sessions_dir(), crashed["running"]["session"], family="root")
+    lines = path.read_bytes().splitlines(keepends=True)
+    admitted = next(index for index, one in enumerate(lines) if ADMITTED.encode() in one)
+    splice_line(path, line, at=admitted + 1)
+    return path
+
+
+async def test_a_damaged_child_log_leaves_its_root_openable_listed_damaged_and_repairable(
+    crashed: dict[str, Any], mount: MountProfile
+) -> None:
+    """Phase 13's gate for one bad file: the child at the model when the kill came has
+    a line that is not a record in the middle of its log. The root still opens and
+    its other child finishes; the damaged child is set aside rather than readmitted,
+    and its file is not written to; the live-roots index, rebuilt as the daemon
+    rebuilds it, lists the root `damaged`; and doctor's repair cuts the log back to
+    what reads, after which the next restart picks the child up."""
+    sessions = resolve_roots().sessions_dir()
+    path = _damage_after_admission(crashed, b"{not a record\n")
+    damaged_id, damaged = path.stem, path.read_bytes()
+
+    ctx, root = await _restart(mount)
+    queued = crashed["queued"]["run"]
+    await _until_settled(ctx, root, queued)
+    assert set(_children(ctx, root)) == {queued}, "the damaged child is nobody's child"
+    assert ctx.require(SUBAGENTS).unreadable(root.id) == (damaged_id,)
+    assert path.read_bytes() == damaged, "nothing is written into a log that will not read"
+
+    index = LiveIndex(sessions.parent / "gate-index")
+    rebuild_live_index(index, JsonlArchive(sessions), now=1, since=index.survey(), ladder=LADDER)
+    assert index.read()["root"].damaged == (damaged_id,)
+
+    _read, found = damaged_logs(sessions)
+    assert [damage.path for damage in found] == [path]
+    copy = truncate_damaged(sessions, found[0])
+    assert copy.read_bytes() == damaged and damage_in(path) is None
+
+    await _flushed(ctx)
+    again, root_again, _parent = await _restarted(mount)
+    await _until_settled(again, root_again, crashed["running"]["run"])
+    assert again.require(SUBAGENTS).unreadable(root_again.id) == ()
+
+
+async def test_damage_only_the_strict_read_sees_is_set_aside_when_the_readmission_meets_it(
+    crashed: dict[str, Any], mount: MountProfile
+) -> None:
+    """The tree read folds only the records a child's state is made of, so a bad
+    envelope in a record of another type passes it, and the child reads as live. The
+    readmission opens the log whole and is refused: the child is set aside there, as
+    the tree read sets aside what it meets, rather than ended in a file that cannot be
+    read or left live to hold its root for good. Doctor finds the same line."""
+    path = _damage_after_admission(crashed, b'{"type":"step/start","seq":"two"}\n')
+    damaged_id, damaged = path.stem, path.read_bytes()
+
+    ctx, root = await _restart(mount)
+    queued = crashed["queued"]["run"]
+    await _until_settled(ctx, root, queued)
+    assert set(_children(ctx, root)) == {queued}, "set aside, not readmitted or ended"
+    assert ctx.require(SUBAGENTS).unreadable(root.id) == (damaged_id,)
+    assert path.read_bytes() == damaged
+    found = damage_in(path)
+    assert found is not None and "seq" in found.reason

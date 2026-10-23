@@ -45,7 +45,10 @@ from ph.cordis.events import events as event_registry
 from ph.json import JsonObject, as_obj
 from ph.keys import DIAGNOSTICS
 from ph.lingering import lifetime
+from ph.locks import describe_lock
 from ph.paths import resolve_roots
+from ph.persistence import SessionBusy, damaged_logs, truncate_damaged
+from ph.persistence.lease import lease_directory
 from ph.resources import run_until_signaled
 from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.seams.models import ModelChoice, ModelChoiceError, ModelList
@@ -449,12 +452,25 @@ async def _report(profile: Profile) -> list[tuple[str, list[tuple[str, str]]]]:
         return registry.report()
 
 
-@app.command()
+doctor_app = typer.Typer(
+    invoke_without_command=True,
+    help="Report the path roots, then mount a profile and report what it composed.",
+)
+
+
+@doctor_app.callback()
 def doctor(
+    ctx: typer.Context,
     profile: ProfileOption = DEFAULT_PROFILE,
     patch: PatchOption = [],  # noqa: B006 - typer builds the list per invocation
 ) -> None:
-    """Report the path roots, then mount a profile and report what it composed."""
+    """Report the path roots, then mount a profile and report what it composed.
+
+    `phern doctor sessions` is the one subcommand: a question about the stored logs
+    rather than about this install, so it mounts nothing.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
     roots = roots_or_exit()
     table = Table(title="pH path roots", show_header=True, header_style="bold")
     table.add_column("root")
@@ -490,6 +506,10 @@ def doctor(
 
     before_mount = [
         ("daemon socket lifetime", lifetime(roots=roots).describe()),
+        # The lease is a kernel `flock`, or nothing (P13-11): a filesystem that
+        # cannot hold one would hand the next daemon every lease this one died with.
+        # Probed for real, in the lease directory, since only the filesystem knows.
+        ("session lease", describe_lock(lease_directory(roots.sessions_dir()))),
         # N5, and the gate's "doctor prints the worker model". Here and not only
         # in `phern agents doctor` because the two answer different questions: that
         # one describes a daemon somebody already started, and this one is read
@@ -527,6 +547,73 @@ def doctor(
     console.print(f"\n[bold]profile:[/bold] {profile}")
     for title, rows in before_mount + sections:
         console.print(section(title, rows))
+
+
+@doctor_app.command("sessions")
+def doctor_sessions(
+    repair: Annotated[
+        bool,
+        typer.Option(
+            "--repair",
+            help="Cut each damaged log back to the prefix that reads, keeping the whole "
+            "file beside it as `<log>.damaged`. A log a running process holds is left.",
+        ),
+    ] = False,
+) -> None:
+    """Name the first line of each stored log the strict reader refuses (P13-09).
+
+    Every log is opened as a resume opens it. Exit 0 when every log reads, 1 while
+    any does not.
+
+    A damaged log is one a resume refuses whole: a line that is not a record, or an
+    envelope this build cannot validate, with a newline after it. A torn last line is
+    not damage — a crash leaves one, and the reader drops it. A sub-agent's damaged
+    log leaves its root openable and listed `damaged`; `--repair` is what clears
+    that, and the daemon reads the repaired log when it next mounts the root.
+    """
+    root = roots_or_exit().sessions_dir()
+    read, found = damaged_logs(root)
+    console.print(f"[dim]{read} stored log(s) under {root}[/dim]")
+    if not found:
+        console.print("[green]every log reads[/green]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("session")
+    table.add_column("line")
+    table.add_column("reason")
+    table.add_column("repair" if repair else "would keep")
+    left = 0 if repair else len(found)
+    for damage in found:
+        if not repair:
+            outcome = (
+                f"lines 1 to {damage.line - 1}"
+                if damage.kept
+                else "nothing: no header reads before the damage"
+            )
+        else:
+            try:
+                copy = truncate_damaged(root, damage)
+            except (SessionBusy, ValueError, OSError) as refused:
+                left += 1
+                outcome = f"[yellow]not repaired: {detail(refused)}[/yellow]"
+            else:
+                outcome = f"cut at line {damage.line}; the whole file is {copy.name}"
+        table.add_row(damage.path.stem, str(damage.line), detail(damage.reason), outcome)
+    console.print(table)
+    if repair and left < len(found):
+        console.print(
+            "[dim]a daemon reads a repaired log when it next mounts the root; "
+            "`phern agents owed --rebuild` re-reads the index[/dim]"
+        )
+    if left:
+        fail(
+            f"[yellow]{left} damaged log(s)"
+            + ("" if repair else "; `phern doctor sessions --repair` cuts each back")
+            + "[/yellow]"
+        )
+
+
+app.add_typer(doctor_app, name="doctor")
 
 
 _DEFAULT_PASSIVATION = f"{PASSIVATE_AFTER / 60:g}"

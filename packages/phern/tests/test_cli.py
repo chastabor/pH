@@ -1013,7 +1013,11 @@ def test_every_public_command_is_registered_and_nothing_private_leaked() -> None
     registered = {
         command.name or not_none(command.callback).__name__ for command in app.registered_commands
     }
-    assert {"daemon", "doctor"} <= registered, f"a command stopped being registered: {registered}"
+    assert "daemon" in registered, f"a command stopped being registered: {registered}"
+    # `doctor` is a group since P13-09 (`phern doctor sessions`), whose bare form is
+    # the old command; a group lives in a table of its own.
+    groups = {group.name for group in app.registered_groups}
+    assert "doctor" in groups, f"a group stopped being registered: {groups}"
     private = {name for name in registered if name.startswith("_")}
     assert not private, f"a helper was captured by an @app.command() decorator: {private}"
 

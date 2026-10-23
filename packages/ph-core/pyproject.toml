@@ -33,7 +33,8 @@ dependencies = [
     # a decision someone makes, not one a resolver makes for them.
     "anyio>=4.4,<5",
     "croniter>=3.0",
-    "filelock>=3.15",
+    # 3.32 for `fallback_to_soft`, which `ph.locks` pins off: a lease is `flock` or nothing.
+    "filelock>=3.32",
     "pydantic>=2.9",
     "pyturso>=0.7",
     "pyyaml>=6.0",

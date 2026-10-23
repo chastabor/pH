@@ -55,6 +55,7 @@ from ph.testing import (
     not_none,
     raising,
     skill,
+    splice_line,
     stored_events,
     stored_types,
     write_skill,
@@ -891,3 +892,44 @@ async def test_a_stored_child_that_is_deleted_takes_its_children_with_it(
     assert stored_types(ctx, grandchild.id)[-2:] == [STATUS, DELETED]
     revoked = ctx.require(SUBAGENTS).state(grandchild.id)
     assert revoked is not None and revoked.deleted_reason == PARENT_TEARDOWN
+
+
+# ------------------------------------------------------- P13-09: damaged logs --
+
+
+async def test_a_child_log_that_will_not_read_costs_its_own_row_and_not_the_tree(
+    mount: MountProfile,
+) -> None:
+    """One damaged child file used to raise through the family read, so the root could
+    not be mounted and its siblings were never readmitted. The child is reported
+    `unreadable` with the reader's reason and is in nobody's children — not live, so
+    the sweep neither waits on it nor readmits it, and not ended, so the sweep writes
+    no tombstone into a file it cannot read — while its sibling is readmitted.
+
+    Sabotage: drop the per-child catch in `stored_tree`, and `load_children` raises.
+    """
+    ctx = await mount()
+    provider = _Readmitting(StubSubagentProvider(root=ctx), takes_back=True)
+    ctx.require(SUBAGENTS).register_provider("stub", provider)
+    parent = _parent(ctx)
+    assert parent.session is not None
+    bad = admitted_child(ctx, parent.session, "r1", {"prompt": "look"})
+    log_event(bad, STATUS, {"status": "running"})
+    fine = admitted_child(ctx, parent.session, "r2", {"prompt": "dig"})
+    log_event(fine, STATUS, {"status": "running"})
+    await _as_an_earlier_process_left_them(ctx, parent.session, bad, fine)
+    store = ctx.require(SESSION_PERSISTENCE)
+    path = not_none(store.locate(bad.id), "the damaged child's log")
+    damaged = splice_line(path)
+    subagents = ctx.require(SUBAGENTS)
+
+    children = await subagents.load_children(parent.session.id, parent.session.header.family)
+
+    assert list(children) == ["r2"]
+    assert subagents.unreadable(parent.session.id) == (bad.id,)
+    assert subagents.state(bad.id) is None, "a child nobody can read has no state"
+    revived = await subagents.resume_children(parent, retry_limit=3)
+    assert set(revived) == {"r2"} and provider.asked == ["r2"]
+    assert path.read_bytes() == damaged
+    subagents.forget_session(parent.session.id)
+    assert subagents.unreadable(parent.session.id) == (), "forgotten with the tree"

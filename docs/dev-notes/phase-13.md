@@ -1,8 +1,9 @@
 # Phase 13 — Stable restart
 
 **Status:** planned 2026-10-22; waves one and two landed the same day (P13-01, P13-02,
-P13-08, P13-12; P13-03 to P13-07, P13-10), wave three on 2026-10-23 (P13-13, P13-14).
-Fourteen rows in four waves; wave four (P13-09, P13-11) remains.
+P13-08, P13-12; P13-03 to P13-07, P13-10), waves three and four on 2026-10-23 (P13-13,
+P13-14; P13-09, P13-11). Fourteen rows in four waves, all landed. Of the kill-shaped
+gates under "Gates", the damaged-log one is on the restart host; the rest are still owed.
 
 **Gate:** `ruff` + `ruff format` + `mypy` across the tree, and `./test.sh test` green,
 plus the SIGKILL gates listed under "Gates" once each wave lands.
@@ -63,7 +64,7 @@ Found 2026-10-22 by reading the restart path end to end against pi-durable's des
 | P13-06 | 2 | A credential hold covers children | `Supervisor._start` |
 | P13-07 | 2 | Durable schedule tick: append, flush, deliver, reindex | `Supervisor.tick`, `ScheduleService.claim` |
 | P13-08 | 1 | Loud write failures: ops record, nonzero exit, `unwritten` in status | `write_on_unwind`, `Supervisor.unwritten` |
-| P13-09 | 4 | Damaged logs isolated per child; `phern doctor sessions --repair` | `_stored_tree`, `ph_app.stored` |
+| P13-09 | 4 | Damaged logs isolated per child; `phern doctor sessions --repair` | `stored_tree`, `ph.persistence.jsonl` |
 | P13-10 | 2 | Flush after a repairing resume; policy first on turn stopping | `Supervisor._start`, `checkpoint_policy` |
 | P13-11 | 4 | Lease fallback refused; doctor names the lock mechanism | `ph.locks` |
 | P13-12 | 1 | Probes over TCP and as exit codes; `sd_notify` | `ph_app.daemon.probes`, `verbs.DAEMON_PROBE` |
@@ -97,11 +98,14 @@ sets it.
 | P13-10 | The repair a resume wrote is flushed before any work; the turn's answer is on disk before an autonomous gate runs, by the gate's own durable record | `Supervisor._start`, `test_goals` |
 | P13-13 | `phern service start/stop/restart/status/resume/watch`: one verdict vocabulary (exit 0 ready, 1 down, 2 degraded), the daemon's options passed through as typed, a watcher on the scheduler's ladder; the agents client's spine shared (`reach`, `stop_daemon`); an owed row says `held` from the daemon; a spawned daemon that exits before listening is reported at once | `ph_app.service`, `agents.reach`, `OwedRoot.held`, `launch.phern_argv`, `launch._await_socket` |
 | P13-14 | A system unit template per user, a user unit with the linger advice, an env file, a Kubernetes sketch with the three probes, and the `restart` non-guarantee reworded | `contrib/`, `NON_GUARANTEES` |
+| P13-09 | A child log that will not read costs its own row and not the family: set aside as unreadable, counted as not live, written to by nothing — whether the tree read meets the damage or a readmission's strict read does; the live-roots index and the owed listing carry it as `damaged`, a root is listed for its damage alone, and a resume pass leaves that one to the repair; the strict reader's refusal says where it stopped (`LogDamaged`), `phern doctor sessions` asks it of every stored log, and `--repair` cuts a log back to the prefix that reads, under the lease, keeping the file beside it | `stored_tree`, `SubagentService.unreadable`, `SubagentService._isolate`, `LiveEntry.damaged`, `LiveEntry.listed`, `OwedRoot.left_by_a_pass`, `jsonl.LogDamaged`, `jsonl.damage_in`, `jsonl.truncate_damaged`, `lease.leased`, `cli.doctor_sessions` |
+| P13-11 | The lease is `flock(2)` by name with the library's existence-lock fallback pinned off (`filelock>=3.32`, the first release verified to have the option); a filesystem without it refuses with `LockUnsupported`; `phern doctor` prints the mechanism, the lease directory, its filesystem and a lock taken there | `ph.locks`, `ph.paths.filesystem_of`, `cli.doctor` |
 
 Tests: `packages/ph-core/tests/test_live_index.py`, `packages/phern/tests/test_daemon_live.py`,
-`packages/phern/tests/test_daemon_resume.py`, `packages/phern/tests/test_service_cli.py`, and
-the rows added to `test_child_logs.py`, `test_schedule.py`, `test_goals.py`, `test_modes.py`
-and `test_daemon_launch.py`.
+`packages/phern/tests/test_daemon_resume.py`, `packages/phern/tests/test_service_cli.py`,
+`packages/phern/tests/test_doctor_sessions.py`, and the rows added to `test_child_logs.py`,
+`test_schedule.py`, `test_goals.py`, `test_modes.py`, `test_daemon_launch.py`,
+`test_persistence.py`, `test_locks.py` and `tests/test_mass_restart.py`.
 
 ---
 
@@ -249,6 +253,65 @@ with the verdict as the exit code, for a cron slot. The watcher takes no signal
 handler, looping or not: it holds nothing a signal needs to unwind, and the daemon
 it started is a process of its own.
 
+**A damaged child log is a row, not a refusal.** `stored_tree` read every log beneath a
+root and let the first refusal through, so one bad file refused the root, its siblings
+were never readmitted, and nothing could repair the file because nothing could open the
+family. The read now catches per child, and only a refusal of the log's content — a
+`ValueError` from every backend, where a log gone missing still raises: the child is
+unreadable, and in no parent's `children` — not live, so no sweep waits on it or
+readmits it, and not ended, so no sweep writes a tombstone into a file it cannot read.
+The tree read folds only the records a child's state is made of, so a bad envelope in a
+record of another type passes it; the readmission then opens the log whole, is refused
+with `LogDamaged`, and sets the child aside the same way (`_isolate`) rather than
+ending it in a file that cannot be read or leaving it live to hold its root for good.
+Both file it by parent (`SubagentService._unreadable`), and `unreadable(root)` is the
+whole tree's, sorted — what the daemon's live entry reads `damaged` from, with no walk
+at all while nothing is damaged. A rebuild reads the same `stored_tree`
+(`stored_children`), so it sees what the tree read sees; damage only a strict read
+meets shows once a mount has met it. A root is listed for its damage alone, holds or
+not (`LiveEntry.listed`, which both writers ask): what a child mid-turn in a file nobody
+can open owes is unknown, and a listing that hid it would hide the one state a repair
+exists for. What a resume pass leaves on disk is one rule on the row
+(`OwedRoot.left_by_a_pass`), asked after "already mounted" by the daemon's pass and by
+the service client's verdict alike: `spent` without `force`, `damaged` for a root that
+holds nothing else and was not named. The daemon reads a tree once per mount, so a
+repair beneath a mounted root shows `damaged` until the root is next mounted; the
+command says so.
+
+**`doctor sessions` is the strict read, asked.** The reader is the one statement of
+what a log must be: every refusal — a line that is not a record, an envelope this build
+cannot validate, no header — is a `LogDamaged` (a `ValueError`, as every refusal was)
+carrying the line, the reason and the bytes before it. To count those bytes the reader
+walks the file in bytes and decodes each line, at the same cost as the text read it
+replaced (35 ms either way on an 822 KB log; a skim unchanged at 2 ms), and an
+unterminated last line that will not parse — cut anywhere, a multi-byte character
+included — is the torn write it always was. `damage_in` runs that read and returns
+where it stopped, so `phern doctor sessions` and a resume cannot disagree about whether
+a file reads. `truncate_damaged` is a cut to the accepted prefix and nothing cleverer,
+in core and under the session's lease (`lease.leased`, the door `claim_session` takes
+too), so a log a daemon or a one-shot run is appending to raises `SessionBusy` however
+the cut is reached: a writer appending behind it would put `seq` backwards. The whole
+file is written durably to `<log>.damaged` first (`write_atomic`, numbered past an
+earlier copy by `ph.paths.free_sibling`), then the log is truncated and synced. A child
+a readmission set aside keeps the lease the open took until its root passivates, so
+`--repair` leaves it while that daemon holds the root. `doctor` became a group whose
+bare form is the old command (`invoke_without_command`), so `phern doctor --profile x`
+is unchanged and `phern doctor sessions` mounts nothing.
+
+**The lease is `flock(2)` or nothing.** The library's `FileLock` is whichever lock the
+host can offer, and its unix lock switches to an *existence* lock — a file whose
+presence is the claim — when a filesystem answers `flock` with "not supported", with a
+warning at the moment nobody is reading. An existence lock is the opposite of a lease:
+a killed process leaves it behind and the next daemon is refused every session it
+held. `ph.locks` asks for `UnixFileLock` by name with `fallback_to_soft=False`, and
+turns the errnos a filesystem without `flock` answers with into `LockUnsupported`,
+naming the path — a type of its own, so no caller mistakes it for "already active".
+`phern doctor` prints the mechanism, the lease directory, its filesystem from the
+mount table (`ph.paths.filesystem_of`: `/proc/self/mountinfo`, the longest mount point
+the canonical path is under) and the result of a lock taken and let go there for real,
+above the profile mount, since the answer needs no profile and is wanted most when the
+profile will not mount.
+
 **`contrib/` is templates, not a package.** The system unit is a template instance
 per unix user (`User=%i`, `RuntimeDirectory=phern-%i`, an env file under
 `/etc/phern`), the user unit carries the linger advice `phern doctor` prints, and
@@ -306,15 +369,32 @@ root is a line there rather than a failed start that `Restart=on-failure` loops 
 and unwritten. A stored root that owes work and is mounted by nobody is the state
 a resumer exists to end, and a `status` that called it ready would give an
 orchestrator nothing to act on; it is a reason with the fix named, and the one
-`watch` acts on without a restart. Damaged joins when P13-09 gives the listing the
-word.
+`watch` acts on without a restart. Damaged joined with P13-09, with
+`phern doctor sessions --repair` as its named fix; a root listed for its damage alone
+is not one `watch` or `service resume` tries to mount.
 
-**The SIGKILL gates for this wave are not yet on the restart host.** The wave's rows
+**A damaged root with no holds is still owed, and `--check` says so.** `phern agents
+owed --check` exits 2 while any listed root is unmounted, and a damaged-only root stays
+unmounted until a repair, so a cron line of `owed --check || resume --all` keeps
+exiting 2 on it — which is right: the state needs an operator, and the table names the
+command. A root whose *own* log will not read is not listed at all unless an earlier
+host left its entry (a rebuild keeps what it cannot re-read); `phern doctor sessions`
+finds it either way.
+
+**Repair is a cut, not a splice.** Everything from the damaged line on goes with it,
+kept only in the copy, and a resume then closes whatever turn the cut left open. A
+reference-forked descendant whose `first_own_seq` lies past the cut can no longer
+materialize its lineage; the "Session lineage" section of `phern doctor` names it, and
+nothing here tries to be cleverer than the person reading that.
+
+**The SIGKILL gates for wave two are not yet on the restart host.** The wave's rows
 are gated in-process (`test_daemon_resume.py`): a stored log left mid-turn by one
 supervisor and mounted by the next, a notice delivered to an idle parent, a tick with
 the flush refused. `tests/mass_restart_host.py` still leaves no open goal and no
-schedule, so the three kill-shaped gates below for this wave are owed with wave
-four's.
+schedule, so the goal, wake and tick gates below are still owed after wave four; the
+damaged-log gate landed there with P13-09 — the child at the model when the kill came,
+its log cut in the middle after the restart, and the whole cycle through doctor's
+repair and a second restart that picks the child up.
 
 ---
 
@@ -328,7 +408,7 @@ All built on the SIGKILL host in `tests/mass_restart_host.py`:
   root is idle, and the root wakes and reads the notice.
 - A kill between a tick's claim and its delivery produces exactly one run.
 - A child log with a malformed middle line leaves its root openable, listed damaged,
-  and repairable by doctor.
+  and repairable by doctor — **landed**, `tests/test_mass_restart.py`.
 - Probe tests over the TCP port for each state, including readiness going false on
   an unwritten root.
 - A second kill right after a resume adds no closers.

@@ -37,6 +37,7 @@ is the one place directories are created, with the mode each tier requires.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import stat
 import sys
@@ -55,6 +56,8 @@ __all__ = [
     "canonical",
     "default_cache_path",
     "default_home_path",
+    "filesystem_of",
+    "free_sibling",
     "is_under",
     "make_directories",
     "replace_durably",
@@ -382,6 +385,53 @@ def is_under(candidate: Path, root: Path) -> bool:
     base = os.path.normcase(root.as_posix()).rstrip("/")
     target = os.path.normcase(candidate.as_posix())
     return target == base or target.startswith(f"{base}/")
+
+
+def free_sibling(path: Path, suffix: str) -> Path:
+    """A name beside `path` not yet taken: `<name><suffix>`, then `-2`, `-3` and on.
+
+    For a file or directory kept aside rather than replaced — a folded drop-in
+    directory (`phern profiles fold`), a log a repair cut (`truncate_damaged`) — so a
+    second one never lands on the first.
+    """
+    candidate = path.with_name(f"{path.name}{suffix}")
+    count = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}{suffix}-{count}")
+        count += 1
+    return candidate
+
+
+_MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
+"""How the kernel escapes a space, tab, newline or backslash in a mount table field."""
+
+
+def filesystem_of(path: Path) -> str:
+    """The filesystem type holding `path`, by the mount table, or `unknown`.
+
+    Linux keeps the table at `/proc/self/mountinfo`, one mount per line, its mount
+    point the fifth field and its type the first after a lone `-`; the mount is the
+    longest mount point that `path` is under. The path need not exist yet: resolved
+    through what does (`canonical`), a directory still to be made lives on whatever
+    holds its nearest existing ancestor.
+    """
+    if not sys.platform.startswith("linux"):
+        return "unknown"
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "unknown"
+    target = canonical(path)
+    found = [(0, "unknown")]
+    for line in lines:
+        head, _, tail = line.partition(" - ")
+        fields, after = head.split(), tail.split()
+        if len(fields) < 5 or not after:
+            continue
+        point = _MOUNT_ESCAPE.sub(lambda match: chr(int(match[1], 8)), fields[4])
+        if is_under(target, Path(point)):
+            found.append((len(point.rstrip("/").split("/")), after[0]))
+    return max(found, key=lambda one: one[0])[1]
 
 
 def write_text_under(path: Path, text: str, *, append: bool = False) -> None:

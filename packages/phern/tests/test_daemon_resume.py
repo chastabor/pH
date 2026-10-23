@@ -18,6 +18,7 @@ from daemon_helpers import (
     A_PERSON,
     cut_turn,
     left_mid_turn,
+    left_with_a_damaged_child,
     route_needs,
     running,
     set_phase,
@@ -27,7 +28,7 @@ from daemon_helpers import (
 )
 
 from ph.json import as_obj, as_seq
-from ph.keys import GOALS, INTENTS, SCHEDULE
+from ph.keys import GOALS, INTENTS, SCHEDULE, SUBAGENTS
 from ph.persistence import resumption_of
 from ph.seams import schedule as schedule_module
 from ph.seams.goals import Goal
@@ -377,3 +378,35 @@ async def test_the_index_moves_only_once_the_tick_and_its_prompt_are_on_disk(
         assert await supervisor.tick(now=made + 150_000) == ["s"]
         assert len(told) == 1, "the index moved over a log that did not take the tick"
         assert "cron" in supervisor.unwritten
+
+
+# ------------------------------------------------------- P13-09: damaged logs --
+
+
+async def test_a_damaged_child_log_lists_its_root_damaged_and_a_pass_leaves_it_to_the_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One child log that will not read used to refuse the whole family. The root is
+    listed for the damage with the child named and no holds — what the child owes is
+    unknown — `resume --all` leaves it on disk and says what moves it, a root named by
+    id still mounts, and nothing is written into the file that will not read."""
+    path = await left_with_a_damaged_child(tmp_path, monkeypatch)
+    child_id, before = path.stem, path.read_bytes()
+    async with supervised(tmp_path, monkeypatch) as second:
+        listing = await second.owed(rebuild=True)
+        [row] = listing.sessions
+        assert (row.session_id, row.holds, row.damaged) == ("family", [], [child_id])
+        passed = await second.resume_owed(all_owed=True)
+        [outcome] = passed.sessions
+        assert outcome.outcome == "damaged"
+        assert "phern doctor sessions --repair" in outcome.detail
+        assert not second.roots, "nothing to resume, so nothing mounted"
+        [named] = (await second.resume_owed(["family"])).sessions
+        assert named.outcome == "resumed"
+        mounted = second.roots["family"]
+        assert mounted.ctx.require(SUBAGENTS).unreadable("family") == (child_id,)
+        [row] = (await second.owed()).sessions
+        assert row.mounted and row.damaged == [child_id], "the mounted entry says so too"
+        [again] = (await second.resume_owed(all_owed=True)).sessions
+        assert again.outcome == "mounted", "mounted is asked before damaged"
+    assert path.read_bytes() == before, "no tombstone into a log that will not read"

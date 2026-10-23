@@ -1010,6 +1010,10 @@ class QuestionAskReply(WireModel):
     answer: str | None = None
 
 
+LeftOnDisk: TypeAlias = Literal["spent", "damaged"]
+"""Why a resume pass leaves an owed root unmounted (`OwedRoot.left_by_a_pass`)."""
+
+
 class OwedRoot(WireModel):
     """One root the live-roots index says still owes work (P13-02)."""
 
@@ -1030,6 +1034,26 @@ class OwedRoot(WireModel):
     profile (`Root.held`) — so nothing this daemon can do moves it. The daemon's
     fact rather than a reading of `status`, whose order of precedence can put
     another word in front of it."""
+    damaged: list[str] = Field(default_factory=list)
+    """Logs beneath it that will not read, by session id (`LiveEntry.damaged`, P13-09):
+    what they owe is unknown, and `phern doctor sessions --repair` is the fix."""
+
+    def left_by_a_pass(self, *, force: bool = False, named: bool = False) -> LeftOnDisk | None:
+        """What a resume pass leaves this root as, when it does not mount it (P13-03).
+
+        `spent`: its ladder is spent, and only `force` mounts it — mounting it rings
+        nothing, and a resumer that runs every minute would mount it every minute.
+        `damaged`: it is listed for a log beneath it that will not read and holds
+        nothing a mount would resume, so a repair moves it and a mount does not — unless
+        a person `named` it, which means they want it mounted. The daemon's pass
+        (`Supervisor.resume_owed`) and the service client's verdict (`Observed.of`)
+        both ask this, so what the client expects a pass to mount is what it mounts.
+        """
+        if self.failed and not force:
+            return "spent"
+        if self.damaged and not self.holds and not named:
+            return "damaged"
+        return None
 
     @classmethod
     def of(cls, entry: LiveEntry, *, mounted: bool, status: str, held: bool = False) -> OwedRoot:
@@ -1046,6 +1070,7 @@ class OwedRoot(WireModel):
             cwd=entry.cwd,
             profile=entry.profile,
             failed=entry.failed,
+            damaged=list(entry.damaged),
             mounted=mounted,
             status=status,
             held=held,
@@ -1062,12 +1087,15 @@ class OwedListing(WireModel):
     """Whether this reply rebuilt the index from the logs first."""
 
 
-ResumeOutcome: TypeAlias = Literal["resumed", "mounted", "held", "spent", "refused"]
+ResumeOutcome: TypeAlias = Literal["resumed", "mounted", "held", "spent", "damaged", "refused"]
 """What `sessions/resume` did with one root (P13-03). `resumed`: mounted by this
 pass. `mounted`: this daemon already held it. `held`: mounted, and waiting on a
 credential or a profile decision before anything runs. `spent`: its ladder is spent
-and `force` was not passed, so it was left on disk. `refused`: the mount raised —
-held by another process, not a root, a log that will not read — and `detail` says."""
+and `force` was not passed, so it was left on disk. `damaged`: it holds nothing a
+mount would resume and is listed for a log beneath it that will not read, so it was
+left on disk for `phern doctor sessions --repair` (P13-09). `refused`: the mount
+raised — held by another process, not a root, a log that will not read — and
+`detail` says."""
 
 
 class ResumedRoot(WireModel):

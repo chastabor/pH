@@ -757,10 +757,17 @@ def print_owed(listing: OwedListing) -> None:
         table.add_column("cwd")
         for row in listing.sessions:
             status = row.status + (" · failed" if row.failed else "")
+            if row.damaged:
+                status += f" · damaged ({', '.join(row.damaged)})"
             table.add_row(
                 row.session_id, status, ", ".join(row.holds) or "—", _when(row.updated), row.cwd
             )
         console.print(table)
+        if any(row.damaged for row in listing.sessions):
+            console.print(
+                "[yellow]damaged: a log beneath the root will not read; "
+                "`phern doctor sessions --repair` cuts it back to what does[/yellow]"
+            )
     note = (
         "rebuilt from the logs"
         if listing.rebuilt

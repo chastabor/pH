@@ -82,6 +82,7 @@ from ..llm.types import (
     text_of,
     unmapped_effort,
 )
+from ..persistence.jsonl import LogDamaged
 from ..persistence.opening import open_session, stored_session
 from ..persistence.protocol import SessionArchive
 from ..session import (
@@ -1652,6 +1653,10 @@ class SubagentService:
     """Children this process is not running, by parent id and then session id. A
     parent is here once its stored children were read (`load_children`), and a child
     of it that is let go leaves its last state here (`_let_go`)."""
+    _unreadable: dict[str, set[str]] = field(default_factory=dict)
+    """Children whose logs will not read, by parent id and then session id (P13-09):
+    found so by the tree read (`stored_tree`) or by a readmission's strict one
+    (`_isolate`). Neither live nor ended, so no sweep waits on one or writes into it."""
     _spawning: dict[str, set[str]] = field(default_factory=dict)
     """The names of each parent's spawns past the guards and not yet admitted, by
     parent id (`child_counts`)."""
@@ -2618,17 +2623,46 @@ class SubagentService:
             sessions = self.ctx.get(SESSIONS)
             live = {one.id for one in sessions.list()} if sessions is not None else set()
             tree = (
-                {}
+                StoredTree()
                 if store is None
                 else await anyio.to_thread.run_sync(
                     lambda: stored_tree(store, parent_id, family, live)
                 )
             )
             self._stored.setdefault(parent_id, {})
-            for owner, states in tree.items():
+            for owner, states in tree.states.items():
                 # What is already known of a child wins over this read of it.
                 self._stored[owner] = states | self._stored.get(owner, {})
+            for child, owner in tree.unreadable.items():
+                self._unreadable.setdefault(owner, set()).add(child)
         return self.children(parent_id)
+
+    def unreadable(self, root_id: str) -> tuple[str, ...]:
+        """The children beneath `root_id`, at every level, whose logs will not read
+        (P13-09) — what the live-roots index carries as `damaged`. Sorted, so an
+        unchanged answer compares equal. Read again when the tree is, which is the
+        root's next mount, so a repair shows there."""
+        if not self._unreadable:
+            return ()
+        owners = [root_id, *(state.session_id for state in self.family(root_id))]
+        return tuple(sorted(one for owner in owners for one in self._unreadable.get(owner, ())))
+
+    def _isolate(self, state: ChildState, damaged: LogDamaged) -> None:
+        """Set aside a child whose log the strict read refused (P13-09).
+
+        The tree read folds only the records a child's state is made of, so damage in
+        a record of another type passes it, and is met when a readmission opens the
+        log whole. Ending the child there would write into a file that cannot be read,
+        and leaving it live would hold its root for good; it is filed with the tree
+        read's own refusals instead, out of its parent's children.
+        """
+        log.warning(
+            "ph.seams.subagents: child %s will not read and is left alone: %s",
+            state.session_id,
+            damaged,
+        )
+        self._stored.get(state.parent_id, {}).pop(state.session_id, None)
+        self._unreadable.setdefault(state.parent_id, set()).add(state.session_id)
 
     def delegated_tokens(self, parent_id: str, goal_id: str | None = None) -> int:
         """What `parent_id`'s children spent — only those admitted under `goal_id`, when
@@ -2681,9 +2715,9 @@ class SubagentService:
         """Drop what this service cached about one session: its own fold, and the
         stored tree it read for it, every level of which `load_children` filed."""
         self._folds.forget(session_id)
-        for state in self.family(session_id):
-            self._stored.pop(state.session_id, None)
-        self._stored.pop(session_id, None)
+        for owner in [*(state.session_id for state in self.family(session_id)), session_id]:
+            self._stored.pop(owner, None)
+            self._unreadable.pop(owner, None)
 
     def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
         """Cached child states that no longer equal the fold of their log (I6).
@@ -2905,6 +2939,9 @@ class SubagentService:
                 if await self._held_for_credential(state, request):
                     continue
                 run = await self._readmit_one(state, request, readmitter)
+            except LogDamaged as damaged:
+                self._isolate(state, damaged)
+                continue
             except Exception as error:
                 log.exception("ph.seams.subagents: %s could not be readmitted", state.run_id)
                 await self._end_child(
@@ -3558,26 +3595,62 @@ def extend_child_state(previous: ChildState, log: Session, start: int) -> ChildS
     return state
 
 
-def stored_tree(
-    store: SessionArchive, parent_id: str, family: str, live: set[str]
-) -> dict[str, dict[str, ChildState]]:
+@dataclass(frozen=True, slots=True)
+class StoredTree:
+    """What `stored_tree` read of one family."""
+
+    states: dict[str, dict[str, ChildState]] = field(default_factory=dict)
+    """Each session's children by session id, filed under the parent its header
+    names — with an entry, empty or not, for every session in the tree, since each
+    one's children were in this read."""
+    unreadable: dict[str, str] = field(default_factory=dict)
+    """The logs the read refused, by session id, each with the parent its listing
+    row names."""
+
+
+def stored_tree(store: SessionArchive, parent_id: str, family: str, live: set[str]) -> StoredTree:
     """Everything beneath `parent_id` on disk that this process is not running, each
-    folded from its stored log and filed under the parent its header names — with an
-    entry, empty or not, for every session in the tree, since each one's children
-    were in this read. Blocking: on a worker thread (`load_children`), or a rebuild's
-    (`ph.seams.live_index`), which asks of the same family the same question."""
-    tree: dict[str, dict[str, ChildState]] = {}
+    folded from its stored log. Blocking: on a worker thread (`load_children`), or a
+    rebuild's (`ph.seams.live_index`), which asks of the same family the same question.
+
+    **One log that will not read costs its own row and not the tree** (P13-09). The
+    read used to raise through here, so one damaged child file refused its root: the
+    root could not be mounted, its siblings were never readmitted, and nothing
+    could repair the file because nothing could open the family. The child is
+    reported `unreadable` instead, and is in no parent's children: not live, so no
+    sweep waits on it or readmits it, and not ended, so no sweep writes a tombstone
+    into a file it cannot read. `phern doctor sessions` names the line, and its
+    `--repair` cuts the log back to what reads.
+
+    **A refusal of the log's content, and nothing else.** That is a `ValueError` from
+    every backend — the JSONL reader's `LogDamaged`, a row another backend cannot
+    validate — while a log that has gone missing or cannot be opened is not damage,
+    and still raises as it did.
+    """
+    tree = StoredTree()
     for row in store.descendants_of(parent_id, family):
-        tree.setdefault(row.session_id, {})
+        tree.states.setdefault(row.session_id, {})
         if row.session_id in live:
             continue
         # A child's log starts at seq 0, so its own file is the whole of it — read by
         # its family, which the listing already found, rather than searched for, and
         # only for what its state is folded from.
-        header, events = store.read_own(row.session_id, family=row.family, types=CHILD_EVENT_TYPES)
+        try:
+            header, events = store.read_own(
+                row.session_id, family=row.family, types=CHILD_EVENT_TYPES
+            )
+        except ValueError as refused:
+            log.warning(
+                "ph.seams.subagents: child %s of %s will not read and is left alone: %s",
+                row.session_id,
+                parent_id,
+                refused,
+            )
+            tree.unreadable[row.session_id] = row.delegating_parent or parent_id
+            continue
         state = child_state_of(row.session_id, header, events)
         if state.admitted:
-            tree.setdefault(state.parent_id, {})[row.session_id] = state
+            tree.states.setdefault(state.parent_id, {})[row.session_id] = state
     return tree
 
 
