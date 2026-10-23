@@ -51,13 +51,14 @@ from . import verbs
 from .console import TypeOption, console, detail, fail, section, selectors_or_exit
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import EventFrame, Followed
-from .params import CancelScheduleParams, CreateScheduleParams
+from .params import CancelScheduleParams, CreateScheduleParams, OwedParams, ProbeParams
 from .payloads import DaemonStatusReply, StatusFacts
 from .protocol import (
     Cursor,
     DaemonError,
     DaemonGone,
     NoParams,
+    ProbeName,
     SessionParams,
     cursor_text,
     parse_cursor,
@@ -674,6 +675,8 @@ def doctor() -> None:
                 ("release", _release(facts)),
                 ("socket watch", facts.socket_watch),
                 ("invariants", "checked when a root settles" if facts.check_invariants else "off"),
+                ("probes", facts.probe or "socket only (`phern agents probe`)"),
+                ("unwritten", ", ".join(facts.unwritten) or "none"),
                 *_reachability(facts),
             ),
         )
@@ -682,6 +685,66 @@ def doctor() -> None:
     # diagnostics to it and this side needs no change to render them.
     for reported in facts.sections:
         console.print(section(reported.title, [(row.label, row.value) for row in reported.rows]))
+
+
+@agents_app.command()
+def owed(
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild", help="Read every stored root's log instead of trusting the index."
+        ),
+    ] = False,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Exit 2 when any owed root is not mounted."),
+    ] = False,
+) -> None:
+    """Which stored roots still owe work, and why (P13-02).
+
+    What a resumer asks before it asks for anything to be mounted: a root killed
+    mid-turn, one with a sub-agent still working in its own log, one with a goal
+    nobody settled, one with a prompt no turn claimed. From the daemon's live-roots
+    index, rebuilt from the logs when it cannot vouch for itself or `--rebuild` says to.
+    """
+    listing = _ask(lambda client: client.call(verbs.SESSIONS_OWED, OwedParams(rebuild=rebuild)))
+    if not listing.sessions:
+        console.print("[dim]no root owes work[/dim]")
+    else:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("session")
+        table.add_column("status")
+        table.add_column("holds")
+        table.add_column("since")
+        table.add_column("cwd")
+        for row in listing.sessions:
+            status = row.status + (" · failed" if row.failed else "")
+            table.add_row(
+                row.session_id, status, ", ".join(row.holds) or "—", _when(row.updated), row.cwd
+            )
+        console.print(table)
+    note = (
+        "rebuilt from the logs"
+        if listing.rebuilt
+        else ("index" if listing.trusted else "index, unvouched")
+    )
+    console.print(f"[dim]source: {note}[/dim]")
+    if check and any(not row.mounted for row in listing.sessions):
+        raise typer.Exit(code=2)
+
+
+@agents_app.command()
+def probe(name: Annotated[ProbeName, typer.Argument(help="startup, ready or live.")]) -> None:
+    """Ask the daemon one of the three orchestrator questions; exit 0 for yes (P13-12).
+
+    The unix-socket door to the same answers `--probe-bind` serves over HTTP, for a
+    systemd `ExecStartPost`, a Kubernetes `exec` probe, or a person. A daemon that
+    is not there at all is a no for every probe, with the usual reason on stderr.
+    """
+    reply = _ask(lambda client: client.call(verbs.DAEMON_PROBE, ProbeParams(name=name)))
+    if not reply.ok:
+        fail("\n".join(f"[red]{name}: {reason}[/red]" for reason in reply.reasons))
+    console.print(f"[green]{name}: yes[/green]")
 
 
 @agents_app.command()

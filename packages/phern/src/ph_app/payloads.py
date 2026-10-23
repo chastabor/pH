@@ -46,6 +46,7 @@ from ph.json import JsonObject, JsonValue
 from ph.llm.types import AttachmentRef, ToolSchema
 from ph.seams.approval import ApprovalRequest
 from ph.seams.commands import CommandSchema
+from ph.seams.live_index import Hold as RootHold
 from ph.seams.models import ModelEntry
 from ph.seams.permission_presets import PresetSchema
 from ph.seams.skills import Skill
@@ -62,7 +63,7 @@ from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
 from ph.wire import WireModel, wire_alias
 
-from .protocol import CapabilityBlock, Cursor
+from .protocol import CapabilityBlock, Cursor, ProbeName
 from .sessions import SessionSummary
 
 __all__ = [
@@ -448,6 +449,13 @@ class DaemonStatusReply(CapabilityBlock):
     unreachable_since: int | None = None
     """Set only once the socket stopped being this daemon's (P5-11). Absent is
     the normal answer, which is why the row it feeds is absent too."""
+    unwritten: list[str] = Field(default_factory=list)
+    """Roots whose log could not be written when this daemon last tried (P13-08):
+    the ladder's record, a passivation's flush, a mutation's ack. Each stays listed
+    until a later write of that root succeeds. Readiness is false while any is."""
+    probe: str = ""
+    """Where the probes answer over TCP, `host:port`, or `""` when `--probe-bind`
+    was not given (P13-12)."""
     sections: list[DiagnosticSection] = Field(default_factory=list)
 
 
@@ -999,3 +1007,40 @@ class QuestionAskReply(WireModel):
     dismissed the modal rather than one who typed nothing."""
 
     answer: str | None = None
+
+
+class OwedRoot(WireModel):
+    """One root the live-roots index says still owes work (P13-02)."""
+
+    session_id: str
+    holds: list[RootHold] = Field(default_factory=list)
+    updated: int
+    """When the host last said so, epoch ms."""
+    mounted: bool
+    """Whether this daemon holds it now."""
+    status: str
+    """The root's own status when mounted (`Root.status`), else `stored`."""
+    cwd: str = ""
+    profile: str = ""
+    failed: bool = False
+    """Its ladder was spent: it owes work and a resumer must not loop on it."""
+
+
+class OwedListing(WireModel):
+    """`sessions/owed` — every root that owes work, by the index."""
+
+    sessions: list[OwedRoot] = Field(default_factory=list)
+    trusted: bool
+    """Whether the index could vouch for itself when read (`LiveSurvey.trusted`)."""
+    rebuilt: bool
+    """Whether this reply rebuilt the index from the logs first."""
+
+
+class ProbeReply(WireModel):
+    """`daemon/probe` — one of the three answers, with why when it is no."""
+
+    name: ProbeName
+    ok: bool
+    reasons: list[str] = Field(default_factory=list)
+    """Why not, one sentence each; empty when `ok`."""
+    checked_at: int

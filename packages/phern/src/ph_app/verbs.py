@@ -45,7 +45,9 @@ from .params import (
     InitializeParams,
     ModelParams,
     NewSessionParams,
+    OwedParams,
     PresetParams,
+    ProbeParams,
     PromptParams,
     PutAttachmentParams,
     ShellParams,
@@ -63,7 +65,9 @@ from .payloads import (
     DaemonLifetime,
     DaemonStatusReply,
     NewSessionReply,
+    OwedListing,
     PresetApplied,
+    ProbeReply,
     RootDescription,
     RootListing,
     RootStatusReply,
@@ -93,6 +97,7 @@ __all__ = [
     "DAEMON_CONFIG",
     "DAEMON_HELLO",
     "DAEMON_LIFETIME",
+    "DAEMON_PROBE",
     "DAEMON_STATUS",
     "INITIALIZE",
     "MODELS_LIST",
@@ -104,6 +109,7 @@ __all__ = [
     "SCREENS_LIST",
     "SESSIONS_BROWSE",
     "SESSIONS_LIST",
+    "SESSIONS_OWED",
     "SESSION_ADOPT",
     "SESSION_ATTACH",
     "SESSION_CANCEL",
@@ -141,6 +147,10 @@ says either gets the same reply model — which is the fact worth declaring."""
 DAEMON_CONFIG = Verb("daemon/config", NoParams, DaemonConfigReply)
 DAEMON_STATUS = Verb("daemon/status", NoParams, DaemonStatusReply)
 DAEMON_LIFETIME = Verb("daemon/lifetime", NoParams, DaemonLifetime)
+DAEMON_PROBE = Verb("daemon/probe", ProbeParams, ProbeReply)
+"""One of the three orchestrator questions, over the socket, for `phern agents probe`
+and an `exec` probe (P13-12). The same answers serve over TCP when `--probe-bind` is
+given; this door is for a host with no port to spare."""
 """Why this daemon is still here, read once at attach.
 
 A verb as well as a notification because a client that connected between two
@@ -160,6 +170,9 @@ id. As a `Verb` that was a convention rather than a rule:
 
 SESSIONS_LIST = Verb("sessions/list", NoParams, RootListing)
 SESSIONS_BROWSE = Verb("sessions/browse", BrowseParams, SessionBrowse)
+SESSIONS_OWED = Verb("sessions/owed", OwedParams, OwedListing)
+"""Every stored root that still owes work, and why (P13-02) — what a resumer asks
+before it asks for anything to be mounted."""
 SESSION_NEW = Verb("session/new", NewSessionParams, NewSessionReply)
 SESSION_ATTACH = Verb("session/attach", SessionParams, AttachReply)
 SESSION_DETACH = Verb("session/detach", SessionParams, SessionDetached)

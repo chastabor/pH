@@ -48,7 +48,7 @@ from ..locks import LockBusy, acquire_file_lock
 if TYPE_CHECKING:
     from ..cordis import Context
 
-__all__ = ["LEASES", "SessionBusy", "claim_session"]
+__all__ = ["LEASES", "SessionBusy", "claim_session", "lease_directory"]
 
 
 class SessionBusy(Exception):
@@ -79,9 +79,14 @@ _HELD: WeakKeyDictionary[Context, set[str]] = WeakKeyDictionary()
 Weakly keyed, so a scope that unwound takes its entry with it."""
 
 
+def lease_directory(root: Path) -> Path:
+    """Where every lease under a sessions root lives."""
+    return root / LEASES
+
+
 def lease_path(root: Path, session_id: str) -> Path:
     """Where this session's lease lives. Derived from the id and nothing else."""
-    return root / LEASES / f"{session_id}.lock"
+    return lease_directory(root) / f"{session_id}.lock"
 
 
 async def claim_session(scope: Context, root: Path, session_id: str) -> None:

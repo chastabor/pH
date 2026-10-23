@@ -31,12 +31,15 @@ import signal
 from base64 import b64decode
 from binascii import Error as BinasciiError
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from anyio.abc import ByteStream, TaskStatus
+from anyio.abc import ByteStream, SocketAttribute, SocketStream, TaskStatus
+from anyio.streams.stapled import MultiListener
 
 from ph.agent.types import AgentCancelCause
 from ph.cordis import Profile
@@ -44,7 +47,8 @@ from ph.keys import ATTACHMENTS, COMMANDS, CREDENTIALS, PERMISSION_PRESETS, TOOL
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
 from ph.path_watch import EntryWatch, Mechanism, WatchUnavailable
-from ph.paths import resolve_roots
+from ph.paths import make_directories, resolve_roots
+from ph.persistence.lease import lease_directory
 from ph.resources import GRACE_SECONDS, stop_on_signals
 from ph.seams.attachments import mime_for
 from ph.seams.models import ModelChoice, ModelEntry
@@ -67,7 +71,9 @@ from ..params import (
     ModelParams,
     MutationParams,
     NewSessionParams,
+    OwedParams,
     PresetParams,
+    ProbeParams,
     PromptParams,
     PutAttachmentParams,
     ShellParams,
@@ -91,7 +97,9 @@ from ..payloads import (
     Hold,
     MutationRepeated,
     NewSessionReply,
+    OwedListing,
     PresetApplied,
+    ProbeReply,
     RepeatOutcome,
     RootDescription,
     RootListing,
@@ -113,6 +121,7 @@ from ..protocol import (
     MethodResult,
     NoParams,
     Notify,
+    ProbeName,
     Refusal,
     SeamAbsent,
     SessionParams,
@@ -129,7 +138,16 @@ from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
 from .launch import SPAWN_TIMEOUT, listening
+from .notify import notify
 from .planner import Planner
+from .probes import (
+    HEARTBEAT_SECONDS,
+    SCHEDULER_GRACE_SECONDS,
+    STALE_HEARTBEATS,
+    answer_probe,
+    keep_heartbeat,
+    parse_bind,
+)
 from .projections import (
     browse_of,
     commands_of,
@@ -529,7 +547,10 @@ class _Connection:
         # an error would tell the client the one thing that is false. A disk that
         # refuses writes is the root's own flushes failing next, which is the
         # retry ladder's to report (`supervisor/failed`).
-        await session_written(root.ctx, root.session)
+        if not await session_written(root.ctx, root.session):
+            # Loud (P13-08): the act happened and the client keeps its reply, so
+            # what changes is what the daemon says about itself.
+            self.server.supervisor.unwritable(root)
         return reply
 
     # --- the methods -----------------------------------------------------------
@@ -658,6 +679,15 @@ class _Connection:
 
     async def _daemon_status(self, _params: NoParams) -> DaemonStatusReply:
         return self.server.status()
+
+    async def _sessions_owed(self, params: OwedParams) -> OwedListing:
+        # Daemon-level, like `sessions/browse`: the index is one file under this
+        # daemon's `$PH_HOME`, and which of its roots are mounted is the
+        # supervisor's own answer.
+        return await self.server.supervisor.owed(rebuild=params.rebuild)
+
+    async def _daemon_probe(self, params: ProbeParams) -> ProbeReply:
+        return self.server.probe(params.name)
 
     async def _daemon_lifetime(self, _params: NoParams) -> DaemonLifetime:
         return self.server.lifetime()
@@ -1221,6 +1251,8 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.DAEMON_CONFIG, _Connection._daemon_config),
         _unkeyed(verbs.DAEMON_STATUS, _Connection._daemon_status),
         _unkeyed(verbs.DAEMON_LIFETIME, _Connection._daemon_lifetime),
+        _unkeyed(verbs.DAEMON_PROBE, _Connection._daemon_probe),
+        _unkeyed(verbs.SESSIONS_OWED, _Connection._sessions_owed),
         _announcing(verbs.SHUTDOWN, _Connection._shutdown),
     )
 )
@@ -1338,6 +1370,17 @@ class DaemonServer:
     fact about a moment and this object outlives it: reading the path on first
     use would adopt whatever is there by then, which is the exact substitution
     the watch exists to catch."""
+    serving: bool = False
+    """Whether the unix listener is accepting (P13-12): the `startup` probe's whole
+    answer, set by `serve` beside `ready`."""
+    heartbeat_at: int = field(default_factory=now_ms)
+    """When the event loop last stamped the clock (`keep_heartbeat`), epoch ms — what
+    `live` measures a stuck loop by."""
+    probe_address: str = ""
+    """`host:port` the probes answer on, or `""` when not bound (`--probe-bind`)."""
+    _leases: Path | None = field(default=None, init=False)
+    """The lease directory, resolved and made by the first `ready` probe, so each
+    later one asks the kernel one question rather than resolving the roots again."""
     unreachable_since: int | None = None
     """When the socket stopped being this daemon's, or `None` while it still is.
 
@@ -1422,6 +1465,8 @@ class DaemonServer:
             socket_watch=self.socket_watch,
             check_invariants=supervisor.check_invariants,
             unreachable_since=self.unreachable_since,
+            unwritten=sorted(supervisor.unwritten),
+            probe=self.probe_address,
             # `report()`'s shape as models — a list of sections, each a title
             # and `(label, value)` rows — carrying one built-in section today
             # (P5-11's socket lifetime). One encoding of one fact, so nothing on
@@ -1436,6 +1481,59 @@ class DaemonServer:
                 for title, rows in self.report()
             ],
         )
+
+    def probe(self, name: ProbeName) -> ProbeReply:
+        """One of the three orchestrator questions, decided here for both doors
+        (P13-12): the TCP responder and `daemon/probe` call this and nothing else.
+
+        *startup* is the unix listener serving. *ready* is startup, the socket still
+        this daemon's, no root the daemon could not write, and the lease directory
+        writable. *live* is a heartbeat the
+        event loop stamped within `STALE_HEARTBEATS` intervals, the socket still
+        this daemon's, and the scheduler no later than `SCHEDULER_GRACE_SECONDS`
+        past its own plan. Each reason is a sentence an operator reads off a 503.
+        """
+        now = now_ms()
+        reasons: list[str] = []
+        if self.stop.is_set():
+            reasons.append("the daemon is stopping")
+        if name in ("startup", "ready") and not self.serving:
+            reasons.append("the socket is not accepting yet")
+        if name in ("ready", "live") and self.unreachable_since is not None:
+            reasons.append(f"the socket at {self.path} is no longer this daemon's")
+        if name == "ready":
+            unwritten = sorted(self.supervisor.unwritten)
+            if unwritten:
+                reasons.append(f"root(s) could not be written: {', '.join(unwritten)}")
+            leases = self._leases_writable()
+            if leases:
+                reasons.append(leases)
+        if name == "live":
+            stale = STALE_HEARTBEATS * int(HEARTBEAT_SECONDS * 1000)
+            if now - self.heartbeat_at > stale:
+                reasons.append(
+                    f"the event loop has not run for {(now - self.heartbeat_at) // 1000} s"
+                )
+            planned = self.supervisor.scheduler.planned
+            if planned is not None and now - planned > SCHEDULER_GRACE_SECONDS * 1000:
+                reasons.append(f"the scheduler is {(now - planned) // 1000} s past its plan")
+        return ProbeReply(name=name, ok=not reasons, reasons=reasons, checked_at=now)
+
+    def _leases_writable(self) -> str:
+        """`""` when this daemon can take a lease, else why not."""
+        if self._leases is None:
+            directory = self.supervisor.sessions_directory()
+            if directory is None:
+                return ""
+            leases = lease_directory(directory)
+            try:
+                make_directories(leases)
+            except OSError as error:
+                return f"the lease directory {leases} cannot be made: {error}"
+            self._leases = leases
+        if not os.access(self._leases, os.W_OK):
+            return f"the lease directory {self._leases} is not writable"
+        return ""
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """The daemon's own diagnostic sections, in `report()`'s shape.
@@ -1814,8 +1912,14 @@ async def serve(
     ready: anyio.Event | None = None,
     started: Callable[[DaemonServer], None] | None = None,
     signals: bool = False,
-) -> None:
-    """Run the supervisor until `shutdown`.
+    probe: str | None = None,
+) -> int:
+    """Run the supervisor until `shutdown`. Returns how many roots could not be
+    written when it stopped (P13-08) — the exit status `phern daemon` reports.
+
+    `probe` is a `host:port` to answer the startup, readiness and liveness probes on
+    over TCP (P13-12, `ph_app.daemon.probes`); `None` answers them on the unix
+    socket only.
 
     `ready` is an `anyio.Event` set once the socket is accepting, so a caller —
     a test, or `phern agents` starting a daemon on demand — can wait for the door
@@ -1849,6 +1953,17 @@ async def serve(
     # rather than by assumption (P5-11). A local as well as a field because the
     # teardown below needs it whether or not the server was ever built.
     identity = socket_identity(socket_path)
+    probes = None
+    if probe is not None:
+        try:
+            host, port = parse_bind(probe)
+            probes = await anyio.create_tcp_listener(local_host=host, local_port=port)
+        except (OSError, ValueError) as error:
+            # The door this daemon just bound goes with the refusal, so the next
+            # start finds no socket rather than a stale one to clear.
+            await listener.aclose()
+            socket_path.unlink(missing_ok=True)
+            raise DaemonUnavailable(f"cannot listen for probes on {probe}: {error}") from error
     # Armed the instant after, for the same reason: a change between the two would
     # be one nothing heard (P12-05).
     watch: EntryWatch | None = None
@@ -1888,6 +2003,7 @@ async def serve(
                 ephemeral=ephemeral,
                 keep_alive=keep_alive,
                 identity=identity,
+                probe_address=_bound_address(probes) if probes is not None else "",
             )
             # The jobs that end on a clock, each its own task and asleep until its
             # next moment rather than polling (`ph_app.daemon.planner`). Release,
@@ -1911,6 +2027,10 @@ async def serve(
                         await server.keep_watching(armed)
 
                 tasks.start_soon(keep_watching, watch)
+            if probes is not None:
+                log.info("ph_app.daemon: probes on %s", server.probe_address)
+                tasks.start_soon(_keep_probing, server, probes)
+            tasks.start_soon(keep_heartbeat, server, server.stop)
             if started is not None:
                 # Handed out rather than reachable through the socket: a test
                 # whose subject is the supervisor's own concurrency has no wire
@@ -1919,10 +2039,12 @@ async def serve(
                 started(server)
             async with listener:
                 tasks.start_soon(listener.serve, server._handle)
+                server.serving = True
                 if ready is not None:
                     ready.set()
                 await server.stop.wait()
         finally:
+            notify("STOPPING=1")
             # **The watch ends before anything below touches the socket**: the
             # unlink is this daemon closing its own door, and a watch still running
             # would hear it as the door being taken and say so in every root.
@@ -1974,3 +2096,25 @@ async def serve(
             tasks.cancel_scope.cancel()
             if watch is not None:
                 watch.close()
+            if probes is not None:
+                await probes.aclose()
+    return len(supervisor.unwritten)
+
+
+async def _keep_probing(server: DaemonServer, probes: MultiListener[SocketStream]) -> None:
+    """Answer probes until the listener is closed under the accept loop, which is how
+    teardown ends it — a closed listener is the end of the job, not a failure."""
+    with suppress(anyio.ClosedResourceError):
+        await probes.serve(partial(answer_probe, server))
+
+
+def _bound_address(probes: MultiListener[SocketStream]) -> str:
+    """`host:port` a TCP listener actually bound — port 0 asks the kernel, and the
+    first of the per-family listeners is the one a loopback bind made."""
+    try:
+        address = probes.listeners[0].extra(SocketAttribute.local_address)
+    except LookupError:
+        return "?"
+    if isinstance(address, tuple) and len(address) >= 2:
+        return f"{address[0]}:{address[1]}"
+    return str(address)

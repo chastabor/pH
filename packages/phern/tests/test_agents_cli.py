@@ -646,7 +646,16 @@ def test_every_agents_command_is_registered() -> None:
         command.name or (command.callback.__name__ if command.callback else "<no callback>")
         for command in registered
     }
-    assert names == {"send", "attach", "schedule", "status", "doctor", "shutdown"}
+    assert names == {
+        "send",
+        "attach",
+        "schedule",
+        "status",
+        "doctor",
+        "owed",
+        "probe",
+        "shutdown",
+    }
     groups = {group.name for group in app.registered_groups}
     assert "agents" in groups
 

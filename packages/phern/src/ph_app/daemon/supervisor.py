@@ -45,6 +45,7 @@ from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     COMMANDS,
+    GOALS,
     INVARIANTS,
     MOUNT,
     SCHEDULE,
@@ -56,11 +57,18 @@ from ph.keys import (
 )
 from ph.llm.types import AttachmentRef
 from ph.paths import resolve_roots
-from ph.persistence import resumption_of
-from ph.persistence.jsonl import logs_holding
-from ph.persistence.protocol import SessionPersistence
+from ph.persistence import JsonlArchive, resumption_of
+from ph.persistence.protocol import SessionArchive, SessionPersistence
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
+from ph.seams.live_index import (
+    Hold,
+    LiveEntry,
+    LiveIndex,
+    LiveIndexWriter,
+    ordered_holds,
+    rebuild_live_index,
+)
 from ph.seams.models import (
     ModelChoice,
     ModelChoiceError,
@@ -108,6 +116,8 @@ from ph.tools.errors import error_message
 from ..attach import Tray, prompt_message
 from ..payloads import (
     ChildRow,
+    OwedListing,
+    OwedRoot,
     ProfileAsk,
     ProfileAskReply,
     RootDescription,
@@ -361,6 +371,9 @@ true are the same strings. A paragraph in a docstring cannot be printed, and a
 sentence nobody can print is one nobody checks.
 """
 
+
+_LIVE_SETTLE_SECONDS = 2.0
+"""How long shutdown waits for the live-roots index's last write."""
 
 WAKE_SLOTS = 8
 """How many un-acted-on doorbell rings to hold.
@@ -1018,6 +1031,20 @@ class Supervisor:
     cannot grow behind it."""
     _schedules: ScheduleIndex | None = None
     """The appointment index, built on first use. See `_index`."""
+    _live: LiveIndexWriter | None = field(init=False, default=None)
+    """The live-roots index's writer (P13-01), or `None` when `$PH_HOME` would not
+    resolve — said once, at construction, rather than at every transition."""
+    _live_guessed: bool = False
+    """Whether the live-roots index was last rebuilt from a guessed directory, with
+    no store mounted to vouch for it: then an unasked `owed` reads the file rather
+    than re-reading every log, until a store mounts or a rebuild is asked for —
+    `_tried`'s rule for the schedule index."""
+    unwritten: set[str] = field(default_factory=set)
+    """Roots whose log this daemon could not write when it last tried (P13-08) — a
+    ladder record, a passivation, a mutation's ack. A root leaves the set when a
+    later write of it succeeds. `daemon/status` lists it, and readiness is no
+    while it is not empty: a daemon that cannot write is one an orchestrator
+    should stop sending work to, loudly rather than as a warning in a log file."""
     scheduler: Planner = field(init=False)
     """The scheduler (P5-06, P6-23): a pass that mounts what is due and fires what is
     mounted (`wake_and_tick`), then a sleep until the next appointment (`next_wake`).
@@ -1081,6 +1108,12 @@ class Supervisor:
         self.verifier = Planner(
             "the invariant check", run=self._verify_quiet, plan=lambda _now: self.next_verify()
         )
+        try:
+            self._live = LiveIndexWriter(LiveIndex(resolve_roots().home), self.tasks)
+        except Exception:
+            log.warning(
+                "ph_app.daemon: no live-roots index; nothing records what is owed", exc_info=True
+            )
 
     async def start(
         self,
@@ -1478,10 +1511,20 @@ class Supervisor:
             # is sent about them is `session.children`, never their chunks.
             ctx.on("session/event", beneath)
 
-            def written(_session: Session, _through: int) -> None:
-                """Something in this mount is durable now that has not been checked."""
+            def written(source: Session, _through: int) -> None:
+                """Something in this mount is durable now that has not been checked.
+
+                **And it is the one moment the live-roots index is owed news**
+                (P13-01): every hold reaches disk through a flush — a turn's first
+                request, a goal record, an acked prompt, a child's status in its own
+                log, the ladder's records — so the index reflects what is durable
+                plus what this process knows, sampled where both just moved. A root
+                written is also a root that is no longer unwritten (P13-08)."""
                 root.unverified_at = now_ms()
                 self.verifier.notice()
+                if source is root.session:
+                    self.unwritten.discard(root.id)
+                self._note_live(root)
 
             ctx.on("session/durable", written)
             ctx.on("agent/status", lifetime)
@@ -1515,6 +1558,9 @@ class Supervisor:
             # `session.observe` callback all sat outside it, and which side of
             # that boundary a new line lands on was invisible.
             root.exits = exits.pop_all()
+            # On the record as held busy, or not at all (P13-01): what the next
+            # daemon reads to know this root is worth mounting.
+            self._note_live(root)
             return root
 
     async def _session_for(
@@ -1995,6 +2041,104 @@ class Supervisor:
             self._wake_failures = 0
             self._wake_retry = None
 
+    # ------------------------------------------------------ the live index --
+
+    def _note_live(self, root: Root) -> None:
+        """Record what `root` owes right now, or that it owes nothing (P13-01).
+
+        On every flush in the root's mount (`written` in `_start`), at the mount, at
+        passivation and at shutdown. The writer drops an entry it already wrote, so
+        a flush that moved no hold costs the fold below and nothing else.
+        """
+        writer = self._live
+        if writer is None:
+            return
+        try:
+            writer.note(root.id, self._live_entry(root))
+        except Exception:
+            log.warning("ph_app.daemon: could not note root %s as live", root.id, exc_info=True)
+
+    def _live_entry(self, root: Root) -> LiveEntry | None:
+        """What `root` owes: its entry, or `None` for a root that owes nothing."""
+        holds: list[Hold] = []
+        if root.agent.status != "idle" or root.status in ("waiting", "retrying"):
+            holds.append("turn")
+        elif root.agent.inbox.has_pending:
+            holds.append("inbox")
+        goals = root.ctx.get(GOALS)
+        if goals is not None and goals.open(root.session) is not None:
+            holds.append("goal")
+        subagents = root.ctx.get(SUBAGENTS)
+        if subagents is not None and any(
+            child_is_live(child) for child in subagents.children(root.id).values()
+        ):
+            holds.append("children")
+        if not holds:
+            return None
+        header = root.session.header
+        return LiveEntry(
+            session_id=root.id,
+            holds=ordered_holds(holds),
+            updated=now_ms(),
+            family=header.family,
+            cwd=header.cwd or "",
+            profile=root.ctx.require(MOUNT).profile.name,
+            failed=root.recovery.failed,
+        )
+
+    async def owed(self, *, rebuild: bool = False) -> OwedListing:
+        """Every root the live-roots index says owes work, and why (P13-02).
+
+        Rebuilt first when asked, or when the index cannot vouch for itself: through
+        a live root's store when one is mounted, else the daemon's own
+        `$PH_HOME/sessions` read as JSONL — the guess `_rebuild` makes for the
+        schedule index, and marked the same way (`vouch`). Off the loop, since a
+        rebuild reads every root's log.
+        """
+        writer = self._live
+        if writer is None:
+            return OwedListing(sessions=[], trusted=False, rebuilt=False)
+        index = writer.index
+        survey = await anyio.to_thread.run_sync(index.survey)
+        archive, vouched = self._archive()
+        rebuilt = False
+        if rebuild or (not survey.complete and (vouched or not self._live_guessed)):
+            # A mounted root's log lags what this process knows until its next
+            # barrier, so its entry is taken from here rather than from disk.
+            live = {root.id: self._live_entry(root) for root in self.roots.values()}
+            try:
+                rebuilt = await anyio.to_thread.run_sync(
+                    partial(
+                        rebuild_live_index,
+                        index,
+                        archive,
+                        now=now_ms(),
+                        since=survey,
+                        live=live,
+                        vouch=vouched,
+                    )
+                )
+            except Exception:
+                log.warning("ph_app.daemon: could not rebuild the live-roots index", exc_info=True)
+            self._live_guessed = not vouched
+            survey = await anyio.to_thread.run_sync(index.survey)
+        rows: list[OwedRoot] = []
+        for entry in sorted(survey.entries.values(), key=lambda one: one.session_id):
+            held = self.roots.get(entry.session_id)
+            rows.append(
+                OwedRoot(
+                    session_id=entry.session_id,
+                    holds=list(entry.holds),
+                    updated=entry.updated,
+                    mounted=held is not None,
+                    status=held.status if held is not None else "stored",
+                    cwd=entry.cwd,
+                    profile=entry.profile,
+                    failed=entry.failed,
+                )
+            )
+        return OwedListing(sessions=rows, trusted=survey.complete, rebuilt=rebuilt)
+
     def _index(self) -> ScheduleIndex | None:
         """The index this daemon reads, or `None` when nothing indexes.
 
@@ -2027,18 +2171,16 @@ class Supervisor:
         so what it finds is written and not vouched for, and the first root to
         mount is the reason to try again.
         """
-        store = self._store()
-        attempt = (store is not None, self._occasions, self.scheduler.rang)
+        archive, vouched = self._archive()
+        attempt = (vouched, self._occasions, self.scheduler.rang)
         if attempt == self._tried:
             return
         self._tried = attempt
-        if store is not None:
-            logs = partial(store.holding, FOLDED, gate=CREATED)
-        else:
-            logs = partial(logs_holding, resolve_roots().sessions_dir(), FOLDED, gate=CREATED)
         try:
             written = await anyio.to_thread.run_sync(
-                lambda: rebuild_index(index, logs(), now=now_ms(), vouch=store is not None)
+                lambda: rebuild_index(
+                    index, archive.holding(FOLDED, gate=CREATED), now=now_ms(), vouch=vouched
+                )
             )
         except Exception:
             log.warning("ph_app.daemon: could not rebuild the schedule index", exc_info=True)
@@ -2046,8 +2188,17 @@ class Supervisor:
         if written:
             log.info(
                 "ph_app.daemon: rebuilt the schedule index%s",
-                "" if store is not None else ", from a guess no store vouches for",
+                "" if vouched else ", from a guess no store vouches for",
             )
+
+    def _archive(self) -> tuple[SessionArchive, bool]:
+        """What a rebuild reads, and whether it may vouch for what it finds: a live
+        root's store, else the daemon's own `$PH_HOME/sessions` read as JSONL — a
+        guess `sessions_directory` explains, written and not vouched for."""
+        store = self._store()
+        if store is not None:
+            return store, True
+        return JsonlArchive(resolve_roots().sessions_dir()), False
 
     def _store(self) -> SessionPersistence | None:
         """A live root's store, which answers for the daemon (`sessions_directory`)."""
@@ -2425,7 +2576,20 @@ class Supervisor:
         log left its context undisposed. `session_written` is that rule for
         every caller that must carry on, so this is one line of it.
         """
-        await session_written(root.ctx, root.session)
+        if not await session_written(root.ctx, root.session):
+            self.unwritable(root)
+
+    def unwritable(self, root: Root) -> None:
+        """Record that `root`'s log could not be written (P13-08), for every caller
+        that writes and must carry on: the ladder's flush and a mutation's ack. A
+        later write of it clears the mark (`written` in `_start`).
+
+        Said once at error level, the first time: the warning `written` logs per
+        attempt is the mechanism's; this is the fact an operator reads a daemon log
+        for."""
+        if root.id not in self.unwritten:
+            log.error("ph_app.daemon: root %s cannot be written; readiness is no", root.id)
+        self.unwritten.add(root.id)
 
     def _restore_point(self, root: Root) -> tuple[Workspace | None, str]:
         """The root's workspace and the tree a retry starts from — `""` when it has none.
@@ -2680,6 +2844,9 @@ class Supervisor:
         log.info(
             "ph_app.daemon: passivating root %s after %d minutes idle", root.id, idle_ms // 60_000
         )
+        # A quiet root owes nothing a resumer should mount it for — unless a goal
+        # is still open, which the entry keeps so a watchdog can say so.
+        self._note_live(root)
         await self._unmount(root)
 
     async def _unmount(self, root: Root) -> None:
@@ -2735,7 +2902,13 @@ class Supervisor:
         for root in self.roots.values():
             await root.wake.aclose()
         for root in list(self.roots.values()):
+            # What it still owes, as the last daemon's word on it (P13-01): a root
+            # stopped mid-turn is one the next daemon's resumer should mount.
+            self._note_live(root)
             if deadline is not None:
                 root.ctx.unwind_by(deadline)
             await self._release(root)
         self.roots.clear()
+        if self._live is not None:
+            with anyio.move_on_after(_LIVE_SETTLE_SECONDS):
+                await self._live.settle()

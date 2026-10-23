@@ -59,7 +59,7 @@ from ph.seams.permission_presets import PresetName
 from ph.seams.schedule import Schedule, ScheduleKind
 from ph.wire import WireModel
 
-from .protocol import Cursor, SessionId, SessionParams
+from .protocol import Cursor, ProbeName, SessionId, SessionParams
 
 __all__ = [
     "AdoptParams",
@@ -262,3 +262,17 @@ class CancelScheduleParams(SessionParams):
     """`schedule/cancel`."""
 
     schedule_id: str
+
+
+class OwedParams(WireModel):
+    """`sessions/owed` (P13-02). `rebuild` reads every stored root's log instead of
+    trusting the live-roots index — what an orchestrator asks once after a crash it
+    does not trust the file to have survived."""
+
+    rebuild: bool = False
+
+
+class ProbeParams(WireModel):
+    """`daemon/probe` (P13-12): which of the three questions to answer."""
+
+    name: ProbeName

@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import pytest
@@ -52,6 +52,7 @@ __all__ = [
     "private_runtime",
     "running",
     "serving",
+    "set_phase",
     "shut_down",
     "spawned",
     "supervised",
@@ -149,9 +150,7 @@ class _Daemon:
         open with what it is testing rather than with driver internals.
         """
         root = await self.running.supervisor.start(session_id)
-        driver = root.agent
-        assert isinstance(driver, ReactLoopAgent), "the real driver is what has a phase"
-        driver._phase.kind = "running"
+        set_phase(root, "running")
         return root
 
     def held(self, session_id: str) -> Root:
@@ -174,6 +173,19 @@ class _Daemon:
 
 
 Daemon = _Daemon
+
+
+def set_phase(root: Root, kind: Literal["idle", "running"]) -> None:
+    """Make `root` read as mid-turn, or idle again, without running a turn.
+
+    `Root.status` derives from the driver's own phase rather than from a flag beside
+    it (P5-01), so the only honest way to make a root look busy is to move that
+    phase — which reaches into a private attribute of the real driver. One function,
+    so a rename of `_phase` or of its phase kinds is one edit.
+    """
+    driver = root.agent
+    assert isinstance(driver, ReactLoopAgent), "the real driver is what has a phase"
+    driver._phase.kind = kind
 
 
 async def until(done: Callable[[], object], *, what: str, seconds: float = 10.0) -> None:

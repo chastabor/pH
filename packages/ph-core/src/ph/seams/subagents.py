@@ -83,7 +83,7 @@ from ..llm.types import (
     unmapped_effort,
 )
 from ..persistence.opening import open_session, stored_session
-from ..persistence.protocol import SessionPersistence
+from ..persistence.protocol import SessionArchive
 from ..session import (
     Session,
     SessionBatch,
@@ -211,6 +211,7 @@ __all__ = [
     "record_waiting",
     "restarts_since_progress",
     "settle_value",
+    "stored_tree",
 ]
 
 log = logging.getLogger("ph.seams.subagents")
@@ -2580,7 +2581,7 @@ class SubagentService:
                 {}
                 if store is None
                 else await anyio.to_thread.run_sync(
-                    lambda: _stored_tree(store, parent_id, family, live)
+                    lambda: stored_tree(store, parent_id, family, live)
                 )
             )
             self._stored.setdefault(parent_id, {})
@@ -3510,13 +3511,14 @@ def extend_child_state(previous: ChildState, log: Session, start: int) -> ChildS
     return state
 
 
-def _stored_tree(
-    store: SessionPersistence, parent_id: str, family: str, live: set[str]
+def stored_tree(
+    store: SessionArchive, parent_id: str, family: str, live: set[str]
 ) -> dict[str, dict[str, ChildState]]:
     """Everything beneath `parent_id` on disk that this process is not running, each
     folded from its stored log and filed under the parent its header names — with an
     entry, empty or not, for every session in the tree, since each one's children
-    were in this read. On a worker thread (`load_children`)."""
+    were in this read. Blocking: on a worker thread (`load_children`), or a rebuild's
+    (`ph.seams.live_index`), which asks of the same family the same question."""
     tree: dict[str, dict[str, ChildState]] = {}
     for row in store.descendants_of(parent_id, family):
         tree.setdefault(row.session_id, {})

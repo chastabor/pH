@@ -27,7 +27,7 @@ it in the conversation land together, or neither does.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
@@ -36,13 +36,13 @@ from pydantic import ConfigDict
 
 from ..json import JsonObject
 from ..llm.types import Message
-from ..session import Session, SessionBatch
+from ..session import Session, SessionBatch, SessionEvent
 from ..session.writers import log_writer
 from ..wire import WireModel
 
 _LOG = log_writer(__name__)
 
-__all__ = ["Inbox", "InboxBatch", "InboxNotifications", "InboxTarget"]
+__all__ = ["Inbox", "InboxBatch", "InboxNotifications", "InboxTarget", "replay_pending"]
 
 InboxTarget: TypeAlias = Literal["next-turn", "next-step"]
 
@@ -114,18 +114,9 @@ class Inbox:
     def __init__(self, session: Session, notifications: InboxNotifications) -> None:
         self._session = session
         self._notify = notifications
-        self._state: dict[str, list[Message]] = {"next-turn": [], "next-step": []}
         # Replay only this lifecycle's splices: a fork inherits its parent's
         # transcript, not its parent's unanswered queue.
-        for event in session.own_events():
-            if event.type != "agent/inbox/spliced":
-                continue
-            try:
-                self._apply(event.data)
-            except ValueError as error:
-                raise ValueError(
-                    f"invalid persisted inbox splice at session seq {event.seq}"
-                ) from error
+        self._state: dict[str, list[Message]] = replay_pending(session.own_events())
 
     @property
     def next_turn(self) -> tuple[Message, ...]:
@@ -225,7 +216,7 @@ class Inbox:
         )
         # The one rule a write can still break. The coordinates are clamped above
         # and the values are already typed, so there is nothing here to parse.
-        self._unique(target, start, delete_count, inserted)
+        _unique_in(self._state, target, start, delete_count, inserted)
         # The durable event commits BEFORE the live projection mutates, so a
         # synchronous `session/event` observer sees the pre-splice lists and can
         # reconstruct exactly what was removed from the normalized coordinates.
@@ -240,43 +231,69 @@ class Inbox:
 
     # ------------------------------------------------------------- internals --
 
-    def _apply(self, splice: JsonObject) -> None:
-        """Replay one logged splice, or refuse the log."""
-        parsed = InboxSplice.model_validate(splice)
-        pending = self._state[parsed.target]
-        removed_count = parsed.removed_count or 0
-        self._placed(parsed.target, parsed.start, removed_count)
-        self._unique(parsed.target, parsed.start, removed_count, parsed.inserted)
-        pending[parsed.start : parsed.start + removed_count] = list(parsed.inserted)
 
-    def _placed(self, target: InboxTarget, start: int, removed_count: int) -> None:
-        """That the coordinates fall inside the queue they name.
+def replay_pending(events: Iterable[SessionEvent]) -> dict[str, list[Message]]:
+    """What is pending after replaying every `agent/inbox/spliced` among `events`.
 
-        Replay only: `splice` clamps both into range before it writes, so on the
-        write path these branches cannot fail and checking them there would read
-        as though they could.
-        """
-        pending = self._state[target]
-        if not 0 <= start <= len(pending) or not 0 <= removed_count <= len(pending) - start:
-            raise ValueError("invalid inbox splice")
+    **A pure fold, and the one `Inbox` is built from** (P13-01). A reader holding a
+    stored log and no `Session` — the live-roots index deciding whether a root died
+    with a prompt nobody claimed — asks the same question the constructor does, and a
+    second replay written there would be a second account of splice semantics that
+    could drift from this one. The caller chooses the slice: `Inbox` replays only
+    its own lifecycle's splices (`own_events`), since a fork inherits its parent's
+    transcript and not its parent's unanswered queue.
 
-    def _unique(
-        self, target: InboxTarget, start: int, removed_count: int, inserted: Sequence[Message]
-    ) -> None:
-        """That no message id would end up pending twice, across both queues.
+    :raises ValueError: for a splice the queues cannot take, naming its seq.
+    """
+    state: dict[str, list[Message]] = {"next-turn": [], "next-step": []}
+    for event in events:
+        if event.type != "agent/inbox/spliced":
+            continue
+        try:
+            _apply_splice(state, event.data)
+        except ValueError as error:
+            raise ValueError(
+                f"invalid persisted inbox splice at session seq {event.seq}"
+            ) from error
+    return state
 
-        The one rule both paths share, so it takes messages rather than a payload:
-        `splice` is holding the `Message` list it just built and has no reason to
-        serialize it and read the ids back out.
-        """
-        pending = self._state[target]
-        other: InboxTarget = "next-step" if target == "next-turn" else "next-turn"
-        candidate = [
-            *(m.id for m in pending[:start]),
-            *(m.id for m in inserted),
-            *(m.id for m in pending[start + removed_count :]),
-            *(m.id for m in self._state[other]),
-        ]
-        if len(set(candidate)) != len(candidate):
-            duplicate = next(i for i in candidate if candidate.count(i) > 1)
-            raise ValueError(f'message "{duplicate}" is already pending')
+
+def _apply_splice(state: dict[str, list[Message]], splice: JsonObject) -> None:
+    """Replay one logged splice into `state`, or refuse it."""
+    parsed = InboxSplice.model_validate(splice)
+    pending = state[parsed.target]
+    removed_count = parsed.removed_count or 0
+    # That the coordinates fall inside the queue they name. Replay only: `splice`
+    # clamps both into range before it writes, so on the write path these
+    # branches cannot fail and checking them there would read as though they could.
+    if (
+        not 0 <= parsed.start <= len(pending)
+        or not 0 <= removed_count <= len(pending) - parsed.start
+    ):
+        raise ValueError("invalid inbox splice")
+    _unique_in(state, parsed.target, parsed.start, removed_count, parsed.inserted)
+    pending[parsed.start : parsed.start + removed_count] = list(parsed.inserted)
+
+
+def _unique_in(
+    state: Mapping[str, Sequence[Message]],
+    target: InboxTarget,
+    start: int,
+    removed_count: int,
+    inserted: Sequence[Message],
+) -> None:
+    """That no message id would end up pending twice, across both queues — the one
+    rule the write path and replay share. Messages rather than a payload: `splice` is
+    holding the `Message` list it just built and has no reason to serialize it and
+    read the ids back out."""
+    pending = state[target]
+    other: InboxTarget = "next-step" if target == "next-turn" else "next-turn"
+    candidate = [
+        *(m.id for m in pending[:start]),
+        *(m.id for m in inserted),
+        *(m.id for m in pending[start + removed_count :]),
+        *(m.id for m in state[other]),
+    ]
+    if len(set(candidate)) != len(candidate):
+        duplicate = next(i for i in candidate if candidate.count(i) > 1)
+        raise ValueError(f'message "{duplicate}" is already pending')

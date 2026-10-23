@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .jsonl import (
+    JsonlArchive,
     JsonlSessionStore,
     append_records,
     read_records,
@@ -36,6 +37,7 @@ __all__ = [
     "TOOL_NOT_STARTED",
     "TOOL_OUTCOME_UNKNOWN",
     "ClaimingStore",
+    "JsonlArchive",
     "JsonlSessionStore",
     "LineageError",
     "NoStoredSession",

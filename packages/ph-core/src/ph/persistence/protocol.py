@@ -30,6 +30,7 @@ from weakref import WeakKeyDictionary
 
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.diagnostics import Diagnostic, contribute
+from ..seams.telemetry import ops_record
 from ..session import Session, SessionEvent, SessionHeader
 from .families import descendants
 from .lineage import lineage_faults
@@ -538,12 +539,21 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
                 written.add(session.id)
                 try:
                     await store.flush(session)
-                except Exception:
+                except Exception as error:
                     # One unwritable log must not keep the next from being written.
                     log.warning(
                         "ph.persistence: session %s could not be written on unwind",
                         session.id,
                         exc_info=True,
+                    )
+                    # And it is an `ops` fact, not a line in a log file (P13-08): the
+                    # stop that lost this tail is not a clean stop, and the next
+                    # process's resume will repair a crash nobody reported.
+                    await ops_record(
+                        scope,
+                        f"session {session.id} could not be written on unwind: {error}",
+                        severity="error",
+                        session_id=session.id,
                     )
 
     scope.add_disposer(last_write, label="session-last-write")

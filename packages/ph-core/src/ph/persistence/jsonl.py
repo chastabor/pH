@@ -63,6 +63,7 @@ from .protocol import (
 )
 
 __all__ = [
+    "JsonlArchive",
     "JsonlSessionStore",
     "apply",
     "family_log",
@@ -418,11 +419,91 @@ def _settle_batch(path: Path, tail: _Tail) -> _Tail:
 
 
 @dataclass(slots=True)
-class JsonlSessionStore:
-    """The service published as `ctx.session_persistence`."""
+class JsonlArchive:
+    """The read half of the JSONL backend: a `SessionArchive` over one directory.
+
+    Its own class because two readers need the store's reads with nothing to
+    write: a daemon rebuilding an index at boot, before any root has mounted a
+    store (`Supervisor.owed`), and a test reading what a run left behind. Both
+    used to build a `JsonlSessionStore` with `ctx=None` and a type-ignore, which is
+    a lie about a field nothing on this side reads. `JsonlSessionStore` adds the
+    writer over it.
+    """
+
+    root: Path
+
+    def exists(self, session_id: str, *, family: str | None = None) -> bool:
+        return stored_under(self.root, session_id, SUFFIX, family)
+
+    def read(
+        self, session_id: str, *, family: str | None = None
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        """The session's full log, following its lineage when it stores a reference.
+
+        `read_own` is this backend's one-file read; `materialize` decides whether
+        a chain is owed by looking at the first event's seq. A log that starts at
+        0 is complete and is returned unchanged, which is every log written so
+        far — so this is a no-op until something writes a reference-fork.
+        """
+        return materialize(self.read_own, session_id, family=family)
+
+    def read_own(
+        self,
+        session_id: str,
+        upto: int | None = None,
+        family: str | None = None,
+        *,
+        types: frozenset[str] | None = None,
+    ) -> tuple[SessionHeader, list[SessionEvent]]:
+        """This file and nothing else — the unchained read `materialize` walks with."""
+        return read_stored(self.root, session_id, upto, family, types=types)
+
+    def directory(self) -> Path | None:
+        return self.root
+
+    def holding(
+        self, types: frozenset[str], *, gate: str
+    ) -> Iterator[tuple[str, list[SessionEvent]]]:
+        return logs_holding(self.root, types, gate=gate)
+
+    def stored(self, *, limit: int = 50) -> list[StoredSession]:
+        """What is on record, most recently touched first.
+
+        One `stat` per entry — the directory scan's own — and one short read for
+        the header, which is the first line. **No title**: deriving one means
+        scanning forward for a `user/message` and joining its content blocks,
+        and the join (`text_of_wire`) lives in the front end that wants it. The
+        TUI's picker keeps its richer summary; this is the part every backend
+        can answer, which is what the Protocol is for.
+        """
+        return [
+            stored_row(path.stem, _peek_header(path), stat.st_mtime)
+            for path, stat in session_logs(self.root)[:limit]
+        ]
+
+    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
+        """Every stored session beneath `parent_id`: one `scandir` of its family, then
+        one header line per log whose name has the parent's prefix.
+
+        The same peek `stored` makes per row, so a child's row here is the row the
+        listing would have shown for it. Only the candidates are read, which are
+        the parent's descendants and any log named after it.
+        """
+        return descendants_among(
+            parent_id,
+            (
+                stored_row(path.stem, _peek_header(path), stat.st_mtime)
+                for path, stat in children_under(self.root, family, parent_id, SUFFIX)
+            ),
+        )
+
+
+@dataclass(slots=True)
+class JsonlSessionStore(JsonlArchive):
+    """The service published as `ctx.session_persistence`: `JsonlArchive`, and the
+    writer over it."""
 
     ctx: Context
-    root: Path
     _progress: dict[str, _Progress] = field(default_factory=dict)
 
     def track(self, session: Session) -> None:
@@ -562,35 +643,6 @@ class JsonlSessionStore:
     # `self.root` and rebuilding a filename. A backend with no per-session file
     # answers all four; a backend with one answers them from the filesystem.
 
-    def exists(self, session_id: str, *, family: str | None = None) -> bool:
-        return stored_under(self.root, session_id, SUFFIX, family)
-
-    def read(
-        self, session_id: str, *, family: str | None = None
-    ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """The session's full log, following its lineage when it stores a reference.
-
-        `read_own` is this backend's one-file read; `materialize` decides whether
-        a chain is owed by looking at the first event's seq. A log that starts at
-        0 is complete and is returned unchanged, which is every log written so
-        far — so this is a no-op until something writes a reference-fork.
-        """
-        return materialize(self.read_own, session_id, family=family)
-
-    def read_own(
-        self,
-        session_id: str,
-        upto: int | None = None,
-        family: str | None = None,
-        *,
-        types: frozenset[str] | None = None,
-    ) -> tuple[SessionHeader, list[SessionEvent]]:
-        """This file and nothing else — the unchained read `materialize` walks with."""
-        return read_stored(self.root, session_id, upto, family, types=types)
-
-    def directory(self) -> Path | None:
-        return self.root
-
     def locate(self, session_id: str) -> Path | None:
         """This backend writes files, so it can always say where."""
         return self._path_for(session_id)
@@ -621,42 +673,6 @@ class JsonlSessionStore:
         write every live log before letting go — see `write_on_unwind`."""
         await claim_session(scope, self.root, session_id)
         write_on_unwind(scope, self)
-
-    def holding(
-        self, types: frozenset[str], *, gate: str
-    ) -> Iterator[tuple[str, list[SessionEvent]]]:
-        return logs_holding(self.root, types, gate=gate)
-
-    def stored(self, *, limit: int = 50) -> list[StoredSession]:
-        """What is on record, most recently touched first.
-
-        One `stat` per entry — the directory scan's own — and one short read for
-        the header, which is the first line. **No title**: deriving one means
-        scanning forward for a `user/message` and joining its content blocks,
-        and the join (`text_of_wire`) lives in the front end that wants it. The
-        TUI's picker keeps its richer summary; this is the part every backend
-        can answer, which is what the Protocol is for.
-        """
-        return [
-            stored_row(path.stem, _peek_header(path), stat.st_mtime)
-            for path, stat in session_logs(self.root)[:limit]
-        ]
-
-    def descendants_of(self, parent_id: str, family: str) -> tuple[StoredSession, ...]:
-        """Every stored session beneath `parent_id`: one `scandir` of its family, then
-        one header line per log whose name has the parent's prefix.
-
-        The same peek `stored` makes per row, so a child's row here is the row the
-        listing would have shown for it. Only the candidates are read, which are
-        the parent's descendants and any log named after it.
-        """
-        return descendants_among(
-            parent_id,
-            (
-                stored_row(path.stem, _peek_header(path), stat.st_mtime)
-                for path, stat in children_under(self.root, family, parent_id, SUFFIX)
-            ),
-        )
 
     def forget(self, session_id: str) -> None:
         self._progress.pop(session_id, None)

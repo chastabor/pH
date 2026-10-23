@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, NotRequired, TypeAlias, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypeAlias, TypedDict, get_args
 
 from pydantic import AfterValidator, Field, ValidationError
 
@@ -82,6 +82,14 @@ __all__ = [
 ]
 
 PROTOCOL_VERSION = 9
+
+ProbeName: TypeAlias = Literal["startup", "ready", "live"]
+"""The three questions an orchestrator asks of a daemon (P13-12), in the order it
+asks them: has it come up, may it be sent work, is it still alive. Closed, so a
+probe a client spells that the daemon does not answer is `invalid_params` and not a
+404 somebody reads as "not ready"."""
+
+PROBES: tuple[ProbeName, ...] = get_args(ProbeName)
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to

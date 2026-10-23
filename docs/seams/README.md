@@ -100,6 +100,8 @@ caller's own content hash.
 | [`ctx.goals`](goals.md) | `seams/goals.py` | An objective, a budget, and the gates that decide it (P5-07). |
 
 `seams/schedule_index.py` answers which sessions hold a live appointment (P6-23).
+`seams/live_index.py` answers which roots a host held busy, and why, so a resumer
+mounts only those (P13-01).
 
 ## The front end
 

@@ -727,6 +727,13 @@ def daemon(
         bool,
         typer.Option("--ephemeral", help="Exit once no client, root or appointment needs this."),
     ] = False,
+    probe_bind: Annotated[
+        str | None,
+        typer.Option(
+            "--probe-bind",
+            help="Answer startup, readiness and liveness probes over HTTP here (host:port).",
+        ),
+    ] = None,
 ) -> None:
     """Run the supervisor: roots that outlive the clients watching them (P5-01).
 
@@ -787,7 +794,7 @@ def daemon(
         # The path that was printed, not a second resolution of it: a message
         # naming one socket while the bind takes another is the kind of thing
         # someone debugs for an hour.
-        anyio.run(
+        unwritten = anyio.run(
             partial(
                 serve,
                 composed,
@@ -807,8 +814,18 @@ def daemon(
                 # `kill`, `systemctl stop` and Ctrl-C end this process the way
                 # `phern agents shutdown` does, instead of the way `kill -9` does.
                 signals=True,
+                probe=probe_bind,
             )
         )
+        if unwritten:
+            # A stop that lost a log's tail is not a clean stop (P13-08): the unit
+            # shows failed, and the next daemon's resume repairs what this one
+            # could not write.
+            fail(
+                f"[red]stopped with {unwritten} session log(s) that could not be "
+                "written; see the daemon log[/red]",
+                code=3,
+            )
     except DaemonUnavailable as error:
         # One named type rather than `(RuntimeError, OSError)`, which is two
         # builtins wide enough to swallow a `typer.Exit` — it subclasses
