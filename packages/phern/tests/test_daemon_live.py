@@ -15,14 +15,26 @@ import socket
 from collections.abc import Mapping
 from pathlib import Path
 
+import anyio
 import pytest
-from daemon_helpers import PROFILE, http, running, set_phase, stale, supervised, unplugged
+from daemon_helpers import (
+    PROFILE,
+    hold_the_provider,
+    http,
+    logged_types,
+    running,
+    set_phase,
+    stale,
+    supervised,
+    unplugged,
+    until,
+)
 
 from ph.keys import SESSIONS
 from ph.paths import resolve_roots
 from ph.seams.live_index import LiveEntry, LiveIndex
 from ph.session import Session
-from ph.testing import log_event
+from ph.testing import log_event, stored_types
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.notify import notify, watchdog_interval
 from ph_app.daemon.probes import parse_bind
@@ -35,6 +47,19 @@ pytestmark = pytest.mark.anyio
 
 def _index() -> LiveIndex:
     return LiveIndex(resolve_roots().home)
+
+
+def _writes(monkeypatch: pytest.MonkeyPatch) -> list[set[str]]:
+    """Every batch the index is handed from here on, by the roots in it."""
+    batches: list[set[str]] = []
+    record_all = LiveIndex.record_all
+
+    def counted(index: LiveIndex, changes: Mapping[str, LiveEntry | None]) -> bool:
+        batches.append(set(changes))
+        return record_all(index, changes)
+
+    monkeypatch.setattr(LiveIndex, "record_all", counted)
+    return batches
 
 
 async def _settled(supervisor: Supervisor) -> None:
@@ -76,14 +101,7 @@ async def test_a_flush_that_moved_no_hold_writes_nothing(
         set_phase(root, "running")
         await supervisor._flush(root)
         await _settled(supervisor)
-        writes: list[object] = []
-        real = LiveIndex.record_all
-
-        def counted(index: LiveIndex, changes: Mapping[str, LiveEntry | None]) -> bool:
-            writes.append(changes)
-            return real(index, changes)
-
-        monkeypatch.setattr(LiveIndex, "record_all", counted)
+        writes = _writes(monkeypatch)
         for _ in range(3):
             await supervisor._flush(root)
         await _settled(supervisor)
@@ -101,6 +119,71 @@ async def test_shutdown_leaves_a_busy_root_on_the_index_for_the_next_daemon(
         set_phase(root, "running")
         await supervisor.aclose()
     assert _index().read()["root"].holds == ("turn",)
+
+
+async def test_a_daemon_cancelled_rather_than_stopped_leaves_its_roots_as_a_stop_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`serve` cancelled — an embedding host's teardown, or this suite's — is the stop
+    a `shutdown` frame asks for: the turn is left cut for the next daemon's resumer,
+    and the index names the root, exactly as after an orderly stop.
+
+    Sabotage: enter `serve`'s task group without `_cancel_is_a_stop`, and the turn
+    ends `aborted` with the root off the index.
+    """
+    hold_the_provider(monkeypatch)
+    async with running(tmp_path) as daemon:
+        root = await daemon.root("root")
+        await daemon.running.supervisor.prompt(root.id, "go")
+        await until(
+            lambda: "turn/start" in stored_types(root.ctx, root.id),
+            what="the turn's first barrier",
+        )
+    assert "turn/end" not in logged_types(root.id), "nobody ended the turn"
+    assert _index().read()["root"].holds == ("turn",)
+
+
+async def test_a_cancelled_serve_still_ends_cancelled(tmp_path: Path) -> None:
+    """The stop a cancel asks for is still a cancel to whoever made it: `serve` runs
+    its teardown and then raises, rather than returning a value to a caller that
+    abandoned the call."""
+    ended: list[str] = []
+    ready = anyio.Event()
+
+    async def served() -> None:
+        try:
+            await serve(PROFILE, path=tmp_path / "daemon.sock", ready=ready, passivate_after=None)
+            ended.append("returned")
+        except anyio.get_cancelled_exc_class():
+            ended.append("cancelled")
+            raise
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(served)
+        await ready.wait()
+        tasks.cancel_scope.cancel()
+    assert ended == ["cancelled"]
+
+
+async def test_shutdown_tells_the_index_about_every_root_in_one_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every root's last word is noted before any is released, so they land in one
+    write of the file rather than one per root, each a lock, a read and a rewrite.
+
+    Sabotage: note each root just before its own release, and the first write holds
+    only the first root.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        for name in ("first", "second", "third"):
+            set_phase(await supervisor.start(name), "running")
+        await _settled(supervisor)
+        batches = _writes(monkeypatch)
+        await supervisor.aclose()
+    assert batches[0] == {"first", "second", "third"}, batches
+    assert {name: entry.holds for name, entry in _index().read().items()} == dict.fromkeys(
+        ("first", "second", "third"), ("turn",)
+    )
 
 
 async def test_owed_lists_what_the_index_holds_and_whether_it_is_mounted(

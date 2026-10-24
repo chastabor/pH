@@ -30,15 +30,20 @@ import os
 import signal
 from base64 import b64decode
 from binascii import Error as BinasciiError
-from collections.abc import Awaitable, Callable, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from anyio.abc import ByteStream, SocketAttribute, SocketStream, TaskStatus
+from anyio.abc import (
+    ByteStream,
+    SocketAttribute,
+    SocketStream,
+    TaskStatus,
+)
 from anyio.streams.stapled import MultiListener
 
 from ph.agent.types import AgentCancelCause
@@ -1900,6 +1905,44 @@ async def _stop_on_signals(
     await stop_on_signals(stopping, task_status=task_status)
 
 
+@asynccontextmanager
+async def _cancel_is_a_stop(stop: anyio.Event) -> AsyncIterator[None]:
+    """Run the block shielded from a cancel meant for `serve`, and turn that cancel
+    into `stop`: the orderly teardown, then the cancel carried on to the caller.
+
+    **A cancel reached every task at once.** A root's turn was cancelled before
+    `serve`'s `finally` began, so it closed `aborted` and by the person, and the
+    shutdown's note on the live-roots index found a root owing nothing: the next
+    daemon never resumed work nobody had stopped. The listener, the planners and
+    any mount in flight went the same way, ahead of the teardown written to end
+    them in order. Shielded, they see only `stop`, which the teardown answers as it
+    answers a `shutdown` frame, under `GRACE_SECONDS`.
+
+    **The relay sits outside the shield**, the one task the cancel still reaches.
+    It is *started* rather than spawned, so a cancel before it runs fails `serve`
+    here instead of leaving a shielded daemon nothing can end. Nothing else bounds
+    the teardown but its own deadline, as after a `shutdown` frame: what it waits
+    on is shielded in its own right (`aclose`, `Context.dispose`), so a clock here
+    would reach none of it.
+    """
+
+    async def relay(*, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED) -> None:
+        task_status.started()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            stop.set()
+
+    async with anyio.create_task_group() as relaying:
+        await relaying.start(relay)
+        with anyio.CancelScope(shield=True):
+            yield
+        relaying.cancel_scope.cancel()
+    # The group swallows its own cancel and leaves with no checkpoint, so the
+    # caller's would end here unsaid and `serve` would return to a call abandoned.
+    await anyio.lowlevel.checkpoint_if_cancelled()
+
+
 async def _clear_stale(path: Path) -> None:
     """Remove a socket nobody is listening on; refuse one somebody is.
 
@@ -1955,6 +1998,10 @@ async def serve(
     (`_stop_on_signals`). Off by default and on for `phern daemon` only: a
     process-wide handler belongs to the process that *is* the daemon, not to a
     test or an embedding host that runs `serve` inside something else.
+
+    **A cancel is that stop too** (`_cancel_is_a_stop`), for the host that runs
+    `serve` and ends it the way it ends any task. The call still ends cancelled,
+    once the daemon has stopped.
     """
     socket_path = path or resolve_roots().ensure().daemon_socket()
     await _clear_stale(socket_path)
@@ -2006,7 +2053,8 @@ async def serve(
     # Its own scope, so teardown can end the watch before it unlinks the socket:
     # that unlink is this daemon closing its own door, not losing it.
     watching = anyio.CancelScope()
-    async with anyio.create_task_group() as tasks:
+    stop = anyio.Event()
+    async with _cancel_is_a_stop(stop), anyio.create_task_group() as tasks:
         # Built inside the group so `tasks` is a required field rather than an
         # Optional with a "not serving" guard: a supervisor that cannot start a
         # root is a state that should not be representable.
@@ -2022,7 +2070,7 @@ async def serve(
         try:
             server = DaemonServer(
                 supervisor=supervisor,
-                stop=anyio.Event(),
+                stop=stop,
                 path=socket_path,
                 watching=watch.mechanism if watch is not None else None,
                 watch_refused=refused,
@@ -2064,8 +2112,13 @@ async def serve(
                 # question to ask, and reaching it through a client would be
                 # testing the transport to get at something behind it.
                 started(server)
-            async with listener:
-                tasks.start_soon(listener.serve, server._handle)
+            # The accept loop has a group of its own, ended at the stop and waited
+            # for before the door closes: closed under the loop, a client
+            # connecting just then woke `accept` on a closed socket and failed
+            # the daemon's group. Its handlers run in `tasks`, so ending the loop
+            # ends no exchange in flight — the `shutdown` request among them.
+            async with listener, anyio.create_task_group() as accepting:
+                accepting.start_soon(partial(listener.serve, server._handle, task_group=tasks))
                 server.serving = True
                 if resume_owed:
                     # After the door is open, so a client that attaches mid-pass
@@ -2075,6 +2128,7 @@ async def serve(
                 if ready is not None:
                     ready.set()
                 await server.stop.wait()
+                accepting.cancel_scope.cancel()
         finally:
             notify("STOPPING=1")
             # **The watch ends before anything below touches the socket**: the
@@ -2100,10 +2154,10 @@ async def serve(
             # already knows how to handle.
             if identity is not None and socket_identity(socket_path) == identity:
                 socket_path.unlink(missing_ok=True)
-            # Shielded, and bounded. `shutdown` is a notification — the caller
-            # does not wait for it — so a cancel from whoever started `serve()`
-            # routinely arrives *while* this is unwinding, and an unwinding cut
-            # short here loses everything teardown is for: sessions unflushed,
+            # Shielded, and bounded. A cancel from whoever started `serve()` stops
+            # at `_cancel_is_a_stop`, but the group cancels itself when one of its
+            # tasks fails, and an unwinding cut short here loses everything
+            # teardown is for: sessions unflushed,
             # worktrees unreclaimed (F6), and P5-03's leases never released, so
             # the next daemon refuses a session whose holder is already gone.
             # **Both halves, and they do different jobs.** The scope shields
@@ -2122,9 +2176,8 @@ async def serve(
             until = anyio.current_time() + GRACE_SECONDS
             with anyio.CancelScope(deadline=until, shield=True):
                 await supervisor.aclose(deadline=until)
-            # Last: the accept loop and any root task still in flight. Roots are
-            # unwound above by their own channels closing, so this cancels a
-            # listener rather than a turn.
+            # Last: whatever still runs — the planners, a connection still open,
+            # and a turn its root's release already wrote the log of.
             tasks.cancel_scope.cancel()
             if watch is not None:
                 watch.close()

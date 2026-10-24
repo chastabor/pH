@@ -119,7 +119,24 @@ root's mount, plus the mount itself, passivation and shutdown. The writer rememb
 what it last wrote per root and `updated` is not compared, so a flush that moved no
 hold costs the fold and nothing else; `updated` therefore reads as "owed since".
 The same hook clears a root from `unwritten`, so any successful write of it does,
-whichever path made it.
+whichever path made it. Shutdown notes every root before it releases any, so the
+file takes them in one write rather than one per root, and `settle` writes what is
+noted in the caller's shielded task rather than awaiting the background drain: a
+drain spawned into a cancelled group either never ran or was cut off before its
+write. It has no clock of its own: shutdown's one deadline bounds it, since a
+thread's write is not abandoned on a cancel.
+
+**A cancelled daemon stops as a stopped one does** (`_cancel_is_a_stop`). The cancel
+reached every task at once, so a root's turn was cancelled before the teardown
+began: closed `aborted`, by the person, and noted on the index as owing nothing, so
+the next daemon never resumed work nobody had stopped. An orderly stop leaves that
+turn open and the root listed, which is what the resumer reads. So the daemon's
+tasks run shielded from a cancel meant for `serve`, and a relay outside the shield
+turns that cancel into `stop`; the call still ends cancelled once the teardown is
+done. The orderly path had a fault the cancel hid: a client connecting as the stop
+closed the unix listener woke `accept` on a closed socket and failed the task group,
+so the accept loop is now ended, and waited for, before the door closes. Its
+handlers run in the daemon's group, so ending it ends no exchange in flight.
 
 **A mounted root's entry is the process's, not its log's.** A rebuild reads every
 stored root, and a root this daemon holds has a log that lags what the daemon knows
@@ -403,6 +420,15 @@ exiting 2 on it — which is right: the state needs an operator, and the table n
 command. A root whose *own* log will not read is not listed at all unless an earlier
 host left its entry (a rebuild keeps what it cannot re-read); `phern doctor sessions`
 finds it either way.
+
+**A cancel waits for the teardown.** An embedding host that cancels `serve` used to
+get its task back at once, with the roots' turns cut short in a way that lost them.
+It now waits for the same teardown a `shutdown` frame runs, under the same bound:
+the roots' flushes and releases under `GRACE_SECONDS`. No second clock backs it up,
+because what the teardown waits on is shielded in its own right, so one would reach
+none of it; a daemon that will not unwind keeps its host as it keeps systemd. Every
+test that tears a daemon down by cancelling it pays that cost, which measured as
+nothing: the 271 daemon tests take 50 s with the relay and without it.
 
 **Repair is a cut, not a splice.** Everything from the damaged line on goes with it,
 kept only in the copy, and a resume then closes whatever turn the cut left open. A

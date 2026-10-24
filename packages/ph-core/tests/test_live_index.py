@@ -13,12 +13,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import anyio
+import pytest
+
 from ph.agent.inbox import Inbox, InboxNotifications, replay_pending
 from ph.seams.goals import SET, SETTLED, Goal
 from ph.seams.live_index import (
     Ladder,
     LiveEntry,
     LiveIndex,
+    LiveIndexWriter,
     LiveSurvey,
     holds_of,
     rebuild_live_index,
@@ -131,6 +135,21 @@ def test_the_index_records_clears_and_vouches(tmp_path: Path) -> None:
     assert index.replace({"root": entry}, since=index.survey())
     assert index.survey().complete, "only a rebuild marks the file complete"
     assert index.survey().entries == {"root": entry}
+
+
+@pytest.mark.anyio
+async def test_settle_writes_what_a_cancelled_group_left_noted(tmp_path: Path) -> None:
+    """With the writer's task group already cancelled, `settle`, run shielded as a
+    shutdown runs it, writes what was noted in the caller's own task, at once."""
+    index = LiveIndex(tmp_path)
+    entry = LiveEntry("root", ("turn",), updated=5, family="root", cwd="/w")
+    async with anyio.create_task_group() as tasks:
+        writer = LiveIndexWriter(index, tasks)
+        tasks.cancel_scope.cancel()
+        writer.note("root", entry)
+        with anyio.CancelScope(shield=True), anyio.fail_after(1):
+            await writer.settle()
+    assert index.read() == {"root": entry}
 
 
 def test_a_damaged_index_reads_as_empty_and_untrusted(tmp_path: Path) -> None:

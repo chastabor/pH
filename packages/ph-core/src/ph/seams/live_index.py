@@ -258,8 +258,14 @@ class LiveIndexWriter:
     **Latest wins, per root, and a repeat costs nothing.** The writer remembers what
     it last wrote for each root, so a host re-stating an unchanged entry — which it
     does at every flush — is dropped in `note` without a thread hop or a read.
-    `settle` is for a host shutting down: it waits for the batch in flight and
-    whatever was noted behind it.
+
+    **`settle` writes; it does not wait for the background to.** It is for a host
+    shutting down, which may be unwinding with `tasks` already cancelled — one of
+    its tasks failed, or it was cancelled with nothing to turn that into a stop. The
+    drain its last `note` starts is spawned into that group, where it either never
+    runs or is cut off before its write. So `settle` drains in the caller's own task,
+    which a shutdown shields, once any batch in flight has landed; and a batch a
+    cancel cut off goes back to be written by whoever writes next.
     """
 
     index: LiveIndex
@@ -267,26 +273,26 @@ class LiveIndexWriter:
     _pending: dict[str, LiveEntry | None] = field(default_factory=dict)
     _written: dict[str, LiveEntry | None] = field(default_factory=dict)
     """What the file was last made to hold for each root by this writer."""
-    _writing: bool = False
-    _idle: anyio.Event = field(default_factory=anyio.Event)
+    _scheduled: bool = False
+    """Whether a background drain was started and has not ended. A drain cancelled
+    before its first step never clears it — only a cancelled group does that, which
+    is a shutdown, and `settle` drains for itself there."""
+    _batch: anyio.Lock = field(default_factory=anyio.Lock)
+    """Held while a batch is written, by whichever task writes it: one batch at a
+    time, so a later one never lands under an earlier."""
 
     def note(self, session_id: str, entry: LiveEntry | None) -> None:
         """Note one root's holds; start the writer if none is running."""
         if session_id not in self._pending and self._written.get(session_id, _UNSEEN) == entry:
             return
         self._pending[session_id] = entry
-        if not self._writing:
-            self._writing = True
-            self._idle = anyio.Event()
+        if not self._scheduled:
+            self._scheduled = True
             self.tasks.start_soon(self._drain)
 
     async def settle(self) -> None:
-        """Wait until everything noted so far is in the file, or was refused."""
-        if self._writing:
-            await self._idle.wait()
-
-    async def _drain(self) -> None:
-        try:
+        """Write everything noted so far, or let it be refused, in the caller's task."""
+        async with self._batch:
             while self._pending:
                 batch, self._pending = self._pending, {}
                 try:
@@ -294,11 +300,19 @@ class LiveIndexWriter:
                 except Exception:
                     log.warning("ph.seams.live_index: a batch was not written", exc_info=True)
                     written = False
+                except BaseException:
+                    # Cancelled: before the thread ran, or once it had, when the same
+                    # entries rewritten are no change. Back under anything since.
+                    self._pending = {**batch, **self._pending}
+                    raise
                 if written:
                     self._written.update(batch)
+
+    async def _drain(self) -> None:
+        try:
+            await self.settle()
         finally:
-            self._writing = False
-            self._idle.set()
+            self._scheduled = False
 
 
 def holds_of(own: Sequence[SessionEvent], *, children_live: bool) -> tuple[Hold, ...]:

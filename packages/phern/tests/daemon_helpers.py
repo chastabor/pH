@@ -33,7 +33,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
 from ph.json import as_obj, as_seq
 from ph.keys import APPROVAL, COMMANDS, MOUNT, SANDBOX
-from ph.llm.types import StreamChunk, create_user_message
+from ph.llm.types import Finish, FinishReason, StreamChunk, create_user_message
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer
 from ph.session import Session, SessionEvent, SurfaceIntent
@@ -69,6 +69,7 @@ __all__ = [
     "continuations",
     "cut_turn",
     "daemon_in_thread",
+    "hold_the_provider",
     "http",
     "left_mid_turn",
     "private_runtime",
@@ -586,6 +587,18 @@ def break_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         yield  # pragma: no cover
 
     monkeypatch.setattr(FakeAdapter, "stream", exploding)
+
+
+def hold_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every model call wait for good, the way a turn mid-request looks to
+    whatever stops the daemon under it. `break_the_provider` says why it is here."""
+    from ph.llm.fake import FakeAdapter
+
+    async def waiting(self: object, options: object) -> AsyncIterator[StreamChunk]:
+        await anyio.sleep_forever()
+        yield Finish(reason=FinishReason(kind="stop"))  # pragma: no cover
+
+    monkeypatch.setattr(FakeAdapter, "stream", waiting)
 
 
 def route_needs(monkeypatch: pytest.MonkeyPatch, key: str) -> None:

@@ -383,9 +383,6 @@ sentence nobody can print is one nobody checks.
 """
 
 
-_LIVE_SETTLE_SECONDS = 2.0
-"""How long shutdown waits for the live-roots index's last write."""
-
 WAKE_SLOTS = 8
 """How many un-acted-on doorbell rings to hold.
 
@@ -3104,16 +3101,23 @@ class Supervisor:
             with anyio.CancelScope(deadline=bound, shield=True):
                 for pending in list(self._in_flight):
                     await pending.done.wait()
-        for root in self.roots.values():
+        roots = list(self.roots.values())
+        for root in roots:
             await root.wake.aclose()
-        for root in list(self.roots.values()):
-            # What it still owes, as the last daemon's word on it (P13-01): a root
-            # stopped mid-turn is one the next daemon's resumer should mount.
+        # What each still owes, as the last daemon's word on it (P13-01): a root
+        # stopped mid-turn is one the next daemon's resumer should mount. Every root
+        # before any is released, so the index takes them in one write rather than
+        # one per root — the writer runs during the first release's awaits — and
+        # what one root owes does not move when another is let go.
+        for root in roots:
             self._note_live(root)
+        for root in roots:
             if deadline is not None:
                 root.ctx.unwind_by(deadline)
             await self._release(root)
         self.roots.clear()
         if self._live is not None:
-            with anyio.move_on_after(_LIVE_SETTLE_SECONDS):
-                await self._live.settle()
+            # Under the same `deadline` as the rest, with no bound of its own: the
+            # write runs in this task, and a thread's write is not abandoned on a
+            # cancel, so a second clock would bound only the wait before it began.
+            await self._live.settle()
