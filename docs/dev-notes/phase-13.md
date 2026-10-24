@@ -138,6 +138,14 @@ closed the unix listener woke `accept` on a closed socket and failed the task gr
 so the accept loop is now ended, and waited for, before the door closes. Its
 handlers run in the daemon's group, so ending it ends no exchange in flight.
 
+**A stop from outside the loop names nobody** (`_turn_reason`). A turn cut by a
+cancelled scope, an interrupt or an exit closed `aborted` with the cause `user`, a
+guess, and one cut after a step had decided its ending closed `completed`. Both now
+close `aborted`, with a cause only when the loop's own `cancel` was told one, as
+repair's `interrupted` closer has none. The daemon no longer cuts its turns this
+way; the one-shot modes and the rpc mode still do. Nothing reads the cause to decide
+anything, so what changes is what a reader is told.
+
 **A mounted root's entry is the process's, not its log's.** A rebuild reads every
 stored root, and a root this daemon holds has a log that lags what the daemon knows
 until the next barrier. So `owed` hands the rebuild its own entries for mounted roots

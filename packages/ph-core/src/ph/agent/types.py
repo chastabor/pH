@@ -131,6 +131,8 @@ class TurnEndReason(WireDataclass):
 
     kind: Literal["completed", "aborted", "blocked", "error", "max-tokens", "interrupted"]
     reason: AgentCancelCause | None = None
+    """Who stopped an `aborted` turn, when the loop's own `cancel` was told; absent
+    for a stop from outside it, whose author the loop cannot see."""
     error: LlmFailure | None = None
 
 
