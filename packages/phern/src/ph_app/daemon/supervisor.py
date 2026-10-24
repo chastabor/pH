@@ -2273,12 +2273,17 @@ class Supervisor:
         widens it to a person's. A person's interrupted prompt is otherwise left: they are at
         a keyboard somewhere, and the transcript shows the turn closed
         `interrupted`. A prompt the turn had not claimed is not this case at all —
-        it is still in the inbox, and the ring at the end of `_start` runs it.
+        it is still in the inbox, and the ring at the end of `_start` runs it — and
+        nor is a turn cut before it claimed one, whatever else holds: it owes
+        nobody, and continuing it too ran a second turn for one prompt.
 
         **How many times.** The root's ladder is `interrupted_resumes`, the twin of
         a child's (`restarts_since_progress`): an answer forgives the restarts
         before it, and past `ROOT_RESUME_LIMIT` the root is failed in its log, so
         `status` says so, the live-roots index carries it, and a resumer skips it.
+        A turn cut before its claim climbs it too, though nothing is sent for it:
+        the ring reruns its prompt at every boot, and the bound is what ends a
+        prompt whose turn dies before its claim each time.
 
         **What it is told** is what a readmitted child is told (`cut_short_note`):
         that the turn above was cut short, which attempt this is, and to carry on from
@@ -2288,11 +2293,13 @@ class Supervisor:
         """
         if root.recovery.failed:
             return
+        owner = cut_turn_owner(root.session)
         goals = root.ctx.get(GOALS)
         unasked = (
-            self.continue_interrupted
+            owner is None
+            or self.continue_interrupted
             or (goals is not None and goals.open(root.session) is not None)
-            or cut_turn_owner(root.session) == "unattended"
+            or owner == "unattended"
         )
         if not unasked:
             log.info(
@@ -2306,6 +2313,8 @@ class Supervisor:
                 f"its turn was cut short by {attempt} restarts in a row with no answer between",
                 attempts=attempt,
             )
+            return
+        if owner is None:
             return
         log.warning(
             "ph_app.daemon: root %s: its turn was cut short; continuing it (attempt %d of %d)",

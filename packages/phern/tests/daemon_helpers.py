@@ -13,6 +13,7 @@ before `serve()` is listening, which is exactly the window a poll would land in.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
@@ -26,14 +27,16 @@ import pytest
 from anyio.abc import TaskGroup
 from typer.testing import CliRunner, Result
 
+from ph.agent.inbox import InboxSplice
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile
+from ph.json import as_obj, as_seq
 from ph.keys import APPROVAL, COMMANDS, MOUNT, SANDBOX
 from ph.llm.types import StreamChunk, create_user_message
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer
-from ph.session import Session, SurfaceIntent
+from ph.session import Session, SessionEvent, SurfaceIntent
 from ph.session_profile import BASE as PROFILE_BASE
 from ph.testing import (
     StubAgent,
@@ -51,17 +54,22 @@ from ph_app.cli import app
 from ph_app.daemon.client import DaemonClient
 from ph_app.daemon.duplex import Notification
 from ph_app.daemon.launch import SPAWN_TIMEOUT
+from ph_app.daemon.probes import HEARTBEAT_SECONDS, STALE_HEARTBEATS, parse_bind
 from ph_app.daemon.server import DaemonServer, serve
 from ph_app.daemon.supervisor import Root, Supervisor
 from ph_app.payloads import DaemonStatusReply
 from ph_app.protocol import NoParams
+from ph_app.wire import source_of
 
 __all__ = [
     "PROFILE",
     "Daemon",
+    "answered",
     "break_the_provider",
+    "continuations",
     "cut_turn",
     "daemon_in_thread",
+    "http",
     "left_mid_turn",
     "private_runtime",
     "route_needs",
@@ -71,7 +79,10 @@ __all__ = [
     "set_phase",
     "shut_down",
     "spawned",
+    "spliced",
+    "stale",
     "supervised",
+    "taken_from",
     "until",
 ]
 
@@ -204,6 +215,56 @@ def set_phase(root: Root, kind: Literal["idle", "running"]) -> None:
     driver._phase.kind = kind
 
 
+def answered(root: Root) -> bool:
+    """Whether the root's last turn ran to an answer."""
+    return root.last_turn == "completed"
+
+
+def spliced(session: Session) -> list[object]:
+    """Every message spliced into this log's inbox, oldest first."""
+    return [
+        message
+        for event in session.events_from(0)
+        if event.type == "agent/inbox/spliced"
+        for message in as_seq(event.data.get("inserted"))
+    ]
+
+
+def taken_from(session: Session, plugin: str) -> list[SessionEvent]:
+    """Every message from `plugin` a turn took, as the turn recorded it."""
+    return [
+        event
+        for event in session.events
+        if event.type == "user/message" and source_of(event.data)[1] == plugin
+    ]
+
+
+def continuations(session: Session) -> list[str]:
+    """The text of every continuation the supervisor put in this root's inbox (P13-04)."""
+    return [
+        str(as_obj(as_seq(as_obj(message).get("content"))[0]).get("text"))
+        for message in spliced(session)
+        if source_of(message)[1] == "ph_app.daemon.supervisor"
+    ]
+
+
+async def http(address: str, request: str) -> tuple[int, dict[str, Any]]:
+    """One raw HTTP exchange with a probe responder at `host:port`: the status code
+    and the JSON body, as an orchestrator's probe reads them (P13-12)."""
+    host, port = parse_bind(address)
+    async with await anyio.connect_tcp(host, port) as stream:
+        await stream.send(request.encode("ascii"))
+        raw = b""
+        while True:
+            try:
+                raw += await stream.receive(65536)
+            except anyio.EndOfStream:
+                break
+    head, _, body = raw.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    return status, (json.loads(body) if body else {})
+
+
 async def until(done: Callable[[], object], *, what: str, seconds: float = 10.0) -> None:
     """`ph.testing.settled`, with the longer bound a daemon's waits need.
 
@@ -233,6 +294,13 @@ def age(server: DaemonServer) -> None:
     with nothing holding it at once, before the event under test.
     """
     server.started -= int(SPAWN_TIMEOUT * 1000) + 1
+
+
+def stale(server: DaemonServer) -> None:
+    """Wind this daemon's heartbeat back past what liveness allows, as a loop that has
+    stopped running would leave it: the next `live` probe says no until the beat
+    after."""
+    server.heartbeat_at -= int((STALE_HEARTBEATS + 1) * HEARTBEAT_SECONDS * 1000)
 
 
 @asynccontextmanager
@@ -571,13 +639,22 @@ A_PERSON: dict[str, Any] = {"kind": "user"}
 """A `user/message` source that is a person's own words."""
 
 
-def cut_turn(root: Root, *, source: Any = A_PERSON) -> None:  # noqa: ANN401
+def cut_turn(root: Root, *, source: Any = A_PERSON, claimed: bool = True) -> None:  # noqa: ANN401
     """Open a turn that claimed one prompt from `source` and never closed — what a
-    kill mid-turn leaves in the log."""
-    log_event(root.session, "turn/start", {"turn": 1})
-    log_event(root.session, "step/start", {"turn": 1, "step": 1})
+    kill mid-turn leaves in the log.
+
+    Not `claimed`: the prompt waits in the inbox and the turn opened ahead of it took
+    nothing — a kill between a turn's start and its claim, which the step's own awaits
+    leave room for. Written as the log has it, since a live delivery would ring the
+    turn under the supervisor writing it."""
     message = create_user_message(content=[{"type": "text", "text": "go"}], source=source)
-    log_event(root.session, "user/message", message.to_wire(), SurfaceIntent("append"))
+    if not claimed:
+        pending = InboxSplice(target="next-turn", start=0, inserted=[message])
+        log_event(root.session, "agent/inbox/spliced", pending.to_wire())
+    log_event(root.session, "turn/start", {"turn": 1})
+    if claimed:
+        log_event(root.session, "step/start", {"turn": 1, "step": 1})
+        log_event(root.session, "user/message", message.to_wire(), SurfaceIntent("append"))
 
 
 async def left_mid_turn(
@@ -586,16 +663,18 @@ async def left_mid_turn(
     session_id: str,
     *,
     source: Any = A_PERSON,  # noqa: ANN401
+    claimed: bool = True,
     before: Callable[[Root], None] | None = None,
 ) -> None:
-    """A stored root whose log ends inside a turn from `source` (`cut_turn`), written
-    by a supervisor that then stops: a root that owes work and that nothing has
-    mounted. `before` writes whatever the log holds ahead of the turn."""
+    """A stored root whose log ends inside a turn from `source` (`cut_turn`, which says
+    what `claimed` is), written by a supervisor that then stops: a root that owes work
+    and that nothing has mounted. `before` writes whatever the log holds ahead of the
+    turn."""
     async with supervised(tmp_path, monkeypatch) as first:
         root = await first.start(session_id)
         if before is not None:
             before(root)
-        cut_turn(root, source=source)
+        cut_turn(root, source=source, claimed=claimed)
         await first._flush(root)
 
 

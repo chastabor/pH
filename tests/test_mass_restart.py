@@ -28,15 +28,11 @@ before it arrives holds them again and appends nothing.
 
 from __future__ import annotations
 
-import json
-import os
-import signal
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+from killed_host import killed_when_ready
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
@@ -81,31 +77,6 @@ SCRIPTED = AgentOptions(provider="scripted", model="s1")
 RETRIES = 3
 KEY = "PH_T5_CHILD_KEY"
 """What the `keyed` route's adapter resolves at its edge in the restarted process."""
-
-
-def _killed_mid_work(project: Path, *mode: str) -> dict[str, Any]:
-    """Run the host until it says everything is in flight, then `SIGKILL` it."""
-    host = subprocess.Popen(
-        [sys.executable, str(HOST), str(project), *mode],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=dict(os.environ),
-    )
-    try:
-        assert host.stdout is not None and host.stderr is not None
-        line = host.stdout.readline()
-        if not line:
-            host.wait(timeout=10)
-            raise AssertionError(f"the host never got its work in flight:\n{host.stderr.read()}")
-        ids: dict[str, Any] = json.loads(line)
-        host.send_signal(signal.SIGKILL)
-        host.wait(timeout=10)
-        return ids
-    finally:
-        if host.poll() is None:  # pragma: no cover
-            host.kill()
-            host.wait()
 
 
 async def _restart(mount: MountProfile) -> tuple[Context, Session]:
@@ -170,14 +141,14 @@ async def _flushed(ctx: Context) -> None:
 
 @pytest.fixture
 def crashed(tmp_path: Path) -> dict[str, Any]:
-    return _killed_mid_work(tmp_path)
+    return killed_when_ready(HOST, str(tmp_path))
 
 
 @pytest.fixture
 def crashed_keyed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """The same crash, with the sub-agents on the `keyed` route — and no `KEY` here."""
     monkeypatch.delenv(KEY, raising=False)
-    return _killed_mid_work(tmp_path, "keyed")
+    return killed_when_ready(HOST, str(tmp_path), "keyed")
 
 
 async def test_every_sub_agent_picks_up_where_it_left_off(

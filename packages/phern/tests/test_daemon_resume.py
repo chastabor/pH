@@ -16,18 +16,21 @@ from typing import Any
 import pytest
 from daemon_helpers import (
     A_PERSON,
+    answered,
+    continuations,
     cut_turn,
     left_mid_turn,
     left_with_a_damaged_child,
     route_needs,
     running,
     set_phase,
+    spliced,
     supervised,
+    taken_from,
     unplugged,
     until,
 )
 
-from ph.json import as_obj, as_seq
 from ph.keys import GOALS, INTENTS, SCHEDULE, SUBAGENTS
 from ph.persistence import resumption_of
 from ph.seams import schedule as schedule_module
@@ -47,30 +50,6 @@ A_SCHEDULE = scheduled_source(Schedule(id="nightly", kind="interval", spec="6000
 KEY = "PH_P13_ROOT_KEY"
 
 
-def _spliced(session: Session) -> list[object]:
-    """Every message spliced into this log's inbox, oldest first."""
-    return [
-        message
-        for event in session.events_from(0)
-        if event.type == "agent/inbox/spliced"
-        for message in as_seq(event.data.get("inserted"))
-    ]
-
-
-def _continuations(session: Session) -> list[str]:
-    """The text of every continuation the supervisor put in this root's inbox."""
-    return [
-        str(as_obj(as_seq(as_obj(message).get("content"))[0]).get("text"))
-        for message in _spliced(session)
-        if source_of(message)[1] == "ph_app.daemon.supervisor"
-    ]
-
-
-def _answered(root: Root) -> bool:
-    """Whether the root's last turn ran to an answer."""
-    return root.last_turn == "completed"
-
-
 # ------------------------------------------------- P13-04: the cut-short turn --
 
 
@@ -86,8 +65,8 @@ async def test_a_turn_a_schedule_sent_is_continued_on_resume(
     await left_mid_turn(tmp_path, monkeypatch, "sched", source=A_SCHEDULE)
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("sched")
-        await until(lambda: _answered(root), what="the continued turn to run")
-        [said] = _continuations(root.session)
+        await until(lambda: answered(root), what="the continued turn to run")
+        [said] = continuations(root.session)
         assert f"attempt 1 of {ROOT_RESUME_LIMIT}" in said
         assert root.status == "idle"
         assert interrupted_resumes(root.session) == 0, "the answer forgave the restart"
@@ -109,7 +88,7 @@ async def test_a_persons_interrupted_turn_waits_for_them_unless_the_daemon_is_to
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("person")
         assert not root.agent.inbox.has_pending and root.status == "idle"
-        assert _continuations(root.session) == []
+        assert continuations(root.session) == []
         resumed = resumption_of(root.session)
         assert resumed is not None and resumed.interrupted and resumed.turn == 1
         on_disk = stored_types(root.ctx, "person")
@@ -136,8 +115,8 @@ async def test_an_open_goal_is_reason_enough_to_continue(
     await left_mid_turn(tmp_path, monkeypatch, "goal", source=A_PERSON, before=_open_goal)
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("goal")
-        await until(lambda: _answered(root), what="the continued turn to run")
-        assert len(_continuations(root.session)) == 1
+        await until(lambda: answered(root), what="the continued turn to run")
+        assert len(continuations(root.session)) == 1
 
 
 def _open_goal(root: Root) -> None:
@@ -165,21 +144,47 @@ async def test_a_resume_that_only_settled_an_intent_continues_nothing(
         root = await second.start("between")
         resumed = resumption_of(root.session)
         assert resumed is not None and resumed.interrupted and resumed.turn is None
-        assert _continuations(root.session) == []
+        assert continuations(root.session) == []
         assert not root.agent.inbox.has_pending
 
 
-async def test_the_root_ladder_gives_up_past_its_bound(
+async def test_a_turn_cut_before_it_took_its_prompt_is_not_continued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kill between a turn's start and its claim leaves a turn with nothing in it
+    and its prompt still in the inbox, which the ring at the end of the mount runs.
+    Continuing the empty turn as well was a second turn for one prompt, about work
+    that never began — what a schedule killed mid-tick cost (`test_daemon_restart`).
+    The goal is open so that no term of `_continue_interrupted` would decline it.
+
+    Sabotage: call a cut turn with no prompt in it `unattended` in `cut_turn_owner`,
+    and the root answers twice.
+    """
+    await left_mid_turn(
+        tmp_path, monkeypatch, "unclaimed", source=A_SCHEDULE, claimed=False, before=_open_goal
+    )
+    async with supervised(tmp_path, monkeypatch) as second:
+        root = await second.start("unclaimed")
+        await until(lambda: answered(root), what="the pending prompt to run")
+        assert continuations(root.session) == []
+        assert len(taken_from(root.session, "ph.seams.schedule")) == 1
+
+
+@pytest.mark.parametrize("claimed", [True, False])
+async def test_the_root_ladder_gives_up_past_its_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claimed: bool
 ) -> None:
     """A turn cut short `ROOT_RESUME_LIMIT` times in a row with no answer between is
     in front of something that keeps stopping: the root is failed in its own log,
     flushed, and reads `failed` — so a resumer that runs every minute does not spend
     one more attempt per restart, and `sessions/resume` leaves it on disk unless
     forced. A goal keeps it on the index, which is how the resumer sees it at all.
+    So is a turn that dies before its claim each time, which is sent no continuation
+    but whose prompt the ring would otherwise rerun at every boot for good.
 
     Sabotage: count the resumes from the ladder's `attempts` rather than the log,
-    and every boot is attempt one.
+    and every boot is attempt one; return before the bound for a turn that took
+    nothing, and the unclaimed one is never given up.
     """
 
     def cut_before(root: Root) -> None:
@@ -191,11 +196,13 @@ async def test_the_root_ladder_gives_up_past_its_bound(
                 {"events": 1, "interrupted": True, "closed": 1, "turn": 1},
             )
 
-    await left_mid_turn(tmp_path, monkeypatch, "looping", source=A_SCHEDULE, before=cut_before)
+    await left_mid_turn(
+        tmp_path, monkeypatch, "looping", source=A_SCHEDULE, claimed=claimed, before=cut_before
+    )
     async with supervised(tmp_path, monkeypatch) as second:
         root = await second.start("looping")
         assert root.status == "failed" and root.recovery.failed
-        assert _continuations(root.session) == []
+        assert continuations(root.session) == []
         assert "supervisor/failed" in stored_types(root.ctx, "looping")
     async with supervised(tmp_path, monkeypatch) as third:
         report = await third.resume_owed(all_owed=True)
@@ -234,7 +241,7 @@ async def test_resume_owed_mounts_what_is_owed_and_says_what_became_of_each(
         assert rows["quiet"].outcome == "resumed" and rows["quiet"].status == "idle"
         assert rows[child_id].outcome == "refused" and "root" in rows[child_id].detail
         assert set(second.roots) == {"owed", "family", "quiet"}
-        await until(lambda: _answered(second.roots["owed"]), what="the owed turn")
+        await until(lambda: answered(second.roots["owed"]), what="the owed turn")
         again = await second.resume_owed(all_owed=True)
         assert {row.outcome for row in again.sessions} <= {"mounted"}
 
@@ -278,7 +285,7 @@ async def test_a_childs_ending_wakes_the_idle_parent_it_reports_to(
 
         await record_ended(root.ctx, child, "done", notice=notice)
 
-        await until(lambda: _answered(root), what="the parent to read the notice")
+        await until(lambda: answered(root), what="the parent to read the notice")
         assert root.status == "idle"
 
 
@@ -366,9 +373,9 @@ async def test_the_index_moves_only_once_the_tick_and_its_prompt_are_on_disk(
         [on_disk] = told
         assert "schedule/tick" in on_disk and "agent/inbox/spliced" in on_disk, on_disk
         assert on_disk.index("schedule/tick") < on_disk.index("agent/inbox/spliced")
-        delivered = [source_of(message)[1] for message in _spliced(root.session)]
+        delivered = [source_of(message)[1] for message in spliced(root.session)]
         assert delivered == ["ph.seams.schedule"], "a scheduled prompt is the schedule's"
-        await until(lambda: _answered(root), what="the scheduled turn")
+        await until(lambda: answered(root), what="the scheduled turn")
         set_phase(root, "idle")
 
         async def refused(_ctx: object, _session: Session) -> bool:

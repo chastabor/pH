@@ -2,8 +2,8 @@
 
 **Status:** planned 2026-10-22; waves one and two landed the same day (P13-01, P13-02,
 P13-08, P13-12; P13-03 to P13-07, P13-10), waves three and four on 2026-10-23 (P13-13,
-P13-14; P13-09, P13-11). Fourteen rows in four waves, all landed. Of the kill-shaped
-gates under "Gates", the damaged-log one is on the restart host; the rest are still owed.
+P13-14; P13-09, P13-11). Fourteen rows in four waves, all landed. The kill-shaped
+gates under "Gates" all landed by 2026-10-23, on two restart hosts.
 
 **Gate:** `ruff` + `ruff format` + `mypy` across the tree, and `./test.sh test` green,
 plus the SIGKILL gates listed under "Gates" once each wave lands.
@@ -105,7 +105,8 @@ Tests: `packages/ph-core/tests/test_live_index.py`, `packages/phern/tests/test_d
 `packages/phern/tests/test_daemon_resume.py`, `packages/phern/tests/test_service_cli.py`,
 `packages/phern/tests/test_doctor_sessions.py`, and the rows added to `test_child_logs.py`,
 `test_schedule.py`, `test_goals.py`, `test_modes.py`, `test_daemon_launch.py`,
-`test_persistence.py`, `test_locks.py` and `tests/test_mass_restart.py`.
+`test_persistence.py`, `test_locks.py` and `tests/test_mass_restart.py`; the kill gates
+in `tests/test_daemon_restart.py`.
 
 ---
 
@@ -179,7 +180,13 @@ that only settled an intent left open between turns, and a resumer that walked b
 to the last `turn/start` from there ran a finished turn again. Who the cut turn was
 owed to is a core fold beside the record (`cut_turn_owner`: `person` or
 `unattended`), walked back over one turn rather than the log, and the wording an
-agent is told is shared with a readmitted child (`cut_short_note`).
+agent is told is shared with a readmitted child (`cut_short_note`). A turn cut
+before it took a prompt is owed to nobody (`None`), whatever else holds: its prompt
+is still in the inbox and the mount's ring runs it, and continuing the empty turn
+as well ran a second turn for one prompt. It still climbs the root's ladder, so a
+prompt whose turn dies before its claim at every boot is given up rather than rerun
+for good. The tick gate found that one: a kill just after a schedule's write could
+land with the woken turn's `turn/start` on disk and its claim not.
 
 **The root's ladder is folded from records the resume already writes.** A
 `session/resumed` that names a `turn` is a restart that cut one short, and an
@@ -323,6 +330,22 @@ the daemon makes 0700 for `$PH_RUNTIME`, and the three probes on `--probe-bind
 because `ExecStart`'s first word may not be a variable and `ExecSearchPath` needs a
 newer systemd than Ubuntu 22.04 ships.
 
+**The daemon gates kill a daemon, and the core gates kill a mount.**
+`tests/mass_restart_host.py` mounts a profile and its test restarts with the core's
+resume, which is one root's mount. `tests/daemon_restart_host.py` runs `serve` itself,
+in six modes that each put one shape of work in flight through the daemon's own
+doors (a person's prompt through `session/prompt`, a schedule through
+`schedule/create`), wait until the log and the live-roots index the next daemon
+reads hold it, and print the ids. The next daemon is in the test's process, so it
+can watch the roots, except for the second-kill gate, whose resuming daemon is the
+host again (`resume`). The two tick modes pause the daemon inside `fire_due` rather
+than racing it: `tick-claim` parks the delivery, and `tick-write` stops the loop
+outright on the write's `session/durable`, before the index is told, with the
+root's ring held, because the write yields to the loop and a woken turn's
+`turn/start` would otherwise reach disk in one run and not the next. A kill between a turn's start and its claim is gated in process instead
+(`test_daemon_resume`). Each gate's docstring names the sabotage that turns it red,
+and each was run.
+
 ---
 
 ## What was traded
@@ -387,28 +410,22 @@ reference-forked descendant whose `first_own_seq` lies past the cut can no longe
 materialize its lineage; the "Session lineage" section of `phern doctor` names it, and
 nothing here tries to be cleverer than the person reading that.
 
-**The SIGKILL gates for wave two are not yet on the restart host.** The wave's rows
-are gated in-process (`test_daemon_resume.py`): a stored log left mid-turn by one
-supervisor and mounted by the next, a notice delivered to an idle parent, a tick with
-the flush refused. `tests/mass_restart_host.py` still leaves no open goal and no
-schedule, so the goal, wake and tick gates below are still owed after wave four; the
-damaged-log gate landed there with P13-09 — the child at the model when the kill came,
-its log cut in the middle after the restart, and the whole cycle through doctor's
-repair and a second restart that picks the child up.
-
 ---
 
 ## Gates
 
-All built on the SIGKILL host in `tests/mass_restart_host.py`:
+All landed, on the two SIGKILL hosts: `tests/mass_restart_host.py` for the damaged
+log, and `tests/daemon_restart_host.py` for the rest.
 
 - A kill with a running child and an open goal, then `phern agents resume --all`
-  brings the child back, continues the root, and the goal settles without a client.
+  brings the child back, continues the root, and the goal settles without a client
+  — `tests/test_daemon_restart.py`.
 - A kill while a readmitted child is still working, then the child finishes while the
-  root is idle, and the root wakes and reads the notice.
-- A kill between a tick's claim and its delivery produces exactly one run.
+  root is idle, and the root wakes and reads the notice — `tests/test_daemon_restart.py`.
+- A kill between a tick's claim and its delivery produces exactly one run, and so
+  does one between its write and the index — `tests/test_daemon_restart.py`.
 - A child log with a malformed middle line leaves its root openable, listed damaged,
-  and repairable by doctor — **landed**, `tests/test_mass_restart.py`.
+  and repairable by doctor — `tests/test_mass_restart.py`.
 - Probe tests over the TCP port for each state, including readiness going false on
-  an unwritten root.
-- A second kill right after a resume adds no closers.
+  an unwritten root — `tests/test_daemon_restart.py`.
+- A second kill right after a resume adds no closers — `tests/test_daemon_restart.py`.

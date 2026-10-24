@@ -83,23 +83,29 @@ def resumption_of(session: Session) -> Resumption | None:
 
 
 def cut_turn_owner(session: Session) -> CutTurnOwner | None:
-    """Who the turn this log's last resume closed was owed to, or `None` when it closed
-    no turn (`Resumption.turn`).
+    """Who the turn this log's last resume closed was owed to, or `None` when it owes
+    nobody: the resume closed no turn (`Resumption.turn`), or closed one cut before it
+    took a prompt. That turn did nothing, and whatever it was started for is still in
+    the inbox, where the next turn takes it — a continuation as well would be a second
+    turn for one prompt.
 
     Read from the cut turn's own prompts, walking back from the last event that
     survived to its `turn/start` — the length of one turn, not of the log. A `user`
-    source anywhere in it makes it a person's; anything else is `unattended`.
+    source anywhere in it makes it a person's; any other prompt, `unattended`.
     """
     resumed = resumption_of(session)
     if resumed is None or resumed.turn is None:
         return None
+    owner: CutTurnOwner | None = None
     for seq in range(resumed.events - 1, session.header.first_own_seq - 1, -1):
         event = session.at(seq)
         if event is None or event.type == "turn/start":
             break
-        if event.type == "user/message" and as_obj(event.data.get("source")).get("kind") == "user":
-            return "person"
-    return "unattended"
+        if event.type == "user/message":
+            if as_obj(event.data.get("source")).get("kind") == "user":
+                return "person"
+            owner = "unattended"
+    return owner
 
 
 def cut_short_note(attempt: int, *, limit: int | None = None) -> str:

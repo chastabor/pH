@@ -11,15 +11,12 @@ are decided in one place and answered over HTTP with the status code a probe rea
 
 from __future__ import annotations
 
-import json
 import socket
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
-import anyio
 import pytest
-from daemon_helpers import PROFILE, running, set_phase, supervised, unplugged
+from daemon_helpers import PROFILE, http, running, set_phase, stale, supervised, unplugged
 
 from ph.keys import SESSIONS
 from ph.paths import resolve_roots
@@ -28,7 +25,7 @@ from ph.session import Session
 from ph.testing import log_event
 from ph_app.daemon import supervisor as supervisor_module
 from ph_app.daemon.notify import notify, watchdog_interval
-from ph_app.daemon.probes import HEARTBEAT_SECONDS, STALE_HEARTBEATS, parse_bind
+from ph_app.daemon.probes import parse_bind
 from ph_app.daemon.server import DaemonUnavailable, serve
 from ph_app.daemon.supervisor import Supervisor
 from ph_app.payloads import OwedRoot
@@ -186,7 +183,7 @@ async def test_the_three_probes_are_decided_in_one_place(
         server.serving = True
         assert server.probe("startup").ok
         assert server.probe("ready").ok
-        server.heartbeat_at -= int((STALE_HEARTBEATS + 1) * HEARTBEAT_SECONDS * 1000)
+        stale(server)
         reply = server.probe("live")
         assert not reply.ok and "event loop" in reply.reasons[0]
         server.stop.set()
@@ -202,21 +199,6 @@ def test_parse_bind_reads_the_spellings_a_unit_file_uses() -> None:
         parse_bind("nine")
 
 
-async def _http(address: str, request: str) -> tuple[int, dict[str, Any]]:
-    host, port = parse_bind(address)
-    async with await anyio.connect_tcp(host, port) as stream:
-        await stream.send(request.encode("ascii"))
-        raw = b""
-        while True:
-            try:
-                raw += await stream.receive(65536)
-            except anyio.EndOfStream:
-                break
-    head, _, body = raw.partition(b"\r\n\r\n")
-    status = int(head.split(b" ", 2)[1])
-    return status, (json.loads(body) if body else {})
-
-
 async def test_the_probes_answer_over_tcp_with_the_code_an_orchestrator_reads(
     tmp_path: Path,
 ) -> None:
@@ -224,16 +206,16 @@ async def test_the_probes_answer_over_tcp_with_the_code_an_orchestrator_reads(
         address = daemon.running.probe_address
         assert address.startswith("127.0.0.1:")
         assert daemon.running.status().probe == address
-        code, body = await _http(address, "GET /ready HTTP/1.1\r\nHost: probe\r\n\r\n")
+        code, body = await http(address, "GET /ready HTTP/1.1\r\nHost: probe\r\n\r\n")
         assert code == 200 and body["ok"] is True and body["name"] == "ready"
-        code, body = await _http(address, "GET /status HTTP/1.1\r\n\r\n")
+        code, body = await http(address, "GET /status HTTP/1.1\r\n\r\n")
         assert code == 200 and body["probe"] == address
-        code, body = await _http(address, "GET /nope HTTP/1.1\r\n\r\n")
+        code, body = await http(address, "GET /nope HTTP/1.1\r\n\r\n")
         assert code == 404 and body["probes"] == ["startup", "ready", "live"]
-        code, _body = await _http(address, "POST /live HTTP/1.1\r\n\r\n")
+        code, _body = await http(address, "POST /live HTTP/1.1\r\n\r\n")
         assert code == 405
         daemon.running.supervisor.unwritten.add("ghost")
-        code, body = await _http(address, "GET /ready HTTP/1.1\r\n\r\n")
+        code, body = await http(address, "GET /ready HTTP/1.1\r\n\r\n")
         assert code == 503 and "ghost" in body["reasons"][0]
 
 
