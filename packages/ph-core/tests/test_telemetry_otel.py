@@ -26,20 +26,49 @@ cannot change while the row is mounted.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Awaitable, Callable
-from typing import Any, get_args
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, get_args
 
 import pytest
 
 from ph.cordis import MountRefusal
-from ph.keys import SESSION_TELEMETRY
+from ph.keys import AGENTS, SESSION_TELEMETRY, SESSIONS
+from ph.persistence import open_session
 from ph.seams.telemetry import SessionTelemetryRecord
-from ph.testing import MountProfile, not_none
+from ph.testing import FAKE_OPTIONS as FAKE
+from ph.testing import MountProfile, log_event, not_none
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
 
 pytestmark = pytest.mark.anyio
 
-OTEL_ROW = {"insert": [{"id": "session-telemetry-otel", "name": "session-telemetry-otel"}]}
+# `ph-base` ships the row off in its slot in the log layer; a profile turns it on there.
+OTEL_ROW = {"id": "telemetry-otel", "disabled": False}
+
+
+@pytest.fixture
+def exported(monkeypatch: pytest.MonkeyPatch) -> InMemoryLogRecordExporter:
+    """The row's transport, swapped for an in-memory exporter behind a simple processor.
+
+    Only the transport: a test has to observe the export before a batch would have
+    flushed. The sink registration, the ordering, the severity and the attribute
+    mapping stay the shipped ones, so what a test asserts is what a collector gets.
+    """
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    import ph.seams.telemetry_otel as row
+
+    # opentelemetry's in-memory exporter ships untyped.
+    exporter = InMemoryLogRecordExporter()  # type: ignore[no-untyped-call]
+    monkeypatch.setattr(row, "_pipeline", lambda config: SimpleLogRecordProcessor(exporter))
+    return exporter
 
 
 def _record(body: str, **attributes: object) -> SessionTelemetryRecord:
@@ -49,7 +78,7 @@ def _record(body: str, **attributes: object) -> SessionTelemetryRecord:
 
 
 async def test_the_shipped_sink_exports_post_redaction_records(
-    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+    mount: MountProfile, exported: InMemoryLogRecordExporter
 ) -> None:
     """End to end through the row itself: what a collector would receive.
 
@@ -61,17 +90,6 @@ async def test_the_shipped_sink_exports_post_redaction_records(
     A test that registered its own sink would have proved the SDK works and
     nothing about this row.
     """
-    from opentelemetry.sdk._logs.export import (
-        InMemoryLogRecordExporter,
-        SimpleLogRecordProcessor,
-    )
-
-    import ph.seams.telemetry_otel as row
-
-    # opentelemetry's in-memory exporter ships untyped.
-    exported = InMemoryLogRecordExporter()  # type: ignore[no-untyped-call]
-    monkeypatch.setattr(row, "_pipeline", lambda config: SimpleLogRecordProcessor(exported))
-
     ctx = await mount(OTEL_ROW)
 
     async def redact(record: SessionTelemetryRecord, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
@@ -89,6 +107,36 @@ async def test_the_shipped_sink_exports_post_redaction_records(
     assert not_none(body.attributes)["ph.channel"] == "ledger"
     assert not_none(body.attributes)["ph.tool"] == "bash"
     assert body.severity_text == "info"
+
+
+async def test_both_shipped_sinks_receive_the_shutdown_tail(
+    mount: MountProfile, exported: InMemoryLogRecordExporter, tmp_path: Path
+) -> None:
+    """The row sits in the log layer beneath `agent`, beside the JSONL sink, so what
+    the agents append as they let go reaches both before either goes. The JSONL sink
+    takes a thread per record, so the fan-out is still running once the last barrier
+    has flushed, and this row shuts its provider down as it unwinds: the barrier has
+    to wait for the fan-out, or the tail reaches neither sink, or only the JSONL one.
+
+    Sabotage: drop the barrier's `drain`, or move `telemetry-otel` after `agent` in
+    `ph-base`, and the tail's `turn/end` misses the collector.
+    """
+    path = tmp_path / "telemetry.jsonl"
+    ctx = await mount(OTEL_ROW, {"id": "telemetry", "config": {"enabled": True, "path": str(path)}})
+    session = await open_session(ctx, "s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    agent.ctx.add_disposer(
+        lambda: log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "aborted"}}),
+        label="cancel",
+    )
+    log_event(session, "turn/start", {"turn": 1})
+    await ctx.require(SESSIONS).flush(session)
+    await ctx.dispose()
+
+    collected = [one.log_record.body for one in exported.get_finished_logs()]
+    written = [json.loads(line)["body"] for line in path.read_text(encoding="utf-8").splitlines()]
+    assert collected[-1] == "turn/end", "the shutdown tail never reached the collector"
+    assert written[-1] == "turn/end", "the shutdown tail never reached the JSONL file"
 
 
 async def test_the_row_refuses_rather_than_shipping_nowhere(

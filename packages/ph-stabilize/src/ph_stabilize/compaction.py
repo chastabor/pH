@@ -81,7 +81,6 @@ from ph.agent.types import (
     RequestFailure,
     RequestProposal,
 )
-from ph.agent_loop import AgentCanceled
 from ph.cancel import Canceled
 from ph.cordis import Context, Next, plugin
 from ph.json import as_obj, as_seq, as_str, dumps
@@ -630,16 +629,15 @@ class SummarizeEngine:
         down because it has a bug, which is why the guard is `Exception` and not
         just `CompactionError` — and why every path through it leaves a record.
 
-        Cancellation is re-raised. `Canceled` and `AgentCanceled` both derive
-        from `Exception`, so a bare guard would swallow a person pressing stop
-        and let the turn carry on.
+        Cancellation is re-raised. `Canceled` derives from `Exception`, so a bare
+        guard would swallow a person pressing stop and let the turn carry on.
         """
         session: Session | None = agent.session
         if session is None or not self.config.auto or session.id in self._running:
             return None
         try:
             return await self._automatic(agent, session, trigger)
-        except (Canceled, AgentCanceled):
+        except Canceled:
             raise
         except Exception as error:
             self._record_failure(session, trigger, error)
@@ -709,7 +707,7 @@ class SummarizeEngine:
             raise CompactionError("busy", "the agent is working; compaction needs an idle session")
         try:
             return await self._compact(agent, session, "manual", instructions=instructions)
-        except (Canceled, AgentCanceled):
+        except Canceled:
             raise
         except Exception as error:
             # Recorded *and* re-raised, unlike the automatic path: the person is

@@ -2,7 +2,8 @@
 #
 # Row order carries no load semantics — activation is service-availability
 # driven, so a row waits for whatever it injects regardless of where it sits.
-# The grouping below is for readers.
+# It does carry the unwind: rows unwind in reverse, which is why the log layer
+# sits beneath the agents. Otherwise the grouping below is for readers.
 #
 # A later bundle or the user's profile addresses these rows by id. A patch
 # replaces the targeted row's WHOLE config rather than merging into it, so a
@@ -21,6 +22,30 @@
 
 - id: session
   name: session
+
+# The log layer: the log's storage, its export, and when it reaches disk,
+# beneath every row that writes to the log. Rows unwind in reverse, so these go
+# last: what the agents append as they let go is flushed by the checkpoint
+# policy's last barrier and shipped while every row here is still mounted. A row
+# that redacts or sinks telemetry records belongs here too, or the shutdown tail
+# passes it by.
+- id: session-persistence
+  name: session-persistence-jsonl
+
+- id: telemetry
+  name: session-telemetry
+  config:
+    enabled: false
+
+# Shipped off and in its slot, because a profile can only add a row at the end,
+# where it would unwind before the tail ships. A profile turns it on in place
+# with `{id: telemetry-otel, disabled: false}`.
+- id: telemetry-otel
+  name: session-telemetry-otel
+  disabled: true
+
+- id: checkpoint-policy
+  name: session-checkpoint-policy
 
 - id: system-prompt
   name: system-prompt
@@ -292,18 +317,6 @@
 # an edit take effect in the turn after it, rather than after a restart.
 - id: memory-agents-md
   name: memory-agents-md
-
-# --- durability ------------------------------------------------------------
-- id: session-persistence
-  name: session-persistence-jsonl
-
-- id: checkpoint-policy
-  name: session-checkpoint-policy
-
-- id: telemetry
-  name: session-telemetry
-  config:
-    enabled: false
 
 # --- resilience ------------------------------------------------------------
 # Media the routed model cannot read, replaced with a pointer it can — above

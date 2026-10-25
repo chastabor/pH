@@ -1092,7 +1092,9 @@ lease taken on a worker thread releases nothing.
 constructed: `user` (TUI interrupt, which keeps the inbox), `parent` (subagent
 release), `disposed` (driver disposal, which clears it). `hook` and `legacy` are
 declared and dead. A turn stopped from outside the loop, by a cancelled scope, an
-interrupt or an exit, closes `aborted` with no cause at all. `TurnEndReason.kind` is
+interrupt or an exit, closes `aborted` with no cause at all, and keeps what the stop
+said of itself as `detail`: a scope's reason, which a one-shot host sets to the
+signal's name, or else the exception's type. `TurnEndReason.kind` is
 `completed | aborted | blocked | error | max-tokens | interrupted`, of which
 `interrupted` is never constructed as a dataclass — it reaches logs only as the
 wire payload repair writes on resume.

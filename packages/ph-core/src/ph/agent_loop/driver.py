@@ -60,7 +60,7 @@ from ..agent.types import (
     RequestProposal,
     TurnEndReason,
 )
-from ..cancel import Canceled, CancelToken
+from ..cancel import Canceled, CancelToken, reason_of
 from ..cordis import Context, settled, settled_or_none
 from ..json import as_int
 from ..keys import LLM, MODELS, SYSTEM_PROMPT
@@ -87,17 +87,9 @@ from ..tools.errors import error_info
 
 _LOG = log_writer(__name__)
 
-__all__ = ["AgentCanceled", "ReactLoopAgent"]
+__all__ = ["ReactLoopAgent"]
 
 log = logging.getLogger("ph.agent_loop")
-
-
-class AgentCanceled(Exception):
-    """The active driver was canceled; carries the cause `cancel` was given."""
-
-    def __init__(self, cause: AgentCancelCause) -> None:
-        super().__init__(f"agent canceled: {cause.kind}")
-        self.cause = cause
 
 
 @dataclass(slots=True)
@@ -248,7 +240,7 @@ class ReactLoopAgent:
 
     def _throw_if_canceled(self) -> None:
         if self._phase.canceled is not None:
-            raise AgentCanceled(self._phase.canceled)
+            raise Canceled(self._phase.canceled.kind)
 
     # ------------------------------------------------------------------ run --
 
@@ -271,7 +263,7 @@ class ReactLoopAgent:
         try:
             while await self._turn():
                 pass
-        except (AgentCanceled, Canceled):
+        except Canceled:
             pass
         except Exception:
             log.debug("ph.agent_loop: driver contained a failure", exc_info=True)
@@ -403,10 +395,9 @@ class ReactLoopAgent:
                 if turn_ends is not None and not self.inbox.next_step:
                     break
                 target = "next-step"
-        except (AgentCanceled, Canceled):
-            # A stop, which `_turn_reason` names, cleared of whatever ending a
-            # step had already decided.
-            turn_ends = None
+        except Canceled as error:
+            # A stop, recorded over whatever ending a step had already decided.
+            turn_ends = _aborted(error, phase.canceled)
             raise
         except Exception as error:
             # A harness error's own code rather than `UNKNOWN`, because that is
@@ -419,10 +410,10 @@ class ReactLoopAgent:
             turn_ends = TurnEndReason(kind="error", error=failure)
             self._report(error)
             raise
-        except BaseException:
-            # A stop from outside, a cancelled scope, an interrupt or an exit, and
-            # cleared as the loop's own are.
-            turn_ends = None
+        except BaseException as error:
+            # A stop from outside, a cancelled scope, an interrupt or an exit,
+            # recorded as the loop's own are.
+            turn_ends = _aborted(error, phase.canceled)
             raise
         finally:
             _LOG.append(
@@ -430,7 +421,7 @@ class ReactLoopAgent:
                 "turn/end",
                 {
                     "turn": turn,
-                    "reason": _turn_reason(turn_ends, capped, phase.canceled).to_wire(),
+                    "reason": _turn_reason(turn_ends, capped).to_wire(),
                 },
             )
         if not self.inbox.has_pending:
@@ -490,7 +481,7 @@ class ReactLoopAgent:
                     )
                     assembler.push(chunk)
                 self._throw_if_canceled()
-            except (AgentCanceled, Canceled):
+            except Canceled:
                 content = assembler.interrupted_blocks()
                 if content:
                     # An interrupted turn still finalizes what the user saw:
@@ -739,9 +730,29 @@ def _error_chain(error: BaseException) -> str:
     return ": ".join(parts)
 
 
-def _turn_reason(
-    ends: TurnEndReason | None, capped: bool, canceled: AgentCancelCause | None
-) -> TurnEndReason:
+def _aborted(stop: BaseException, canceled: AgentCancelCause | None) -> TurnEndReason:
+    """What a stop ends a turn as: `aborted`, whatever a step had decided (C9).
+
+    A step may already have decided how the turn ends when the stop lands: while
+    `agent/turn-stopping` runs, or in a step a steer added. `_turn` records every
+    stop by catching `BaseException`, not `anyio.get_cancelled_exc_class()`, which
+    misses the `BaseExceptionGroup` an anyio task group raises around one, and
+    `KeyboardInterrupt`, and `SystemExit`.
+
+    **The cause is the one the loop's own `cancel` was told, or none.** A stop
+    from outside has an author the loop cannot see: a person's Ctrl-C and a host's
+    shutdown reach it as the same cancel. It said `user`, which a shutdown is not,
+    and now names nobody, as repair's `interrupted` closer does. What the loop has
+    instead is what the stop said of itself (`reason_of`), kept as the `detail`. A
+    host that wants its reason on record gives it to `cancel`, or to the scope it
+    cancels, as `until_signaled` does with the signal's name.
+    """
+    if canceled is not None:
+        return TurnEndReason(kind="aborted", reason=canceled)
+    return TurnEndReason(kind="aborted", detail=reason_of(stop))
+
+
+def _turn_reason(ends: TurnEndReason | None, capped: bool) -> TurnEndReason:
     """What `turn/end` records, given how the loop left and what it passed through.
 
     **A cap is not erased by finishing.** A step that hit `max_tokens` cut the
@@ -754,27 +765,15 @@ def _turn_reason(
     `error` each name something the reader has to act on, and a cap somewhere in
     the turn is the smaller fact beside them.
 
-    **`None` means a stop left the body, so it is `aborted`** (C9). Every normal
-    exit from `_turn` assigns `ends` first — both `break`s are guarded by
-    `turn_ends is not None` and both `return` paths set it — so a `None` arriving
-    here cannot be a turn that finished. It used to read as `completed`, and a
-    turn that finished nothing told the resume path there was no open turn to
-    repair and a reader a story the run did not have.
-
-    Every stop clears `ends` on its way out, because a step may already have
-    decided how the turn ends when the stop lands: while `agent/turn-stopping`
-    runs, or in a step a steer added. `_turn` clears on `BaseException`, not on
-    `anyio.get_cancelled_exc_class()`, which misses the `BaseExceptionGroup` an
-    anyio task group raises around one, and `KeyboardInterrupt`, and `SystemExit`.
-
-    **The cause is the one the loop's own `cancel` was told, or none.** A stop
-    from outside has an author the loop cannot see: a person's Ctrl-C and a host's
-    shutdown reach it as the same cancel. It said `user`, which a shutdown is not,
-    and now names nobody, as repair's `interrupted` closer does. A host that wants
-    its reason on record gives it to `cancel`.
+    **No ending reads as `aborted`, never `completed`** (C9). Every exit from
+    `_turn` assigns one first — both `break`s are guarded by `turn_ends is not
+    None`, both `return` paths set it, and every raise is caught — so `None` is a
+    path nobody wrote yet. It used to read as `completed`, and a turn that
+    finished nothing told the resume path there was no open turn to repair and a
+    reader a story the run did not have.
     """
     if ends is None:
-        return TurnEndReason(kind="aborted", reason=canceled)
+        return TurnEndReason(kind="aborted")
     if ends.kind == "completed":
         return TurnEndReason(kind="max-tokens" if capped else "completed")
     return ends

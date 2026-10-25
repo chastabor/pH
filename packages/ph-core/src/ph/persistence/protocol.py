@@ -497,10 +497,14 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
     a child's parent-scope effect writes its tombstone, a canceled turn closes
     itself. All of it happens while `scope` unwinds its children — every row, and
     beneath the `agent` row every agent scope — which is after each host's own
-    flush, and for the agent scopes after the persistence row itself has gone:
-    rows unwind in reverse, and persistence mounts after `agent`. So a clean stop
-    wrote a log that read as a crash, and `workspace-reconcile` reclaimed trees a
-    clean exit had already released.
+    flush. When persistence mounted after `agent` it had gone by then, so a clean
+    stop wrote a log that read as a crash, and `workspace-reconcile` reclaimed trees
+    a clean exit had already released.
+
+    **The backstop, now.** `ph-base` mounts persistence in the log layer beneath
+    `agent`, and the checkpoint policy's last barrier writes the agents' tail
+    through the store as it unwinds, so in that profile this finds nothing owed. It
+    stays for a profile that composes the rows otherwise, or drops the barrier.
 
     An effect of the **mount's own scope** is the one thing that runs after all of
     that: a scope unwinds its children first, then its own effects, LIFO. Each

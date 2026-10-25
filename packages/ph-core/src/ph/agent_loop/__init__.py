@@ -8,9 +8,9 @@ from ..agent.registry import DriverFactory
 from ..cordis import Context, plugin
 from ..keys import AGENTS, LLM, SESSIONS, SYSTEM_PROMPT
 from ..wire import WireModel
-from .driver import AgentCanceled, ReactLoopAgent
+from .driver import ReactLoopAgent
 
-__all__ = ["AgentCanceled", "Config", "ReactLoopAgent", "apply"]
+__all__ = ["Config", "ReactLoopAgent", "apply"]
 
 
 class Config(WireModel):

@@ -29,10 +29,18 @@ from typing import Any
 import anyio
 import pytest
 
-from ph.keys import SESSION_TELEMETRY, SESSIONS
+from ph.keys import AGENTS, SESSION_TELEMETRY, SESSIONS
+from ph.persistence import open_session
 from ph.seams.telemetry import SessionTelemetryRecord
-from ph.session import Session, SessionHeader
-from ph.testing import MountProfile, log_event, raising, stored_events
+from ph.session import Session, SessionEvent, SessionHeader, declare_log_type
+from ph.testing import FAKE_OPTIONS as FAKE
+from ph.testing import (
+    MountProfile,
+    isolated_log_types,
+    log_event,
+    raising,
+    stored_events,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -175,13 +183,18 @@ async def test_a_sink_that_records_is_still_refused(mount: MountProfile) -> None
 # ------------------------------------------------------- behind the log --
 
 
-def _ledger(seen: list[SessionTelemetryRecord], session_id: str) -> list[tuple[str, int]]:
-    """What the ledger said about one session, as the `(type, seq)` it names."""
+def _records(seen: list[SessionTelemetryRecord], session_id: str) -> list[SessionTelemetryRecord]:
+    """What the ledger said about one session."""
     return [
-        (record.body, record.attributes["event.seq"])
+        record
         for record in seen
         if record.channel == "ledger" and record.attributes["session.id"] == session_id
     ]
+
+
+def _ledger(seen: list[SessionTelemetryRecord], session_id: str) -> list[tuple[str, int]]:
+    """What the ledger said about one session, as the `(type, seq)` it names."""
+    return [(record.body, record.attributes["event.seq"]) for record in _records(seen, session_id)]
 
 
 async def test_a_ledger_record_ships_once_the_log_holds_its_event(mount: MountProfile) -> None:
@@ -215,6 +228,46 @@ async def test_a_ledger_record_ships_once_the_log_holds_its_event(mount: MountPr
     assert "turn/start" in [event.type for event in stored]
     assert _ledger(seen, "s") == [(event.type, event.seq) for event in stored]
     assert lost.seq == len(stored), "the tail the store does not hold was not shipped"
+
+
+async def test_a_record_carries_the_fields_its_type_exports(mount: MountProfile) -> None:
+    """A record names its event and carries only what its type exports: why the work
+    failed, was refused or stopped, which is what an operator looks for without the
+    log at hand. ph-core's types and a package's declared ones ship the same way.
+
+    Sabotage: drop `_exported` from `observe`, or hand a sink the payload's frozen
+    view.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s")
+    reason = {"kind": "aborted", "detail": "SIGTERM"}
+
+    with isolated_log_types():
+        declare_log_type(
+            "sample/declined",
+            owner="sample.plugin",
+            ignorable=True,
+            audit_only=True,
+            exported=("reason", "code"),
+        )
+        log_event(session, "turn/start", {"turn": 1})
+        log_event(session, "turn/end", {"turn": 1, "reason": reason})
+        log_event(session, "sample/declined", {"reason": "busy", "via": "write"})
+        await sessions.flush(session)
+        await anyio.wait_all_tasks_blocked()
+
+    shipped = {record.body: record.attributes for record in _records(seen, "s")}
+    assert shipped["turn/end"]["event.reason"] == reason
+    assert type(shipped["turn/end"]["event.reason"]) is dict, "a sink was handed a frozen view"
+    assert "event.turn" not in shipped["turn/end"], "a field the type does not export shipped"
+    assert not [key for key in shipped["turn/start"] if key.startswith("event.reason")]
+    declined = shipped["sample/declined"]
+    assert declined["event.reason"] == "busy"
+    assert "event.code" not in declined, "a field the payload left out shipped as null"
+    assert "event.via" not in declined
 
 
 async def test_a_flush_that_failed_ships_nothing(mount: MountProfile) -> None:
@@ -267,3 +320,90 @@ async def test_one_copy_of_a_log_cannot_release_another(mount: MountProfile) -> 
     await sessions.flush(new)
     await anyio.wait_all_tasks_blocked()
     assert _ledger(seen, "s") == [(started.type, started.seq)]
+
+
+async def test_the_shutdown_tail_ships_before_the_mount_lets_go(mount: MountProfile) -> None:
+    """What the agents append as they let go ships in the same process. The log layer
+    sits beneath `agent`, so the checkpoint policy's last barrier writes that tail
+    through the store while this row is still mounted, and waits for the ledger to
+    ship it before the rows beneath go. The sink takes its time, as the JSONL one
+    does with a thread per record, so the fan-out is still running when the barrier
+    returns from its flush.
+
+    Sabotage: drop the barrier's `drain`, drop the barrier, or move the log layer
+    back above `agent` in `ph-base`, and the tail never ships.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+
+    async def slow(record: SessionTelemetryRecord) -> None:
+        await anyio.sleep(0.01)
+        seen.append(record)
+
+    ctx.require(SESSION_TELEMETRY).add_sink(slow)
+    session = await open_session(ctx, "s")
+    agent = ctx.require(AGENTS).create(session, FAKE)
+    # A canceled turn closing itself as its agent lets go.
+    tail: list[SessionEvent] = []
+    reason = {"kind": "aborted", "detail": "SIGTERM"}
+    agent.ctx.add_disposer(
+        lambda: tail.append(log_event(session, "turn/end", {"turn": 1, "reason": reason})),
+        label="cancel",
+    )
+    log_event(session, "turn/start", {"turn": 1})
+    await ctx.require(SESSIONS).flush(session)
+    await ctx.dispose()
+
+    (closing,) = tail
+    (ended,) = [record for record in _records(seen, "s") if record.body == closing.type]
+    assert ended.attributes["event.seq"] == closing.seq
+    assert ended.attributes["event.reason"] == reason
+
+
+async def test_a_resumed_logs_repair_ships(mount: MountProfile) -> None:
+    """A resume closes a crashed turn with records its store does not hold yet. They
+    are this process's to write, so they are the ledger's to ship, with the reason
+    the repair gives. What the store held was the last run's to ship, so nothing
+    before them ships again.
+
+    Sabotage: start `_created` at the seed's end, and the closing `turn/end` never
+    ships.
+    """
+    crashed = await mount()
+    session = crashed.require(SESSIONS).create("s")
+    started = log_event(session, "turn/start", {"turn": 1})
+    await crashed.require(SESSIONS).flush(session)
+    await crashed.dispose()  # the turn is never closed, as after a crash
+
+    reopened = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    reopened.require(SESSION_TELEMETRY).add_sink(seen.append)
+    revived = await open_session(reopened, "s")
+    await reopened.require(SESSIONS).flush(revived)
+    await anyio.wait_all_tasks_blocked()
+
+    shipped = _records(seen, "s")
+    assert [record.body for record in shipped][:2] == ["turn/end", "session/resumed"]
+    assert shipped[0].attributes["event.reason"]["kind"] == "interrupted"
+    assert all(record.attributes["event.seq"] > started.seq for record in shipped)
+
+
+async def test_only_the_first_chunk_of_a_step_ships(mount: MountProfile) -> None:
+    """A token-by-token export is thousands of records saying the same thing, and the
+    first chunk of a step is the one that carries the latency signal.
+
+    Sabotage: let `_Cursor.wants` pass every chunk, and the second of each step ships.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s")
+    chunks = [
+        log_event(session, "assistant/chunk", {"turn": 1, "step": step, "delta": "x"})
+        for step in (1, 1, 2, 2)
+    ]
+    await sessions.flush(session)
+    await anyio.wait_all_tasks_blocked()
+
+    assert _ledger(seen, "s") == [(chunk.type, chunk.seq) for chunk in chunks[::2]]

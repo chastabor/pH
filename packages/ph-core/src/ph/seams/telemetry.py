@@ -14,7 +14,9 @@ after the waterfall settles.
 Ledger records mirror session events one-to-one with one exception: only the
 *first* `assistant/chunk` per step ships, because a token-by-token export is
 thousands of records saying the same thing, and the first is the one that
-carries the latency signal.
+carries the latency signal. A record names its event and carries only the
+fields its type exports (`ph.session.exported_fields`): why the work failed, was
+refused or stopped.
 
 **A ledger record ships once the log holds its event, and not before.** The
 record names its event by `(session, seq)`, and `session/event` fires on the
@@ -28,10 +30,12 @@ event's own `time`, so the latency the first chunk reports is the one it had, an
 the export lags only by the distance to the next flush, which every step, tool
 call and turn end makes.
 
-**Limit: the shutdown tail is not exported.** Rows unwind in reverse mount order,
-so this row goes before the agent row, and what an agent's teardown appends is
-written only by the mount's last write, after it. That order stays; see
-`docs/seams/session_telemetry.md` for why, and for what a fix has to respect.
+**The shutdown tail ships before the row goes.** This row sits in the log layer,
+beneath the agents, and rows unwind in reverse. So what the agents append as they
+let go is flushed by the checkpoint policy's last barrier while this row and the
+sinks beside it are still mounted, and ships like any other record; the barrier
+waits for that fan-out before the rows beneath it go.
+`docs/seams/session_telemetry.md` has the rest.
 
 @module ph.seams.telemetry
 """
@@ -58,10 +62,10 @@ from ..cordis import (
     running,
     settled_or_none,
 )
-from ..json import as_int, dumps
+from ..json import PlainJsonValue, as_int, dumps, thaw_json
 from ..keys import SESSION_TELEMETRY, SESSIONS
 from ..paths import default_home_path, write_text_under
-from ..session import Session, SessionEvent, now_ms
+from ..session import Session, SessionEvent, exported_fields, now_ms
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -130,17 +134,34 @@ export path.
 
 
 @dataclass(slots=True)
+class _Cursor:
+    """How far the ledger has come through one session's log."""
+
+    read: int
+    """Every event below this seq has been read for shipping, and none past it."""
+    chunked: tuple[int, int] | None = None
+    """The step whose first chunk already shipped. One per session rather than one
+    per step, so it does not grow with the conversation."""
+
+    def wants(self, event: SessionEvent) -> bool:
+        """Whether this event ships. Only the first `assistant/chunk` per step does."""
+        if event.type != "assistant/chunk":
+            return True
+        step = (as_int(event.data.get("turn")), as_int(event.data.get("step")))
+        if self.chunked == step:
+            return False
+        self.chunked = step
+        return True
+
+
+@dataclass(slots=True)
 class SessionTelemetry:
     """The service published as `ctx.session_telemetry`."""
 
     ctx: Context
     _sinks: list[_Sink] = field(default_factory=list)
-    _last_chunked_step: dict[Session, tuple[int, int]] = field(default_factory=dict)
-    """Per session, the step whose first chunk already shipped. One entry per
-    session rather than one per step, so it does not grow with the conversation."""
-    _shipped: dict[Session, int] = field(default_factory=dict)
-    """Per live session, how far the ledger has read its log: every event below
-    this seq, and none past it.
+    _cursors: dict[Session, _Cursor] = field(default_factory=dict)
+    """Per live session, how far the ledger has come through its log.
 
     Keyed by the session and not its id, because a resume in the same process
     makes a second copy of a log under the same id, and a flush of the first
@@ -179,39 +200,40 @@ class SessionTelemetry:
         finally:
             _EXPORTING.reset(token)
 
-    def _wants(self, session: Session, event: SessionEvent) -> bool:
-        """Whether this event ships. Only the first `assistant/chunk` per step does."""
-        if event.type != "assistant/chunk":
-            return True
-        step = (as_int(event.data.get("turn")), as_int(event.data.get("step")))
-        if self._last_chunked_step.get(session) == step:
-            return False
-        self._last_chunked_step[session] = step
-        return True
-
     def _track(self, session: Session) -> None:
-        """Start a session's cursor at its end: its seed was never an event here."""
-        self._shipped.setdefault(session, session.seq)
+        """Read a session already live when the row activates from here on: what it
+        held by then was this row's earlier life's to ship."""
+        self._cursors[session] = _Cursor(read=session.seq)
 
-    def _durable(self, session: Session, through: int) -> list[SessionEvent]:
-        """What the ledger ships now that the log holds every event below `through`.
+    def _created(self, session: Session) -> None:
+        """Start a new session's cursor where this process's own writing begins.
 
-        Nothing is read when no sink would receive it: a record is fanned out to
-        the sinks there are when it is made, so there is nobody to read it for."""
-        start = self._shipped.get(session)
-        if start is None or through <= start:
-            return []
-        self._shipped[session] = through
+        That is `durable_length`, what a store already held when the session was
+        made: a fork's prefix was its parent's to ship, and a stored log was the run's
+        that wrote it. So a resume's repair closers ship, because the store does not
+        hold them yet; a cursor at the seed's end skipped them."""
+        self._cursors[session] = _Cursor(read=session.durable_length)
+
+    def _durable(self, session: Session, through: int) -> MaybeAwaitable[None]:
+        """Ship what the ledger owes now that the log holds every event below `through`.
+
+        The fan-out comes back for `emit` to schedule, never awaited on the flush
+        path, and a flush that released nothing costs no task at all. Nothing is
+        read when no sink would receive it: a record is fanned out to the sinks
+        there are when it is made, so there is nobody to read it for."""
+        cursor = self._cursors.get(session)
+        if cursor is None or through <= cursor.read:
+            return None
+        start, cursor.read = cursor.read, through
         if not self._sinks:
-            return []
+            return None
         owed = session.events_from(start, through - start)
-        return [event for event in owed if self._wants(session, event)]
+        ready = [event for event in owed if cursor.wants(event)]
+        return self.observe(session, ready) if ready else None
 
     def _forget(self, session: Session) -> None:
-        """Drop one session's cursor. What no flush confirmed is not exported:
-        nothing says the log holds it."""
-        self._shipped.pop(session, None)
-        self._last_chunked_step.pop(session, None)
+        """Drop one session's cursor."""
+        self._cursors.pop(session, None)
 
     async def observe(self, session: Session, events: Sequence[SessionEvent]) -> None:
         """Mirror session events onto the ledger channel, in the order given."""
@@ -225,6 +247,7 @@ class SessionTelemetry:
                         "session.id": session.id,
                         "event.type": event.type,
                         "event.seq": event.seq,
+                        **_exported(event),
                     },
                     body=event.type,
                 )
@@ -247,6 +270,16 @@ class SessionTelemetry:
                 body=body,
             )
         )
+
+
+def _exported(event: SessionEvent) -> dict[str, PlainJsonValue]:
+    """The fields `event`'s type exports, each as `event.<field>`, thawed so a sink is
+    handed plain JSON. A field the payload leaves out ships nothing."""
+    return {
+        f"event.{name}": thaw_json(event.data[name])
+        for name in exported_fields(event.type)
+        if event.data.get(name) is not None
+    }
 
 
 async def ops_record(
@@ -302,16 +335,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
         telemetry.add_sink(write)
 
-    def on_durable(session: Session, through: int) -> MaybeAwaitable[None]:
-        # The returned coroutine is scheduled by `emit`, never awaited on the
-        # flush path; a flush that released nothing costs no task at all.
-        ready = telemetry._durable(session, through)
-        return telemetry.observe(session, ready) if ready else None
-
-    # Sessions already live when the row (re)activates are read from here on,
-    # as the firehose listener it replaced would have heard them.
     for session in ctx.require(SESSIONS).list():
         telemetry._track(session)
-    ctx.on("session/created", telemetry._track)
-    ctx.on("session/durable", on_durable)
+    ctx.on("session/created", telemetry._created)
+    ctx.on("session/durable", telemetry._durable)
     ctx.on("session/disposed", telemetry._forget)

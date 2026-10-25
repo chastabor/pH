@@ -34,6 +34,7 @@ __all__ = [
     "first_of",
     "is_canceled",
     "raced",
+    "reason_of",
     "until_canceled",
 ]
 
@@ -154,17 +155,39 @@ def is_canceled(token: Cancellation | None) -> bool:
     return token is not None and token.canceled
 
 
+def reason_of(stop: BaseException) -> str:
+    """What a stop says of itself: a token's or a scope's reason, else its type.
+
+    A cancelled anyio scope hands its reason over inside a message that also names
+    the scope's id and the task that cancelled it, so only the reason is kept: the
+    rest differs every run and tells a reader nothing. That message is the asyncio
+    backend's, not public API, so a change to it reads as the bare type. A task
+    group's stop says what the stops it holds say. Needs a running event loop, as
+    `anyio.get_cancelled_exc_class` does.
+    """
+    if isinstance(stop, Canceled):
+        return stop.reason
+    if isinstance(stop, BaseExceptionGroup):
+        return "; ".join(reason_of(inner) for inner in stop.exceptions)
+    name, text = type(stop).__name__, str(stop)
+    if isinstance(stop, anyio.get_cancelled_exc_class()):
+        return text.partition("; reason: ")[2] or name
+    return f"{name}: {text}" if text else name
+
+
 async def until_canceled(signal: Cancellation | None, scope: anyio.CancelScope) -> None:
-    """Cancel `scope` once `signal` trips; park forever when there is none.
+    """Cancel `scope` once `signal` trips, with its reason; park forever when
+    there is none.
 
     `None` parks rather than returning, so `raced` can start this
-    unconditionally and let the work be what finishes the scope.
+    unconditionally and let the work be what finishes the scope. The reason goes
+    with the cancel so a turn the scope cuts records why (`reason_of`).
     """
     if signal is None:
         await anyio.sleep_forever()
         return  # `sleep_forever` never returns; this is for the checker
     await signal.wait()
-    scope.cancel()
+    scope.cancel(signal.cancel_reason)
 
 
 class Waitable(Protocol):

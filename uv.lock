@@ -22,7 +22,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
-    { name = "anyio", specifier = ">=4.4,<5" },
+    { name = "anyio", specifier = ">=4.11,<5" },
     { name = "filelock", specifier = ">=3.32" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "ph-core", extras = ["otel"], editable = "packages/ph-core" },
@@ -1437,7 +1437,7 @@ otel = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.4,<5" },
+    { name = "anyio", specifier = ">=4.11,<5" },
     { name = "croniter", specifier = ">=3.0" },
     { name = "filelock", specifier = ">=3.32" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.27" },
@@ -1555,7 +1555,7 @@ web = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.4,<5" },
+    { name = "anyio", specifier = ">=4.11,<5" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "ph-clm", editable = "packages/ph-clm" },
     { name = "ph-code-graph", editable = "packages/ph-code-graph" },

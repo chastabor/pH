@@ -1147,15 +1147,16 @@ async def test_what_a_teardown_appends_is_written_by_the_mounts_last_act(
 
     Every host flushes *before* it unwinds, and unwinding is exactly when records
     are appended — the workspace seam's release closure writes
-    `workspace/disposed` as an agent scope lets go. Rows unwind in reverse and the
-    agent scopes hang off the `agent` row, which mounts before persistence, so
-    those appends landed after the persistence row's listeners were gone: in
+    `workspace/disposed` as an agent scope lets go. When persistence mounted after
+    the `agent` row, those appends landed after its listeners were gone: in
     memory, never on disk. A clean stop read as a crash, and `workspace-reconcile`
     reclaimed trees the clean exit had already released.
 
     Held by the claim, which is the contract every host already goes through: a
     store that holds a session writes every live log before letting it go
-    (`write_on_unwind`). Probe: `reviews/probes/probe_teardown_flush.py`.
+    (`write_on_unwind`). `ph-base` now writes that tail earlier, at the checkpoint
+    policy's last barrier, so the barrier is turned off here to reach the backstop.
+    Probe: `reviews/probes/probe_teardown_flush.py`.
 
     Sabotage: drop `write_on_unwind` from `JsonlSessionStore.claim` and the last
     record is `turn/start`.
@@ -1163,7 +1164,7 @@ async def test_what_a_teardown_appends_is_written_by_the_mounts_last_act(
     from ph.seams.workspace import DISPOSED
     from ph.testing import workspace_disposed
 
-    ctx = await mount(_root(tmp_path))
+    ctx = await mount(_root(tmp_path), {"id": "checkpoint-policy", "disabled": True})
     store = ctx.require(SESSION_PERSISTENCE)
     assert isinstance(store, JsonlSessionStore)
     await store.claim("s", scope=ctx)

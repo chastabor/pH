@@ -26,6 +26,7 @@ import anyio
 import pytest
 
 from ph import resources
+from ph.cancel import reason_of
 from ph.cordis import Context
 from ph.orphans import process_alive
 from ph.resources import (
@@ -295,8 +296,12 @@ async def test_a_signal_stops_a_one_shot_run_through_its_own_unwind() -> None:
     A hard stop left armed after the stop it bounds would end a process that had
     already finished stopping cleanly, partway through whatever it did next.
 
+    The cancel names its signal, so a turn it cuts records which one: a person's
+    Ctrl-C and a supervisor's `SIGTERM` are otherwise the same cancelled scope.
+
     Sabotage: drop the `hard.cancel()` in `stop_on_signals`, and the thread is still
-    armed when the run comes back.
+    armed when the run comes back. Cancel `body` with no reason in
+    `until_signaled`, and the run hears only the cancelled class.
     """
     unwound: list[str] = []
 
@@ -304,12 +309,13 @@ async def test_a_signal_stops_a_one_shot_run_through_its_own_unwind() -> None:
         try:
             os.kill(os.getpid(), signal.SIGTERM)
             await anyio.sleep(30)
-        finally:
-            unwound.append("unwound")
+        except BaseException as stop:
+            unwound.append(reason_of(stop))
+            raise
         return "finished"
 
     assert await until_signaled(run) == Stopped(signal.SIGTERM)
-    assert unwound == ["unwound"]
+    assert unwound == ["SIGTERM"]
 
     def armed() -> bool:
         return any(thread.name == HARD_STOP_THREAD for thread in threading.enumerate())

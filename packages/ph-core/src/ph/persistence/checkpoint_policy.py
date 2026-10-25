@@ -5,7 +5,8 @@ are separate plugins for the reason dsh separated them: a deployment that wants
 a different durability/latency trade makes it a config change, not a fork of the
 backend.
 
-Two barriers, and a third that turns out to be one of the first two:
+Two barriers, a third that turns out to be one of the first two, and a fourth at
+the end:
 
 1. **before each model request** (`llm/send`) — the events that motivated the
    request are durable before it is in flight. On `llm/send`, not around
@@ -32,7 +33,16 @@ Two barriers, and a third that turns out to be one of the first two:
    fsync microseconds earlier would buy nothing. The only step end barrier 1
    never reaches is a pre-step **reject** (no request follows), so that is the
    one case flushed here — on `agent/step-rejected`, once the decision is final,
-   since a row outside this one that rejected without calling on was never seen.
+   since a row outside this one that rejected without calling on was never seen;
+4. **once the agents have let go**, as this row unwinds. It sits in the log layer
+   beneath `agent`, and rows unwind in reverse, so it runs after every agent scope
+   has appended what it appends on the way out, such as `workspace/disposed`, a
+   child's tombstone or a canceled turn's `turn/end`, and before persistence and
+   telemetry go. So that tail is written through the store, which says so on
+   `session/durable`, and the barrier waits out the detached work that set off
+   (`Context.drain`), the telemetry ledger shipping the tail among it. The mount's
+   last write (`ph.persistence.write_on_unwind`) stays for a profile without this
+   row, and otherwise finds nothing owed.
 
 Barriers 1 and 2 are **fail-closed**: if the flush raises, the adapter and the
 tool body are not invoked. A side effect whose record could not be written is
@@ -42,6 +52,8 @@ worse than a side effect that did not happen.
 """
 
 from __future__ import annotations
+
+import anyio
 
 from ..agent.types import PreStepRequest
 from ..cordis import Context, plugin
@@ -89,6 +101,21 @@ async def apply(ctx: Context, config: None) -> None:
         # No request will follow to flush the previous step's results.
         await ctx.require(SESSIONS).flush(request.session)
 
+    async def after_the_agents() -> None:
+        # Not fail-closed: nothing waits on it, and a log that could not be written
+        # is the mount's last write's to try again. All at once, since each flush
+        # writes a session's ancestors before it and waits on a write of them
+        # already under way, so a child still never lands before its parent.
+        sessions = ctx.require(SESSIONS)
+        async with anyio.create_task_group() as writing:
+            for session in sessions.list():
+                writing.start_soon(sessions.written, session)
+        # A `session/durable` reader acts off the flush path, in detached work its
+        # scope would cancel: the telemetry ledger's fan-out of the tail is that.
+        # This is its one chance to finish while the rows beneath are mounted.
+        await ctx.drain()
+
     ctx.on("llm/send", before_request)
     ctx.on("tools/body", before_tool_body)
     ctx.on("agent/step-rejected", after_reject)
+    ctx.add_disposer(after_the_agents, label="checkpoint.after-the-agents")

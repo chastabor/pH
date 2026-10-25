@@ -326,6 +326,14 @@ def test_a_declaration_cannot_disagree_with_itself_or_ph_core(vocabulary: None) 
         declare_log_type("sample/note", owner="sample.plugin", ignorable=False, audit_only=False)
     with pytest.raises(LogTypeError, match="who reads a type cannot change"):
         declare_log_type("sample/note", owner="sample.plugin", ignorable=True, audit_only=True)
+    with pytest.raises(LogTypeError, match="what a type ships cannot change"):
+        declare_log_type(
+            "sample/note",
+            owner="sample.plugin",
+            ignorable=True,
+            audit_only=False,
+            exported=("reason",),
+        )
     with pytest.raises(LogTypeError, match="namespace/type"):
         declare_log_type("SampleNote", owner="sample.plugin", ignorable=True, audit_only=False)
     with pytest.raises(LogTypeError, match="needs an owner"):

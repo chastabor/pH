@@ -48,12 +48,14 @@ from .journal import Claim, IntentJournal, IntentNotDurable, Prior, intents_of
 from .json import InvalidJsonValueError, freeze_json_value
 from .known_event_types import (
     AUDIT_ONLY_SESSION_EVENT_TYPES,
+    EXPORTED_SESSION_EVENT_FIELDS,
     IGNORABLE_SESSION_EVENT_TYPES,
     KNOWN_SESSION_EVENT_TYPES,
     LogTypeDeclaration,
     LogTypeError,
     UnknownEventTypeError,
     declare_log_type,
+    exported_fields,
     is_audit_only,
     known_log_types,
 )
@@ -120,6 +122,7 @@ from .surface import (
 
 __all__ = [
     "AUDIT_ONLY_SESSION_EVENT_TYPES",
+    "EXPORTED_SESSION_EVENT_FIELDS",
     "IGNORABLE_SESSION_EVENT_TYPES",
     "KNOWN_SESSION_EVENT_TYPES",
     "SESSION_FORMAT_VERSION",
@@ -178,6 +181,7 @@ __all__ = [
     "derive_event_message",
     "derive_transcript",
     "editable_message",
+    "exported_fields",
     "extend_index",
     "family_for",
     "fold_intents",

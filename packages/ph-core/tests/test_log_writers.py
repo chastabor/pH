@@ -52,6 +52,7 @@ from ph.agent_loop.driver import _LOG as DRIVER
 from ph.json import JsonObject
 from ph.session import Session
 from ph.session.known_event_types import (
+    EXPORTED_SESSION_EVENT_FIELDS,
     KNOWN_SESSION_EVENT_TYPES,
     WRITERS,
     declare_log_type,
@@ -79,6 +80,16 @@ NOT_A_LOG_WRITE: frozenset[tuple[str, str]] = frozenset(
 """Two-argument `.append` receivers, and `RevisionRecord` writers, that are not a module's
 own writer, and why."""
 
+EXPORTED_PAST_THE_WALK: dict[str, str] = {
+    # Payloads built before the write, which the walk does not read into.
+    "llm/retry": "`account`, built before the retry is granted",
+    "sandbox/denied": "`Denial.record`",
+    "supervisor/unreachable": "the `note` the socket watch builds",
+    "supervisor/violated": "the `note` the invariant poll builds",
+}
+"""Exported types whose fields no write spells out in a literal payload, and where
+each payload is built instead."""
+
 
 @dataclass(frozen=True, slots=True)
 class _Walk:
@@ -90,6 +101,10 @@ class _Walk:
     """`(module, expression)` for every write whose type is not a constant."""
     declared: dict[str, str]
     """Types declared with `declare_log_type` in shipped code → their `owner=`."""
+    exported: dict[str, tuple[str, ...]]
+    """Types declared in shipped code → their `exported=`."""
+    keys: dict[str, set[str]]
+    """Type → every key a write of it spells out in a literal payload."""
     minted: dict[str, set[str]]
     """Module → the names it binds to its own `log_writer(__name__)` at module top."""
     strays: list[str]
@@ -171,6 +186,8 @@ def _walk() -> _Walk:
     static: dict[str, set[str]] = defaultdict(set)
     variable: set[tuple[str, str]] = set()
     declared: dict[str, str] = {}
+    exported: dict[str, tuple[str, ...]] = {}
+    keys: dict[str, set[str]] = defaultdict(set)
     strays: list[str] = []
     for module, (tree, _) in modules.items():
         own = minted[module]
@@ -226,6 +243,9 @@ def _walk() -> _Walk:
                 owner = next((k.value for k in node.keywords if k.arg == "owner"), None)
                 if kind is not None and isinstance(owner, ast.Constant):
                     declared[kind] = str(owner.value)
+                fields = next((k.value for k in node.keywords if k.arg == "exported"), None)
+                if kind is not None and isinstance(fields, ast.Tuple):
+                    exported[kind] = tuple(str(ast.literal_eval(one)) for one in fields.elts)
             if not (isinstance(callee, ast.Attribute) and name == "append" and len(node.args) >= 2):
                 continue
             receiver = ast.unparse(callee.value)
@@ -242,10 +262,18 @@ def _walk() -> _Walk:
                 variable.add((module, ast.unparse(node.args[1])))
             else:
                 static[kind].add(module)
+                if isinstance(node.args[2], ast.Dict):
+                    keys[kind] |= {
+                        key.value
+                        for key in node.args[2].keys
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    }
     return _Walk(
         static=dict(static),
         variable=variable,
         declared=declared,
+        exported=exported,
+        keys=dict(keys),
         minted={module: names for module, names in minted.items() if names},
         strays=strays,
     )
@@ -318,6 +346,29 @@ def test_the_writers_table_is_what_the_writers_write() -> None:
     )
     unwritten = sorted(granted - written)
     assert not unowned, unowned
+    assert not unwritten, unwritten
+
+
+def test_an_exported_field_is_one_its_writers_write() -> None:
+    """A field telemetry ships is one a write of its type puts in the payload: a
+    misspelled name ships nothing, and nothing else would notice.
+
+    Sabotage: export `reasons` for `turn/end`, or for `clm/declined` in its
+    declaration.
+    """
+    exported = {**EXPORTED_SESSION_EVENT_FIELDS, **WALK.exported}
+    assert set(EXPORTED_SESSION_EVENT_FIELDS) <= KNOWN_SESSION_EVENT_TYPES
+    assert "clm/declined" in WALK.exported, "the walk lost the declared exports"
+    assert set(EXPORTED_PAST_THE_WALK) <= set(exported), (
+        "an exception for a type that ships nothing"
+    )
+    unwritten = sorted(
+        (kind, name)
+        for kind, names in exported.items()
+        if kind not in EXPORTED_PAST_THE_WALK
+        for name in names
+        if name not in WALK.keys.get(kind, set())
+    )
     assert not unwritten, unwritten
 
 

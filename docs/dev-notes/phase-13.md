@@ -146,6 +146,33 @@ repair's `interrupted` closer has none. The daemon no longer cuts its turns this
 way; the one-shot modes and the rpc mode still do. Nothing reads the cause to decide
 anything, so what changes is what a reader is told.
 
+**What the stop said is kept** (`TurnEndReason.detail`). A stop from outside names
+nobody, but it still says something: a token's reason, a cancelled scope's, or its
+exception type, read by `ph.cancel.reason_of`; a task group's stop says what the
+stops it holds say. `until_signaled` cancels with the signal's name, so a one-shot
+turn cut by Ctrl-C records `SIGINT` and one cut by a supervisor records `SIGTERM`,
+and `until_canceled` cancels with the token's reason, so work `raced` cuts records
+why. That reason is anyio's from 4.11, now the floor. A telemetry record carries
+the fields its type exports, `event.reason` for a `turn/end` among them, and the
+log vocabulary declares which (`EXPORTED_SESSION_EVENT_FIELDS`,
+`declare_log_type(exported=)`), so the seam names no type. `AgentCanceled` is gone:
+the loop raises `Canceled` with its cause's kind, as a token does, and reads the
+cause itself from what `cancel` was told.
+
+**A teardown's records ship before the mount lets go: the log layer.** The telemetry
+row unwound before the agent row, so what a teardown appends, a canceled turn's
+`turn/end` among it, reached the log and never the ledger. Rows still unwind in
+reverse; what moved is the layer each row is in. `ph-base` now mounts the log's
+storage, its export and its checkpoint policy right after `session`, beneath
+`agent`, in that order, with the OTel sink shipped off in its slot beside the
+export. The checkpoint policy's new last barrier flushes every live session once
+the agents have let go, while persistence and the sinks are still mounted, and
+waits for the ledger's fan-out it set off, so the tail ships in the same process. A
+resume's repair closers now ship too: the cursor starts at what the store
+held, where it started at the seed's end and skipped them. `test_config_owners`
+holds every shipped profile to the order, and a redacting or sinking row belongs
+in that layer for the same reason.
+
 **A mounted root's entry is the process's, not its log's.** A rebuild reads every
 stored root, and a root this daemon holds has a log that lags what the daemon knows
 until the next barrier. So `owed` hands the rebuild its own entries for mounted roots

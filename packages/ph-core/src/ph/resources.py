@@ -221,7 +221,9 @@ async def until_signaled[T](
 
     def stop(signum: int) -> bool:
         signaled.append(signum)
-        body.cancel()
+        # Named, so a turn it cuts records which signal: a person's Ctrl-C and a
+        # supervisor's `SIGTERM` are otherwise the same cancel.
+        body.cancel(signal.Signals(signum).name)
         return True
 
     finished: tuple[T] | None = None

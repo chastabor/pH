@@ -30,8 +30,12 @@ dependencies = [
     # `Future.set_result` handed to `loop.add_reader` — and `ph_rlm.kernel`
     # depends on the *hardened* free `anyio.wait_readable` staying hardened.
     # Neither is public API, so a major release that changes either should be
-    # a decision someone makes, not one a resolver makes for them.
-    "anyio>=4.4,<5",
+    # a decision someone makes, not one a resolver makes for them. The floor is
+    # 4.11 for `CancelScope.cancel(reason)`, and `ph.cancel.reason_of` reads that
+    # reason back out of the message the asyncio backend builds, which is not
+    # public either; a change to it degrades to the bare type, and `test_cancel`
+    # says so.
+    "anyio>=4.11,<5",
     "croniter>=3.0",
     # 3.32 for `fallback_to_soft`, which `ph.locks` pins off: a lease is `flock` or nothing.
     "filelock>=3.32",

@@ -18,7 +18,7 @@ from __future__ import annotations
 import anyio
 import pytest
 
-from ph.cancel import Canceled, CancelToken, is_canceled, raced, until_canceled
+from ph.cancel import Canceled, CancelToken, is_canceled, raced, reason_of, until_canceled
 
 pytestmark = pytest.mark.anyio
 
@@ -136,14 +136,26 @@ async def _answered(value: str) -> str:
 
 
 async def test_until_canceled_ends_the_scope_it_was_given() -> None:
-    """`raced`'s half, on its own — a scope nothing else would end."""
+    """`raced`'s half, on its own — a scope nothing else would end, ended with the
+    token's reason so the work it cuts can say why.
+
+    Sabotage: drop the reason from `until_canceled`'s `scope.cancel`.
+    """
     token = CancelToken()
+    heard: list[str] = []
 
     with anyio.fail_after(1):
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(until_canceled, token, tasks.cancel_scope)
             await anyio.sleep(0.01)
             token.cancel("user")
+            try:
+                await anyio.sleep(1)
+            except anyio.get_cancelled_exc_class() as stop:
+                heard.append(reason_of(stop))
+                raise
+
+    assert heard == ["user"]
 
 
 async def test_a_token_with_no_signal_parks_rather_than_ending_the_scope() -> None:
@@ -169,3 +181,31 @@ def test_the_reason_travels_with_the_refusal() -> None:
         token.child().raise_if_canceled()
 
     assert caught.value.reason == "user"
+
+
+async def test_a_stop_is_read_for_what_it_says_of_itself() -> None:
+    """A cancelled scope keeps its reason and loses the rest of its message.
+
+    anyio puts the reason after the scope's id and the cancelling task's repr, which
+    differ every run, so a turn recording the whole message would record noise.
+
+    Sabotage: return `str(stop)` for the cancelled class, and the first assertion
+    holds a task's repr.
+    """
+
+    async def caught(reason: str | None) -> BaseException:
+        with anyio.CancelScope() as scope:
+            scope.cancel(reason)
+            try:
+                await anyio.sleep(1)
+            except anyio.get_cancelled_exc_class() as stop:
+                return stop
+        raise AssertionError("the scope never cancelled")
+
+    assert reason_of(await caught("shutting down")) == "shutting down"
+    assert reason_of(await caught(None)) == anyio.get_cancelled_exc_class().__name__
+    assert reason_of(Canceled("job canceled")) == "job canceled"
+    assert reason_of(KeyboardInterrupt()) == "KeyboardInterrupt"
+    assert reason_of(SystemExit(2)) == "SystemExit: 2"
+    group = BaseExceptionGroup("unhandled errors", [KeyboardInterrupt(), Canceled("user")])
+    assert reason_of(group) == "KeyboardInterrupt; user"

@@ -54,25 +54,51 @@ nothing says the log holds it. With no sink registered, nothing is read.
 The cost is lag, not loss: a record ships at the next flush, which every step,
 tool call and turn end makes. It still carries its event's own `time`.
 
-## Limit: the shutdown tail is in the log, not the ledger
+**A new session's cursor starts at what its store already held**
+(`Session.durable_length`), not at the end of its seed. A fork's prefix was its
+parent's to ship, and a stored log was the run's that wrote it. A resume's repair
+closers, which close a crashed turn, are in the seed but not yet in the store, so
+this process writes them and the ledger ships them, with the reason the repair
+gives.
+
+## The shutdown tail ships before the mount lets go
 
 A mount's rows unwind in reverse mount order, each layer before the ones it stands
-on, and that order stays: it is what makes a teardown readable as the mount read
-backwards. Telemetry (row 53 in `ph-base`) therefore unwinds before the agent row
-(5), and what an agent's teardown appends — `workspace/disposed`, a child's
-tombstone, a canceled turn's closers — is written only by the mount's last write
-(`ph.persistence.write_on_unwind`), after telemetry has gone. Measured over one
-turn of the base profile, every record shipped but `workspace/disposed`. An OTLP
-sink misses the same tail, and a little more: a profile appends its row after
-telemetry's, so it unwinds first.
+on. So this row sits in **the log layer**, mounted right after `session` and beneath
+every row that writes to the log:
 
-**Not fixed by reordering rows.** Mounting the durability rows before `agent`
-would bring the teardown flush inside telemetry's life, at the price of an unwind
-order that is a list of exceptions rather than the layering. A fix has to work
-with the order — for instance a later reader that exports, from the stored log,
-what lies past the last record the ledger holds for that session. Until then the
-log is complete and the ledger is not, which is the direction §8 already allows:
-the log is the trace.
+1. `session-persistence`, the log's storage;
+2. `telemetry`, this row, and its JSONL sink;
+3. `telemetry-otel`, the OTel sink, shipped off in its slot;
+4. `checkpoint-policy`, which decides when the log reaches disk;
+5. then `agent`, and everything above it.
+
+Unwinding runs that list backwards. Every row above the agent goes, then the agent,
+whose scopes append what they append on the way out, such as `workspace/disposed`,
+a child's tombstone or a canceled turn's `turn/end`. The checkpoint policy goes
+next, and its last barrier flushes every live session through the store.
+Persistence is still mounted, so the flush writes, and `session/durable` says so.
+This row hears it and ships the tail while both sinks are still there. The mount's
+last write (`ph.persistence.write_on_unwind`) stays as a backstop and finds nothing
+owed.
+
+* **The barrier waits for what its flush set off.** The ledger ships off the flush
+  path, in detached work the unwind would cancel: the JSONL sink takes a thread per
+  record, and the OTel row shuts its provider down as it goes. So the barrier waits
+  out that work (`Context.drain`) before the rows beneath it unwind, within the
+  unwind's own budget.
+* **Telemetry goes before persistence.** A flush after persistence had gone would
+  have no backend to dispatch to, answer at once, and announce a write that never
+  happened. Beneath persistence, this row is never mounted while that can be true.
+* **The OTel row ships disabled in its slot**, because a profile can only add a row
+  at the end, where it would unwind before the tail ships. A profile turns it on in
+  place, with `{id: telemetry-otel, disabled: false}`.
+* `test_config_owners` holds every shipped profile to this order.
+
+**A row that redacts or sinks records belongs in the log layer.** One mounted above
+the agent is gone before the tail ships, so the tail would skip that redactor or
+miss that sink. No such row ships with pH. A crash still loses whatever no flush
+had written, as it always has.
 
 ## One exception to mirroring
 
@@ -81,6 +107,31 @@ Ledger records mirror session events one-to-one, except that **only the first
 
 A token-by-token export is thousands of records saying the same thing, and the
 first is the one that carries the latency signal.
+
+## A record carries what its type exports
+
+A ledger record names its event, and of its data carries only the fields its type
+exports: why the work failed, was refused or stopped. A `turn/end` ships its
+`reason`, which says who canceled the turn, what a stop from outside said of itself,
+or a failure's code and message. A declined compaction ships its `code` and
+`reason`, a refused profile its `reason`, a denied sandbox boundary its `kind` and
+`message`, a supervisor's retry or failure its `reason`. An operator looking for the
+work that was cut or failed needs that without the log at hand.
+
+Each field ships as `event.<field>`, so one attribute name, `event.reason`, finds
+every reason whatever its event, and `event.type` says which kind it is. The OTel
+sink ships it as `ph.event.reason`, in JSON text as it ships any value that is not
+a scalar. It passes redaction like any attribute.
+
+**The vocabulary declares the fields, not this seam.** ph-core's types are listed in
+`EXPORTED_SESSION_EVENT_FIELDS` beside their other properties, and a package
+declares its own with `declare_log_type(..., exported=)`, as `ph_clm` does for
+`clm/declined`. So the seam never names a type or a payload key, and a bundle opts
+in without ph-core learning about it. A type is listed rather than every field
+named `reason` shipped, because a field's name does not say what it holds:
+`request/header`'s `reason` says which prompt snapshot it is, and much of a payload
+is what the model or a person wrote. `test_log_writers` holds each exported name to
+a payload its writers write, so a misspelled one fails there.
 
 ## What it does not do
 
@@ -102,6 +153,7 @@ first is the one that carries the latency signal.
   name: session-telemetry
   config:
     enabled: false      # ph-base default: pay nothing until asked
+    # path: the JSONL sink's file, $PH_HOME/telemetry.jsonl unless set
 ```
 
 ## See also

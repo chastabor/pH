@@ -31,7 +31,9 @@ for them, and what that cost. Lands in the batch of the revision it describes.""
 
 DECLINED = "clm/declined"
 """A context-file edit refused, and why. Its receipt is in the call's result; this is
-the auditor's copy."""
+the auditor's copy, and the why is what telemetry ships."""
 
 declare_log_type(REVISED, owner="ph_clm.edits", ignorable=True, audit_only=True)
-declare_log_type(DECLINED, owner="ph_clm.mirror", ignorable=True, audit_only=True)
+declare_log_type(
+    DECLINED, owner="ph_clm.mirror", ignorable=True, audit_only=True, exported=("reason",)
+)

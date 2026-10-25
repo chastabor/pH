@@ -133,6 +133,10 @@ class TurnEndReason(WireDataclass):
     reason: AgentCancelCause | None = None
     """Who stopped an `aborted` turn, when the loop's own `cancel` was told; absent
     for a stop from outside it, whose author the loop cannot see."""
+    detail: str | None = None
+    """What that stop from outside said of itself, in place of `reason`: a token's
+    or a scope's reason, else the exception's type. Kept for a reader and for
+    telemetry; nothing routes on it."""
     error: LlmFailure | None = None
 
 

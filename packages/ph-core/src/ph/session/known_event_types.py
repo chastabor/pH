@@ -24,6 +24,10 @@ event is declared with `EventRegistry.declare`.
 conversation row for one, and the auditor's view records it. So a front end derives both
 of its tables from the vocabulary, rather than each type being listed again in each.
 
+**And which of a type's fields telemetry ships** (`EXPORTED_SESSION_EVENT_FIELDS`,
+`declare_log_type(exported=)`): a ledger record names its event, and carries only the
+fields its type declares, so the telemetry seam never names a type or a payload key.
+
 @module ph.session.known_event_types
 """
 
@@ -36,6 +40,7 @@ from types import MappingProxyType
 
 __all__ = [
     "AUDIT_ONLY_SESSION_EVENT_TYPES",
+    "EXPORTED_SESSION_EVENT_FIELDS",
     "IGNORABLE_SESSION_EVENT_TYPES",
     "INTENT_PAIRS",
     "KNOWN_SESSION_EVENT_TYPES",
@@ -46,6 +51,7 @@ __all__ = [
     "UnknownEventTypeError",
     "declare_log_type",
     "declared_owner",
+    "exported_fields",
     "is_audit_only",
     "is_ignorable",
     "is_known",
@@ -584,6 +590,37 @@ no record either, since another record carries them or they are too fine-grained
 read, and each front end lists those for its own reasons.
 """
 
+EXPORTED_SESSION_EVENT_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        # How a turn ended: who canceled it, what a stop said, or a failure.
+        "turn/end": ("reason",),
+        # A model call failed in a way worth another try, and which failure it was.
+        "llm/retry": ("code",),
+        "compaction/declined": ("code", "reason"),
+        "harness/refine-considered": ("reason",),
+        "goal/settled": ("outcome", "detail"),
+        "subagent/deleted": ("reason",),
+        "sandbox/denied": ("kind", "message"),
+        "profile/refused": ("reason",),
+        "profile/withdrawn": ("reason",),
+        # A root's recovery ladder, and what a supervisor found broken around it.
+        "supervisor/retry": ("reason",),
+        "supervisor/failed": ("reason",),
+        "supervisor/unreachable": ("reason",),
+        "supervisor/violated": ("violations",),
+    }
+)
+"""The fields of a type's payload that telemetry ships, each as `event.<field>`.
+
+**Why the work failed, was refused or stopped**, and nothing else: that is what an
+operator filters on without the log at hand. Everything else stays in the log, which
+is why a record carried no data at all before, and why a type is listed rather than
+every field named `reason` shipped: `request/header`'s `reason` says which prompt
+snapshot it is, and much of a payload is what the model or a person wrote.
+
+Each name is one its writers write, which `test_log_writers` reads from the source.
+"""
+
 
 # ------------------------------------------------------------- intent pairs --
 
@@ -798,6 +835,8 @@ class LogTypeDeclaration:
     ignorable: bool
     audit_only: bool
     """Only an auditor reads it, as for `AUDIT_ONLY_SESSION_EVENT_TYPES`."""
+    exported: tuple[str, ...] = ()
+    """The fields telemetry ships, as for `EXPORTED_SESSION_EVENT_FIELDS`."""
 
 
 _NAME = re.compile(r"[a-z][a-z0-9-]*(?:/[a-z0-9-]+)+")
@@ -809,7 +848,7 @@ ignorable are asked of the frozen sets first, then of this."""
 
 
 def declare_log_type(
-    name: str, *, owner: str, ignorable: bool, audit_only: bool
+    name: str, *, owner: str, ignorable: bool, audit_only: bool, exported: tuple[str, ...] = ()
 ) -> LogTypeDeclaration:
     """Add a type to the vocabulary this build writes and reads. Call at import.
 
@@ -828,11 +867,15 @@ def declare_log_type(
     the payload. A front end can have no handler of its own for a type it cannot
     import, so a declared type that is not audit-only is one no front end shows.
 
+    **Exported names the fields telemetry ships**, as `EXPORTED_SESSION_EVENT_FIELDS`
+    does for ph-core's: the ones that say why the work failed, was refused or stopped.
+
     Refused, the way `EventRegistry.declare` refuses a bus event:
 
     * a name ph-core already owns — one type, one home;
-    * a second owner, or the same owner changing its ignorability or who reads it
-      — two statements of one type that disagree are a log two builds read two ways;
+    * a second owner, or the same owner changing its ignorability, who reads it or
+      what ships — two statements of one type that disagree are a log two builds
+      read two ways;
     * a name that is not `namespace/type`.
 
     Declaring the same thing twice returns the first, so a module imported
@@ -861,9 +904,14 @@ def declare_log_type(
                 f'"{name}" is already declared audit_only={existing.audit_only}; '
                 "who reads a type cannot change"
             )
+        if existing.exported != exported:
+            raise LogTypeError(
+                f'"{name}" is already declared exported={existing.exported}; '
+                "what a type ships cannot change"
+            )
         return existing
     declaration = LogTypeDeclaration(
-        name=name, owner=owner, ignorable=ignorable, audit_only=audit_only
+        name=name, owner=owner, ignorable=ignorable, audit_only=audit_only, exported=exported
     )
     _DECLARED[name] = declaration
     return declaration
@@ -898,6 +946,15 @@ def is_audit_only(event_type: str) -> bool:
         return True
     declared = _DECLARED.get(event_type)
     return declared is not None and declared.audit_only
+
+
+def exported_fields(event_type: str) -> tuple[str, ...]:
+    """The fields of `event_type`'s payload that telemetry ships: ph-core's, or declared."""
+    core = EXPORTED_SESSION_EVENT_FIELDS.get(event_type)
+    if core is not None:
+        return core
+    declared = _DECLARED.get(event_type)
+    return () if declared is None else declared.exported
 
 
 def is_ignorable(event_type: str) -> bool:

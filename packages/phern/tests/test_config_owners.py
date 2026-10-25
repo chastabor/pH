@@ -14,6 +14,7 @@ shipped row declares its kind, and which.
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +123,40 @@ def test_every_named_profile_mounts_the_screens_pH_ships() -> None:
         rows = {row.id for row in profile_or_exit(name).enabled_rows()}
         for screen in ("tui-screen-trajectory", "tui-screen-diff"):
             assert screen in rows, f"{name} ships without {screen}"
+
+
+LOG_LAYER = (
+    "session-persistence-*",
+    "session-telemetry",
+    "session-telemetry-otel",
+    "session-checkpoint-policy",
+    "agent",
+)
+"""The log layer's rows by plugin, in the order they mount, and the row they sit
+beneath. Persistence is a pattern, since a profile picks its backend."""
+
+
+def test_every_named_profile_keeps_the_log_layer_beneath_the_agents() -> None:
+    """Rows unwind in reverse, so the log layer goes last only if it mounts first.
+    The checkpoint policy's last barrier must run after the agents let go, while the
+    telemetry sinks and persistence are still mounted; telemetry must go before
+    persistence, or a flush after persistence went would announce a write that never
+    happened. A profile that composed these otherwise would lose the shutdown tail
+    from the ledger, or ship records the log does not hold.
+
+    Disabled rows count: the OTel row ships off in its slot, and turning it on must
+    not move it.
+    """
+    for name in available_profiles():
+        rows = [row.name for row in profile_or_exit(name).rows]
+        # Each log-layer row's place in `LOG_LAYER`, in the order the profile mounts it.
+        ranks = [
+            rank
+            for plugin in rows
+            for rank, pattern in enumerate(LOG_LAYER)
+            if fnmatchcase(plugin, pattern)
+        ]
+        assert ranks == sorted(ranks), f"{name} mounts the log layer as {rows}"
 
 
 def test_a_session_profile_may_not_remove_a_screen(tmp_path: Path) -> None:

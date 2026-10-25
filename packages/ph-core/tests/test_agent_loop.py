@@ -661,7 +661,24 @@ async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: MountProfil
     assert types.count("step/start") == 2
 
 
-async def test_canceling_ends_the_turn_as_aborted(mount: MountProfile) -> None:
+@pytest.mark.parametrize(
+    ("stop", "recorded"),
+    [
+        ("cancel", {"kind": "aborted", "reason": {"kind": "user"}}),
+        ("foreign", {"kind": "aborted", "detail": "job canceled"}),
+    ],
+)
+async def test_canceling_ends_the_turn_as_aborted(
+    mount: MountProfile, stop: Literal["cancel", "foreign"], recorded: dict[str, object]
+) -> None:
+    """A cancel closes the turn `aborted`, naming a cause only when the loop was told one.
+
+    The loop's own `cancel` was told `user`, which is what `session/cancel` says. A
+    `Canceled` from a token the loop does not own came from somewhere it cannot see,
+    so the turn names nobody and keeps what the token said instead.
+
+    Sabotage: give `_aborted` a fallback cause, or drop its `detail`.
+    """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
     agent = ctx.require(AGENTS).create(session, FAKE)
@@ -669,36 +686,14 @@ async def test_canceling_ends_the_turn_as_aborted(mount: MountProfile) -> None:
     async def cancel_at_pre_step(
         request: PreStepRequest, next_: Callable[..., Awaitable[Any]]
     ) -> Any:  # noqa: ANN401
+        if stop == "foreign":
+            raise Canceled("job canceled")
         agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return await next_()
 
     ctx.on("agent/pre-step", cancel_at_pre_step)
     await agent.prompt("hello")
-    reason = session.events[-1].data["reason"]
-    assert as_obj(reason)["kind"] == "aborted"
-    assert as_obj(as_obj(reason)["reason"])["kind"] == "user"
-
-
-async def test_a_cancel_the_loop_was_not_told_about_names_nobody(
-    mount: MountProfile,
-) -> None:
-    """A `Canceled` from a token the loop does not own closes the turn with no cause.
-
-    `user` is what `session/cancel` records, and a person's interrupt is what
-    reaches it. This cancel came from somewhere the loop cannot see.
-
-    Sabotage: give `_turn_reason` a fallback cause.
-    """
-    ctx = await mount()
-    session = ctx.require(SESSIONS).create("s")
-    agent = ctx.require(AGENTS).create(session, FAKE)
-
-    async def foreign(_request: PreStepRequest, _next: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
-        raise Canceled("job canceled")
-
-    ctx.on("agent/pre-step", foreign)
-    await agent.prompt("hello")
-    assert session.events[-1].data["reason"] == {"kind": "aborted"}
+    assert session.events[-1].data["reason"] == recorded
 
 
 async def test_agent_scoped_listeners_hear_only_their_agent(mount: MountProfile) -> None:
@@ -847,18 +842,17 @@ async def test_a_scope_torn_down_around_a_turn_does_not_record_it_as_completed(
 ) -> None:
     """C9 — a raw cancellation is a `BaseException`, so both handlers missed it.
 
-    The loop catches `AgentCanceled`/`Canceled` — its own vocabulary — and
-    `Exception`. A cancellation from *outside* is neither: a host shutting down,
-    a deadline on an enclosing scope, a task group unwinding because a sibling
-    raised. It passed both, and the `finally` wrote whatever `turn_ends` happened
-    to hold, which for a turn interrupted mid-step is `None` and renders as
-    **completed**.
+    The loop catches `Canceled` — its own vocabulary — and `Exception`. A
+    cancellation from *outside* is neither: a host shutting down, a deadline on an
+    enclosing scope, a task group unwinding because a sibling raised. It passed
+    both, and the `finally` wrote whatever `turn_ends` happened to hold, which for
+    a turn interrupted mid-step is `None` and renders as **completed**.
 
     The log is the state, so that is a turn recorded as having finished its work
     when nothing finished it: the resume path sees no open turn to repair, and a
     reader — a person, the trajectory view, the compaction fold — is told a
     story the run did not have. It names no cause, since nobody stopped it
-    through the loop.
+    through the loop, and a scope cancelled with no reason says only what it is.
     """
     ctx = await mount()
     started = anyio.Event()
@@ -881,24 +875,24 @@ async def test_a_scope_torn_down_around_a_turn_does_not_record_it_as_completed(
 
     ends = [event for event in session.events if event.type == "turn/end"]
     assert ends, "the turn never closed at all"
-    assert ends[-1].data["reason"] == {"kind": "aborted"}
+    cancelled = anyio.get_cancelled_exc_class().__name__
+    assert ends[-1].data["reason"] == {"kind": "aborted", "detail": cancelled}
 
 
 async def test_a_turn_that_died_in_a_group_is_not_recorded_as_completed(
     mount: MountProfile,
 ) -> None:
-    """C9's coverage, which a third `except` branch could not have given.
+    """C9's coverage, which catching the cancelled class could not have given.
 
     A cancellation reaching the loop from an anyio task group arrives wrapped in
     a `BaseExceptionGroup`, not as the cancelled class — and `KeyboardInterrupt`
-    and `SystemExit` are neither. Catching one more type leaves the other three
+    and `SystemExit` are neither. Catching that one type leaves the other three
     recording a turn that finished nothing as *completed*, so the resume path
     sees no open turn to repair.
 
-    Reading it off the state instead makes the question "did anything assign an
-    ending" rather than "which exception was it", and every normal exit assigns
-    one. `KeyboardInterrupt` is the case used here because it is the one a person
-    can actually cause.
+    `_turn` catches `BaseException` instead. `KeyboardInterrupt` is the case used
+    here because it is the one a person can actually cause, and it carries no
+    reason, so the turn keeps its type.
     """
     ctx = await mount()
 
@@ -916,7 +910,7 @@ async def test_a_turn_that_died_in_a_group_is_not_recorded_as_completed(
 
     ends = [event for event in session.events if event.type == "turn/end"]
     assert ends, "the turn never closed at all"
-    assert as_obj(ends[-1].data["reason"])["kind"] == "aborted"
+    assert ends[-1].data["reason"] == {"kind": "aborted", "detail": "KeyboardInterrupt"}
 
 
 @pytest.mark.parametrize("stop", ["cancel", "scope"])
@@ -928,9 +922,10 @@ async def test_a_stop_after_the_step_decided_the_ending_is_still_a_stop(
     The step has already decided the turn is `completed` by then. A stop from
     outside left that standing, so the turn was recorded as finished while the
     listeners that could have carried it on were cut. The loop's own `cancel`
-    names its cause; the scope's names none.
+    names its cause; the scope names none and keeps the reason it was given.
 
-    Sabotage: drop the `turn_ends = None` from either of `_turn`'s stop branches.
+    Sabotage: drop the `turn_ends = _aborted(...)` from either of `_turn`'s stop
+    branches.
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
@@ -942,7 +937,7 @@ async def test_a_stop_after_the_step_decided_the_ending_is_still_a_stop(
             if stop == "cancel":
                 agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
             else:
-                scope.cancel()
+                scope.cancel("shutting down")
                 await anyio.sleep(0)
 
         ctx.on("agent/turn-stopping", stopping)
@@ -953,7 +948,7 @@ async def test_a_stop_after_the_step_decided_the_ending_is_still_a_stop(
         assert ends[-1].data["reason"] == {"kind": "aborted", "reason": {"kind": "user"}}
     else:
         assert scope.cancelled_caught, "the stop never landed"
-        assert ends[-1].data["reason"] == {"kind": "aborted"}
+        assert ends[-1].data["reason"] == {"kind": "aborted", "detail": "shutting down"}
 
 
 async def test_a_failed_request_carries_the_session_the_retry_policy_counts_on(
