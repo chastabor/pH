@@ -46,8 +46,8 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.anyio
 
-# `ph-base` ships the row off in its slot in the log layer; a profile turns it on there.
-OTEL_ROW = {"id": "telemetry-otel", "disabled": False}
+# Declared at the end, as a deployment adds it; its plugin places it in the log layer.
+OTEL_ROW = {"id": "telemetry-otel", "name": "session-telemetry-otel"}
 
 
 @pytest.fixture
@@ -112,14 +112,15 @@ async def test_the_shipped_sink_exports_post_redaction_records(
 async def test_both_shipped_sinks_receive_the_shutdown_tail(
     mount: MountProfile, exported: InMemoryLogRecordExporter, tmp_path: Path
 ) -> None:
-    """The row sits in the log layer beneath `agent`, beside the JSONL sink, so what
-    the agents append as they let go reaches both before either goes. The JSONL sink
-    takes a thread per record, so the fan-out is still running once the last barrier
-    has flushed, and this row shuts its provider down as it unwinds: the barrier has
-    to wait for the fan-out, or the tail reaches neither sink, or only the JSONL one.
+    """The row is written last, after `agent`, and its plugin places it in the log
+    layer beside the JSONL sink, so what the agents append as they let go reaches
+    both before either goes. The JSONL sink takes a thread per record, so the
+    fan-out is still running once the last barrier has flushed, and this row shuts
+    its provider down as it unwinds: the barrier has to wait for the fan-out, or the
+    tail reaches neither sink, or only the JSONL one.
 
-    Sabotage: drop the barrier's `drain`, or move `telemetry-otel` after `agent` in
-    `ph-base`, and the tail's `turn/end` misses the collector.
+    Sabotage: drop the barrier's `drain`, or the row's `log_layer`, and the tail's
+    `turn/end` misses the collector.
     """
     path = tmp_path / "telemetry.jsonl"
     ctx = await mount(OTEL_ROW, {"id": "telemetry", "config": {"enabled": True, "path": str(path)}})

@@ -504,11 +504,12 @@ class Root:
     """When something in this root's mount was last made durable since its
     invariants were checked, epoch ms, or `None` when nothing has been (P12-04).
 
-    Set from `session/durable`, which ph-core emits after every flush of every
-    session in the mount — the root's and its children's alike, and whichever path
-    wrote: a turn, a command, a credential, a schedule. A cache drifts only when
-    something writes, and every writer that has finished has flushed, so this is
-    the one place every write is seen. Cleared by `verify_root`."""
+    Set from `session/durable`, which ph-core emits after every flush that wrote
+    something, of every session in the mount — the root's and its children's alike,
+    and whichever path wrote: a turn, a command, a credential, a schedule. A cache
+    drifts only when something writes, and every writer that has finished has
+    flushed, so this is the one place every write is seen. Cleared by
+    `verify_root`."""
     recheck: Callable[[], None] = _nothing
     """Say that this root's status may have moved, which both its release and the
     daemon's life depend on. `Supervisor.start` points it at `Supervisor._recheck`.
@@ -1577,8 +1578,10 @@ class Supervisor:
                 (P13-01): every hold reaches disk through a flush — a turn's first
                 request, a goal record, an acked prompt, a child's status in its own
                 log, the ladder's records — so the index reflects what is durable
-                plus what this process knows, sampled where both just moved. A root
-                written is also a root that is no longer unwritten (P13-08)."""
+                plus what this process knows, sampled where both just moved. Heard
+                only for a flush that wrote something (`SessionStore.flush`), so a
+                hold that moved with no record after it would wait for the next one.
+                A root written is also a root that is no longer unwritten (P13-08)."""
                 root.unverified_at = now_ms()
                 self.verifier.notice()
                 if source is root.session:
@@ -2109,9 +2112,10 @@ class Supervisor:
     def _note_live(self, root: Root) -> None:
         """Record what `root` owes right now, or that it owes nothing (P13-01).
 
-        On every flush in the root's mount (`written` in `_start`), at the mount, at
-        passivation and at shutdown. The writer drops an entry it already wrote, so
-        a flush that moved no hold costs the fold below and nothing else.
+        On every flush in the root's mount that wrote something (`written` in
+        `_start`), at the mount, at passivation and at shutdown. The writer drops an
+        entry it already wrote, so a flush that moved no hold costs the fold below and
+        nothing else.
         """
         writer = self._live
         if writer is None:
@@ -2781,6 +2785,10 @@ class Supervisor:
         """Record that `root`'s log could not be written (P13-08), for every caller
         that writes and must carry on: the ladder's flush and a mutation's ack. A
         later write of it clears the mark (`written` in `_start`).
+
+        **Only for a store flush that raised.** The store announces the next flush of
+        the root that returns even when it writes nothing, because this one failed;
+        a mark set for any other reason would wait for the log to grow to clear.
 
         Said once at error level, the first time: the warning `written` logs per
         attempt is the mechanism's; this is the fact an operator reads a daemon log

@@ -76,7 +76,10 @@ events.declare(
     "session/durable",
     "emit",
     owner="ph.session",
-    doc="A flush every backend finished: the log holds the session's events below the count.",
+    doc=(
+        "A flush every backend finished: the log holds the session's events below the "
+        "count. Said when the count moved, and after a flush of the session failed."
+    ),
 )
 events.declare(
     "session/loaded",
@@ -188,6 +191,10 @@ class _Entry:
     not see it and nothing forced anyone to say whether it runs inside a
     binding. `Session.observe` returns `Callable[[], None]`; naming it puts it
     in front of the gate, which files it as teardown."""
+    announced: int | None
+    """How much of the log `session/durable` has said is held, starting from what a
+    store held when the session was made (`durable_length`). `None` once a flush has
+    failed, so the next one that returns says so whatever it wrote."""
 
 
 @dataclass(slots=True)
@@ -270,7 +277,11 @@ class SessionStore:
             # un-appends a committed event (A1).
             self.ctx.emit("session/event", source, event)
 
-        self._entries[session.id] = _Entry(session=session, unobserve=session.observe(observer))
+        self._entries[session.id] = _Entry(
+            session=session,
+            unobserve=session.observe(observer),
+            announced=session.durable_length,
+        )
         self.ctx.emit("session/created", session)
         return session
 
@@ -324,11 +335,40 @@ class SessionStore:
         taken before the dispatch: each backend writes, under its own lock,
         everything the log held when that write began, so it is a floor. With no
         backend attached every flush answers at once, as `written` does.
+
+        **Only when the count moved.** A flush that found nothing owed has nothing to
+        say, and its listeners did work for each one: the daemon refolds a root's
+        holds over its children, so a shutdown flushing every finished child of a
+        root walked those children once per child. Except after a flush of it
+        failed: a reader may have taken the failure as news (the daemon marks the
+        root unwritten), and only an announcement takes that back, so the next flush
+        that returns makes one even if it wrote nothing. A cancellation is not a
+        failure, as `written` says, and leaves the count as it was. A session this
+        store does not hold has no count, and is announced on every flush.
         """
-        for ancestor in self.lineage(session):
+        lineage = self.lineage(session)
+        for index, ancestor in enumerate(lineage):
             through = ancestor.seq
-            await self.ctx.parallel("session/flush", ancestor)
+            try:
+                await self.ctx.parallel("session/flush", ancestor)
+            except Exception:
+                # The rest of the lineage was not flushed either, the session asked
+                # for among them.
+                for unsettled in lineage[index:]:
+                    if (failed := self._entry_of(unsettled)) is not None:
+                        failed.announced = None
+                raise
+            entry = self._entry_of(ancestor)
+            if entry is not None:
+                if entry.announced is not None and through <= entry.announced:
+                    continue
+                entry.announced = through
             self.ctx.emit("session/durable", ancestor, through)
+
+    def _entry_of(self, session: Session) -> _Entry | None:
+        """The entry holding this very session, and not another copy under its id."""
+        entry = self._entries.get(session.id)
+        return entry if entry is not None and entry.session is session else None
 
     async def written(self, session: Session) -> bool:
         """`flush`, answering whether it worked rather than raising.

@@ -38,7 +38,7 @@ from .context import Context, ForkScope
 from .errors import LoaderError
 from .events import events
 from .key import ServiceKey
-from .plugin import CONFIGURED_IN, Affects, normalize_plugin
+from .plugin import CONFIGURED_IN, LOG_LAYER, Affects, LogLayer, normalize_plugin
 
 __all__ = [
     "ENTRY_POINT_GROUP",
@@ -471,8 +471,9 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
     """Compose ordered profile documents into the final row list.
 
     Each document is either a plain list of rows or a list of patch entries.
-    Rows keep file order; patches address rows by id. A document that says what it
-    `sets` has every entry checked against the kind of the row it touches.
+    Rows keep file order, but for the log layer (`_place_log_layer`); patches
+    address rows by id. A document that says what it `sets` has every entry
+    checked against the kind of the row it touches.
     """
     rows: list[Row] = []
     for document in documents:
@@ -492,7 +493,38 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
             _check_kind(document, touched)
     _check_unique_ids(rows)
     _check_isolation(rows)
-    return rows
+    return _place_log_layer(rows)
+
+
+def _place_log_layer(rows: list[Row]) -> list[Row]:
+    """Gather the log layer where its first row is, in `LOG_LAYER` order (`LogLayer`
+    says why), and keep the other rows' order around it.
+
+    An enabled row only. A disabled row does not mount, so it has no place to keep,
+    and resolving it could refuse a profile over a row that is off (`resolve_row`'s
+    rule). Nor a row whose plugin does not resolve: it stays where it was written,
+    and mounting it is what refuses it.
+    """
+    rank = {
+        row.id: LOG_LAYER.index(place)
+        for row in rows
+        if not row.disabled and (place := _log_layer_of(row)) is not None
+    }
+    if not rank:
+        return rows
+    first = next(index for index, row in enumerate(rows) if row.id in rank)
+    layer = sorted((row for row in rows if row.id in rank), key=lambda row: rank[row.id])
+    rest = [row for row in rows if row.id not in rank]
+    return [*rest[:first], *layer, *rest[first:]]
+
+
+def _log_layer_of(row: Row) -> LogLayer | None:
+    """The log-layer place `row`'s plugin declares, or `None` when it declares none
+    or does not resolve."""
+    try:
+        return normalize_plugin(resolve_plugin(row.name)).log_layer
+    except LoaderError:
+        return None
 
 
 def resolve_row(row: Row) -> dict[str, JsonValue]:
@@ -552,7 +584,8 @@ def sparse_entries(base: Sequence[Row], rows: Sequence[Row]) -> list[JsonObject]
 
     `compose_rows([*base_documents, (layer, sparse_entries(base, rows))])` gives
     back `rows`, in order, for every `rows` a composition over `base` can
-    produce: added rows land at the end, which is where a later layer put them.
+    produce: added rows land at the end, which is where a later layer put them,
+    and a log-layer row is placed again where its plugin says.
     """
     kept = {row.id for row in rows}
     before = {row.id: row for row in base}
@@ -760,7 +793,7 @@ class Profile:
     async def mount(self, ctx: Context, *, project: Path | None = None) -> Mount:
         """Mount every enabled row onto `ctx`, settle the tree, and return the mount.
 
-        Rows mount in file order, but nothing runs until `reconcile()`:
+        Rows mount in the order composed, but nothing runs until `reconcile()`:
         activation is service-availability driven, so a row that needs `llm`
         waits for whichever row provides it regardless of where it sits.
 

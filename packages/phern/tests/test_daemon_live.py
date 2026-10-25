@@ -33,9 +33,7 @@ from daemon_helpers import (
 from ph.keys import SESSIONS
 from ph.paths import resolve_roots
 from ph.seams.live_index import LiveEntry, LiveIndex
-from ph.session import Session
-from ph.testing import log_event, stored_types
-from ph_app.daemon import supervisor as supervisor_module
+from ph.testing import log_event, raising, stored_types
 from ph_app.daemon.notify import notify, watchdog_interval
 from ph_app.daemon.probes import parse_bind
 from ph_app.daemon.server import DaemonUnavailable, serve
@@ -78,14 +76,18 @@ async def test_a_busy_root_is_on_the_index_and_a_quiet_one_is_not(
         root = await supervisor.start("root")
         await _settled(supervisor)
         assert "root" not in _index().read(), "an idle root owes nothing"
+        # A hold moves with a record, as a turn's start and end are, and the flush
+        # that writes it is the moment the index is owed news (`written` in
+        # `_start`). A flush that writes nothing announces nothing.
         set_phase(root, "running")
-        # A flush is the moment the index is owed news (`written` in `_start`).
+        log_event(root.session, "turn/start", {"turn": 1})
         await supervisor._flush(root)
         await _settled(supervisor)
         entry = _index().read()["root"]
         assert entry.holds == ("turn",)
         assert entry.cwd == (root.session.header.cwd or "")
         set_phase(root, "idle")
+        log_event(root.session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
         await supervisor._flush(root)
         await _settled(supervisor)
         assert "root" not in _index().read()
@@ -232,20 +234,23 @@ async def test_owed_rebuilds_from_the_logs_when_asked(
 async def test_an_unwritable_root_makes_readiness_no_until_a_write_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The write fails in the store, as every door that marks a root does, and with
+    nothing owed since the last write: the mark is cleared by an announcement, and a
+    flush that writes nothing makes one only because the one before it failed.
+
+    Sabotage: forget the failure in `SessionStore.flush`, and the mark stays.
+    """
     async with unplugged(tmp_path, monkeypatch) as server:
         root = await server.supervisor.start("root")
         server.serving = True
         assert server.probe("ready").ok
 
-        async def refused(_ctx: object, _session: Session) -> bool:
-            return False
-
-        monkeypatch.setattr(supervisor_module, "session_written", refused)
+        refusing = root.ctx.on("session/flush", raising(OSError("no space left on device")))
         await server.supervisor._flush(root)
         reply = server.probe("ready")
         assert not reply.ok and any("root" in reason for reason in reply.reasons)
         assert server.status().unwritten == ["root"]
-        monkeypatch.undo()
+        refusing()
         # Any write of the root clears it — here the store's own flush, which the
         # ladder's `_drive` calls directly — not only the doors that set the mark.
         await root.ctx.require(SESSIONS).flush(root.session)

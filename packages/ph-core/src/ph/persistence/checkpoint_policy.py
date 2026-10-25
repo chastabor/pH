@@ -65,7 +65,9 @@ from ..tools.definition import ToolExecution
 __all__ = ["apply"]
 
 
-@plugin("session-checkpoint-policy", affects="deployment", inject=[SESSIONS])
+@plugin(
+    "session-checkpoint-policy", affects="deployment", inject=[SESSIONS], log_layer="checkpoint"
+)
 async def apply(ctx: Context, config: None) -> None:
     """Install the semantic checkpoints."""
 

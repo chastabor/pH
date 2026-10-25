@@ -259,6 +259,65 @@ async def test_a_segment_still_writes_its_parent_first(mount: MountProfile, tmp_
     assert [event.type for event in whole][:2] == ["turn/start", "turn/end"]
 
 
+async def test_a_flush_that_wrote_nothing_announces_nothing(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """`session/durable` says the log moved, so a flush that found nothing owed is
+    silent, and so is a stored log's first flush when nothing was added to it. Each
+    announcement costs its listeners work: the daemon refolds a root's holds over
+    its children, and a shutdown flushes every finished child of a root.
+
+    Sabotage: announce whatever the count, and the second flush is heard.
+    """
+    ctx = await mount(_root(tmp_path))
+    sessions = ctx.require(SESSIONS)
+    heard: list[tuple[str, int]] = []
+    ctx.on("session/durable", lambda session, through: heard.append((session.id, through)))
+    session = sessions.create("s")
+    log_event(session, "turn/start", {"turn": 1})
+
+    await sessions.flush(session)
+    await sessions.flush(session)
+    log_event(session, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    await sessions.flush(session)
+    assert heard == [("s", 1), ("s", 2)]
+
+    sessions.dispose("s")
+    stored = Session("s", seed=session.events, header=session.header, durable=session.seq)
+    await sessions.flush(sessions.adopt(stored))
+    assert heard == [("s", 1), ("s", 2)], "a stored log's first flush wrote nothing"
+
+
+async def test_the_flush_after_a_failed_one_announces_even_with_nothing_new(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A failure may have been taken as news, as the daemon marks a root unwritten,
+    and only an announcement takes that back. So the next flush that returns is
+    heard even when nothing was added since the last one, for every session the
+    failure kept from being flushed: here a segment, whose parent goes first and
+    fails first.
+
+    Sabotage: forget only the session that failed, and the child is never heard.
+    """
+    ctx = await mount(_root(tmp_path))
+    sessions = ctx.require(SESSIONS)
+    parent = sessions.create("parent")
+    log_event(parent, "turn/start", {"turn": 1})
+    log_event(parent, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    child = sessions.roll(parent, "child")
+    await sessions.flush(child)
+    heard: list[tuple[str, int]] = []
+    ctx.on("session/durable", lambda session, through: heard.append((session.id, through)))
+
+    refusing = ctx.on("session/flush", raising(OSError("no space left on device")))
+    with pytest.raises(ExceptionGroup):
+        await sessions.flush(child)
+    refusing()
+    await sessions.flush(child)
+
+    assert heard == [("parent", parent.seq), ("child", child.seq)]
+
+
 def test_read_session_hands_acceptance_to_the_session(tmp_path: Path) -> None:
     path = tmp_path / "future.jsonl"
     path.write_text(

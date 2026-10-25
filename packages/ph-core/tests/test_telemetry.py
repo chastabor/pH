@@ -330,8 +330,8 @@ async def test_the_shutdown_tail_ships_before_the_mount_lets_go(mount: MountProf
     does with a thread per record, so the fan-out is still running when the barrier
     returns from its flush.
 
-    Sabotage: drop the barrier's `drain`, drop the barrier, or move the log layer
-    back above `agent` in `ph-base`, and the tail never ships.
+    Sabotage: drop the barrier's `drain`, drop the barrier, or write the log layer's
+    first row above `agent` in `ph-base`, and the tail never ships.
     """
     ctx = await mount()
     seen: list[SessionTelemetryRecord] = []

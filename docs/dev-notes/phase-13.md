@@ -173,6 +173,30 @@ held, where it started at the seed's end and skipped them. `test_config_owners`
 holds every shipped profile to the order, and a redacting or sinking row belongs
 in that layer for the same reason.
 
+**The log layer is placed by its plugins.** A profile can only add a row at the end,
+so a sink a host added in `daemon.yaml` landed above the agents and missed the tail,
+and nothing refused it. Each log-layer plugin now declares its place
+(`log_layer=`, `LogLayer`), and `compose_rows` gathers the layer where its first row
+is written, in that order; a disabled row, or one whose plugin does not resolve,
+stays where it was written. `--dump-config` prints the placed order, and a saved
+profile composes back into it. The OTel row's disabled slot in `ph-base` is gone:
+a host declares `{id: telemetry-otel, name: session-telemetry-otel}`, and the patch
+`{id: telemetry-otel, disabled: false}` now fails with no row to patch. Composing
+imports every enabled row's plugin to read its place, about 37 ms in a `phern`
+command that composes without mounting; one that mounts imported them anyway.
+
+**`session/durable` is said only when the count moved.** Every flush announced, the
+empty ones included, and the daemon refolded a root's holds over its children on
+each. A shutdown flushing a root's 2,000 finished children made 2,003 empty
+announcements and as many refolds; it makes none now. The store keeps what it last
+announced per session, from `durable_length`. A flush that failed clears it for
+every session it kept from being written, so the next flush that returns announces
+even with nothing new, and the daemon's unwritten mark still clears. Two daemon
+tests leaned on the old heartbeat: one moved a hold with no record and flushed, and
+one faked a failure above the store. Neither happens in the daemon, where a hold
+moves with a record and every door that marks a root unwritten is a store flush
+that raised, so both now do what the daemon does.
+
 **A mounted root's entry is the process's, not its log's.** A rebuild reads every
 stored root, and a root this daemon holds has a log that lags what the daemon knows
 until the next barrier. So `owed` hands the rebuild its own entries for mounted roots

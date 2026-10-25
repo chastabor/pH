@@ -14,7 +14,6 @@ shipped row declares its kind, and which.
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from ph.cordis import normalize_plugin, resolve_plugin
 from ph.paths import resolve_roots
 from ph.testing import write_host_config, write_profile
 from ph_app.cli import app
@@ -125,17 +125,6 @@ def test_every_named_profile_mounts_the_screens_pH_ships() -> None:
             assert screen in rows, f"{name} ships without {screen}"
 
 
-LOG_LAYER = (
-    "session-persistence-*",
-    "session-telemetry",
-    "session-telemetry-otel",
-    "session-checkpoint-policy",
-    "agent",
-)
-"""The log layer's rows by plugin, in the order they mount, and the row they sit
-beneath. Persistence is a pattern, since a profile picks its backend."""
-
-
 def test_every_named_profile_keeps_the_log_layer_beneath_the_agents() -> None:
     """Rows unwind in reverse, so the log layer goes last only if it mounts first.
     The checkpoint policy's last barrier must run after the agents let go, while the
@@ -144,19 +133,24 @@ def test_every_named_profile_keeps_the_log_layer_beneath_the_agents() -> None:
     happened. A profile that composed these otherwise would lose the shutdown tail
     from the ledger, or ship records the log does not hold.
 
-    Disabled rows count: the OTel row ships off in its slot, and turning it on must
-    not move it.
+    The composition places the layer by what each plugin declares (`LogLayer`),
+    where the first of its rows is written. So what a profile still decides is where
+    that first row goes, which has to be beneath `agent`. The OTel sink is added the
+    way a host adds it, in `daemon.yaml` after every row, and lands in the layer too.
+
+    Sabotage: drop the OTel row's `log_layer`, or write `ph-base`'s log layer after
+    `agent`, and a profile mounts it above the agents.
     """
+    write_host_config("rows:\n  - id: telemetry-otel\n    name: session-telemetry-otel\n")
     for name in available_profiles():
-        rows = [row.name for row in profile_or_exit(name).rows]
-        # Each log-layer row's place in `LOG_LAYER`, in the order the profile mounts it.
-        ranks = [
-            rank
-            for plugin in rows
-            for rank, pattern in enumerate(LOG_LAYER)
-            if fnmatchcase(plugin, pattern)
+        rows = [row.name for row in profile_or_exit(name).enabled_rows()]
+        layer = [
+            index
+            for index, plugin in enumerate(rows)
+            if normalize_plugin(resolve_plugin(plugin)).log_layer is not None
         ]
-        assert ranks == sorted(ranks), f"{name} mounts the log layer as {rows}"
+        assert rows.index("session-telemetry-otel") in layer, f"{name} left the OTel sink out"
+        assert layer[-1] < rows.index("agent"), f"{name} mounts the log layer as {rows}"
 
 
 def test_a_session_profile_may_not_remove_a_screen(tmp_path: Path) -> None:

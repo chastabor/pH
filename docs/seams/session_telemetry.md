@@ -69,9 +69,17 @@ every row that writes to the log:
 
 1. `session-persistence`, the log's storage;
 2. `telemetry`, this row, and its JSONL sink;
-3. `telemetry-otel`, the OTel sink, shipped off in its slot;
+3. any export row, such as the OTel sink `session-telemetry-otel`;
 4. `checkpoint-policy`, which decides when the log reaches disk;
 5. then `agent`, and everything above it.
+
+**Each row's plugin declares its place** (`log_layer=` on `@plugin`, one of
+`LogLayer`'s `storage`, `telemetry`, `export` and `checkpoint`), and the composition
+gathers the layer where its first row is written, in that order. `ph-base` writes
+the first one right after `session`. So a deployment adds a row by naming it,
+wherever it writes it: the OTel sink is
+`{id: telemetry-otel, name: session-telemetry-otel}` in `daemon.yaml`, which puts it
+at the end, and it mounts third.
 
 Unwinding runs that list backwards. Every row above the agent goes, then the agent,
 whose scopes append what they append on the way out, such as `workspace/disposed`,
@@ -90,15 +98,13 @@ owed.
 * **Telemetry goes before persistence.** A flush after persistence had gone would
   have no backend to dispatch to, answer at once, and announce a write that never
   happened. Beneath persistence, this row is never mounted while that can be true.
-* **The OTel row ships disabled in its slot**, because a profile can only add a row
-  at the end, where it would unwind before the tail ships. A profile turns it on in
-  place, with `{id: telemetry-otel, disabled: false}`.
-* `test_config_owners` holds every shipped profile to this order.
+* `test_config_owners` holds every shipped profile to writing the layer's first
+  row beneath `agent`, with the OTel sink added the way a host adds it.
 
-**A row that redacts or sinks records belongs in the log layer.** One mounted above
-the agent is gone before the tail ships, so the tail would skip that redactor or
-miss that sink. No such row ships with pH. A crash still loses whatever no flush
-had written, as it always has.
+**A row that redacts or sinks records declares `log_layer="export"`.** One mounted
+above the agent is gone before the tail ships, so the tail would skip that redactor
+or miss that sink. No redacting row ships with pH. A crash still loses whatever no
+flush had written, as it always has.
 
 ## One exception to mirroring
 

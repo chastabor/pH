@@ -65,7 +65,7 @@ from .loader import (
     safe_yaml_load,
     sparse_entries,
 )
-from .plugin import PluginSpec, normalize_plugin, plugin
+from .plugin import LOG_LAYER, LogLayer, PluginSpec, normalize_plugin, plugin
 from .scoped import ScopedEntries, ScopedTable
 
 __all__ = [
@@ -74,6 +74,7 @@ __all__ = [
     "DRAIN_SECONDS",
     "ENTRY_POINT_GROUP",
     "GRACE_SECONDS",
+    "LOG_LAYER",
     "Abandoned",
     "AtDispose",
     "Boundary",
@@ -93,6 +94,7 @@ __all__ = [
     "InactiveScopeError",
     "Listener",
     "LoaderError",
+    "LogLayer",
     "MaybeAwaitable",
     "Mount",
     "MountRefusal",

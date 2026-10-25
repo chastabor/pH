@@ -257,7 +257,8 @@ class LiveIndexWriter:
 
     **Latest wins, per root, and a repeat costs nothing.** The writer remembers what
     it last wrote for each root, so a host re-stating an unchanged entry — which it
-    does at every flush — is dropped in `note` without a thread hop or a read.
+    does at every flush that wrote something — is dropped in `note` without a thread
+    hop or a read.
 
     **`settle` writes; it does not wait for the background to.** It is for a host
     shutting down, which may be unwinding with `tasks` already cancelled — one of

@@ -24,7 +24,16 @@ from .key import ServiceKey, service_names
 if TYPE_CHECKING:
     from .context import Context
 
-__all__ = ["AFFECTS", "CONFIGURED_IN", "Affects", "PluginSpec", "normalize_plugin", "plugin"]
+__all__ = [
+    "AFFECTS",
+    "CONFIGURED_IN",
+    "LOG_LAYER",
+    "Affects",
+    "LogLayer",
+    "PluginSpec",
+    "normalize_plugin",
+    "plugin",
+]
 
 Affects: TypeAlias = Literal["environment", "presentation", "deployment"]
 """What a row's settings shape, and so which configuration owns them.
@@ -58,6 +67,25 @@ host's files that `ph.cordis` never reads. Written once, so the loader's refusal
 and the documentation cannot name different files for one kind.
 """
 
+LogLayer: TypeAlias = Literal["storage", "telemetry", "export", "checkpoint"]
+"""A row's place in the log layer: the rows that keep the log, export it and say when
+it reaches disk, beneath every row that writes to it.
+
+Rows unwind in reverse, so the layer goes last, and in reverse of this order. The
+checkpoint policy's last barrier flushes what the agents appended as they let go,
+while every other row here is still mounted. An `export` row, a sink or a redactor
+of what sinks receive, is there to handle that tail. The telemetry seam outlives
+them, since they register with it. Storage goes last, so no flush announces a write
+after it went.
+
+**Declared, so nobody has to remember where to write the row.** The composition
+gathers the layer where its first row is written, in this order
+(`ph.cordis.loader`), so a deployment adds a sink by naming it, and a row appended
+at the end, which is all a profile can do, still lands beneath the agents.
+"""
+
+LOG_LAYER: tuple[LogLayer, ...] = get_args(LogLayer)
+
 
 @dataclass(frozen=True, slots=True)
 class PluginSpec:
@@ -78,6 +106,8 @@ class PluginSpec:
     """How a child holds less of this row (`ph.cordis.child_limit`), or `None` when
     it holds this row as its parent runs it or not at all. Erased as `apply` is, and
     held to the config model by the same overload."""
+    log_layer: LogLayer | None = None
+    """This row's place in the log layer (`LogLayer`), or `None` for a row outside it."""
 
     def resolve_config(self, raw: object) -> BaseModel | None:
         """Validate a row's raw config against the plugin's model.
@@ -112,7 +142,11 @@ class PluginSpec:
 
 @overload
 def plugin(
-    name: str, *, affects: Affects, inject: Sequence[str | ServiceKey[Any]] = ()
+    name: str,
+    *,
+    affects: Affects,
+    inject: Sequence[str | ServiceKey[Any]] = (),
+    log_layer: LogLayer | None = None,
 ) -> Callable[
     [Callable[[Context, None], Awaitable[None]]], Callable[[Context, None], Awaitable[None]]
 ]: ...
@@ -124,6 +158,7 @@ def plugin[C: BaseModel](
     inject: Sequence[str | ServiceKey[Any]] = (),
     config: type[C],
     narrows: Narrows[C] | None = None,
+    log_layer: LogLayer | None = None,
 ) -> Callable[
     [Callable[[Context, C], Awaitable[None]]], Callable[[Context, C], Awaitable[None]]
 ]: ...
@@ -134,6 +169,7 @@ def plugin(
     inject: Sequence[str | ServiceKey[Any]] = (),
     config: type[BaseModel] | None = None,
     narrows: Callable[..., ChildLimit] | None = None,
+    log_layer: LogLayer | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark a function as a plugin body.
 
@@ -154,6 +190,8 @@ def plugin(
     `narrows` is how a child's copy of this row holds less than its parent's
     (`ph.cordis.child_limit`), and takes the config model too, so it comes only with
     one: a row with no config has nothing to narrow but whether it runs.
+
+    `log_layer` places a row that keeps, exports or flushes the log (`LogLayer`).
     """
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -164,6 +202,7 @@ def plugin(
             inject=service_names(inject),
             config_model=config,
             narrows=narrows,
+            log_layer=log_layer,
         )
         return fn
 
@@ -197,10 +236,16 @@ def normalize_plugin(source: object) -> PluginSpec:
             f'plugin "{name}" does not say what its settings shape: give it `affects`, one '
             f"of {', '.join(sorted(AFFECTS))}"
         )
+    log_layer = getattr(source, "log_layer", None)
+    if log_layer is not None and log_layer not in LOG_LAYER:
+        raise LoaderError(
+            f'plugin "{name}" has log_layer {log_layer!r}; give it one of {", ".join(LOG_LAYER)}'
+        )
     return PluginSpec(
         name=str(name),
         apply=apply,
         affects=affects,
         inject=service_names(getattr(source, "inject", ()) or ()),
         config_model=config_model,
+        log_layer=log_layer,
     )

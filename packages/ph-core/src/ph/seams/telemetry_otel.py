@@ -81,7 +81,13 @@ class Config(WireModel):
     endpoint: str = ""
 
 
-@plugin("session-telemetry-otel", affects="deployment", inject=[SESSION_TELEMETRY], config=Config)
+@plugin(
+    "session-telemetry-otel",
+    affects="deployment",
+    inject=[SESSION_TELEMETRY],
+    config=Config,
+    log_layer="export",
+)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the exporter as a sink, or refuse with a reason."""
     try:

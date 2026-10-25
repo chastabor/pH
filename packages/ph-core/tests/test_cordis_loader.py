@@ -17,7 +17,16 @@ from pathlib import Path
 import pytest
 
 from ph.bundles import BASE, HEADLESS
-from ph.cordis import Context, Disposer, LoaderError, events, plugin
+from ph.cordis import (
+    LOG_LAYER,
+    Context,
+    Disposer,
+    LoaderError,
+    LogLayer,
+    events,
+    normalize_plugin,
+    plugin,
+)
 from ph.cordis.loader import (
     PROJECT_ROOT,
     Profile,
@@ -897,6 +906,102 @@ def test_a_sparse_profile_composes_back_into_what_it_was_saved_from() -> None:
     assert {entry["id"] for entry in saved} == {"a", "b", "c", "d", "e", "f"}
     assert {"id": "b", "config": {"depth": 2}} in saved, "a patch carries the whole config"
     assert sparse_entries(shipped, shipped) == [], "a profile that differs in nothing saves nothing"
+
+
+def _in_layer(place: LogLayer | None) -> object:
+    """A row with nothing to do, in the log layer at `place` or outside it."""
+
+    @plugin(f"t-{place or 'plain'}", affects="deployment", log_layer=place)
+    async def body(ctx: Context, config: None) -> None:
+        return None
+
+    return body
+
+
+_fake_module("ph_test_log_layer", plain=_in_layer(None), **{p: _in_layer(p) for p in LOG_LAYER})
+
+LAYERED = _doc(
+    "base",
+    "- id: model\n  name: ph_test_log_layer:plain\n"
+    "- id: store\n  name: ph_test_log_layer:storage\n"
+    "- id: between\n  name: ph_test_log_layer:plain\n"
+    "- id: policy\n  name: ph_test_log_layer:checkpoint\n"
+    "- id: agent\n  name: ph_test_log_layer:plain\n",
+)
+
+
+def test_the_log_layer_gathers_where_its_first_row_is_written() -> None:
+    """A profile can only add a row at the end, above the agents, where a sink would
+    unwind before the shutdown tail ships. So the composition places each row its
+    plugin declares in the log layer: where the first of them is written, in the
+    order `LogLayer` states, and the other rows keep their order around it. A saved
+    profile composes back into the same order, since the placement is the plugins'.
+
+    Sabotage: return the rows as composed, or keep the layer in written order, and
+    the order differs.
+    """
+    host = _doc(
+        "host",
+        "- id: sink\n  name: ph_test_log_layer:export\n"
+        "- id: seam\n  name: ph_test_log_layer:telemetry\n",
+    )
+    shipped = compose_rows([LAYERED])
+    composed = compose_rows([LAYERED, host])
+
+    assert [row.id for row in shipped] == ["model", "store", "policy", "between", "agent"]
+    assert [row.id for row in composed] == [
+        "model",
+        "store",
+        "seam",
+        "sink",
+        "policy",
+        "between",
+        "agent",
+    ]
+    reloaded = compose_rows([LAYERED, ProfileDocument("saved", sparse_entries(shipped, composed))])
+    assert _entries(reloaded) == _entries(composed)
+
+
+def test_a_row_that_does_not_mount_stays_where_it_was_written() -> None:
+    """A disabled row has no place to keep, and one whose plugin does not resolve is
+    refused by the mount, not here: `--dump-config` still shows a profile with a
+    mistyped name.
+
+    Sabotage: place disabled rows too, and `parked` joins the layer.
+    """
+    rows = compose_rows(
+        [
+            LAYERED,
+            _doc(
+                "host",
+                "- id: parked\n  name: ph_test_log_layer:export\n  disabled: true\n"
+                "- id: missing\n  name: mod.missing\n",
+            ),
+        ]
+    )
+
+    assert [row.id for row in rows] == [
+        "model",
+        "store",
+        "policy",
+        "between",
+        "agent",
+        "parked",
+        "missing",
+    ]
+
+
+def test_a_plugin_object_names_a_place_in_the_log_layer_or_none() -> None:
+    """The duck-typed path is held to the same closed set as the decorator's keyword."""
+    misplaced = types.SimpleNamespace(
+        name="t-misplaced",
+        affects="deployment",
+        log_layer="nowhere",
+        apply=lambda ctx, config: None,
+    )
+
+    with pytest.raises(LoaderError, match="log_layer 'nowhere'"):
+        normalize_plugin(misplaced)
 
 
 def test_a_dump_is_not_a_document_and_an_entry_is() -> None:
