@@ -1087,14 +1087,14 @@ so a crashed process gives it back by dying. `thread_local=False` is load-bearin
 and its absence is silent: filelock's re-entrancy counter is thread-local, so a
 lease taken on a worker thread releases nothing.
 
-**Cancellation vocabulary.** `AgentCancelCause.kind` is
-`user | parent | hook | disposed | legacy` — but only **three** are ever
-constructed: `user` (TUI interrupt, which keeps the inbox), `parent` (subagent
-release), `disposed` (driver disposal, which clears it). `hook` and `legacy` are
-declared and dead. A turn stopped from outside the loop, by a cancelled scope, an
-interrupt or an exit, closes `aborted` with no cause at all, and keeps what the stop
-said of itself as `detail`: a scope's reason, which a one-shot host sets to the
-signal's name, or else the exception's type. `TurnEndReason.kind` is
+**Cancellation vocabulary.** `AgentCancelCause.kind` is `user | parent | disposed`:
+`user` (TUI interrupt, which keeps the inbox), `parent` (subagent release),
+`disposed` (driver disposal, which clears it). The loop asks its turn's token
+whether it is canceled, so a stop sent straight to the token stops it too. A turn
+stopped from outside the loop's own `cancel`, by the token alone, a cancelled
+scope, an interrupt or an exit, closes `aborted` with no cause at all, and keeps
+what the stop said of itself as `detail`: the token's or a scope's reason, which a
+one-shot host sets to the signal's name, or else the exception's type. `TurnEndReason.kind` is
 `completed | aborted | blocked | error | max-tokens | interrupted`, of which
 `interrupted` is never constructed as a dataclass — it reaches logs only as the
 wire payload repair writes on resume.
@@ -1881,7 +1881,6 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | Gap | Status |
 |---|---|
 | `sandbox-local` ships `bwrap` and Seatbelt, both verified against a real kernel — the blind Seatbelt profile was wrong in four places a Mac found (P6-40). Landlock is unwritten | P6-04, P6-40; Landlock open |
-| `AgentCancelCause.kind` declares `hook` and `legacy`; neither is ever constructed | dead vocabulary |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
 | `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
 | **A writer can be forged on purpose.** Every log write goes through a module's own writer, which refuses a type its row in `WRITERS` does not grant — a third-party row appending `sandbox/mode` is refused at the write (T6, closing F12). What the runtime cannot refuse is a module that imports another's writer, constructs a `LogWriter`, or calls `Session._append`: each is deliberate, and `test_log_writers.py` fails on all three | T6, by design (rule 6) |

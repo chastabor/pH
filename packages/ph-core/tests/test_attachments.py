@@ -8,9 +8,11 @@ references exactly what its parent does — which is why this store has no owner
 directory and why nothing here collects automatically.
 
 The other half is the token estimate. A media block used to contribute **zero**,
-which meant a conversation of forty images reported no context pressure at all;
+which meant a conversation of forty images reported no context pressure at all,
+and G2/G3's character thresholds, counted over text, never fired on it either;
 the tests below care that the number is non-zero and proportionate, not that it
-is right to the token — it exists to answer "compact before asking?".
+is right to the token — it exists to answer "compact before asking?". That is why
+`MEDIA_TOKENS_UNKNOWN` is order-of-magnitude on purpose.
 
 ## What the base64 cache saves
 

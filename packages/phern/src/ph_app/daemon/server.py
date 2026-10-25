@@ -554,10 +554,8 @@ class _Connection:
         # an error would tell the client the one thing that is false. A disk that
         # refuses writes is the root's own flushes failing next, which is the
         # retry ladder's to report (`supervisor/failed`).
-        if not await session_written(root.ctx, root.session):
-            # Loud (P13-08): the act happened and the client keeps its reply, so
-            # what changes is what the daemon says about itself.
-            self.server.supervisor.unwritable(root)
+        # A failure marks the root unwritten through the store (P13-08).
+        await session_written(root.ctx, root.session)
         return reply
 
     # --- the methods -----------------------------------------------------------

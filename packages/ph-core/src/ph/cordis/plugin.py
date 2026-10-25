@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias, get_args, overload
 
 from pydantic import BaseModel
 
+from ..wire import literal_lookup
 from .child_limit import ChildLimit, Narrows
 from .errors import LoaderError
 from .key import ServiceKey, service_names
@@ -52,7 +53,8 @@ where it is written (the decorator's required keyword) rather than guessed at
 when a profile is split by owner. `plans/Session_Profiles_Plan.md` is the design.
 """
 
-AFFECTS: frozenset[Affects] = frozenset(get_args(Affects))
+AFFECTS: Mapping[str, Affects] = literal_lookup(Affects)
+"""Every `Affects` by its spelling, so checking a plugin's word also types it."""
 
 CONFIGURED_IN: Mapping[Affects, str] = {
     "environment": "a session profile, `$PH_HOME/profiles/<name>.yaml`",
@@ -85,6 +87,8 @@ at the end, which is all a profile can do, still lands beneath the agents.
 """
 
 LOG_LAYER: tuple[LogLayer, ...] = get_args(LogLayer)
+
+_LOG_LAYERS: Mapping[str, LogLayer] = literal_lookup(LogLayer)
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,16 +234,17 @@ def normalize_plugin(source: object) -> PluginSpec:
         isinstance(config_model, type) and issubclass(config_model, BaseModel)
     ):
         raise LoaderError(f'plugin "{name}" has a Config that is not a pydantic model')
-    affects = getattr(source, "affects", None)
-    if affects not in AFFECTS:
+    affects = AFFECTS.get(getattr(source, "affects", ""))
+    if affects is None:
         raise LoaderError(
             f'plugin "{name}" does not say what its settings shape: give it `affects`, one '
             f"of {', '.join(sorted(AFFECTS))}"
         )
-    log_layer = getattr(source, "log_layer", None)
-    if log_layer is not None and log_layer not in LOG_LAYER:
+    declared = getattr(source, "log_layer", None)
+    log_layer = None if declared is None else _LOG_LAYERS.get(declared)
+    if declared is not None and log_layer is None:
         raise LoaderError(
-            f'plugin "{name}" has log_layer {log_layer!r}; give it one of {", ".join(LOG_LAYER)}'
+            f'plugin "{name}" has log_layer {declared!r}; give it one of {", ".join(LOG_LAYER)}'
         )
     return PluginSpec(
         name=str(name),

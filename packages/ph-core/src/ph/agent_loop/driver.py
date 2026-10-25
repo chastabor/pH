@@ -97,9 +97,12 @@ class _Phase:
     kind: str = "idle"
     turn: int = 0
     step: int = 0
-    canceled: AgentCancelCause | None = None
+    cause: AgentCancelCause | None = None
+    """Who the loop's own `cancel` was told stopped this turn, for its `turn/end`.
+    Whether the turn is canceled is the token's to say: a stop sent straight to the
+    token has no cause, and stops the loop all the same."""
     token: CancelToken = field(default_factory=CancelToken)
-    """The live cancellation view handed to tool calls.
+    """The live cancellation view handed to tool calls, and the one the loop checks.
 
     A flag the loop checks between awaits is not enough once a tool body can run
     for minutes: the body needs to observe cancellation itself, and the pipeline
@@ -110,7 +113,7 @@ class _Phase:
         """Fresh per-turn state: a new token, so an old cancellation cannot leak
         into the next turn's tool calls."""
         self.step = 0
-        self.canceled = None
+        self.cause = None
         self.token = CancelToken()
 
 
@@ -187,9 +190,7 @@ class ReactLoopAgent:
         # Waking input cannot join an aborted activity, so it starts the next
         # turn. Classified BEFORE the insertion, so a reentrant cancel from a
         # splice observer cannot reclassify it.
-        waking_after_abort = (
-            wakeup and self._phase.kind != "idle" and self._phase.canceled is not None
-        )
+        waking_after_abort = wakeup and self._phase.kind != "idle" and self._phase.token.canceled
         self.inbox.append("next-turn" if waking_after_abort else target, message)
         if wakeup:
             # The wake the table in `ph.agent.inbox` promises, said out loud. This
@@ -235,12 +236,11 @@ class ReactLoopAgent:
     def cancel(self, cause: AgentCancelCause, *, keep_inbox: bool = False) -> None:
         if not keep_inbox:
             self.inbox.clear()
-        self._phase.canceled = cause
+        self._phase.cause = cause
         self._phase.token.cancel(cause.kind)
 
     def _throw_if_canceled(self) -> None:
-        if self._phase.canceled is not None:
-            raise Canceled(self._phase.canceled.kind)
+        self._phase.token.raise_if_canceled()
 
     # ------------------------------------------------------------------ run --
 
@@ -319,7 +319,7 @@ class ReactLoopAgent:
             # runs the turn again (the daemon's `_drive` says why), so a batch left
             # pending would be taken by the *next* prompt's turn, ahead of the
             # prompt that woke it. A stop is not a failure, and leaves it pending.
-            if self._phase.canceled is None:
+            if not self._phase.token.canceled:
                 self.inbox.take(held, turn)
             raise
         self._throw_if_canceled()
@@ -397,7 +397,7 @@ class ReactLoopAgent:
                 target = "next-step"
         except Canceled as error:
             # A stop, recorded over whatever ending a step had already decided.
-            turn_ends = _aborted(error, phase.canceled)
+            turn_ends = _aborted(error, phase.cause)
             raise
         except Exception as error:
             # A harness error's own code rather than `UNKNOWN`, because that is
@@ -413,7 +413,7 @@ class ReactLoopAgent:
         except BaseException as error:
             # A stop from outside, a cancelled scope, an interrupt or an exit,
             # recorded as the loop's own are.
-            turn_ends = _aborted(error, phase.canceled)
+            turn_ends = _aborted(error, phase.cause)
             raise
         finally:
             _LOG.append(
@@ -730,7 +730,7 @@ def _error_chain(error: BaseException) -> str:
     return ": ".join(parts)
 
 
-def _aborted(stop: BaseException, canceled: AgentCancelCause | None) -> TurnEndReason:
+def _aborted(stop: BaseException, cause: AgentCancelCause | None) -> TurnEndReason:
     """What a stop ends a turn as: `aborted`, whatever a step had decided (C9).
 
     A step may already have decided how the turn ends when the stop lands: while
@@ -744,11 +744,12 @@ def _aborted(stop: BaseException, canceled: AgentCancelCause | None) -> TurnEndR
     shutdown reach it as the same cancel. It said `user`, which a shutdown is not,
     and now names nobody, as repair's `interrupted` closer does. What the loop has
     instead is what the stop said of itself (`reason_of`), kept as the `detail`. A
-    host that wants its reason on record gives it to `cancel`, or to the scope it
-    cancels, as `until_signaled` does with the signal's name.
+    stop sent straight to the loop's token is one of these, and its reason is the
+    detail. A host that wants its reason on record gives it to `cancel`, or to the
+    scope it cancels, as `until_signaled` does with the signal's name.
     """
-    if canceled is not None:
-        return TurnEndReason(kind="aborted", reason=canceled)
+    if cause is not None:
+        return TurnEndReason(kind="aborted", reason=cause)
     return TurnEndReason(kind="aborted", detail=reason_of(stop))
 
 

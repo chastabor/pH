@@ -33,7 +33,7 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, NamedTuple, TypeAlias
+from typing import Literal, TypeAlias
 
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_int, as_str
@@ -53,7 +53,6 @@ __all__ = [
     "CREATED",
     "FOLDED",
     "TICK",
-    "Fired",
     "Schedule",
     "ScheduleKind",
     "ScheduleService",
@@ -492,26 +491,17 @@ class ScheduleService:
         self.index.record(session.id, next_at=self.next_due(session, now=stamp), now=stamp, new=new)
 
 
-class Fired(NamedTuple):
-    """What one `fire_due` did."""
-
-    schedules: list[Schedule]
-    """What came due and was delivered, in the order it was claimed."""
-    written: bool
-    """Whether the log took the ticks and the prompts. When not, the index was left
-    where it was, and the host says the log is unwritable."""
-
-
 async def fire_due(
     ctx: Context,
     session: Session,
     *,
     now: int,
     deliver: Callable[[Schedule], Awaitable[object]],
-) -> Fired:
+) -> list[Schedule]:
     """Fire whatever is due on `session`: claim, deliver, write, then tell the index
     (P13-07) — the door every host fires a schedule through, so the order is the
-    seam's and not each host's.
+    seam's and not each host's. Answers what came due and was delivered, in the
+    order it was claimed.
 
     **The tick before the prompt**, in the log: `claim` appends it before `deliver`
     can put anything in the inbox, so a reader never finds a scheduled prompt
@@ -526,18 +516,18 @@ async def fire_due(
     **The index last, and only over a written log.** Told at the claim, it said
     "later" over a log whose tick was still in a buffer, and a kill there lost the
     run. A write that fails leaves it where it was, so the moment is still due to
-    whatever reads it next.
+    whatever reads it next, and the store says the log is unwritten
+    (`session/unwritten`).
     """
     service = ctx.require(SCHEDULE)
     claimed = service.claim(session, now=now)
     if not claimed:
-        return Fired([], written=True)
+        return []
     for schedule in claimed:
         await deliver(schedule)
-    written = await session_written(ctx, session)
-    if written:
+    if await session_written(ctx, session):
         service.reindex(session, now=now)
-    return Fired(claimed, written)
+    return claimed
 
 
 def scheduled_source(schedule: Schedule) -> PluginSource:

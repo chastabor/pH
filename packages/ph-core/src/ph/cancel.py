@@ -156,7 +156,8 @@ def is_canceled(token: Cancellation | None) -> bool:
 
 
 def reason_of(stop: BaseException) -> str:
-    """What a stop says of itself: a token's or a scope's reason, else its type.
+    """What a stop, or any failure, says of itself: a token's or a scope's reason,
+    else its type and message, and for a group what each member says.
 
     A cancelled anyio scope hands its reason over inside a message that also names
     the scope's id and the task that cancelled it, so only the reason is kept: the

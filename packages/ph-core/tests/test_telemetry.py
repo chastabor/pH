@@ -8,17 +8,6 @@ no shipped profile mounts a sink (`base.yaml` carries the row with
 proof, and they live here rather than with the OTel row because the property is
 the *seam's*: renaming or dropping an exporter must not take the seam's only
 ordering test with it.
-
-## What the media estimates replaced
-
-A media block matched none of `measure`'s branches and contributed **zero**, so a
-conversation of forty images reported no pressure at all — and G2/G3's character
-thresholds, counted over text, never fired on it either.
-
-That is why `MEDIA_TOKENS_UNKNOWN` is deliberately order-of-magnitude rather than
-precise: being wrong by a factor is a rounding error against being wrong by
-everything, and this estimate only ever answers "should we compact *before*
-asking".
 """
 
 from __future__ import annotations
@@ -294,6 +283,31 @@ async def test_a_flush_that_failed_ships_nothing(mount: MountProfile) -> None:
     await sessions.flush(session)
     await anyio.wait_all_tasks_blocked()
     assert (started.type, started.seq) in _ledger(seen, "s")
+
+
+async def test_a_flush_that_failed_is_an_ops_record_saying_why(mount: MountProfile) -> None:
+    """A write that failed is a fact about the harness, not the conversation: no event
+    names it, since the log is what could not take it. So it ships on the ops channel,
+    with what the write said.
+
+    Sabotage: drop the row's `session/unwritten` listener, and nothing ships.
+    """
+    ctx = await mount()
+    seen: list[SessionTelemetryRecord] = []
+    ctx.require(SESSION_TELEMETRY).add_sink(seen.append)
+    sessions = ctx.require(SESSIONS)
+    session = sessions.create("s")
+    log_event(session, "turn/start", {"turn": 1})
+
+    refusing = ctx.on("session/flush", raising(OSError("no space left on device")))
+    assert not await sessions.written(session)
+    refusing()
+    await anyio.wait_all_tasks_blocked()
+
+    [failed] = [record for record in seen if record.channel == "ops"]
+    assert failed.severity == "error"
+    assert failed.attributes == {"session_id": "s", "reason": "OSError: no space left on device"}
+    assert failed.body == "session s could not be written: OSError: no space left on device"
 
 
 async def test_one_copy_of_a_log_cannot_release_another(mount: MountProfile) -> None:

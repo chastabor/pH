@@ -33,13 +33,12 @@ from daemon_helpers import (
 
 from ph.keys import GOALS, INTENTS, SCHEDULE, SUBAGENTS
 from ph.persistence import resumption_of
-from ph.seams import schedule as schedule_module
 from ph.seams.goals import Goal
 from ph.seams.schedule import Schedule, ScheduleService, scheduled_source
 from ph.seams.subagents import ChildNotice, SubagentService, record_ended
 from ph.session import Session
 from ph.session.kinds import SHELL_COMMAND
-from ph.testing import admitted_child, log_event, stored_types
+from ph.testing import admitted_child, log_event, raising, stored_types
 from ph_app.daemon.recovery import ROOT_RESUME_LIMIT, interrupted_resumes
 from ph_app.daemon.supervisor import Root
 from ph_app.wire import source_of
@@ -378,13 +377,11 @@ async def test_the_index_moves_only_once_the_tick_and_its_prompt_are_on_disk(
         await until(lambda: answered(root), what="the scheduled turn")
         set_phase(root, "idle")
 
-        async def refused(_ctx: object, _session: Session) -> bool:
-            return False
-
-        monkeypatch.setattr(schedule_module, "session_written", refused)
+        refusing = root.ctx.on("session/flush", raising(OSError("no space left on device")))
         assert await supervisor.tick(now=made + 150_000) == ["s"]
         assert len(told) == 1, "the index moved over a log that did not take the tick"
         assert "cron" in supervisor.unwritten
+        refusing()
 
 
 # ------------------------------------------------------- P13-09: damaged logs --

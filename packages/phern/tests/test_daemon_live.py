@@ -232,13 +232,15 @@ async def test_owed_rebuilds_from_the_logs_when_asked(
 
 
 async def test_an_unwritable_root_makes_readiness_no_until_a_write_succeeds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The write fails in the store, as every door that marks a root does, and with
-    nothing owed since the last write: the mark is cleared by an announcement, and a
-    flush that writes nothing makes one only because the one before it failed.
+    """Any write of the root that fails marks it, through a door the daemon does not
+    own as much as its own: the store says so (`session/unwritten`), and the daemon's
+    log says why. Here nothing was owed since the last write, so the mark is cleared
+    by an announcement the next flush makes only because the one before it failed.
 
-    Sabotage: forget the failure in `SessionStore.flush`, and the mark stays.
+    Sabotage: drop `session/unwritten` from `SessionStore.flush`, and the root is
+    never marked; forget the failure there, and the mark stays.
     """
     async with unplugged(tmp_path, monkeypatch) as server:
         root = await server.supervisor.start("root")
@@ -246,10 +248,13 @@ async def test_an_unwritable_root_makes_readiness_no_until_a_write_succeeds(
         assert server.probe("ready").ok
 
         refusing = root.ctx.on("session/flush", raising(OSError("no space left on device")))
-        await server.supervisor._flush(root)
+        # The store's own door, as a barrier before a model request goes through.
+        assert not await root.ctx.require(SESSIONS).written(root.session)
         reply = server.probe("ready")
         assert not reply.ok and any("root" in reason for reason in reply.reasons)
         assert server.status().unwritten == ["root"]
+        said = [one.getMessage() for one in caplog.records if one.name == "ph_app.daemon"]
+        assert any("no space left on device" in line for line in said), "the log says why"
         refusing()
         # Any write of the root clears it — here the store's own flush, which the
         # ladder's `_drive` calls directly — not only the doors that set the mark.

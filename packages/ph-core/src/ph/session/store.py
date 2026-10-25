@@ -1,11 +1,12 @@
 """`ctx.sessions` — the live session store, and forking.
 
-Publishes six events: `session/created`, `session/disposed`, `session/event`
+Publishes seven events: `session/created`, `session/disposed`, `session/event`
 (the post-commit append feed), `session/flush` (the awaited durability
 checkpoint, a `parallel` dispatch so every backend runs and the caller waits
 for all of them), `session/durable` (what that checkpoint made durable, for
-a reader that must not run ahead of the log) and `session/loaded` (what a log
-read off disk owes before anything runs in it, awaited by the door that read it).
+a reader that must not run ahead of the log), `session/unwritten` (a checkpoint
+that raised, and why) and `session/loaded` (what a log read off disk owes before
+anything runs in it, awaited by the door that read it).
 
 Forking is the branching mechanism (D2): pH does not model branching as a
 message tree, it models it as `fork(source, boundary)` plus `seed_length`. The
@@ -79,6 +80,15 @@ events.declare(
     doc=(
         "A flush every backend finished: the log holds the session's events below the "
         "count. Said when the count moved, and after a flush of the session failed."
+    ),
+)
+events.declare(
+    "session/unwritten",
+    "emit",
+    owner="ph.session",
+    doc=(
+        "A flush of the session raised, with the error, so the log holds less than the "
+        "session does. The next flush of it that returns says `session/durable`."
     ),
 )
 events.declare(
@@ -191,10 +201,12 @@ class _Entry:
     not see it and nothing forced anyone to say whether it runs inside a
     binding. `Session.observe` returns `Callable[[], None]`; naming it puts it
     in front of the gate, which files it as teardown."""
-    announced: int | None
+    announced: int
     """How much of the log `session/durable` has said is held, starting from what a
-    store held when the session was made (`durable_length`). `None` once a flush has
-    failed, so the next one that returns says so whatever it wrote."""
+    store held when the session was made (`durable_length`)."""
+    unwritten: bool = False
+    """Whether a flush of it raised since the last one that returned, as
+    `session/unwritten` said. The next one that returns announces whatever it wrote."""
 
 
 @dataclass(slots=True)
@@ -339,30 +351,33 @@ class SessionStore:
         **Only when the count moved.** A flush that found nothing owed has nothing to
         say, and its listeners did work for each one: the daemon refolds a root's
         holds over its children, so a shutdown flushing every finished child of a
-        root walked those children once per child. Except after a flush of it
-        failed: a reader may have taken the failure as news (the daemon marks the
-        root unwritten), and only an announcement takes that back, so the next flush
-        that returns makes one even if it wrote nothing. A cancellation is not a
-        failure, as `written` says, and leaves the count as it was. A session this
-        store does not hold has no count, and is announced on every flush.
+        root walked those children once per child. A session this store does not
+        hold has no count, and is announced on every flush.
+
+        **A flush that raised says so**, as `session/unwritten` with the error, for
+        the session that failed and every one after it in the lineage, which were not
+        flushed either. Through whichever door the flush came, so a reader such as
+        the daemon, which marks the root unwritten, hears every failure from one
+        place. Only an announcement takes that back, so the next flush that returns
+        makes one even if it wrote nothing. A cancellation is not a failure, as
+        `written` says, and is not said.
         """
         lineage = self.lineage(session)
         for index, ancestor in enumerate(lineage):
             through = ancestor.seq
             try:
                 await self.ctx.parallel("session/flush", ancestor)
-            except Exception:
-                # The rest of the lineage was not flushed either, the session asked
-                # for among them.
+            except Exception as error:
                 for unsettled in lineage[index:]:
                     if (failed := self._entry_of(unsettled)) is not None:
-                        failed.announced = None
+                        failed.unwritten = True
+                    self.ctx.emit("session/unwritten", unsettled, error)
                 raise
             entry = self._entry_of(ancestor)
             if entry is not None:
-                if entry.announced is not None and through <= entry.announced:
+                if through <= entry.announced and not entry.unwritten:
                     continue
-                entry.announced = through
+                entry.announced, entry.unwritten = max(entry.announced, through), False
             self.ctx.emit("session/durable", ancestor, through)
 
     def _entry_of(self, session: Session) -> _Entry | None:

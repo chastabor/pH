@@ -197,6 +197,28 @@ one faked a failure above the store. Neither happens in the daemon, where a hold
 moves with a record and every door that marks a root unwritten is a store flush
 that raised, so both now do what the daemon does.
 
+**A failed write is the store's to say.** `SessionStore.flush` says
+`session/unwritten`, with the error, for the session that failed and every one after
+it in its lineage, and keeps that as a named flag on the session's entry beside the
+announced count, where a `None` count stood for it. The daemon marks a root from
+that event, so every door that writes it, a barrier before a model request among
+them, now makes readiness no, where only the ladder's flush, a mutation's ack and a
+schedule tick did; its error log names the reason. Those three no longer mark the
+root themselves, and `fire_due` answers the schedules it delivered, since nothing
+read whether it wrote. Two more tests faked a failure above the store, and now fail
+its flush. The telemetry row ships the same event as an `error` ops record with its
+`reason`, since no ledger record can name a write the log never took.
+
+**The loop asks its token whether a turn is canceled.** `_throw_if_canceled` read
+the loop's own cause, so a stop sent straight to the turn's token went unnoticed
+until a tool batch or a stream saw it. The cause stays, as `_Phase.cause`, for the
+`turn/end` record only. `AgentCancelCause` lost `hook`, `legacy` and `reason`, which
+nothing constructed or read.
+
+**`normalize_plugin` checks `affects` and `log_layer` through `literal_lookup`**, so
+what it hands `PluginSpec` is typed rather than whatever `getattr` returned.
+`AFFECTS` is that lookup now.
+
 **A mounted root's entry is the process's, not its log's.** A rebuild reads every
 stored root, and a root this daemon holds has a log that lags what the daemon knows
 until the next barrier. So `owed` hands the rebuild its own entries for mounted roots

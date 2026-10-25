@@ -29,6 +29,7 @@ from ph.agent.types import (
     RequestFailure,
     RequestProposal,
 )
+from ph.agent_loop.driver import ReactLoopAgent
 from ph.agent_loop.invariant import ModelVisibleNotLoggedError
 from ph.cancel import Canceled
 from ph.cordis import Context, plugin
@@ -666,18 +667,22 @@ async def test_turn_stopping_listener_can_keep_the_turn_alive(mount: MountProfil
     [
         ("cancel", {"kind": "aborted", "reason": {"kind": "user"}}),
         ("foreign", {"kind": "aborted", "detail": "job canceled"}),
+        ("token", {"kind": "aborted", "detail": "the user stopped the turn"}),
     ],
 )
 async def test_canceling_ends_the_turn_as_aborted(
-    mount: MountProfile, stop: Literal["cancel", "foreign"], recorded: dict[str, object]
+    mount: MountProfile, stop: Literal["cancel", "foreign", "token"], recorded: dict[str, object]
 ) -> None:
     """A cancel closes the turn `aborted`, naming a cause only when the loop was told one.
 
     The loop's own `cancel` was told `user`, which is what `session/cancel` says. A
     `Canceled` from a token the loop does not own came from somewhere it cannot see,
-    so the turn names nobody and keeps what the token said instead.
+    so the turn names nobody and keeps what the token said instead. A stop sent
+    straight to the loop's own token has no cause either, and stops the turn at the
+    loop's next check, before the model is asked.
 
-    Sabotage: give `_aborted` a fallback cause, or drop its `detail`.
+    Sabotage: give `_aborted` a fallback cause, or drop its `detail`, or have the
+    loop check its own cause rather than the token.
     """
     ctx = await mount()
     session = ctx.require(SESSIONS).create("s")
@@ -688,12 +693,18 @@ async def test_canceling_ends_the_turn_as_aborted(
     ) -> Any:  # noqa: ANN401
         if stop == "foreign":
             raise Canceled("job canceled")
-        agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
+        if stop == "token":
+            # The loop's own token, which it also hands every tool call to observe.
+            assert isinstance(agent, ReactLoopAgent)
+            agent.signal.cancel("the user stopped the turn")
+        else:
+            agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return await next_()
 
     ctx.on("agent/pre-step", cancel_at_pre_step)
     await agent.prompt("hello")
     assert session.events[-1].data["reason"] == recorded
+    assert "assistant/message" not in [event.type for event in session.events]
 
 
 async def test_agent_scoped_listeners_hear_only_their_agent(mount: MountProfile) -> None:

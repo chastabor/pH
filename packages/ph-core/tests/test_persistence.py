@@ -291,11 +291,11 @@ async def test_a_flush_that_wrote_nothing_announces_nothing(
 async def test_the_flush_after_a_failed_one_announces_even_with_nothing_new(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A failure may have been taken as news, as the daemon marks a root unwritten,
-    and only an announcement takes that back. So the next flush that returns is
-    heard even when nothing was added since the last one, for every session the
-    failure kept from being flushed: here a segment, whose parent goes first and
-    fails first.
+    """A failure is said, with the error, for every session it kept from being
+    flushed: here a segment, whose parent goes first and fails first. A reader may
+    take that as news, as the daemon marks a root unwritten, and only an
+    announcement takes it back. So the next flush that returns is heard even when
+    nothing was added since the last one, for each of them.
 
     Sabotage: forget only the session that failed, and the child is never heard.
     """
@@ -308,10 +308,14 @@ async def test_the_flush_after_a_failed_one_announces_even_with_nothing_new(
     await sessions.flush(child)
     heard: list[tuple[str, int]] = []
     ctx.on("session/durable", lambda session, through: heard.append((session.id, through)))
+    failed: list[str] = []
+    ctx.on("session/unwritten", lambda session, _error: failed.append(session.id))
 
     refusing = ctx.on("session/flush", raising(OSError("no space left on device")))
     with pytest.raises(ExceptionGroup):
         await sessions.flush(child)
+    assert failed == ["parent", "child"]
+    assert heard == []
     refusing()
     await sessions.flush(child)
 

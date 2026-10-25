@@ -144,12 +144,15 @@ a payload its writers write, so a misspelled one fails there.
 * It does not trace. See above.
 * It does not decide what is sensitive — a redaction row does, on the waterfall.
 * **Ledger records are the seam's own mirroring of the session log**, so what an
-  operator sees there is what the log already holds. The `ops` channel has three
-  producers, all through the module's `ops_record` helper, which is a no-op
-  without the seam: a session open refused because another process holds it, a
-  store that cannot take the I-5 lease, and a workspace provider that failed and
-  left an agent uncontained. It is never called from inside the sink loop, where
-  a failing sink reporting itself would recurse. Stated because a telemetry seam
+  operator sees there is what the log already holds. The `ops` channel says what
+  the log cannot. Most of it comes through the module's `ops_record` helper, which
+  is a no-op without the seam: a session open refused because another process
+  holds it, a store that cannot take the I-5 lease, a workspace provider that
+  failed and left an agent uncontained, and a log the mount's last write could not
+  write. A flush that raised is heard by this row itself, from the store's
+  `session/unwritten`, and ships as an `error` record with its `reason`. None of it
+  is made from inside the sink loop, where a failing sink reporting itself would
+  recurse. Stated because a telemetry seam
   that looked wired but reported nothing would be worse than one that is off.
 
 ## The row

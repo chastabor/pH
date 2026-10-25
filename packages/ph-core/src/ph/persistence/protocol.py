@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from weakref import WeakKeyDictionary
 
+from ..cancel import reason_of
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.diagnostics import Diagnostic, contribute
 from ..seams.telemetry import ops_record
@@ -554,11 +555,13 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
                     # And it is an `ops` fact, not a line in a log file (P13-08): the
                     # stop that lost this tail is not a clean stop, and the next
                     # process's resume will repair a crash nobody reported.
+                    reason = reason_of(error)
                     await ops_record(
                         scope,
-                        f"session {session.id} could not be written on unwind: {error}",
+                        f"session {session.id} could not be written on unwind: {reason}",
                         severity="error",
                         session_id=session.id,
+                        reason=reason,
                     )
 
     scope.add_disposer(last_write, label="session-last-write")

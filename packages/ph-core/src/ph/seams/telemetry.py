@@ -35,6 +35,10 @@ beneath the agents, and rows unwind in reverse. So what the agents append as the
 let go is flushed by the checkpoint policy's last barrier while this row and the
 sinks beside it are still mounted, and ships like any other record; the barrier
 waits for that fan-out before the rows beneath it go.
+
+**A write that failed ships too, on the ops channel.** No event names it, since the
+log is what could not take it, so the store's `session/unwritten` is shipped as an
+`error` record with what the write said.
 `docs/seams/session_telemetry.md` has the rest.
 
 @module ph.seams.telemetry
@@ -51,6 +55,7 @@ from typing import Any, Literal, TypeAlias
 
 import anyio
 
+from ..cancel import reason_of
 from ..cordis import (
     Context,
     Disposer,
@@ -231,6 +236,19 @@ class SessionTelemetry:
         ready = [event for event in owed if cursor.wants(event)]
         return self.observe(session, ready) if ready else None
 
+    def _unwritten(self, session: Session, error: Exception) -> MaybeAwaitable[None]:
+        """Ship a write of `session` that raised, with its reason, and nothing when no
+        sink would receive it, as `_durable`."""
+        if not self._sinks:
+            return None
+        reason = reason_of(error)
+        return self.ops(
+            f"session {session.id} could not be written: {reason}",
+            severity="error",
+            session_id=session.id,
+            reason=reason,
+        )
+
     def _forget(self, session: Session) -> None:
         """Drop one session's cursor."""
         self._cursors.pop(session, None)
@@ -345,4 +363,5 @@ async def apply(ctx: Context, config: Config) -> None:
         telemetry._track(session)
     ctx.on("session/created", telemetry._created)
     ctx.on("session/durable", telemetry._durable)
+    ctx.on("session/unwritten", telemetry._unwritten)
     ctx.on("session/disposed", telemetry._forget)
