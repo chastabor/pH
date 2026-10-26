@@ -1483,7 +1483,7 @@ class DaemonServer:
             socket_watch=self.socket_watch,
             check_invariants=supervisor.check_invariants,
             unreachable_since=self.unreachable_since,
-            unwritten=sorted(supervisor.unwritten),
+            unwritten=sorted(set(supervisor.unwritten.values())),
             probe=self.probe_address,
             # `report()`'s shape as models — a list of sections, each a title
             # and `(label, value)` rows — carrying one built-in section today
@@ -1521,7 +1521,7 @@ class DaemonServer:
         if name in ("ready", "live") and self.unreachable_since is not None:
             reasons.append(f"the socket at {self.path} is no longer this daemon's")
         if name == "ready":
-            unwritten = sorted(self.supervisor.unwritten)
+            unwritten = sorted(set(self.supervisor.unwritten.values()))
             if unwritten:
                 reasons.append(f"root(s) could not be written: {', '.join(unwritten)}")
             leases = self._leases_writable()
@@ -1975,8 +1975,8 @@ async def serve(
     resume_owed: bool = False,
     continue_interrupted: bool = False,
 ) -> int:
-    """Run the supervisor until `shutdown`. Returns how many roots could not be
-    written when it stopped (P13-08) — the exit status `phern daemon` reports.
+    """Run the supervisor until `shutdown`. Returns how many session logs could not
+    be written when it stopped (P13-08) — the exit status `phern daemon` reports.
 
     `probe` is a `host:port` to answer the startup, readiness and liveness probes on
     over TCP (P13-12, `ph_app.daemon.probes`); `None` answers them on the unix

@@ -10,6 +10,7 @@ refusal has to be at parse time, not at use time.
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 from pathlib import Path
@@ -1002,6 +1003,47 @@ def test_a_plugin_object_names_a_place_in_the_log_layer_or_none() -> None:
 
     with pytest.raises(LoaderError, match="log_layer 'nowhere'"):
         normalize_plugin(misplaced)
+
+
+@plugin("t-waiting", affects="deployment", inject=["t-unprovided"], log_layer="checkpoint")
+async def _waiting_checkpoint(ctx: Context, config: None) -> None:
+    return None
+
+
+_fake_module("ph_test_log_waiting", checkpoint=_waiting_checkpoint)
+
+
+async def test_a_log_nothing_flushes_is_warned_about_at_mount(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A profile that keeps the log with no checkpoint row mounts, and says once that
+    nothing flushes it. With the row there is nothing to say, nor without storage. A
+    checkpoint row switched off, or still waiting on a service, flushes nothing, so it
+    is no checkpoint row.
+
+    Sabotage: drop the call from `Profile.mount`, or ask it of every enabled row rather
+    than the ones that activated, and the warnings differ.
+    """
+    caplog.set_level(logging.WARNING, logger="ph.cordis")
+
+    async def warned(*documents: ProfileDocument) -> list[str]:
+        caplog.clear()
+        ctx = Context()
+        await Profile.from_documents(documents).mount(ctx)
+        await ctx.dispose()
+        return [record.getMessage() for record in caplog.records if record.name == "ph.cordis"]
+
+    store = "- id: store\n  name: ph_test_log_layer:storage\n"
+    waiting = f"{store}- id: policy\n  name: ph_test_log_waiting:checkpoint\n"
+    switched_off = ProfileDocument("host", [{"id": "policy", "disabled": True}])
+
+    said = await warned(_doc("base", store))
+    assert len(said) == 1
+    assert "store keeps the session log" in said[0]
+    assert await warned(LAYERED) == []
+    assert len(await warned(LAYERED, switched_off)) == 1
+    assert len(await warned(_doc("base", waiting))) == 1
+    assert await warned(_doc("base", "- id: model\n  name: ph_test_log_layer:plain\n")) == []
 
 
 def test_a_dump_is_not_a_document_and_an_entry_is() -> None:

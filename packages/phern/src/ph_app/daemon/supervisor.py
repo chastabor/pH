@@ -58,7 +58,13 @@ from ph.keys import (
 )
 from ph.llm.types import AttachmentRef, PluginSource, create_user_message
 from ph.paths import resolve_roots
-from ph.persistence import JsonlArchive, cut_short_note, cut_turn_owner, resumption_of
+from ph.persistence import (
+    JsonlArchive,
+    cut_short_note,
+    cut_turn_owner,
+    resumption_of,
+    unwritten_at_unwind,
+)
 from ph.persistence.protocol import SessionArchive, SessionPersistence
 from ph.seams.credentials import hold_for_credential, waiting_for
 from ph.seams.invariants import Violation
@@ -1065,14 +1071,15 @@ class Supervisor:
     no store mounted to vouch for it: then an unasked `owed` reads the file rather
     than re-reading every log, until a store mounts or a rebuild is asked for —
     `_tried`'s rule for the schedule index."""
-    unwritten: set[str] = field(default_factory=set)
-    """Roots whose log could not be written when it was last tried (P13-08), through
-    any door, a barrier before a model request among them. The store says each
-    (`session/unwritten`, heard in `_start`), and a root leaves the set when a later
-    write of it succeeds. `daemon/status` lists
-    it, and readiness is no while it is not empty: a daemon that cannot write is one
-    an orchestrator should stop sending work to, loudly rather than as a warning in a
-    log file."""
+    unwritten: dict[str, str] = field(default_factory=dict)
+    """The logs that could not be written when they were last tried (P13-08), by
+    session id, each with its root: the root's own or a child's, since a root resumes
+    into whatever its family lost. Through any door, a barrier before a model request
+    among them, as the store says it (`session/unwritten`, heard in `_start`), and at
+    the unwind, as the mount's last write keeps it (`_release`). A log leaves when a
+    later write of it succeeds. `daemon/status` lists the roots, and readiness is no
+    while there is one: a daemon that cannot write is one an orchestrator should stop
+    sending work to, loudly rather than as a warning in a log file."""
     scheduler: Planner = field(init=False)
     """The scheduler (P5-06, P6-23): a pass that mounts what is due and fires what is
     mounted (`wake_and_tick`), then a sleep until the next appointment (`next_wake`).
@@ -1584,27 +1591,14 @@ class Supervisor:
                 plus what this process knows, sampled where both just moved. Heard
                 only for a flush that wrote something (`SessionStore.flush`), so a
                 hold that moved with no record after it would wait for the next one.
-                A root written is also a root that is no longer unwritten (P13-08)."""
+                A log written is also one that is no longer unwritten (P13-08)."""
                 root.unverified_at = now_ms()
                 self.verifier.notice()
-                if source is root.session:
-                    self.unwritten.discard(root.id)
+                self.unwritten.pop(source.id, None)
                 self._note_live(root)
 
             def could_not_write(source: Session, error: Exception) -> None:
-                """A write of this root's log raised, whichever door it came through
-                (P13-08). Said once at error level, the first time, with what the
-                write said: the warning the store logs per attempt is the
-                mechanism's; this is the fact an operator reads a daemon log for."""
-                if source is not root.session:
-                    return
-                if root.id not in self.unwritten:
-                    log.error(
-                        "ph_app.daemon: root %s cannot be written (%s); readiness is no",
-                        root.id,
-                        reason_of(error),
-                    )
-                self.unwritten.add(root.id)
+                self._could_not_write(root, source.id, reason_of(error))
 
             ctx.on("session/durable", written)
             ctx.on("session/unwritten", could_not_write)
@@ -2783,12 +2777,29 @@ class Supervisor:
             await root.exits.aclose()
         except Exception:
             log.warning("ph_app.daemon: root %s did not unwind cleanly", root.id, exc_info=True)
+        for session_id, reason in unwritten_at_unwind(root.ctx).items():
+            self._could_not_write(root, session_id, reason)
 
     async def _flush(self, root: Root) -> None:
         """Write `root`'s log, or carry on without it: the crash a ladder retries may
         well be a failing flush. A failure marks the root through the store
         (`session/unwritten`, heard in `_start`)."""
         await session_written(root.ctx, root.session)
+
+    def _could_not_write(self, root: Root, session_id: str, reason: str) -> None:
+        """A write of one of `root`'s logs, its own or a child's, raised (P13-08).
+
+        Said once per log at error level, with what the write said: the warning the
+        store or the last write logs per attempt is the mechanism's; this is the fact
+        an operator reads a daemon log for."""
+        if session_id not in self.unwritten:
+            log.error(
+                "ph_app.daemon: session %s of root %s could not be written (%s); readiness is no",
+                session_id,
+                root.id,
+                reason,
+            )
+        self.unwritten[session_id] = root.id
 
     def _restore_point(self, root: Root) -> tuple[Workspace | None, str]:
         """The root's workspace and the tree a retry starts from — `""` when it has none.

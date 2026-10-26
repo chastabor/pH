@@ -48,6 +48,7 @@ from ph.persistence.jsonl import (
     truncate_damaged,
 )
 from ph.persistence.lease import SessionBusy, lease_path
+from ph.persistence.protocol import unwritten_at_unwind
 from ph.session import (
     SESSION_FORMAT_VERSION,
     BatchRef,
@@ -1285,6 +1286,37 @@ async def test_a_scope_holding_many_leases_writes_each_log_once_while_it_is_held
     assert sorted(written) == [("first", True), ("second", True)], (
         "each log written once, while this process still held it"
     )
+
+
+async def test_what_the_last_write_could_not_write_is_kept_for_the_host(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mount's last write runs after every row has gone, so no listener hears of
+    a log it could not write (P13-08). It keeps each one, with why, for the host that
+    unwound the scope to read once it has, and still writes the rest.
+
+    Sabotage: drop the record from `write_on_unwind`, and the host reads nothing.
+    """
+    ctx = await mount(_root(tmp_path), {"id": "checkpoint-policy", "disabled": True})
+    store = ctx.require(SESSION_PERSISTENCE)
+    assert isinstance(store, JsonlSessionStore)
+    sessions = ctx.require(SESSIONS)
+    for name in ("broken", "fine"):
+        await store.claim(name, scope=ctx)
+        log_event(sessions.create(name), "turn/start", {"turn": 1})
+    flush = JsonlSessionStore.flush
+
+    async def failing(self: JsonlSessionStore, session: Session) -> None:
+        if session.id == "broken":
+            raise OSError("no space left on device")
+        await flush(self, session)
+
+    monkeypatch.setattr(JsonlSessionStore, "flush", failing)
+    await ctx.dispose()
+
+    assert unwritten_at_unwind(ctx) == {"broken": "OSError: no space left on device"}
+    _header, events = read_session(stored_log(tmp_path / "sessions", "fine"))
+    assert [event.type for event in events][-1] == "turn/start"
 
 
 async def test_disposing_an_agent_writes_what_its_teardown_appended(

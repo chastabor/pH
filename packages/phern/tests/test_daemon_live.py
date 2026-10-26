@@ -4,8 +4,9 @@ A root that dies busy must be findable by the next daemon without reading every
 log: the supervisor notes each root's holds on the live-roots index at every
 transition that can move them, keeps a busy root's entry across its own shutdown,
 and answers `sessions/owed` from the file — or from the logs when the file cannot
-vouch for itself. A write that fails is loud: the root is listed as unwritten and
-readiness is no until a later write succeeds. And the three orchestrator questions
+vouch for itself. A write that fails, of the root's log or a child's, is loud: the
+root is listed as unwritten and readiness is no until a later write of that log
+succeeds. And the three orchestrator questions
 are decided in one place and answered over HTTP with the status code a probe reads.
 """
 
@@ -24,6 +25,7 @@ from daemon_helpers import (
     logged_types,
     running,
     set_phase,
+    spawned,
     stale,
     supervised,
     unplugged,
@@ -32,7 +34,9 @@ from daemon_helpers import (
 
 from ph.keys import SESSIONS
 from ph.paths import resolve_roots
+from ph.persistence import JsonlSessionStore
 from ph.seams.live_index import LiveEntry, LiveIndex
+from ph.session import now_ms
 from ph.testing import log_event, raising, stored_types
 from ph_app.daemon.notify import notify, watchdog_interval
 from ph_app.daemon.probes import parse_bind
@@ -58,6 +62,11 @@ def _writes(monkeypatch: pytest.MonkeyPatch) -> list[set[str]]:
 
     monkeypatch.setattr(LiveIndex, "record_all", counted)
     return batches
+
+
+def _said(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """What the daemon's own log said."""
+    return [one.getMessage() for one in caplog.records if one.name == "ph_app.daemon"]
 
 
 async def _settled(supervisor: Supervisor) -> None:
@@ -253,7 +262,7 @@ async def test_an_unwritable_root_makes_readiness_no_until_a_write_succeeds(
         reply = server.probe("ready")
         assert not reply.ok and any("root" in reason for reason in reply.reasons)
         assert server.status().unwritten == ["root"]
-        said = [one.getMessage() for one in caplog.records if one.name == "ph_app.daemon"]
+        said = _said(caplog)
         assert any("no space left on device" in line for line in said), "the log says why"
         refusing()
         # Any write of the root clears it — here the store's own flush, which the
@@ -261,6 +270,62 @@ async def test_an_unwritable_root_makes_readiness_no_until_a_write_succeeds(
         await root.ctx.require(SESSIONS).flush(root.session)
         assert server.probe("ready").ok
         assert server.status().unwritten == []
+
+
+async def test_a_childs_unwritten_log_counts_against_its_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A root resumes into whatever its family lost, so a child's log that could not
+    be written marks the root as its own would, and the daemon's log names the child.
+    The mark is the child's: a write of the root leaves it, and a write of the child
+    clears it.
+
+    Sabotage: hear only the root's own log, and the root is never marked. Clear a
+    root on any write of it, and the root's own write clears the child's mark.
+    """
+    async with unplugged(tmp_path, monkeypatch) as server:
+        root = await server.supervisor.start("root")
+        server.serving = True
+        sessions = root.ctx.require(SESSIONS)
+        child = spawned(root, "r1")
+        assert server.probe("ready").ok
+
+        refusing = root.ctx.on("session/flush", raising(OSError("no space left on device")))
+        assert not await sessions.written(child)
+        assert server.status().unwritten == ["root"]
+        said = _said(caplog)
+        assert any(child.id in line and "no space left" in line for line in said), said
+        refusing()
+        # Something to write, so the root's flush is announced.
+        log_event(root.session, "turn/start", {"turn": 1})
+        await sessions.flush(root.session)
+        assert not server.probe("ready").ok, "the root's own write left the child's mark"
+        await sessions.flush(child)
+        assert server.probe("ready").ok
+        assert server.status().unwritten == []
+
+
+async def test_what_the_last_write_could_not_write_counts_against_its_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mount's last write runs after every listener has gone, so the store cannot
+    tell the daemon then. What it could not write is read once the root is down, and
+    counts as any failed write does: readiness is no after a passivation (P13-08).
+    Only the last write fails here; the host's flush and the checkpoint barrier go
+    through the listener the store registered before the patch.
+
+    Sabotage: drop the read from `Supervisor._release`, and the root is never marked.
+    """
+    async with unplugged(tmp_path, monkeypatch) as server:
+        root = await server.supervisor.start("root")
+        server.serving = True
+        monkeypatch.setattr(JsonlSessionStore, "flush", raising(OSError("no space left on device")))
+        await server.supervisor.passivate(root, now=now_ms())
+
+        assert server.supervisor.unwritten == {"root": "root"}
+        assert not server.probe("ready").ok
+        said = _said(caplog)
+        assert any("session root of root root" in line for line in said), said
 
 
 # ------------------------------------------------------------------ the probes --
@@ -307,7 +372,7 @@ async def test_the_probes_answer_over_tcp_with_the_code_an_orchestrator_reads(
         assert code == 404 and body["probes"] == ["startup", "ready", "live"]
         code, _body = await http(address, "POST /live HTTP/1.1\r\n\r\n")
         assert code == 405
-        daemon.running.supervisor.unwritten.add("ghost")
+        daemon.running.supervisor.unwritten["ghost"] = "ghost"
         code, body = await http(address, "GET /ready HTTP/1.1\r\n\r\n")
         assert code == 503 and "ghost" in body["reasons"][0]
 

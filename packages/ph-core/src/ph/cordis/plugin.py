@@ -83,7 +83,9 @@ after it went.
 **Declared, so nobody has to remember where to write the row.** The composition
 gathers the layer where its first row is written, in this order
 (`ph.cordis.loader`), so a deployment adds a sink by naming it, and a row appended
-at the end, which is all a profile can do, still lands beneath the agents.
+at the end, which is all a profile can do, still lands beneath the agents. A
+`storage` row with no `checkpoint` row is warned about at mount, since nothing then
+says when the log reaches disk.
 """
 
 LOG_LAYER: tuple[LogLayer, ...] = get_args(LogLayer)

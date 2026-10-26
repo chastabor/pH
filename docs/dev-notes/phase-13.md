@@ -63,7 +63,7 @@ Found 2026-10-22 by reading the restart path end to end against pi-durable's des
 | P13-05 | 2 | A finishing child wakes an idle parent; a spent child says so | `beneath`, `_end_child` |
 | P13-06 | 2 | A credential hold covers children | `Supervisor._start` |
 | P13-07 | 2 | Durable schedule tick: append, flush, deliver, reindex | `Supervisor.tick`, `ScheduleService.claim` |
-| P13-08 | 1 | Loud write failures: ops record, nonzero exit, `unwritten` in status | `write_on_unwind`, `Supervisor.unwritten` |
+| P13-08 | 1 | Loud write failures: ops record, nonzero exit, `unwritten` in status | `SessionTelemetry._unwritten`, `Supervisor.unwritten` |
 | P13-09 | 4 | Damaged logs isolated per child; `phern doctor sessions --repair` | `stored_tree`, `ph.persistence.jsonl` |
 | P13-10 | 2 | Flush after a repairing resume; policy first on turn stopping | `Supervisor._start`, `checkpoint_policy` |
 | P13-11 | 4 | Lease fallback refused; doctor names the lock mechanism | `ph.locks` |
@@ -88,7 +88,7 @@ sets it.
 |---|---|---|
 | P13-01 | The live-roots index: holds per root, noted at every transition, kept across an orderly stop, rebuilt from the logs | `ph.seams.live_index`, `Supervisor._note_live`, `replay_pending` |
 | P13-02 | `sessions/owed` and `phern agents owed [--rebuild] [--check]` | `verbs.SESSIONS_OWED`, `Supervisor.owed`, `JsonlArchive` |
-| P13-08 | A failed write is an ops record, an `unwritten` list in `daemon/status`, readiness no, and exit 3 from `phern daemon` | `write_on_unwind`, `Supervisor._flush`, `cli.daemon` |
+| P13-08 | A failed write is an ops record, an `unwritten` list in `daemon/status`, readiness no, and exit 3 from `phern daemon` | `SessionStore.flush`, `unwritten_at_unwind`, `Supervisor.unwritten`, `cli.daemon` |
 | P13-12 | `--probe-bind host:port`, `daemon/probe`, `phern agents probe`, the heartbeat, `sd_notify` | `ph_app.daemon.probes`, `ph_app.daemon.notify`, `DaemonServer.probe` |
 | P13-03 | `sessions/resume`, `phern agents resume [IDS] [--all] [--force]`, `phern daemon --resume-owed`; readiness waits for the first pass | `Supervisor.resume_owed`, `DaemonServer.resumed`, `_resume_at_boot` |
 | P13-04 | A cut-short turn nobody will send again is continued, bounded by the root's own ladder; `--continue-interrupted` widens it to a person's | `Supervisor._continue_interrupted`, `recovery.ROOT_RESUME_LIMIT`, `interrupted_resumes` |
@@ -208,6 +208,30 @@ root themselves, and `fire_due` answers the schedules it delivered, since nothin
 read whether it wrote. Two more tests faked a failure above the store, and now fail
 its flush. The telemetry row ships the same event as an `error` ops record with its
 `reason`, since no ledger record can name a write the log never took.
+
+**The mount's last write no longer makes an ops record.** `write_on_unwind` runs
+after the telemetry row has unwound, so `ops_record` found no seam and the record
+never reached a sink. No test looked for it. It keeps what it could not write
+instead, for the host to read once the mount is down (`unwritten_at_unwind`), since
+every listener has gone with the rows. `docs/seams/session_telemetry.md` has the
+unwind order, and the barrier before it whose failure telemetry does record.
+
+**A failed write counts against its root, whichever of the root's logs it was.**
+The daemon marked a root only for its own log, and never for the last write, which
+nothing heard. `Supervisor.unwritten` now holds every log that failed, by session id
+with its root: a child's as well as the root's own, since a root resumes into
+whatever its family lost, and each is named once in the daemon's error log.
+`_release` reads the last write's record after the unwind, so a passivated root's
+failure makes readiness no and a shutdown's exits 3 in every profile. A log leaves
+when a later write of it is announced, so the root's own write no longer clears a
+child's mark. `phern daemon` now counts logs rather than roots, as its message always
+said. Print mode and rpc do not read the record yet: `phern -p` exits nonzero when
+its root's own flush raises, and 0 when only the last write fails.
+
+**A profile that keeps the log with no checkpoint row is warned about at mount**,
+by `_warn_unflushed`, whose docstring says why there and why not a refusal: nothing
+flushes before a model request or a tool body, so a crash loses more.
+`test_config_owners` holds every shipped profile to the row.
 
 **The loop asks its token whether a turn is canceled.** `_throw_if_canceled` read
 the loop's own cause, so a stop sent straight to the turn's token went unnoticed

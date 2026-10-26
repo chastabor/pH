@@ -88,7 +88,8 @@ next, and its last barrier flushes every live session through the store.
 Persistence is still mounted, so the flush writes, and `session/durable` says so.
 This row hears it and ships the tail while both sinks are still there. The mount's
 last write (`ph.persistence.write_on_unwind`) stays as a backstop and finds nothing
-owed.
+owed. It runs after this row has gone, so a failure there is never a record. The
+host reads what it could not write once the mount is down (`unwritten_at_unwind`).
 
 * **The barrier waits for what its flush set off.** The ledger ships off the flush
   path, in detached work the unwind would cancel: the JSONL sink takes a thread per
@@ -147,13 +148,12 @@ a payload its writers write, so a misspelled one fails there.
   operator sees there is what the log already holds. The `ops` channel says what
   the log cannot. Most of it comes through the module's `ops_record` helper, which
   is a no-op without the seam: a session open refused because another process
-  holds it, a store that cannot take the I-5 lease, a workspace provider that
-  failed and left an agent uncontained, and a log the mount's last write could not
-  write. A flush that raised is heard by this row itself, from the store's
-  `session/unwritten`, and ships as an `error` record with its `reason`. None of it
-  is made from inside the sink loop, where a failing sink reporting itself would
-  recurse. Stated because a telemetry seam
-  that looked wired but reported nothing would be worse than one that is off.
+  holds it, a store that cannot take the I-5 lease, and a workspace provider that
+  failed and left an agent uncontained. A flush that raised is heard by this row
+  itself, from the store's `session/unwritten`, and ships as an `error` record with
+  its `reason`. None of it is made from inside the sink loop, where a failing sink
+  reporting itself would recurse. Stated because a telemetry seam that looked
+  wired but reported nothing would be worse than one that is off.
 
 ## The row
 

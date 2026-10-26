@@ -19,6 +19,7 @@ Two rules make this data rather than code (D9, invariant I-8):
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import re
 import sys
@@ -58,6 +59,8 @@ __all__ = [
     "safe_yaml_load",
     "sparse_entries",
 ]
+
+log = logging.getLogger("ph.cordis")
 
 ENTRY_POINT_GROUP = "ph.plugins"
 
@@ -527,6 +530,31 @@ def _log_layer_of(row: Row) -> LogLayer | None:
         return None
 
 
+def _warn_unflushed(rows: Iterable[Row]) -> None:
+    """Warn when `rows` keep the log and none of them says when it reaches disk.
+
+    Without a `checkpoint` row nothing flushes before a model request or a tool
+    body, so a crash loses what no other write took, and the one write left at
+    shutdown is the mount's last (`ph.persistence.write_on_unwind`), which runs after
+    telemetry has gone. A warning rather than a refusal, since the log is still
+    written and the trade is the deployment's to make.
+
+    Asked of the rows a mount activated, once it has settled: a checkpoint row still
+    waiting on a service flushes nothing, and a mount a row refused warns of nothing.
+    Not in `compose_rows`, which runs again whenever a session's environment is
+    compared.
+    """
+    places = {row.id: _log_layer_of(row) for row in rows}
+    stores = [row_id for row_id, place in places.items() if place == "storage"]
+    if stores and "checkpoint" not in places.values():
+        log.warning(
+            "ph.cordis: %s keeps the session log, but no row flushes it (log_layer "
+            '"checkpoint", such as session-checkpoint-policy): a crash loses what no '
+            "other write took",
+            ", ".join(stores),
+        )
+
+
 def resolve_row(row: Row) -> dict[str, JsonValue]:
     """One row as it would mount: its config through its plugin's model, defaults
     included, and every field stated — the ones a document may leave out too. A route's
@@ -884,6 +912,7 @@ class Profile:
         # layered after it, so a verdict computed then would be wrong for
         # precisely the profile that orders things that way.
         await ctx.serial("profile/mounted")
+        _warn_unflushed(row for row in self.enabled_rows() if forks[row.id].active)
         return mount
 
 

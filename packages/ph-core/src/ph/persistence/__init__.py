@@ -27,7 +27,7 @@ from .lineage import (
     materialize_some,
 )
 from .opening import open_session, stored_session
-from .protocol import ClaimingStore, NoStoredSession, read_if_stored
+from .protocol import ClaimingStore, NoStoredSession, read_if_stored, unwritten_at_unwind
 from .repair import (
     TOOL_NOT_STARTED,
     TOOL_OUTCOME_UNKNOWN,
@@ -84,4 +84,5 @@ __all__ = [
     "session_path",
     "stored_session",
     "truncate_damaged",
+    "unwritten_at_unwind",
 ]

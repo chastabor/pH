@@ -21,7 +21,7 @@ loudly instead of inventing a path that protects nothing.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -31,7 +31,6 @@ from weakref import WeakKeyDictionary
 from ..cancel import reason_of
 from ..keys import SESSION_PERSISTENCE, SESSIONS
 from ..seams.diagnostics import Diagnostic, contribute
-from ..seams.telemetry import ops_record
 from ..session import Session, SessionEvent, SessionHeader
 from .families import descendants
 from .lineage import lineage_faults
@@ -43,6 +42,9 @@ log = logging.getLogger("ph.persistence")
 
 _OWED: WeakKeyDictionary[Context, set[int]] = WeakKeyDictionary()
 """The stores, by `id`, whose last write each scope still owes (`write_on_unwind`)."""
+
+_UNWRITTEN: WeakKeyDictionary[Context, dict[str, str]] = WeakKeyDictionary()
+"""Each scope's record for `unwritten_at_unwind`."""
 
 SURVEY_LIMIT = 500
 """How many stored sessions the lineage check surveys.
@@ -63,6 +65,7 @@ __all__ = [
     "attach",
     "gated",
     "read_if_stored",
+    "unwritten_at_unwind",
     "write_on_unwind",
 ]
 
@@ -514,10 +517,11 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
     while it is still this process's to write, and no host has to remember it.
 
     Straight to the backend rather than through `SessionStore.flush`, which
-    dispatches `session/flush` to listeners that have unwound by now. Parents
-    before children, through the store's own `lineage` and for its reason: a
-    reference-forked child is unreadable without its parent's prefix, so a write
-    cut short must leave the parent's done.
+    dispatches `session/flush` to listeners that have unwound by now. Telemetry has
+    gone with them, so a failure here is kept for the host instead
+    (`unwritten_at_unwind`). Parents before children, through the store's own
+    `lineage` and for its reason: a reference-forked child is unreadable without its
+    parent's prefix, so a write cut short must leave the parent's done.
 
     A scope with no session store has nothing to write. **One registration per
     claim, one walk per scope.** Every claim registers, because only the newest
@@ -552,16 +556,17 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
                         session.id,
                         exc_info=True,
                     )
-                    # And it is an `ops` fact, not a line in a log file (P13-08): the
-                    # stop that lost this tail is not a clean stop, and the next
-                    # process's resume will repair a crash nobody reported.
-                    reason = reason_of(error)
-                    await ops_record(
-                        scope,
-                        f"session {session.id} could not be written on unwind: {reason}",
-                        severity="error",
-                        session_id=session.id,
-                        reason=reason,
-                    )
+                    _UNWRITTEN.setdefault(scope, {})[session.id] = reason_of(error)
 
     scope.add_disposer(last_write, label="session-last-write")
+
+
+def unwritten_at_unwind(scope: Context) -> Mapping[str, str]:
+    """The sessions `scope`'s last write could not write, by id, with why
+    (`write_on_unwind`).
+
+    For the host that unwound `scope`, once it has: the write runs after every row
+    has gone, telemetry and every listener with them, so nothing hears it as it
+    happens. Empty when the write succeeded or found nothing to write.
+    """
+    return _UNWRITTEN.get(scope, {})

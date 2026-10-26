@@ -137,20 +137,21 @@ def test_every_named_profile_keeps_the_log_layer_beneath_the_agents() -> None:
     where the first of its rows is written. So what a profile still decides is where
     that first row goes, which has to be beneath `agent`. The OTel sink is added the
     way a host adds it, in `daemon.yaml` after every row, and lands in the layer too.
+    Every profile keeps its checkpoint row, so none mounts with the warning that
+    nothing flushes the log.
 
     Sabotage: drop the OTel row's `log_layer`, or write `ph-base`'s log layer after
-    `agent`, and a profile mounts it above the agents.
+    `agent`, and a profile mounts it above the agents. Switch off `checkpoint-policy`
+    in `ph-base`, and every profile lacks it.
     """
     write_host_config("rows:\n  - id: telemetry-otel\n    name: session-telemetry-otel\n")
     for name in available_profiles():
         rows = [row.name for row in profile_or_exit(name).enabled_rows()]
-        layer = [
-            index
-            for index, plugin in enumerate(rows)
-            if normalize_plugin(resolve_plugin(plugin)).log_layer is not None
-        ]
+        places = [normalize_plugin(resolve_plugin(plugin)).log_layer for plugin in rows]
+        layer = [index for index, place in enumerate(places) if place is not None]
         assert rows.index("session-telemetry-otel") in layer, f"{name} left the OTel sink out"
         assert layer[-1] < rows.index("agent"), f"{name} mounts the log layer as {rows}"
+        assert "checkpoint" in places, f"{name} keeps the log with nothing to flush it"
 
 
 def test_a_session_profile_may_not_remove_a_screen(tmp_path: Path) -> None:

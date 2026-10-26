@@ -152,7 +152,7 @@ async def test_a_root_the_daemon_could_not_write_is_degraded(
     it (P13-08): the one state an orchestrator reads off a 503 is the one a person
     reads off `status`."""
     async with serving(tmp_path, monkeypatch) as daemon:
-        daemon.running.supervisor.unwritten.add("torn")
+        daemon.running.supervisor.unwritten["torn"] = "torn"
         result = await run_phern("service", "status")
         assert result.exit_code == 2, result.output
         assert "degraded" in result.output
@@ -277,7 +277,7 @@ async def test_watch_once_resumes_what_is_owed_and_reports_the_rest(
         assert "owed: left; resuming" in passed.output
         assert daemon.holds("left")
 
-        daemon.running.supervisor.unwritten.add("torn")
+        daemon.running.supervisor.unwritten["torn"] = "torn"
         degraded = await run_phern("service", "watch", "--once")
         assert degraded.exit_code == 2, degraded.output
         assert "could not be written: torn" in degraded.output
