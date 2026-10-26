@@ -81,7 +81,7 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 10
 
 ProbeName: TypeAlias = Literal["startup", "ready", "live"]
 """The three questions an orchestrator asks of a daemon (P13-12), in the order it
@@ -214,6 +214,14 @@ topP, ...}` where it carried `temperature`, and may carry `efforts`. A `Skill`, 
 its skill list at attach, and a route that sets either new field; a 0.9 client refuses
 a 0.8 daemon's header. Restarting the daemon on the same release fixes both. Released
 with the session log's format 4, so each number moves once.
+
+**10 (0.10.0): a daemon answers for the work it owes and the logs it could not
+write.** `daemon/status` carries `unwritten`, the roots with a log the daemon could
+not write (P13-08), and `probe`, where its probes answer over TCP (P13-12), so a 0.9
+client refuses a 0.10 daemon's status. Three methods are new: `sessions/owed`
+(P13-02), `sessions/resume` (P13-03) and `daemon/probe` (P13-12), each
+`unknown_method` to a 0.9 daemon. Restarting the daemon on the same release fixes
+both. The session log stays format 4: no record type changed.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

@@ -230,6 +230,61 @@ the request edge, so the value never enters a row, an event, or a child process
 (I-3). `${env:…}` interpolation is available for everything that is not a
 secret, with `${env:VAR:-default}` for a fallback.
 
+## Upgrading from 0.9
+
+0.10 makes a restart something an orchestrator can own: the daemon says which stored
+roots still owe work and resumes them when asked, continues a turn a crash cut short,
+answers startup, readiness and liveness probes, and says so when a session log could
+not be written. What that changes for an 0.9 setup:
+
+- **Restart the daemon.** It speaks protocol 10: `daemon/status` carries `unwritten`
+  and `probe`, so a 0.9 client refuses a 0.10 daemon's status, and `sessions/owed`,
+  `sessions/resume` and `daemon/probe` are new. `phern agents shutdown`, and the next
+  command that needs one starts the new one.
+- **Sessions from 0.9 carry over.** The session log is still format 4.
+- **A log that could not be written is exit 3.** `phern -p`, `--mode json` and
+  `--mode transcript` exit 3 when a session log, the root's or a child's, could not
+  be written, after printing what the run produced, and stderr names each log and
+  why. `--mode rpc` does the same once its peer closes the pipe. `phern daemon` exits 3 the same way, counting logs, and its
+  readiness is no while a log it holds is unwritten. A script that branches on `-p`'s
+  exit sees 3 beside 1 and 2: the answer stands, and the log behind it is short.
+- **New: a restart an orchestrator owns.** `phern daemon --resume-owed` resumes what
+  the last daemon owed on its way up, `--continue-interrupted` continues a person's
+  cut-short turn as well as an unattended one, and `--probe-bind host:port` answers
+  the startup, ready and live probes over HTTP. Under systemd it sends `READY=1` and
+  `WATCHDOG=1`. `phern agents owed`, `phern agents resume` and `phern agents probe`
+  ask the same from a shell, and `phern service start|stop|restart|status|resume|watch`
+  does the orchestrator's part on a host with none. [`contrib/`](https://github.com/chastabor/pH/blob/main/contrib/README.md) has
+  a system unit, a user unit and a Kubernetes manifest.
+- **New: `phern doctor sessions [--repair]`.** It reads every stored log strictly and
+  names the first line it refuses; `--repair` cuts each damaged log back to what
+  reads, keeping the original beside it. One damaged child log no longer takes its
+  family offline.
+- **The lease is `flock` or nothing.** A session store on a filesystem without
+  `flock(2)` is refused (`LockUnsupported`) rather than given a lock a crash cannot
+  release, and `phern doctor` names the lock mechanism and the lease directory's
+  filesystem. ph-core needs `filelock>=3.32`.
+- **A child's ending wakes an idle parent**, in the daemon and in rpc mode, and a
+  child the sweep gives up on tells its parent so. A root held for a credential holds
+  its children, and the key that arrives readmits them.
+- **Rows in the log layer place themselves.** A row that keeps, exports or flushes the
+  log goes beneath the agents wherever a profile writes it, so a telemetry sink added
+  at the end of `daemon.yaml`, such as `{id: telemetry-otel, name:
+  session-telemetry-otel}`, ships the shutdown tail too. A ledger record carries why
+  its work ended (`event.reason`), a failed write is an `error` ops record with its
+  reason, and a profile that keeps the log with no checkpoint row is warned about at
+  mount.
+- **For code built on pH:**
+  - A plugin that keeps, exports or flushes the log says where with
+    `@plugin(..., log_layer=...)`: `storage`, `telemetry`, `export` or `checkpoint`.
+  - `AgentCancelCause.kind` is `user`, `parent` or `disposed`; `hook`, `legacy` and
+    `reason` are gone.
+  - `SessionStore.flush` says `session/unwritten`, with the error, for a flush that
+    raised, and `ph.persistence.unwritten_at_unwind(scope)` answers every log a mount
+    left short, for a host that mounts its own.
+  - `run_rpc` returns that record, and `PrintResult`, `JsonResult` and
+    `TranscriptResult` carry it as `unwritten`.
+
 ## Upgrading from 0.6
 
 - **Restart the daemon** (`phern agents shutdown`): it speaks protocol 7, and a
