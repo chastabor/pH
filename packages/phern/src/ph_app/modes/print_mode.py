@@ -10,7 +10,7 @@ stay separate questions.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from ph.cordis import Context, Profile
 from ph.json import as_obj, as_str
 from ph.keys import SESSION_PERSISTENCE
 from ph.llm.types import text_of
+from ph.persistence import unwritten_at_unwind
 from ph.seams.models import ModelChoice
 from ph.session import Session, derive_transcript
 
@@ -50,6 +51,10 @@ class PrintResult:
 
     failure: str
     """The provider's own words, when `ended` is `error` — and empty otherwise."""
+
+    unwritten: Mapping[str, str]
+    """What the mount's last write could not write, by session id, with why
+    (`unwritten_at_unwind`): read once the mount is down, after everything above."""
 
 
 async def run_print(
@@ -88,6 +93,10 @@ async def run_print(
             if message.role == "assistant" and text_of(message.content)
         )
         persistence = ctx.get(SESSION_PERSISTENCE)
+        # `locate`, so a backend with no per-session file reports none rather
+        # than a path nobody could open.
+        log_path = None if persistence is None else persistence.locate(session.id)
+        events = len(session.events)
         # Off the log rather than out of a listener, because that is where the
         # driver writes it and a `finally` is what guarantees it is written: a
         # turn killed by a cancellation still records how it ended, and a
@@ -95,13 +104,12 @@ async def run_print(
         # the more fragile of the two.
         end = session.latest("turn/end")
         reason = as_obj(end.data.get("reason")) if end is not None else {}
-        return PrintResult(
-            session_id=session.id,
-            text=text,
-            # `locate`, so a backend with no per-session file reports none
-            # rather than a path nobody could open.
-            log_path=None if persistence is None else persistence.locate(session.id),
-            events=len(session.events),
-            ended=as_str(reason.get("kind")),
-            failure=as_str(as_obj(reason.get("error")).get("message")),
-        )
+    return PrintResult(
+        session_id=session.id,
+        text=text,
+        log_path=log_path,
+        events=events,
+        ended=as_str(reason.get("kind")),
+        failure=as_str(as_obj(reason.get("error")).get("message")),
+        unwritten=unwritten_at_unwind(ctx),
+    )

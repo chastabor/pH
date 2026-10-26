@@ -518,10 +518,11 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
 
     Straight to the backend rather than through `SessionStore.flush`, which
     dispatches `session/flush` to listeners that have unwound by now. Telemetry has
-    gone with them, so a failure here is kept for the host instead
-    (`unwritten_at_unwind`). Parents before children, through the store's own
-    `lineage` and for its reason: a reference-forked child is unreadable without its
-    parent's prefix, so a write cut short must leave the parent's done.
+    gone with them, so a failure here is kept for the host instead, on a record the
+    first claim on `scope` starts (`unwritten_at_unwind`). Parents before children,
+    through the store's own `lineage` and for its reason: a reference-forked child is
+    unreadable without its parent's prefix, so a write cut short must leave the
+    parent's done.
 
     A scope with no session store has nothing to write. **One registration per
     claim, one walk per scope.** Every claim registers, because only the newest
@@ -534,6 +535,9 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
     sessions = scope.get(SESSIONS)
     if sessions is None:
         return
+    record = _UNWRITTEN.get(scope)
+    if record is None:
+        record = _UNWRITTEN[scope] = _keep_unwritten(scope)
     _OWED.setdefault(scope, set()).add(id(store))
 
     async def last_write() -> None:
@@ -556,17 +560,38 @@ def write_on_unwind(scope: Context, store: SessionPersistence) -> None:
                         session.id,
                         exc_info=True,
                     )
-                    _UNWRITTEN.setdefault(scope, {})[session.id] = reason_of(error)
+                    record[session.id] = reason_of(error)
+                else:
+                    record.pop(session.id, None)
 
     scope.add_disposer(last_write, label="session-last-write")
 
 
-def unwritten_at_unwind(scope: Context) -> Mapping[str, str]:
-    """The sessions `scope`'s last write could not write, by id, with why
-    (`write_on_unwind`).
+def _keep_unwritten(scope: Context) -> dict[str, str]:
+    """A record for `scope` that keeps each write the store says raised, and gives it
+    back when a later one returns: a log the store could not write is not always one
+    the last write tries again, since a sweep writes a stored child once and lets it
+    go."""
+    record: dict[str, str] = {}
 
-    For the host that unwound `scope`, once it has: the write runs after every row
-    has gone, telemetry and every listener with them, so nothing hears it as it
-    happens. Empty when the write succeeded or found nothing to write.
+    def unwritten(session: Session, error: Exception) -> None:
+        record[session.id] = reason_of(error)
+
+    def durable(session: Session, _through: int) -> None:
+        record.pop(session.id, None)
+
+    scope.on("session/unwritten", unwritten)
+    scope.on("session/durable", durable)
+    return record
+
+
+def unwritten_at_unwind(scope: Context) -> Mapping[str, str]:
+    """The logs `scope`'s mount left short, by session id, with why: every write that
+    raised, through the store or the mount's last write, that no later write of the
+    same log took back (`write_on_unwind`).
+
+    For the host that unwound `scope`, once it has: the last write runs after every
+    row has gone, telemetry and every listener with them, so nothing hears it as it
+    happens. Empty when every log was written.
     """
     return _UNWRITTEN.get(scope, {})

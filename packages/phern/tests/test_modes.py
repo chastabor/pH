@@ -36,17 +36,18 @@ import json
 import os
 import signal
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from functools import partial
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import anyio
 import pytest
 from rlm_fixtures import HOST_INTERPRETER
 
-from ph.cordis import Profile, ProfileDocument
+from ph.cordis import Context, Profile, ProfileDocument
 from ph.cordis import context as cordis_context
 from ph.keys import SESSION_TELEMETRY, SESSIONS, SUBAGENTS
 from ph.llm.fake import FakeAdapter
@@ -63,7 +64,7 @@ from ph.llm.types import (
     UsageChunk,
     text_of,
 )
-from ph.persistence import SessionBusy, open_session, read_session
+from ph.persistence import JsonlSessionStore, SessionBusy, open_session, read_session
 from ph.resources import Stopped, until_signaled
 from ph.seams.subagents import (
     STATUS,
@@ -74,7 +75,7 @@ from ph.seams.subagents import (
     child_state_of,
     record_ended,
 )
-from ph.session import child_session_id
+from ph.session import Session, child_session_id
 from ph.testing import (
     admitted_child,
     hold_session,
@@ -85,12 +86,17 @@ from ph.testing import (
     settled,
     stored_log,
 )
+from ph_app import runtime
 from ph_app.daemon.recovery import CHILD_RETRY_LIMIT
-from ph_app.modes import render_transcript, run_json, run_print, run_rpc, run_transcript
+from ph_app.modes import render_transcript, rpc_mode, run_json, run_print, run_rpc, run_transcript
+from ph_app.modes.json_mode import JsonResult
+from ph_app.modes.print_mode import PrintResult
 from ph_app.modes.rpc_mode import RpcServer
+from ph_app.modes.transcript_mode import TranscriptResult
 from ph_app.profiles import compose_profile
 from ph_app.protocol import PROTOCOL_VERSION, request, result_of
 from ph_app.runtime import mounted
+from ph_app.sessions import RecordedStart
 from ph_rlm.presentation import PYTHON
 
 pytestmark = pytest.mark.anyio
@@ -302,9 +308,59 @@ async def test_a_malformed_rpc_line_is_ignored(profile: Profile) -> None:
     assert frames[0]["id"] == 1
 
 
-async def _rpc_prompt(profile: Profile, session_id: str) -> None:
+async def _rpc_prompt(profile: Profile, session_id: str) -> Mapping[str, str]:
     prompt = request(1, "session/prompt", {"sessionId": session_id, "prompt": "hello"})
-    await run_rpc(profile, stdin=io.StringIO(f"{json.dumps(prompt)}\n"), out=io.StringIO())
+    return await run_rpc(profile, stdin=io.StringIO(f"{json.dumps(prompt)}\n"), out=io.StringIO())
+
+
+def _unwritable_once_open(monkeypatch: pytest.MonkeyPatch, host: ModuleType) -> None:
+    """The store refuses every write that looks its method up once `host`'s
+    `open_root` has opened the session: after the mount, so the listener the store
+    registered keeps the method it took, and only the mount's last write fails."""
+    opened: Callable[[Context, RecordedStart], Awaitable[Session]] = host.open_root
+
+    async def then_unwritable(ctx: Context, start: RecordedStart) -> Session:
+        session = await opened(ctx, start)
+        monkeypatch.setattr(JsonlSessionStore, "flush", raising(OSError("no space left on device")))
+        return session
+
+    monkeypatch.setattr(host, "open_root", then_unwritable)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [run_print, partial(run_json, out=io.StringIO()), run_transcript],
+    ids=["print", "json", "transcript"],
+)
+async def test_a_one_shot_run_answers_what_its_last_write_could_not_write(
+    profile: Profile,
+    monkeypatch: pytest.MonkeyPatch,
+    run: Callable[..., Awaitable[PrintResult | JsonResult | TranscriptResult]],
+) -> None:
+    """The mount's last write runs after everything that could hear it, so each
+    one-shot mode reads what it could not write once its mount is down, and its result
+    carries it for the CLI's exit (P13-08).
+
+    Sabotage: drop the read from any one mode, and its result carries nothing.
+    """
+    _unwritable_once_open(monkeypatch, runtime)
+
+    result = await run(profile, "hello", session_id="short")
+
+    assert result.unwritten == {"short": "OSError: no space left on device"}
+
+
+async def test_an_rpc_server_answers_what_its_mounts_last_writes_could_not_write(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--mode rpc` reads each session mount's record once its peer is gone and the
+    mounts are down, as the one-shot modes do (P13-08).
+
+    Sabotage: drop the read from `run_rpc`, and it answers nothing.
+    """
+    _unwritable_once_open(monkeypatch, rpc_mode)
+
+    assert await _rpc_prompt(profile, "short") == {"short": "OSError: no space left on device"}
 
 
 # `print` stands for the one-shot modes: `--mode json` and transcript make their

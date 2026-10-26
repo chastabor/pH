@@ -337,11 +337,15 @@ def default(
     if mode == "rpc":
         # No prompt: the peer drives the session over stdio. A signal stops it the
         # way it stops the daemon, and a peer closing it by `SIGTERM` is the common
-        # case (`run_until_signaled`).
+        # case (`run_until_signaled`). That stop leaves through the signal before the
+        # mounts' records are read; the last write's own warning names each log.
         try:
-            run_until_signaled(partial(run_rpc, composed, choice=choice), on_stop=_say_stopped)
+            unwritten = run_until_signaled(
+                partial(run_rpc, composed, choice=choice), on_stop=_say_stopped
+            )
         except MountRefusal as error:
             fail_unmounted(profile, error)
+        _exit_if_unwritten(unwritten)
         return
 
     if prompt is None:
@@ -391,24 +395,42 @@ def default(
         # option the log could not record, which is not run on.
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
-    if mode == "json":
-        # Already written, event by event, as each committed.
-        return
-    if mode == "transcript":
+    # `json` has written its output already, event by event, as each committed.
+    if mode != "json":
         console.print(outcome.text)
-        return
-    console.print(outcome.text)
-    err.print(
-        f"[dim]session {outcome.session_id} · {outcome.events} events · {outcome.log_path}[/dim]"
-    )
-    if outcome.ended == "error":
+    failed = False
+    if mode == "text":
+        err.print(
+            f"[dim]session {outcome.session_id} · {outcome.events} events · "
+            f"{outcome.log_path}[/dim]"
+        )
+        failed = outcome.ended == "error"
+    if failed:
         # Whatever arrived before the failure is still printed above — it is in
         # the log either way, and a truncated answer is worth seeing. What must
         # not happen is exiting 0: a `-p` run is something scripts call, and a
         # provider outage that reports success is indistinguishable from an
         # answer. Only `error`: `blocked` and `max-tokens` are turns that ended
         # the way they were asked to.
-        fail(f"[red]the turn failed:[/red] {detail(outcome.failure)}", code=1)
+        err.print(f"[red]the turn failed:[/red] {detail(outcome.failure)}")
+    # Both are said, and a log left short is the graver exit of the two.
+    _exit_if_unwritten(outcome.unwritten)
+    if failed:
+        raise typer.Exit(code=1)
+
+
+def _exit_if_unwritten(unwritten: Mapping[str, str]) -> None:
+    """Exit 3 when the mount's last write could not write a log, as `phern daemon`
+    does (P13-08): what the run printed stands, and the next run resumes a log that
+    is missing its tail."""
+    if unwritten:
+        fail(
+            "\n".join(
+                f"[red]session {session_id} could not be written:[/red] {detail(reason)}"
+                for session_id, reason in sorted(unwritten.items())
+            ),
+            code=3,
+        )
 
 
 def _say_stopped(signum: int) -> None:

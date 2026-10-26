@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -29,6 +30,7 @@ from ph.cordis import DEPLOYMENT, Context, Profile
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.llm.types import user_text
+from ph.persistence import unwritten_at_unwind
 from ph.seams.models import ModelChoice, start_on
 from ph.session import Session, SessionEvent, SessionForkError
 from ph.wire import WireModel
@@ -146,6 +148,15 @@ class RpcServer:
         self._served[session.id] = served
         self._attach(served.ctx, session)
         return session
+
+    def unwritten(self) -> dict[str, str]:
+        """What the last write of each session's mount could not write, by session id,
+        with why (`unwritten_at_unwind`): read once the mounts are down."""
+        return {
+            session_id: reason
+            for served in self._served.values()
+            for session_id, reason in unwritten_at_unwind(served.ctx).items()
+        }
 
     async def _listing(self) -> Context:
         """The profile itself, mounted once, for what the deployment offers before any
@@ -303,8 +314,8 @@ async def run_rpc(
     choice: ModelChoice = ModelChoice(),
     stdin: TextIO | None = None,
     out: TextIO | None = None,
-) -> None:
-    """Serve JSON-RPC until stdin closes."""
+) -> Mapping[str, str]:
+    """Serve JSON-RPC until stdin closes, then answer `RpcServer.unwritten`."""
     source = stdin if stdin is not None else sys.stdin
     sink = out if out is not None else sys.stdout
     async with AsyncExitStack() as exits, anyio.create_task_group() as tasks:
@@ -315,6 +326,7 @@ async def run_rpc(
             # A turn a child's notice woke (P13-05) ends with the peer: cancelled
             # before the group waits for it, and the mounts unwind after.
             tasks.cancel_scope.cancel()
+    return server.unwritten()
 
 
 async def _serve_lines(server: RpcServer, source: TextIO) -> None:

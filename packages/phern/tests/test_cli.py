@@ -28,8 +28,9 @@ from ph.persistence.jsonl import read_session
 from ph.seams.models import ModelChoice
 from ph.session import SESSION_FORMAT_VERSION
 from ph.testing import ReapedHost, hold_session, not_none, stored_log
-from ph_app import profiles
+from ph_app import cli, profiles
 from ph_app.cli import app
+from ph_app.modes.print_mode import PrintResult
 from ph_app.profiles import (
     PRESENTATION,
     PROFILE_DIR,
@@ -756,6 +757,59 @@ def test_print_mode_exits_nonzero_on_an_error_turn(
     _header, events = read_session(stored_log(tmp_path / "sessions", "failed"))
     ended = [event for event in events if event.type == "turn/end"]
     assert as_obj(ended[-1].data["reason"])["kind"] == "error", "and the log says so too"
+
+
+def test_a_print_run_whose_last_write_failed_exits_3_after_its_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A log the mount's last write could not write exits 3, as `phern daemon` does
+    (P13-08), and after the answer: what the run printed stands, and stderr names the
+    log and why. A failed turn is said as well, and the short log is the exit.
+    `test_modes` holds each mode to reading the record; this holds the command to it.
+
+    Sabotage: drop `_exit_if_unwritten` from the text path, or decide the failed turn
+    first, and the run exits 1.
+    """
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+
+    async def answered(*_args: object, **_kwargs: object) -> PrintResult:
+        return PrintResult(
+            session_id="short",
+            text="the answer",
+            log_path=None,
+            events=3,
+            ended="error",
+            failure="the provider went away",
+            unwritten={"short": "OSError: no space left on device"},
+        )
+
+    monkeypatch.setitem(cli._MODES, "text", answered)
+    result = runner.invoke(app, ["-p", "hello"])
+
+    assert result.exit_code == 3, result.output
+    assert "the answer" in result.stdout
+    assert "the turn failed: the provider went away" in result.output
+    assert "session short could not be written: OSError: no space left on device" in result.output
+
+
+def test_an_rpc_server_whose_last_writes_failed_exits_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--mode rpc` exits 3 on what its mounts' last writes could not write, once its
+    peer is gone, as `-p` does (P13-08).
+
+    Sabotage: drop `_exit_if_unwritten` from the rpc path, and the server exits 0.
+    """
+    monkeypatch.setenv("PH_HOME", str(tmp_path))
+
+    async def served(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {"short": "OSError: no space left on device"}
+
+    monkeypatch.setattr(cli, "run_rpc", served)
+    result = runner.invoke(app, ["--mode", "rpc"])
+
+    assert result.exit_code == 3, result.output
+    assert "session short could not be written: OSError: no space left on device" in result.output
 
 
 @pytest.mark.parametrize(

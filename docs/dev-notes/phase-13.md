@@ -225,8 +225,23 @@ whatever its family lost, and each is named once in the daemon's error log.
 failure makes readiness no and a shutdown's exits 3 in every profile. A log leaves
 when a later write of it is announced, so the root's own write no longer clears a
 child's mark. `phern daemon` now counts logs rather than roots, as its message always
-said. Print mode and rpc do not read the record yet: `phern -p` exits nonzero when
-its root's own flush raises, and 0 when only the last write fails.
+said.
+
+**The one-shot modes and rpc read the record too.** `phern -p` exited 0 when only
+the last write failed. Each one-shot mode now reads it after its `prompted` block,
+once the mount is down, and its result carries it; `run_rpc` reads every session
+mount's once its peer is gone and returns it. The command prints what the run
+produced, names each log and why on stderr, and exits 3, as `phern daemon` does. A
+turn that failed as well is said too, and the short log is the exit.
+
+**The record is every log the mount left short.** It held only the last write's own
+failures, and a log the store could not write is not always one the last write
+tries again: a sweep writes a stored child once and lets it go, and a one-shot run
+exited 0 over it. From the first claim, `write_on_unwind` also hears the store's
+`session/unwritten` and `session/durable`, so a failed write through the store is
+kept and a later one that returns takes it back, the last write's included. The
+record is in memory, so a disk that refuses the logs cannot refuse it too; the
+next open still repairs whatever tail did not land, as it repairs a crash.
 
 **A profile that keeps the log with no checkpoint row is warned about at mount**,
 by `_warn_unflushed`, whose docstring says why there and why not a refusal: nothing

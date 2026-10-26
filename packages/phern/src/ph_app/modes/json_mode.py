@@ -10,13 +10,14 @@ caller reading the stored log parse one format, and dsh tooling reads both (Q2).
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
 from ph.cordis import Context, Profile
 from ph.json import dumps
+from ph.persistence import unwritten_at_unwind
 from ph.seams.models import ModelChoice
 from ph.session import Session, SessionEvent
 
@@ -29,6 +30,8 @@ __all__ = ["JsonResult", "run_json"]
 class JsonResult:
     session_id: str
     events: int
+    unwritten: Mapping[str, str]
+    """As `PrintResult.unwritten`."""
 
 
 async def run_json(
@@ -64,13 +67,15 @@ async def run_json(
         session_id=session_id,
         attachments=attachments,
         before=attach,
-    ) as (_ctx, session):
+    ) as (ctx, session):
         pass
     # Counted after teardown, not inside it: scopes unwind on the way out and
     # what they append — a released workspace, a reaped child — is streamed like
     # any other event, so a count taken one line earlier would report fewer
     # events than the reader just saw.
-    return JsonResult(session_id=session.id, events=len(session.events))
+    return JsonResult(
+        session_id=session.id, events=len(session.events), unwritten=unwritten_at_unwind(ctx)
+    )
 
 
 def _opened_here(session: Session) -> tuple[SessionEvent, ...]:

@@ -64,6 +64,7 @@ from ph.testing import (
     disk_fills_midway,
     hold_session,
     log_event,
+    not_none,
     noted,
     raising,
     searches_into,
@@ -1288,35 +1289,55 @@ async def test_a_scope_holding_many_leases_writes_each_log_once_while_it_is_held
     )
 
 
-async def test_what_the_last_write_could_not_write_is_kept_for_the_host(
+async def test_the_record_is_every_log_the_mount_left_short(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The mount's last write runs after every row has gone, so no listener hears of
-    a log it could not write (P13-08). It keeps each one, with why, for the host that
-    unwound the scope to read once it has, and still writes the rest.
+    a log it could not write: it keeps each one, with why, for the host that unwound
+    the scope, and still writes the rest. A write the store says raised is kept too,
+    since the last write does not try every log again: a stored child a sweep writes
+    once is let go at once. A later write that returns takes it back, the store's or
+    the last write's, so what is left is the logs the mount left short (P13-08).
 
-    Sabotage: drop the record from `write_on_unwind`, and the host reads nothing.
+    Sabotage: drop the record from the last write, and `broken` is not kept; drop
+    `_keep_unwritten`'s listeners, and `dropped` is not. Drop the take-back on
+    `session/durable` or on the last write's success, and `kept` or `retried` stays.
     """
     ctx = await mount(_root(tmp_path), {"id": "checkpoint-policy", "disabled": True})
     store = ctx.require(SESSION_PERSISTENCE)
     assert isinstance(store, JsonlSessionStore)
     sessions = ctx.require(SESSIONS)
-    for name in ("broken", "fine"):
+    for name in ("broken", "kept", "retried", "dropped"):
         await store.claim(name, scope=ctx)
         log_event(sessions.create(name), "turn/start", {"turn": 1})
+
+    refusing = ctx.on("session/flush", raising(OSError("no space left on device")))
+    for name in ("kept", "retried", "dropped"):
+        assert not await sessions.written(not_none(sessions.get(name)))
+    refusing()
+    assert await sessions.written(not_none(sessions.get("kept")))
+    # Let go, as a sweep lets a stored child go: the last write tries neither again.
+    sessions.dispose("kept")
+    sessions.dispose("dropped")
     flush = JsonlSessionStore.flush
 
     async def failing(self: JsonlSessionStore, session: Session) -> None:
         if session.id == "broken":
-            raise OSError("no space left on device")
+            raise OSError("the disk went away")
         await flush(self, session)
 
+    # Patched after the mount, so only the last write meets it: the store's listener
+    # kept the method it took.
     monkeypatch.setattr(JsonlSessionStore, "flush", failing)
     await ctx.dispose()
 
-    assert unwritten_at_unwind(ctx) == {"broken": "OSError: no space left on device"}
-    _header, events = read_session(stored_log(tmp_path / "sessions", "fine"))
-    assert [event.type for event in events][-1] == "turn/start"
+    assert unwritten_at_unwind(ctx) == {
+        "broken": "OSError: the disk went away",
+        "dropped": "OSError: no space left on device",
+    }
+    for name in ("kept", "retried"):
+        _header, events = read_session(stored_log(tmp_path / "sessions", name))
+        assert [event.type for event in events][-1] == "turn/start", name
 
 
 async def test_disposing_an_agent_writes_what_its_teardown_appended(

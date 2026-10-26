@@ -10,7 +10,7 @@ replaced ranges, and that is the wrong projection for a reader.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, assert_never
@@ -25,6 +25,7 @@ from ph.llm.types import (
     ToolResultBlock,
     text_of,
 )
+from ph.persistence import unwritten_at_unwind
 from ph.seams.models import ModelChoice
 from ph.text import block_marker, redacted_marker
 
@@ -37,6 +38,8 @@ __all__ = ["TranscriptResult", "render_transcript", "run_transcript"]
 class TranscriptResult:
     session_id: str
     text: str
+    unwritten: Mapping[str, str]
+    """As `PrintResult.unwritten`."""
 
 
 _SPEAKER: dict[Literal["system", "user", "assistant"], str] = {
@@ -91,5 +94,6 @@ async def run_transcript(
         choice=choice,
         session_id=session_id,
         attachments=attachments,
-    ) as (_ctx, session):
-        return TranscriptResult(session_id=session.id, text=render_transcript(session.transcript()))
+    ) as (ctx, session):
+        text = render_transcript(session.transcript())
+    return TranscriptResult(session_id=session.id, text=text, unwritten=unwritten_at_unwind(ctx))
