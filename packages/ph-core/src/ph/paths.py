@@ -142,6 +142,18 @@ class PathRoots:
         reaps."""
         return self.home / "logs" / "daemon.log"
 
+    def daemon_stderr(self) -> Path:
+        """Where a daemon a UI spawned writes its stderr (`launch._detach`).
+
+        Beside `daemon_log`, and for the gap in it: the log is opened by the daemon
+        once its profile has composed, so a refusal *before* that — a row whose
+        plugin will not import, an option it does not take, a traceback on the
+        way in — reached no file at all. This one is the launcher's, truncated at
+        each spawn and read back into the launcher's own refusal when the process
+        ends before it listens.
+        """
+        return self.home / "logs" / "daemon.stderr"
+
     def ensure(self) -> PathRoots:
         """Create whatever is missing, with the mode its tier requires."""
         self.home.mkdir(parents=True, exist_ok=True)

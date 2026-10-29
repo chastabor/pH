@@ -19,13 +19,14 @@ The commands are registered on the *root* context, so they unwind with it (I2).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast
 
 from textual.binding import Binding, BindingType
 
-from ph.seams.commands import CommandDefinition
+from ph.cordis import maybe_await
+from ph.seams.commands import CommandContext, CommandDefinition, parse_command_line
 
 from .config import TuiKeybindings, TuiSettings
 from .screens import AppSurface
@@ -40,6 +41,7 @@ __all__ = [
     "action_command",
     "app_bindings",
     "local_commands",
+    "run_line",
 ]
 
 
@@ -218,6 +220,27 @@ def local_commands(app: AppSurface) -> list[CommandDefinition]:
         action_command(app, verb.name, verb.summary, verb.action, verb.argument_hint)
         for verb in TUI_VERBS
     ]
+
+
+async def run_line(definitions: Iterable[CommandDefinition], line: str) -> str | None:
+    """Dispatch a `/name` line to the definition in `definitions` that names it.
+
+    The list is `PHTuiApp.commands`: the terminal's own verbs, then whatever its
+    front end offers — each screen's, and the daemon's. `parse_command_line` is the
+    registry's own split, so a line tokenizes the same way here as it would on the
+    daemon. A name no definition claims is a `KeyError`, in the words the prompt
+    shows.
+    """
+    name, argument = parse_command_line(line)
+    for definition in definitions:
+        if definition.name == name:
+            # A client holds no `Context`, so it can build no `CommandContext` —
+            # and neither body reachable here reads one: a local definition's
+            # `run` dispatches a Textual action, and a remote one's sends the line
+            # back to the daemon, which builds the real one.
+            shown = await maybe_await(definition.run(argument, cast("CommandContext", None)))
+            return shown or None
+    raise KeyError(f'unknown command "/{name}"')
 
 
 def action_command(

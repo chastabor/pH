@@ -50,6 +50,7 @@ UI_LOCAL: dict[str, str] = {
     "on_prompt_input_canceled": "clears local input state",
     "on_prompt_input_submitted": "routes; every slow branch is handed to a worker",
     "action_view": "toggles panel state and redraws from rows it already holds",
+    "action_quit": "exits with this app's own code; async only to match Textual's base",
 }
 """Every handler that may stay `async` on the pump: each awaits only this
 process's own state.

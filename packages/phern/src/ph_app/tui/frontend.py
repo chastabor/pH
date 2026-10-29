@@ -153,8 +153,6 @@ class FrontSession(Protocol):
         """
         ...
 
-    async def run_command(self, line: str) -> str | None: ...
-
     async def shell(self, command: str, *, surface: bool = False) -> None:
         """Run the person's own shell command in the session's workspace.
 
@@ -175,7 +173,9 @@ class FrontSession(Protocol):
         ...
 
     def commands(self) -> list[CommandDefinition]:
-        """Every slash command a person may run here.
+        """The slash commands this front end offers: one per screen it can draw, and
+        the daemon's. The terminal's own verbs are the app's (`PHTuiApp.commands`),
+        so they answer with no front end at all.
 
         Definitions and not `Any`: the palette reads `name`, `argument_hint` and
         `summary` off these, and the picker that renders them had to take

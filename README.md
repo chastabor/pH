@@ -412,6 +412,14 @@ not be written. What that changes for an 0.9 setup:
   its work ended (`event.reason`), a failed write is an `error` ops record with its
   reason, and a profile that keeps the log with no checkpoint row is warned about at
   mount.
+- **The TUI says why it could not start, and keeps saying it.** A daemon a UI
+  starts writes its stderr to `$PH_HOME/logs/daemon.stderr`, truncated at each
+  spawn, so one that exits before it listens is reported in its own words rather
+  than by exit status. Once it is up, its warnings go to `daemon.log` alone. The
+  terminal keeps that sentence on screen with a retry and a quit beside it, its own
+  verbs such as `/theme` and `/quit` still answer with no session behind the
+  prompt, and a verb that needs one says so instead of doing nothing. Quitting from
+  under a failed start exits 1.
 - **For code built on pH:**
   - A plugin that keeps, exports or flushes the log says where with
     `@plugin(..., log_layer=...)`: `storage`, `telemetry`, `export` or `checkpoint`.

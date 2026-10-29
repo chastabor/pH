@@ -27,6 +27,7 @@ it is what turns the loser into a client instead of a casualty.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -56,6 +57,17 @@ start while it is still starting, and they cannot tell that from the truth.
 LOCK_TIMEOUT = SPAWN_TIMEOUT + 5.0
 """How long the loser of a race waits for the winner's spawn — longer than the
 spawn it is serializing against, so one slow start is not two failures."""
+
+TAIL_LINES = 12
+"""How many of a daemon's last stderr lines go into the refusal when it exits before
+it listens: enough for a usage error or the end of a traceback, few enough to read
+in a modal."""
+
+DETACHED = "PH_DAEMON_DETACHED"
+"""Set in the environment of a daemon `_detach` starts: its stderr is the launcher's
+file, read only until the socket answers. `phern daemon` reads it to keep its
+warnings out of that file once it is up (`configure_daemon_logging(to_stderr=…)`),
+because the rotating log already holds every one and this file does not rotate."""
 
 
 def phern_argv(*args: str) -> list[str]:
@@ -152,14 +164,15 @@ async def ensure_daemon(
         if await listening(path):
             return Started(path=path, spawned=False)
         log.info("ph_app.daemon: no daemon at %s; starting one", path)
-        process = _detach(list(argv))
-        await _await_socket(path, process)
+        stderr = resolved.daemon_stderr()
+        process = _detach(list(argv), stderr)
+        await _await_socket(path, process, stderr)
         return Started(path=path, spawned=True)
     finally:
         await anyio.to_thread.run_sync(release)
 
 
-def _detach(argv: list[str]) -> subprocess.Popen[bytes]:
+def _detach(argv: list[str], stderr: Path) -> subprocess.Popen[bytes]:
     """Start the daemon as a process that outlives this one.
 
     The whole point of a daemon is that closing the terminal does not end the
@@ -168,22 +181,32 @@ def _detach(argv: list[str]) -> subprocess.Popen[bytes]:
     half of the double-fork idiom, and enough here because pH's daemon needs no
     controlling terminal.
 
-    Output goes to the null device rather than being inherited: the daemon prints
-    its socket path and its linger warning on the way up, and those landing in the
-    middle of a Textual screen would corrupt the UI that started it. What it says
-    afterwards belongs in the logs and in `phern agents doctor`.
+    Output is not inherited: the daemon prints its socket path and its linger
+    warning on the way up, and those landing in the middle of a Textual screen
+    would corrupt the UI that started it. Stdout goes to the null device. **Stderr
+    goes to `stderr`, truncated first**, because a daemon that exits before it
+    listens says why on exactly that stream — and with it on the null device the
+    only thing a UI could report was the exit status, with advice to run the
+    command again somewhere its words could be seen. `_await_socket` reads the
+    file back into its refusal. Once the daemon is up its warnings go to its own
+    rotating log alone (`DETACHED`), so this file keeps its startup and, should it
+    crash, its last words.
     """
+    stderr.parent.mkdir(parents=True, exist_ok=True)
     # argv is built by the caller's `spawn_command`, never from anything typed.
-    return subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    with stderr.open("wb") as captured:
+        # Popen keeps a descriptor of its own; this handle closes with the block.
+        return subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=captured,
+            start_new_session=True,
+            env={**os.environ, DETACHED: "1"},
+        )
 
 
-async def _await_socket(path: Path, process: subprocess.Popen[bytes]) -> None:
+async def _await_socket(path: Path, process: subprocess.Popen[bytes], stderr: Path) -> None:
     """Wait for something to answer, or say what we waited for and gave up on.
 
     Polls the *connect* rather than the file, because the file exists before
@@ -193,21 +216,46 @@ async def _await_socket(path: Path, process: subprocess.Popen[bytes]) -> None:
 
     A daemon that exits before it listens — a profile that does not compose, a
     flag it does not take, a socket it cannot bind — is said at once rather than
-    after the whole wait: its words went to the null device with the rest of its
-    output, so the exit status is what there is to report, and the fix is to run
-    the same command where its refusal can be read.
+    after the whole wait, and **in its own words**: `_detach` pointed its stderr at
+    `stderr`, so the refusal it printed is read back here and put in the sentence.
+    Before that the words went to the null device with the rest of its output, and
+    a person was handed an exit status and told to run the command again in a
+    terminal to read what it had already said once.
     """
     with anyio.move_on_after(SPAWN_TIMEOUT):
         while not await listening(path):
             code = process.poll()
             if code is not None:
                 raise DaemonAbsent(
-                    f"the daemon exited with status {code} before listening on {path}; "
-                    "run `phern daemon` with the same options in a terminal to see why"
+                    _refusal(
+                        f"the daemon exited with status {code} before listening on {path}",
+                        stderr,
+                    )
                 )
             await anyio.sleep(0.02)
         return
     raise DaemonAbsent(
-        f"started a daemon but nothing is listening on {path} after {SPAWN_TIMEOUT:g}s; "
-        "run `phern daemon` in another terminal to see why"
+        _refusal(
+            f"started a daemon but nothing is listening on {path} after {SPAWN_TIMEOUT:g}s",
+            stderr,
+        )
+    )
+
+
+def _refusal(what: str, stderr: Path) -> str:
+    """`what`, followed by the daemon's last `TAIL_LINES` non-blank lines when it left any.
+
+    Read whole: the file was truncated at this spawn and holds only what the daemon
+    said on its way up. The tail, because a traceback's reason is its last line.
+    """
+    try:
+        text = stderr.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    said = [line.rstrip() for line in text.splitlines() if line.strip()][-TAIL_LINES:]
+    if said:
+        return f"{what}; it said:\n" + "\n".join(said)
+    return (
+        f"{what} and said nothing; run `phern daemon` with the same options in a "
+        "terminal to see why"
     )

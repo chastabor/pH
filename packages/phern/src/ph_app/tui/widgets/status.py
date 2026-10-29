@@ -20,6 +20,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from ph.json import as_str
+from ph.seams.subprocess import first_line
 from ph.seams.tui_status import StatusReading
 from ph.text import duration, thousands
 
@@ -155,16 +156,24 @@ class StatusBar(Vertical):
     def tick(self) -> None:
         self._frame += 1
 
-    def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
-        # A frame may land while this widget is mounted and its child is not —
-        # compose is asynchronous, and so is teardown. A widget owns its
-        # children's lifetime, so it is the widget that says "nothing to draw
-        # into yet" rather than every caller guessing at the moment. Checked
-        # first, so the string work below is not done for a line that is gone;
-        # `query_one` by id is the cheap path, ~45x a generic `query`.
+    def _line(self) -> Static | None:
+        """The line to draw into, or `None` while there is none.
+
+        A frame may land while this widget is mounted and its child is not —
+        compose is asynchronous, and so is teardown. A widget owns its children's
+        lifetime, so it is the widget that says "nothing to draw into yet" rather
+        than every caller guessing at the moment. Asked first, so the string work
+        is not done for a line that is gone; `query_one` by id is the cheap path,
+        ~45x a generic `query`.
+        """
         try:
-            line = self.query_one("#status-line", Static)
+            return self.query_one("#status-line", Static)
         except NoMatches:
+            return None
+
+    def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
+        line = self._line()
+        if line is None:
             return
         parts = [
             "[$ph-accent]$glyph[/]",
@@ -195,6 +204,26 @@ class StatusBar(Vertical):
             parts.append(f"[$ph-muted]·[/] [{style}]$field{index}[/]")
             values[f"field{index}"] = reading.text
         line.update(Content.from_markup("  ".join(parts), **values))
+
+    def show_unattached(self, refusal: str | None) -> None:
+        """No session yet: why, when a start failed, else that one is on its way.
+
+        The refusal is the line that stays once the modal saying it is gone. Its
+        first line only: the whole of it was in the modal, and a footer is one row.
+        Substituted rather than spliced into the markup, for the reason
+        `ConfirmModal` gives — a refusal quotes paths and options, and `[…]` is
+        markup.
+        """
+        line = self._line()
+        if line is None:
+            return
+        if refusal is None:
+            line.update(Content.from_markup("[$ph-muted]●  attaching…[/]"))
+            return
+        why = first_line(refusal) or "could not start"
+        line.update(
+            Content.from_markup("[$ph-warning]●  no session[/]  [$ph-muted]$why[/]", why=why)
+        )
 
 
 class Sidebar(Vertical):

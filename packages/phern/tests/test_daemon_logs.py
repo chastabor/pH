@@ -86,6 +86,23 @@ def test_warnings_reach_the_stderr_of_the_moment(
     assert "not said" not in err
 
 
+def test_a_detached_daemon_says_its_warnings_to_the_file_alone(
+    tmp_path: Path, root_logger: logging.Logger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A daemon a UI spawned has the launcher's file for a stderr, read only until
+    the socket answers and never rotated (`launch.DETACHED`). Its warnings are all
+    in the rotating log already, so echoing them there too would grow that file
+    for the daemon's whole life.
+
+    Sabotage: ignore `to_stderr`, and the warning reaches stderr.
+    """
+    path = tmp_path / "daemon.log"
+    configure_daemon_logging(path, to_stderr=False)
+    logging.getLogger("ph_app.daemon").warning("ph_app.daemon: kept to the file")
+    assert "kept to the file" not in capsys.readouterr().err
+    assert "kept to the file" in path.read_text(encoding="utf-8")
+
+
 def test_release_takes_back_what_configure_attached(
     tmp_path: Path, root_logger: logging.Logger
 ) -> None:

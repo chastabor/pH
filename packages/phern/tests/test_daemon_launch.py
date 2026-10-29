@@ -149,6 +149,10 @@ async def test_a_ui_with_no_daemon_starts_one_and_waits_for_the_door() -> None:
 
     assert started.spawned
     assert started.path.exists()
+    # Its stderr is a file now, not the null device: what it said on the way up
+    # is there to read, and so is whatever it says next.
+    said = resolve_roots().daemon_stderr().read_text(encoding="utf-8")
+    assert "listening on" in said
 
     await shut_down(started.path)
 
@@ -207,17 +211,22 @@ async def test_a_daemon_that_exits_before_listening_is_said_at_once() -> None:
     """A flag the daemon does not take, a profile that does not compose, a socket
     it cannot bind: each ends the process in under a second, and the spawner used to
     wait the whole `SPAWN_TIMEOUT` before saying nothing was listening — thirty
-    seconds, for a person who typed one wrong option. Its output went to the null
-    device with the rest, so the exit status is what there is to say, and it is said
-    as soon as the process is gone.
+    seconds, for a person who typed one wrong option. It is said as soon as the
+    process is gone, **and in the daemon's own words**: its stderr used to go to the
+    null device with the rest of its output, so the exit status was all there was to
+    say, and the person was sent to run the command again in a terminal to read a
+    refusal the daemon had already printed once.
 
     Sabotage: drop the `poll` from `_await_socket`, and this takes thirty seconds
-    and names the wrong cause.
+    and names the wrong cause; point `_detach`'s stderr back at the null device, and
+    the status comes without the sentence.
     """
     with anyio.fail_after(SPAWN_TIMEOUT / 2), pytest.raises(DaemonAbsent) as refused:
         await ensure_daemon(argv=phern_argv("daemon", "--no-such-option"))
-    assert "exited with status 2 before listening" in str(refused.value)
-    assert "phern daemon" in str(refused.value), "the fix: run it where its refusal can be read"
+    said = str(refused.value)
+    assert "exited with status 2 before listening" in said
+    assert "--no-such-option" in said, "the daemon's own refusal, read back from its stderr"
+    assert "phern daemon" not in said, "nobody is sent to a terminal for what is already here"
 
 
 def _gone(pid: int) -> bool:

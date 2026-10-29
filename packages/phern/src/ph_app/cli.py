@@ -25,6 +25,7 @@ resume and watch it (P13-13).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import signal
 import sys
@@ -71,7 +72,7 @@ from .console import (
     section,
     selectors_or_exit,
 )
-from .daemon.launch import phern_argv
+from .daemon.launch import DETACHED, phern_argv
 from .daemon.recovery import PASSIVATE_AFTER
 from .modes import run_json, run_print, run_rpc, run_transcript
 from .profiles import (
@@ -911,13 +912,14 @@ def daemon(
     if life.survives_logout is not True:
         err.print(f"[yellow]this socket does not survive logout:[/yellow] {life.verdict()}")
         err.print(f"[yellow]  {life.advice}[/yellow]")
-    # Before `serve` can log: detached, this process's stderr is the null device,
-    # and this file is where its warnings go (`ph_app.daemon.logs`). Right above
-    # the `try` whose `finally` releases it, so nothing between can skip that.
+    # Before `serve` can log: detached, this process's stderr is a file the launcher
+    # reads only until the socket answers, and this one is where its warnings go
+    # (`ph_app.daemon.logs`). Right above the `try` whose `finally` releases it, so
+    # nothing between can skip that.
     from .daemon.logs import configure_daemon_logging, release_daemon_logging  # noqa: PLC0415
 
     log_path = roots.daemon_log()
-    configure_daemon_logging(log_path)
+    configure_daemon_logging(log_path, to_stderr=DETACHED not in os.environ)
     err.print(f"[dim]logging to {log_path}[/dim]")
     try:
         # The path that was printed, not a second resolution of it: a message

@@ -1,17 +1,20 @@
 """The daemon's log file: the one place its warnings land once it is detached.
 
-`launch._detach` starts the daemon with stdout and stderr on the null device, so a
-Textual screen is not written over. Everything the daemon says after that went
-with them: a root that gave up its retry ladder, a wake it could not make, an
-invariant that drifted, the socket check failing. Python's last-resort handler
-writes warnings to stderr only while no handler is configured, and nothing in pH
-configured one. So `phern daemon` installs this before it serves.
+`launch._detach` starts the daemon with stdout on the null device and stderr on a
+file the launcher reads only until the socket answers, so a Textual screen is not
+written over. Before this module, everything the daemon said after that was lost:
+a root that gave up its retry ladder, a wake it could not make, an invariant that
+drifted, the socket check failing. Python's last-resort handler writes warnings to
+stderr only while no handler is configured, and nothing in pH configured one. So
+`phern daemon` installs this before it serves.
 
 Two handlers, each with one job. A rotating file under `$PH_HOME/logs` holds
 `INFO` and up, bounded so a daemon left running for months does not fill a disk.
 A stderr handler at `WARNING` keeps a foreground `phern daemon` saying what it
 said before this module existed, which the last-resort handler stops doing the
-moment a file handler is attached. Both are attached to the root logger, so a
+moment a file handler is attached. A detached daemon goes without it
+(`to_stderr=False`): its stderr is the launcher's file, which does not rotate, and
+the log already holds every warning. Both are attached to the root logger, so a
 seam's `ph.*` logger and the daemon's own are both heard; those two are the ones
 raised to `INFO` (`LOUD`).
 
@@ -75,8 +78,10 @@ def _owned(handler: logging.Handler, path: Path) -> bool:
     )
 
 
-def configure_daemon_logging(path: Path, *, level: int = logging.INFO) -> None:
-    """Send the process's logging to `path`, and warnings to stderr.
+def configure_daemon_logging(
+    path: Path, *, level: int = logging.INFO, to_stderr: bool = True
+) -> None:
+    """Send the process's logging to `path`, and warnings to stderr when `to_stderr`.
 
     The directory is made. pH's own loggers are lowered to `level` where higher or
     unset, and never raised; every other logger keeps the root's level.
@@ -88,11 +93,11 @@ def configure_daemon_logging(path: Path, *, level: int = logging.INFO) -> None:
     to_file = _DaemonLog(path, maxBytes=LOG_BYTES, backupCount=LOG_FILES, encoding="utf-8")
     to_file.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     root.addHandler(to_file)
-    if not any(isinstance(handler, _DaemonStderr) for handler in root.handlers):
-        to_stderr = _DaemonStderr()
-        to_stderr.setLevel(logging.WARNING)
-        to_stderr.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
-        root.addHandler(to_stderr)
+    if to_stderr and not any(isinstance(handler, _DaemonStderr) for handler in root.handlers):
+        echo = _DaemonStderr()
+        echo.setLevel(logging.WARNING)
+        echo.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+        root.addHandler(echo)
     for name in LOUD:
         logger = logging.getLogger(name)
         if logger.level == logging.NOTSET or logger.level > level:

@@ -21,13 +21,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daemon_helpers import Daemon
+from daemon_helpers import Daemon, private_runtime
 from daemon_helpers import until as daemon_until
 from textual.app import App
 from textual.binding import Binding
 from textual.pilot import Pilot
 from textual.widgets import Input
-from tui_helpers import MakeApp, root_of, running, turn_done, until
+from tui_helpers import MakeApp, root_of, running, tui_app, turn_done, until
 
 from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
 from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
@@ -50,6 +50,7 @@ from ph_app.tui.state import ChatItem
 from ph_app.tui.themes import fallback_variables, load_theme_profile
 from ph_app.tui.trajectory_app import run_trajectory
 from ph_app.tui.widgets.prompt import PromptInput
+from ph_app.tui.widgets.status import StatusBar
 
 pytestmark = pytest.mark.anyio
 
@@ -513,12 +514,119 @@ async def test_the_terminal_s_own_route_rides_its_session_new(
     refused = make_tui_app(model_choice=ModelChoice(key="nope"))
     async with refused.run_test() as pilot:
         await pilot.pause()
-        await until(pilot, lambda: bool(refused._notifications))
+        await until(pilot, lambda: isinstance(refused.screen, ConfirmModal))
         assert refused.front is None, "a refused route opened a session anyway"
-        assert any(
-            "not a model this profile lists" in str(one.message) for one in refused._notifications
-        )
+        assert "not a model this profile lists" in _refused_start(refused)
+        await pilot.click("#act-quit")
+        await until(pilot, lambda: refused.return_code is not None)
+    assert refused.return_code == 1, "a terminal that never had a session did not succeed"
     assert root_of(tui_daemon).agent.options.model == "fake-5", "and it moved nothing"
+
+
+# ------------------------------------------------------- the start that failed --
+
+
+def _refused_start(app: App[Any]) -> str:
+    """The sentence on the modal a failed start put up — what a person reads."""
+    modal = app.screen
+    assert isinstance(modal, ConfirmModal), f"no modal is up; the screen is {modal!r}"
+    return modal.body_text
+
+
+def _status_line(app: PHTuiApp) -> str:
+    return str(app.query_one(StatusBar).query_one("#status-line").render())
+
+
+async def _submit(app: PHTuiApp, pilot: Pilot[str | None], line: str) -> None:
+    """Type `line` and send it.
+
+    A slash line opens the completion popup, which claims enter: tab accepts, then
+    enter submits. Plain text opens none, and tab with no popup is the text area's
+    own — it moves focus — so it is pressed only when there is a list to accept.
+    """
+    await pilot.press(*line)
+    await pilot.pause()
+    if line.startswith("/"):
+        await pilot.press(app.keys.accept_completion)
+    await pilot.press(app.keys.submit)
+
+
+async def test_a_start_that_fails_stays_said_and_the_terminal_still_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug this guards: a daemon that would not start was reported in a toast,
+    and a toast lasts five seconds. What it left was a terminal with its headings
+    drawn and nothing behind them — every line typed swallowed, `/quit` included,
+    because every slash command went through the front end that was never built.
+    The person who met it read it as a hang.
+
+    No daemon listens on this test's `$PH_RUNTIME` and `spawn=False` refuses to
+    start one, so the open fails the way a daemon that exits on the way up fails
+    it. Sabotage: put the bare `return` back under `if front is None` in
+    `on_prompt_input_submitted`, and `/theme` opens nothing; drop `show_refusal`,
+    and Esc leaves a blank footer over the same dead prompt.
+    """
+    private_runtime(tmp_path, monkeypatch)
+    app = tui_app(home=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert app.front is None
+        assert "no daemon at" in _refused_start(app), "the launcher's own sentence"
+
+        # Esc stays. The sentence moves to the footer, and the prompt answers.
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, ConfirmModal))
+        assert "no session" in _status_line(app)
+        assert "no daemon at" in _status_line(app)
+        await _submit(app, pilot, "hello?")
+        await until(pilot, lambda: len(app._notifications) > 0)
+        assert any("no daemon at" in str(one.message) for one in app._notifications), (
+            "a line typed at no session is answered, not swallowed"
+        )
+
+        # This terminal's own verbs still run: `/theme` is one of them.
+        await _submit(app, pilot, "/theme")
+        await until(pilot, lambda: isinstance(app.screen, ChoicePicker))
+        await pilot.press("escape")
+        await until(pilot, lambda: not isinstance(app.screen, ChoicePicker))
+
+        # A verb that needs a session says so rather than doing nothing.
+        before = len(app._notifications)
+        await pilot.press(app.keys.session_picker)
+        await until(pilot, lambda: len(app._notifications) > before)
+
+        # And `/quit` leaves, with the code of a start that never happened.
+        await _submit(app, pilot, "/quit")
+        await until(pilot, lambda: app.return_code is not None)
+    assert app.return_code == 1
+
+
+async def test_try_again_reruns_the_open_after_a_refused_start(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
+    """**Try again** is for the person whose fix is in another terminal — a daemon
+    started by hand, an install put right — who should not have to reopen the
+    terminal to find out. The open runs whole, and the refusal is withdrawn.
+
+    A refused route stands in for the daemon that would not start: it is the
+    other way an open fails after `ensure_daemon`, and the one a test can turn on
+    and off. The connection the first attempt opened is dropped before the second
+    — and dropped quietly: the watcher that reports a daemon *going away* must
+    not fire for a socket this terminal closed on purpose.
+    """
+    app = make_tui_app(model_choice=ModelChoice(key="nope"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        assert "not a model this profile lists" in _refused_start(app)
+        assert app.refusal is not None
+        app.model_choice = ModelChoice()
+        await pilot.click("#act-retry")
+        await until(pilot, lambda: app.front is not None)
+        assert app.refusal is None
+        await until(pilot, lambda: "no session" not in _status_line(app))
+        assert not any("lost the daemon" in str(one.message) for one in app._notifications)
 
 
 async def test_the_theme_picker_previews_and_applies(make_tui_app: MakeApp, tmp_path: Path) -> None:
@@ -863,11 +971,11 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
     async with running(make_tui_app()) as (app, _pilot):
         front = app.front
         assert front is not None
-        # `front.commands()`, not the daemon's registry: after P5-14 a verb that
+        # `app.commands()`, not the daemon's registry: after P5-14 a verb that
         # changes *this* client's display is built client-side and never
         # registered anywhere, so the list a person sees is the merge of both
         # ends — which is the thing "reachable as a command" has to mean now.
-        registered = {definition.name for definition in front.commands()}
+        registered = {definition.name for definition in app.commands()}
         bound = {binding.id for binding in app.BINDINGS if isinstance(binding, Binding)}
         for verb in TUI_VERBS:
             assert verb.name in registered
@@ -985,7 +1093,7 @@ async def test_the_context_gauge_warns_from_the_compaction_threshold(
     make_tui_app: MakeApp,
 ) -> None:
     """The number a user needs to see coming is the one where pH will act."""
-    from ph_app.tui.widgets.status import COMPACTION_THRESHOLD, StatusBar
+    from ph_app.tui.widgets.status import COMPACTION_THRESHOLD
 
     async with running(make_tui_app()) as (app, pilot):
         front = app.front
@@ -994,7 +1102,7 @@ async def test_the_context_gauge_warns_from_the_compaction_threshold(
         front.state.tokens = int(1_000 * COMPACTION_THRESHOLD) + 10
         app.state_changed()
         await pilot.pause(0.1)
-        rendered = str(app.query_one(StatusBar).query_one("#status-line").render())
+        rendered = _status_line(app)
         assert "context 86%" in rendered
         assert "fake-1" in rendered
 
@@ -1088,7 +1196,7 @@ async def test_a_typed_attach_reaches_the_verb_with_its_argument(
         front = app.front
         assert front is not None
 
-        await app._dispatch_command(front, f"/attach {picture}")
+        await app._dispatch_command(f"/attach {picture}")
         await _verbs_done(app)
         await pilot.pause()
 
@@ -1111,7 +1219,7 @@ async def test_a_quoted_attach_path_is_one_path(make_tui_app: MakeApp, tmp_path:
         front = app.front
         assert front is not None
 
-        await app._dispatch_command(front, f'/attach "{picture}"')
+        await app._dispatch_command(f'/attach "{picture}"')
         await _verbs_done(app)
         await pilot.pause()
 

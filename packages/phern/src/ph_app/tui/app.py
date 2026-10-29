@@ -50,6 +50,7 @@ from textual.worker import Worker
 
 from ph.paths import resolve_roots
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest
+from ph.seams.commands import CommandDefinition
 from ph.seams.models import ModelChoice, ModelChoiceError
 from ph.seams.permission_presets import PRESET_NAMES
 from ph.seams.tui_screens import ScreenDefinition
@@ -62,7 +63,7 @@ from ..payloads import AskKey, ProfileDecision
 from ..protocol import DaemonError
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
-from .commands import TUI_VERBS, VIEW_USAGE, VIEWS, app_bindings
+from .commands import TUI_VERBS, VIEW_USAGE, VIEWS, app_bindings, local_commands, run_line
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
 from .frontend import FrontSession
 from .modals.approval import ApprovalModal
@@ -79,6 +80,7 @@ from .modals.pickers import (
     theme_choices,
 )
 from .modals.profile import decision_of, profile_changed_modal
+from .modals.start import could_not_start_modal, start_decision
 from .modals.trust import project_trust_modal
 from .remote import attach_session, browse_on
 from .screens import Revealing, RevealSeq
@@ -224,6 +226,17 @@ class PHTuiApp(App[str | None]):
         self.trust = TrustStore(path=trust_path(self.home))
         self.front: FrontSession | None = None
         self._client: DaemonClient | None = None
+        self.refusal: str | None = None
+        """Why this terminal has no session: the sentence its start failed with,
+        kept until the person retries (H3). `None` before that, and once attached.
+
+        Read wherever a person could otherwise be left guessing — the status line,
+        a line typed at the prompt, a verb that needs a session — because the modal
+        that first said it can be dismissed, and a toast is gone in five seconds."""
+        self._verbs = local_commands(self)
+        """This terminal's own slash commands, built once: the completion source asks
+        for the list on every keystroke. The app's rather than the front end's, so
+        `/theme` and `/quit` answer whether or not anything is attached (H3)."""
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
         self._open_asks: dict[AskKey, PhModal[Any]] = {}
@@ -310,12 +323,18 @@ class PHTuiApp(App[str | None]):
             self.refresh_bindings()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Keep global keys quiet while a modal owns the screen — except quit."""
+        """Keep global keys quiet while a modal owns the screen — except quit.
+
+        Not while there is no front end. That clause kept every `open_*` verb
+        silent during the attach, and silent after an attach that failed — which
+        made it the half of the dead terminal (H3) that `/theme` and the keys were:
+        a refused action is one Textual reports as nothing. A verb that needs a
+        session says so itself now (`_attached`), and the theme and command pickers
+        never needed one.
+        """
         if action == "quit":
             return True
-        if len(self.screen_stack) > 1:
-            return False
-        return not (action.startswith("open_") and self.front is None)
+        return len(self.screen_stack) <= 1
 
     # --------------------------------------------------------------- layout --
 
@@ -404,7 +423,7 @@ class PHTuiApp(App[str | None]):
             )
         except Exception as error:
             log.exception("ph_app.tui: could not attach to a daemon")
-            self.notify(str(error), title="pH could not start", severity="error", markup=False)
+            await self._could_not_start(str(error), trust)
             return
         # A screen a row contributed gets its verb, its key and its palette
         # entry from here — but each of those unwinds with the *row*, not with
@@ -456,6 +475,54 @@ class PHTuiApp(App[str | None]):
         # both mean "not one of these".
         return None if chosen == NEW_SESSION else chosen
 
+    async def _could_not_start(self, reason: str, trust: TrustAnswer) -> None:
+        """There is no session, and this is why — kept on screen, and answerable (H3).
+
+        A toast was the whole report, and a toast lasts five seconds. What it left
+        was a terminal with its headings drawn and nothing behind them: a prompt
+        that swallowed every line, and `/quit` doing nothing, because every slash
+        command was dispatched through the front end that had not been built. The
+        person who met it read it as a hang, and the sentence that would have told
+        them otherwise had already gone.
+
+        So the sentence stays — on the status line, and under every line typed at
+        the prompt — and a modal asks what to do about it. **Retry** runs the whole
+        open again, for the case where the fix is in another terminal: a daemon
+        that would not start, an install put right. **Quit** leaves, with the exit
+        code `action_quit` gives a start that never happened. Esc stays, with this
+        terminal's own verbs still answering (`run_command`).
+
+        Awaiting the modal is legal here for `_offer_sessions`'s reason: this runs
+        in the `_open` worker, never on the message pump.
+        """
+        await self._disconnect()
+        self.refusal = reason
+        self.state_changed(Surface.FOOTER)
+        decision = start_decision(await self.push_screen_wait(could_not_start_modal(reason)))
+        if decision == "retry":
+            self.refusal = None
+            self.state_changed(Surface.FOOTER)
+            self.run_worker(self._open(trust), group="open")
+        elif decision == "quit":
+            await self.action_quit()
+        elif self._prompt is not None:
+            # Staying means typing next, and a modal's close leaves nothing focused
+            # — the pickers refocus the prompt for the same reason (`_insert_command`).
+            self._prompt.area.focus()
+
+    async def _disconnect(self) -> None:
+        """Close the connection this app opened: after an attach failed, so a retry
+        starts clean, and on the way out.
+
+        The watcher first: it reports a daemon that *went away*, and a socket this
+        terminal closes on purpose is not that.
+        """
+        client, self._client = self._client, None
+        if client is None:
+            return
+        self.workers.cancel_group(self, "daemon")
+        await client.aclose()
+
     async def on_unmount(self) -> None:
         # **Before anything else unwinds.** Both timers call into widgets, and a
         # frame that lands after the status bar has been taken apart queries a
@@ -471,15 +538,13 @@ class PHTuiApp(App[str | None]):
         self._command_disposers.clear()
         if self.front is not None:
             await self.front.close()
-        if self._client is not None:
-            # **This app opened the connection, so this app closes it.** The
-            # front end only detaches: a host that kept one connection across
-            # several sessions — a browser tab per session, say — must not have
-            # one closing the socket the others are on. Without this the daemon
-            # keeps the subscription, and a subscriber is its own claim on a
-            # root's life, so nothing the sweep does can ever release it.
-            await self._client.aclose()
-            self._client = None
+        # **This app opened the connection, so this app closes it.** The front end
+        # only detaches: a host that kept one connection across several sessions —
+        # a browser tab per session, say — must not have one closing the socket the
+        # others are on. Without this the daemon keeps the subscription, and a
+        # subscriber is its own claim on a root's life, so nothing the sweep does
+        # can ever release it.
+        await self._disconnect()
         self.title_writer.clear()
 
     # ---------------------------------------------------------------- frames --
@@ -511,7 +576,13 @@ class PHTuiApp(App[str | None]):
         """Render whichever surfaces have moved since the last draw."""
         self._draw_timer = None
         front, status, view = self.front, self._status, self._view
-        if front is None or status is None or view is None:
+        if status is None or view is None:
+            return
+        if front is None:
+            # Nothing to fold: the footer says why, and the rest waits for a front
+            # end — `_dirty` is left as it is, so the first draw after the attach
+            # is a whole one.
+            status.show_unattached(self.refusal)
             return
         dirty, self._dirty = self._dirty, Surface.NOTHING
         if Surface.FOOTER in dirty:
@@ -570,7 +641,21 @@ class PHTuiApp(App[str | None]):
     # ----------------------------------------------------------------- turns --
 
     async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
-        front = self.front
+        if message.text.startswith("/"):
+            # A command is the human's verb. Sending it as a prompt would spend
+            # a turn and make the log say the model chose it. First, and before
+            # asking for a front end: the terminal's own verbs need none (H3).
+            #
+            # **On a worker, like the two shell branches below** (H7). This is a
+            # handler on Textual's message pump, and a daemon verb is a round trip:
+            # `/compact` spends a whole model call in there. Awaited here it froze
+            # the entire UI for the duration — no keystrokes, no repaint, not even
+            # the spinner — for the command whose whole job is to take a while.
+            # `_dispatch_command` already reports its own failures through
+            # `notify`, which is a worker's contract, so nothing else had to change.
+            self.run_worker(self._dispatch_command(message.text), group="command")
+            return
+        front = self._attached("pH has no session")
         if front is None:
             return
         if message.text.startswith("!!"):
@@ -585,20 +670,6 @@ class PHTuiApp(App[str | None]):
             self.run_worker(
                 self._shell(front, message.text[1:].strip(), surface=True), group="shell"
             )
-            return
-        if message.text.startswith("/"):
-            # A command is the human's verb. Sending it as a prompt would spend
-            # a turn and make the log say the model chose it.
-            #
-            # **On a worker, like the two shell branches above** (H7). This is a
-            # handler on Textual's message pump, and `run_command` is a round
-            # trip to the daemon: `/compact` spends a whole model call in there.
-            # Awaited here it froze the entire UI for the duration — no
-            # keystrokes, no repaint, not even the spinner — for the command
-            # whose whole job is to take a while. `_dispatch_command` already
-            # reports its own failures through `notify`, which is a worker's
-            # contract, so nothing else had to change.
-            self.run_worker(self._dispatch_command(front, message.text), group="command")
             return
         if message.queue or front.state.busy:
             # The driver refuses a second concurrent `run()`, and a person
@@ -644,7 +715,6 @@ class PHTuiApp(App[str | None]):
         palette there is nothing to attach, so it says how it is used rather
         than doing nothing.
         """
-        front = self.front
         # `shlex.split`, not `str.split` (H7). A path with a space in it is the
         # ordinary case on a Mac — `~/Library/Application Support/...` — and
         # whitespace-splitting turned one `/attach "my notes.md"` into two
@@ -657,6 +727,7 @@ class PHTuiApp(App[str | None]):
             # An unbalanced quote. Their text back, rather than a traceback or a
             # silent mis-split of it.
             paths = [argument.strip()] if argument.strip() else []
+        front = self._attached("attach")
         if front is None:
             return
         if not paths:
@@ -678,10 +749,10 @@ class PHTuiApp(App[str | None]):
         if self.front is not None and self.front.state.busy:
             self.front.cancel()
 
-    async def _dispatch_command(self, front: FrontSession, line: str) -> None:
+    async def _dispatch_command(self, line: str) -> None:
         name = line.split()[0]
         try:
-            shown = await front.run_command(line)
+            shown = await run_line(self.commands(), line)
         except KeyError as error:
             self.notify(str(error), title="unknown command", severity="warning", markup=False)
             return
@@ -692,6 +763,31 @@ class PHTuiApp(App[str | None]):
         if shown:
             self.notify(shown, title=name, markup=False)
         self.state_changed()
+
+    def commands(self) -> list[CommandDefinition]:
+        """Every slash command that can run here now, for the palette, the completion
+        list and `_dispatch_command`: this terminal's own, then whatever its front end
+        offers — each screen's, and the daemon's."""
+        front = self.front
+        return [*self._verbs, *(front.commands() if front is not None else ())]
+
+    def _attached(self, verb: str) -> FrontSession | None:
+        """The front end a verb needs, or the sentence saying why there is none.
+
+        A verb that does nothing and says nothing is one the person presses again;
+        silent returns here were part of how a failed start came to look like a
+        hang (H3). `verb` titles the toast, so it reads as the answer to the key
+        that was pressed.
+        """
+        front = self.front
+        if front is None:
+            self.notify(
+                self.refusal or "not attached to a session yet",
+                title=verb,
+                severity="warning",
+                markup=False,
+            )
+        return front
 
     async def _watch_daemon(self, client: DaemonClient) -> None:
         """Say so, once, when the daemon goes away (H3).
@@ -871,8 +967,7 @@ class PHTuiApp(App[str | None]):
         return front.screen(screen_id) if front is not None else None
 
     def action_open_commands(self) -> None:
-        if self.front is not None:
-            self._pick("commands", command_choices(self.front.commands()), self._insert_command)
+        self._pick("commands", command_choices(self.commands()), self._insert_command)
 
     def _insert_command(self, chosen: str | None) -> None:
         if chosen is not None and self._prompt is not None:
@@ -880,7 +975,7 @@ class PHTuiApp(App[str | None]):
             self._prompt.area.focus()
 
     def action_open_models(self) -> None:
-        front = self.front
+        front = self._attached("model")
         if front is None:
             return
         state = front.state
@@ -930,7 +1025,7 @@ class PHTuiApp(App[str | None]):
         handed a path and walk it, which worked only while it and the harness
         shared a machine.
         """
-        front = self.front
+        front = self._attached("sessions")
         if front is None:
             return
         self._pick(
@@ -952,7 +1047,7 @@ class PHTuiApp(App[str | None]):
         the same `RevealSeq` join a contributed screen uses, so the conversation
         moves behind the picker while you look for one.
         """
-        front = self.front
+        front = self._attached("history")
         if front is None:
             return
         if front.diverged:
@@ -1023,7 +1118,7 @@ class PHTuiApp(App[str | None]):
     @verb_work("permissions")
     async def action_open_presets(self) -> None:
         """Ask the daemon which postures there are, then offer them."""
-        front = self.front
+        front = self._attached("permissions")
         if front is not None:
             self._pick("permissions", preset_choices(await front.presets()), self._set_preset)
 
@@ -1048,7 +1143,7 @@ class PHTuiApp(App[str | None]):
         *ordering*, and it used to settle *who owns the pump* as a side effect,
         because `async def action_*` is the only shape Textual offers.
         """
-        front = self.front
+        front = self._attached("login")
         if front is None:
             return
         held = await front.refresh_credentials()
@@ -1138,13 +1233,21 @@ class PHTuiApp(App[str | None]):
         the transcript: a front end may not write into a fold of the log (A11),
         and this is the surface every other command's output already uses.
         """
-        if self.front is not None:
-            self._show_catalog("tools", self.front.state.tools)
+        front = self._attached("tools")
+        if front is not None:
+            self._show_catalog("tools", front.state.tools)
 
     def action_list_skills(self) -> None:
         """`/skills` — what is installed, and what each one is for."""
-        if self.front is not None:
-            self._show_catalog("skills", self.front.state.skills)
+        front = self._attached("skills")
+        if front is not None:
+            self._show_catalog("skills", front.state.skills)
+
+    async def action_quit(self) -> None:
+        """`/quit`, and its key. The exit code says whether there was ever a session
+        (M4): a terminal left from under a failed start did not succeed at anything
+        a script running `phern --mode tui` could rely on, so it does not answer `0`."""
+        self.exit(return_code=1 if self.refusal is not None else 0)
 
     def _show_catalog(self, what: str, entries: tuple[CatalogEntry, ...]) -> None:
         """Render one catalog as a toast.
@@ -1184,10 +1287,7 @@ class PHTuiApp(App[str | None]):
         return front.state.prompt_history()
 
     def _completion_source(self) -> dict[str, Any]:
-        front = self.front
-        commands: list[tuple[str, str]] = []
-        if front is not None:
-            commands = [(d.name, d.summary) for d in front.commands()]
+        commands = [(d.name, d.summary) for d in self.commands()]
         return {"commands": commands, "paths": self._paths}
 
 

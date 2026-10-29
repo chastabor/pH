@@ -46,7 +46,7 @@ from ph_app.params import CancelScheduleParams, CreateScheduleParams
 from ph_app.payloads import AskKey, DaemonLifetime, MutationRepeated, RepeatOutcome, StatusFacts
 from ph_app.protocol import Cursor
 from ph_app.tui.adapter import TuiEventAdapter
-from ph_app.tui.commands import TUI_VERBS
+from ph_app.tui.commands import TUI_VERBS, local_commands, run_line
 from ph_app.tui.remote import UNKNOWN_REPEAT, DaemonSession, _remote_command, attach_session
 from ph_app.tui.state import TuiState
 from ph_app.tui.widgets.status import daemon_line
@@ -532,12 +532,18 @@ async def test_the_catalogs_are_read_at_attach_and_carry_their_descriptions(
 # ----------------------------------------------------------------- the verbs --
 
 
-async def test_the_command_list_is_both_ends_merged(tmp_path: Path) -> None:
+async def test_a_front_end_offers_the_daemon_s_verbs_and_not_the_terminal_s(
+    tmp_path: Path,
+) -> None:
     """One list to a person, two owners underneath.
 
     `/model` and `/theme` change *this* client's display and mean nothing to a
-    daemon serving three of them; `/compact` is the harness's. So the palette
-    shows the union, and `run_command` routes on which side owns the name.
+    daemon serving three of them; `/compact` is the harness's. The terminal's own
+    are the app's, so they answer with no front end at all (H3); a front end
+    offers the daemon's, and the app puts the two together (`PHTuiApp.commands`).
+
+    Sabotage: build `local_commands(app)` back into `_wire_screens`, and the
+    terminal's verbs are offered twice once a front end attaches.
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
@@ -547,8 +553,8 @@ async def test_the_command_list_is_both_ends_merged(tmp_path: Path) -> None:
 
         local = {verb.name for verb in TUI_VERBS}
 
-        assert names >= local, "the terminal's own verbs are offered"
-        assert names - local, "and so are the daemon's"
+        assert names, "the daemon's verbs are offered"
+        assert not names & local, "and the terminal's own are not this front end's"
 
 
 async def test_a_daemon_verb_is_dispatched_over_the_wire(tmp_path: Path) -> None:
@@ -565,9 +571,9 @@ async def test_a_daemon_verb_is_dispatched_over_the_wire(tmp_path: Path) -> None
         remote = next(one for one in front.commands() if one.name not in local)
 
         # One kind of thing in the palette, dispatched one way, whichever end
-        # executes it: `run_command` reaches the remote proxy's `run` exactly as
-        # it reaches a local verb's.
-        await front.run_command(f"/{remote.name}")
+        # executes it: `run_line` reaches the remote proxy's `run` exactly as it
+        # reaches a local verb's.
+        await run_line(front.commands(), f"/{remote.name}")
         root = daemon.running.supervisor.roots["remote"]
         assert any(one.type == "command/run" for one in root.session.events)
 
@@ -583,7 +589,9 @@ async def test_a_local_verb_never_reaches_the_daemon(tmp_path: Path) -> None:
         app = StubApp()
         front.attach_surfaces(app)
 
-        await front.run_command("/model")
+        # The list `PHTuiApp.commands` dispatches through: the app's own, then the
+        # front end's.
+        await run_line([*local_commands(app), *front.commands()], "/model")
 
         assert app.ran == ["open_models"]
         root = daemon.running.supervisor.roots["remote"]

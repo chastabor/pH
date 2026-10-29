@@ -54,21 +54,18 @@ from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping,
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 import anyio
 from textual.binding import Binding
 
 from ph.cancel import first_of
-from ph.cordis import maybe_await
 from ph.llm.types import AttachmentRef
 from ph.seams.approval import answer_to_wire
 from ph.seams.attachments import read_for_attach
 from ph.seams.commands import (
-    CommandContext,
     CommandDefinition,
     CommandSchema,
-    parse_command_line,
 )
 from ph.seams.models import ModelChoice, ModelEntry
 from ph.seams.permission_presets import PresetName, PresetSchema
@@ -119,7 +116,7 @@ from ..protocol import DaemonGone, NoParams, SessionParams, Verb
 from ..sessions import SessionSummary
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
-from .commands import action_command, local_commands
+from .commands import action_command
 from .diff_screen import CLIENT_SIDE as DIFF
 from .frontend import ModalHost
 from .screens import AppSurface, open_screen_action
@@ -162,7 +159,7 @@ class DaemonSession:
     """The Textual app, once `attach_surfaces` has been given it — so a local verb
     has something to dispatch into and async work has an owner. `None` until then,
     which is the state a headless test drives this in."""
-    _verbs: list[CommandDefinition] = field(default_factory=list)
+    _screen_verbs: list[CommandDefinition] = field(default_factory=list)
     _keys: list[Callable[[], None]] = field(default_factory=list)
     _unreadable: int = 0
     """Frames this client could not rebuild **or admit**. Counted so the warning is
@@ -404,7 +401,7 @@ class DaemonSession:
         return list(self._readings)
 
     def commands(self) -> list[CommandDefinition]:
-        return [*self._verbs, *self.remote_commands]
+        return [*self._screen_verbs, *self.remote_commands]
 
     def screen(self, screen_id: str) -> ScreenDefinition | None:
         return self.screens.get(screen_id)
@@ -546,24 +543,6 @@ class DaemonSession:
             raise RuntimeError("attach_surfaces first: nothing owns background work yet")
         self.app.run_worker(_reported(work))
 
-    async def run_command(self, line: str) -> str | None:
-        """Dispatch a `/name` line — the merge in `commands()`, read back.
-
-        One path for both ends: a local definition's `run` dispatches a Textual
-        action, a remote one's sends `session/command`. `parse_command_line` is
-        the registry's own split, so a line tokenizes the same way here as it
-        would on the daemon.
-        """
-        name, argument = parse_command_line(line)
-        for definition in self.commands():
-            if definition.name == name:
-                # A client holds no `Context`, so it can build no `CommandContext`
-                # — and neither body reachable here reads one: the daemon builds
-                # the real one when `elsewhere` sends the line back to `dispatch`.
-                shown = await maybe_await(definition.run(argument, cast("CommandContext", None)))
-                return shown or None
-        raise KeyError(f'unknown command "/{name}"')
-
     async def shell(self, command: str, *, surface: bool = False) -> None:
         """`!`/`!!` in the session's workspace — the daemon's shell, not this one.
 
@@ -593,12 +572,13 @@ class DaemonSession:
     # ------------------------------------------------------------ lifecycle --
 
     def attach_surfaces(self, app: AppSurface) -> list[Callable[[], None]]:
-        """Take the app, and build the local verbs that dispatch into it.
+        """Take the app, and build each screen's verb, which dispatches into it.
 
         Built once here rather than per `commands()` call, which the completion
         source makes on every keystroke. The daemon's own verbs belong to its
-        registry and unwind with the row that made them; what unwinds here is
-        what this client made — the local verbs and each screen's key binding.
+        registry and unwind with the row that made them, and the terminal's own
+        are the app's; what unwinds here is what this client made — each screen's
+        verb and key binding.
 
         Imported inside, because `screens.py` is the Textual-shaped half of the
         front end and this module is driven headless by tests with no terminal.
@@ -610,12 +590,12 @@ class DaemonSession:
         def release() -> None:
             self._release_screens()
             self.app = None
-            self._verbs = []
+            self._screen_verbs = []
 
         return [release]
 
     def _wire_screens(self, app: AppSurface) -> None:
-        """Build this client's verbs: the table's, plus one per drawable screen.
+        """Build one verb per drawable screen.
 
         A screen buys a verb, a palette entry and a key — the three routes it
         buys in process too — and the key is a binding on the app, so replacing
@@ -623,10 +603,10 @@ class DaemonSession:
         `session.screens` says the deployment's list changed.
         """
         self._release_screens()
-        self._verbs = local_commands(app)
+        self._screen_verbs = []
         for screen in self.screens.values():
             action = open_screen_action(screen.id)
-            self._verbs.append(action_command(app, screen.id, screen.label, action))
+            self._screen_verbs.append(action_command(app, screen.id, screen.label, action))
             if screen.key:
                 binding = Binding(
                     screen.key, action, screen.label, priority=True, id=screen.id, show=False
