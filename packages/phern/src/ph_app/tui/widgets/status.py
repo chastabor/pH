@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.css.query import NoMatches
-from textual.widgets import Static
+from textual.widgets import Rule, Static
 
 from ph.json import as_str
 from ph.seams.subprocess import first_line
@@ -151,17 +151,35 @@ def render_subagents(state: TuiState) -> str:
     return "\n".join(lines)
 
 
-class StatusBar(Vertical):
+class StatusBar(Horizontal):
     """One line: spinner, model and its effort, turn, queue depth, context and
     its cache rate, then every reading the rows put on the line.
+
+    **Drawn as the prompt's top edge**, between the transcript and the box: the
+    text right-aligned and a rule filling the row to its left. The prompt has no
+    border of its own any more — two rows and two columns of a terminal spent on
+    a frame — so this row is what separates the conversation from the draft.
+    One column of padding at the right end keeps the text off the side panel's
+    border, which is drawn in the very next cell.
+
+    **The rule is a widget beside the text, not padding inside it.** Textual's
+    horizontal layout gives the text its own width and the rule what is left, so
+    nothing here measures a string against the terminal, and `#status-line`
+    still renders exactly the line it was given — which is what a test reads and
+    what a narrow terminal crops. Too narrow for the whole line, the rule keeps
+    its last cell — a fraction never sizes below one — and the text runs past
+    the row, which clips its right end: the posture before the model, the order
+    the line was written in. One row whatever the width, so the prompt never
+    moves down for a long reading.
 
     Owns the spinner frame, so the footer and the terminal title read the same
     glyph from one counter.
     """
 
     DEFAULT_CSS = """
-    StatusBar { height: 1; background: $ph-panel; }
-    StatusBar > #status-line { height: 1; }
+    StatusBar { height: 1; background: $ph-panel; padding: 0 1 0 0; }
+    StatusBar > #status-rule { width: 1fr; height: 1; margin: 0 1 0 0; color: $ph-border; }
+    StatusBar > #status-line { width: auto; height: 1; }
     """
 
     def __init__(self) -> None:
@@ -169,6 +187,7 @@ class StatusBar(Vertical):
         self._frame = 0
 
     def compose(self) -> ComposeResult:
+        yield Rule(id="status-rule")
         yield Static(Content(""), id="status-line")
 
     @property

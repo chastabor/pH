@@ -192,47 +192,43 @@ build.
 is that file's rule to state — read its docstring before deciding, and bump if it says
 any wire-model change does.
 
-## T2 — The status line becomes the prompt's top rule
+## T2 — The status line becomes the prompt's top rule (done)
 
-**`app.py:347-353`.** Inside `#chrome`, yield `StatusBar()` *before* `PromptInput(...)`.
-Nothing else in the app reads the order: `_status`, `_prompt` and `_view` are found by
-query.
+**`app.py` `compose`.** Inside `#chrome`, `StatusBar()` is yielded *before*
+`PromptInput(...)`. Nothing else in the app reads the order: `_status`, `_prompt` and
+`_view` are found by query.
 
-**`status.py`.** Replace the `Static` with a `StatusLine(Static)` subclass, keeping
-`id="status-line"` so `_line()` and the pilot helper keep working. It overrides
-`render()`:
+**`status.py`.** `StatusBar` is a `Horizontal` holding a Textual `Rule#status-rule`
+(`width: 1fr`, `color: $ph-border`, one column of right margin) and the unchanged
+`Static#status-line` (`width: auto`). The layout gives the text its own width and the
+rule what is left, so nothing measures a string against the terminal, and
+`#status-line` still renders exactly the line `show()` built — which is what the
+pilot's exact-line test reads. This replaced the planned `render()` override, which
+would have put the rule inside the text widget.
 
-```python
-def render(self) -> Content:
-    text = self.content             # Static exposes it; show() always passes a Content
-    fill = self.size.width - text.cell_length - 1
-    if fill <= 0:
-        return text                 # narrower than the row: no rule, crop right
-    return Content.from_markup(f"[$ph-border]{RULE * fill}[/] ") + text
-```
+The bar has one column of right padding, so the text stops a cell short of the side
+panel's border instead of touching it. The padding cell stays blank when a narrow
+terminal crops the text, because the row clips its children at its content edge.
 
-`RULE = "─"`, one module constant, so the glyph is a one-line decision. `update()` is
-inherited; it stores the content and refreshes, and a `Resize` re-renders, so the fill
-is always measured against the current width. CSS:
+Too narrow for the line, the rule keeps one cell (a fraction never sizes below one)
+and the text runs past the row, which clips its right end: the posture goes first and
+the glyph and model stay. No `text-wrap`/`text-overflow` rule is needed, because an
+auto-width `Static` is never narrower than its content and so never wraps.
+`show_unattached()` lands in the same widget, so "attaching…" and "no session" also
+sit at the right.
 
-```
-StatusBar { height: 1; background: $ph-panel; }
-StatusBar > #status-line { height: 1; width: 1fr; text-wrap: nowrap; text-overflow: clip; }
-```
+**Contrast.** `$ph-border` on `$ph-panel` is the same pairing as the sidebar's left
+edge: faint in ph-dark, ph-light and the catppuccin themes, strong in high-contrast.
+If the rule should read more strongly, `color: $ph-muted` is the one-word change.
 
-`text-wrap: nowrap` is what keeps a too-long line one row tall instead of growing the
-bar to two (the `Vertical` is `height: 1`, but a wrapped `Static` would clip its second
-line silently and the first line would be the wrong half). Cropping at the right means a
-terminal too narrow for the whole line loses the posture first and the model last,
-which is the mockup's priority order read left to right.
-
-`show()` and `show_unattached()` keep producing the same `Content`; only where it is
-drawn changes. The rule is drawn in both states, so “attaching…” and “no session” also
-sit at the right over the prompt.
-
-**Verify:** the pilot assertions are substrings and pass. `test_the_full_app_shell`
-changes and is regenerated in T5. Run `uv run phern` at 90 columns and at 50: the
-narrow case must show the cropped text with no rule and no second row.
+**Tests.** `test_the_status_line_is_the_prompts_top_edge` (the row ends where the
+prompt begins, the text ends where the row does, the rule runs from the row's start
+to one column short of the text, and the text ends one column short of the row;
+sabotaged by swapping the compose order) and
+`test_a_narrow_terminal_crops_the_status_line_rather_than_wrapping_it` (one row at
+60×24, the visible slice keeps `● fake-1` and loses `accepted`).
+`test_the_full_app_shell` was regenerated here rather than in T5, so the suite is
+green at this increment.
 
 ## T3 — Borderless prompt and completion list, left gutter
 
@@ -246,7 +242,8 @@ PromptInput > #completions {
     border: none; scrollbar-size-vertical: 1; scrollbar-gutter: stable;
 }
 PromptInput.-completing > #completions { display: block; }
-PromptInput > #hint { color: $ph-muted; padding-left: 1; }
+PromptInput > #hint { color: $ph-muted; padding-left: 1; display: none; }
+PromptInput.-completing > #hint { display: block; }
 ```
 
 * `padding: 0 1` stays: with the border gone, the left pad *is* the single gutter
@@ -254,6 +251,8 @@ PromptInput > #hint { color: $ph-muted; padding-left: 1; }
 * The `:focus` rule is deleted (see decisions).
 * `max-height` values drop by 2 so the prompt's *content* height is what it was (the old
   caps included two border rows). Keep or revisit — a content line is cheap now.
+* `#hint` shows only while the list is open. Empty, it was still a row: the line under
+  the prompt in every frame, spent on nothing.
 * `#completions` keeps its panel background, which is what still marks it as a popup
   once its border is gone. `scrollbar-gutter: stable` keeps the items at column 1
   whether or not the list overflows its six rows.
@@ -315,7 +314,7 @@ next reader does not look for a `scrollbar-side` property that does not exist.
 
 ## T5 — Snapshots, docs, bookkeeping
 
-* Regenerate the ten frames: `uv run pytest packages/phern/tests/test_tui_snapshot.py
+* Regenerate the frames T3 and T4 move (the full shell was already regenerated in T2): `uv run pytest packages/phern/tests/test_tui_snapshot.py
   --snapshot-update`, **outside the sandbox** (the full-shell test attaches over a unix
   socket), then read `snapshot_report.html` before committing the `.raw` files.
   Check in the full-shell frame: rule at the right over the prompt, prompt text at

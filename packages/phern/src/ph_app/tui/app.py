@@ -345,12 +345,14 @@ class PHTuiApp(App[str | None]):
             with Vertical(id="main"):
                 yield TranscriptView(id="transcript")
                 with Vertical(id="chrome"):
+                    # The status line first: it is the prompt's top edge (see
+                    # `StatusBar`), so it sits between the conversation and the box.
+                    yield StatusBar()
                     yield PromptInput(
                         self.keys,
                         completion_source=self._completion_source,
                         history_source=self._history_source,
                     )
-                    yield StatusBar()
             if self.settings.sidebar != "left":
                 yield Sidebar()
 

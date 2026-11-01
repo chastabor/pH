@@ -1140,6 +1140,58 @@ async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
         )
 
 
+async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) -> None:
+    """Between the conversation and the box, text at the right, a rule to its left.
+
+    Positions rather than a picture, so a theme or a font cannot pass it by
+    accident: the row ends where the prompt begins, the text ends one column
+    short of the row — the space that keeps it off the side panel's border — and
+    the rule runs from the row's start to one column short of the text.
+
+    Sabotage: yield `StatusBar` after `PromptInput` in `PHTuiApp.compose`, and the
+    first assertion names the order.
+    """
+    async with running(make_tui_app(), size=(100, 24)) as (app, pilot):
+        await pilot.pause(0.1)
+        bar = app.query_one(StatusBar)
+        rule = bar.query_one("#status-rule").region
+        line = bar.query_one("#status-line").region
+        prompt = app.query_one(PromptInput).region
+
+        assert bar.region.bottom == prompt.y, "the status line is not directly above the prompt"
+        assert line.right == bar.region.right - 1, "the text does not end one space short"
+        assert rule.x == bar.region.x and rule.right == line.x - 1, "the rule does not fill"
+        assert rule.width > 0
+
+
+async def test_a_narrow_terminal_crops_the_status_line_rather_than_wrapping_it(
+    make_tui_app: MakeApp,
+) -> None:
+    """Too narrow for the whole line: one row still, and the start kept.
+
+    The start is the glyph and the model — what a person glances for — and the
+    end is the posture, which the session panel's neighbors can live without.
+    A wrapped line would grow the bar to two rows and push the prompt down, the
+    space this layout exists to save.
+
+    **What is visible is the bar's slice of the line**, not `render_line`, which
+    draws the whole of a widget however much of it its container shows. The
+    line keeps its own width and runs past the bar, and the bar clips it.
+    """
+    # The sidebar keeps its 32 columns, so this leaves the line about 27.
+    async with running(make_tui_app(), size=(60, 24)) as (app, pilot):
+        await pilot.pause(0.1)
+        bar = app.query_one(StatusBar)
+        line = bar.query_one("#status-line")
+
+        assert bar.region.height == 1
+        assert line.region.height == 1
+        assert line.region.right > bar.region.right, "the line fit; the test is too wide"
+        shown = line.render_line(0).text[: bar.content_region.right - line.region.x]
+        assert shown.startswith("● fake-1")
+        assert "accepted" not in shown, "the line was not cropped"
+
+
 # ------------------------------------------------------------------- resume --
 
 
