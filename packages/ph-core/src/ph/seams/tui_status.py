@@ -68,7 +68,7 @@ change for every front end, which is the right amount of friction."""
 ReadingSlot: TypeAlias = Literal["line", "session", "model", "context"]
 """Where a reading belongs, semantically.
 
-* `line` — the footer line, in `order`. The default, and the fallback.
+* `line` — the footer line, in `order`. The default.
 * `session` — the session panel, beside the directory a session is bound to.
 * `model` — qualifies the model name the line opens with. One model at two
   efforts is two costs and two answers, so the effort is drawn *onto* the name
@@ -78,10 +78,8 @@ ReadingSlot: TypeAlias = Literal["line", "session", "model", "context"]
   (`context 12%/cache 28.8k(98%)`).
 
 The two joined slots say *what figure a reading is about*, not how the join is
-drawn — the slash is the front end's, as the colors are. A front end that draws
-no gauge, or has not learned a slot at all, renders the reading on the line:
-`in_slot`'s fallback, which is what keeps a slot additive for a front end that
-does not know it.
+drawn — the slash is the front end's, as the colors are. A front end with no
+gauge to draw still draws a `context` reading, on its own.
 
 Closed and small for `ReadingLevel`'s reason: each value is a placement every
 front end must be able to express, and `StatusReading` validates it, so a value
@@ -112,6 +110,11 @@ class StatusReading(WireModel):
     every status frame. A client that does not recognize an id still renders it
     on the line, which is what keeps a new reading additive."""
     text: str
+    """One compact phrase: `high`, `cache 28.8k(98%)`, `read-only accepted`.
+
+    A front end puts its own marks between readings, and between a reading and
+    the figure its slot names, so a reading carries no separator of its own — a
+    row that wrote one would draw as two readings where it meant one."""
     level: ReadingLevel = "normal"
 
 

@@ -26,7 +26,7 @@ one that occasionally compacts a turn early.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, assert_never
 
@@ -48,7 +48,7 @@ from ..llm.types import (
 from ..session import Session, SessionEvent, derive_event_message, shadowed_by
 from ..text import thousands
 from ._registry import contribute_item
-from .tui_status import ReadingSlot, StatusField, StatusReading
+from .tui_status import StatusField, StatusReading
 
 __all__ = [
     "CHARS_PER_TOKEN",
@@ -266,11 +266,11 @@ class TokenMeter:
         percentage computed from a different message is the inconsistency worth
         avoiding.
 
-        **Spelled to sit on the gauge.** The field is in the `context` slot, so a
-        footer draws it as `context 12%/cache 28.8k(98%)`: one category, with
-        `·` left to separate categories. Hence no inner `·`, and no space between
-        the count and the share it was of the prompt — `28.8k(98%)`, then
-        `+2.0k stored` when the request also paid to store a prefix.
+        **One compact phrase**, as `StatusReading.text` asks, because the field is
+        in the `context` slot and a front end draws it onto the gauge: no
+        separator of its own, and no space between the count and the share it
+        was of the prompt — `28.8k(98%)`, then `+2.0k stored` when the request
+        also paid to store a prefix.
         """
         usage = self.last_usage(session)
         if usage is None:
@@ -419,19 +419,13 @@ async def apply(ctx: Context, config: None) -> None:
     # row must activate in a profile that mounts no front end at all, and a
     # dependency on `ctx.tui_status` would make the meter — which compaction
     # needs — wait on a registry a headless run never mounts.
-    fields: tuple[tuple[str, Callable[[Session], StatusReading | None], int, ReadingSlot], ...] = (
+    for status_field in (
         # `model`: it qualifies the model name the line opens with — one model
         # at two efforts is two costs and two answers — so a front end draws it
         # onto the name (`flash/high`) rather than somewhere down the line.
-        ("reasoning", meter.reasoning_reading, 5, "model"),
+        StatusField(id="reasoning", read=meter.reasoning_reading, order=5, slot="model"),
         # `context`: the other half of the gauge's number, drawn onto the gauge
         # (`context 12%/cache 28.8k(98%)`); `cache_reading` says how it spells.
-        ("cache", meter.cache_reading, 14, "context"),
-    )
-    for field_id, read, order, slot in fields:
-        contribute_item(
-            ctx,
-            TUI_STATUS,
-            StatusField(id=field_id, read=read, order=order, slot=slot),
-            label=f"token-meter({field_id})",
-        )
+        StatusField(id="cache", read=meter.cache_reading, order=14, slot="context"),
+    ):
+        contribute_item(ctx, TUI_STATUS, status_field, label=f"token-meter({status_field.id})")

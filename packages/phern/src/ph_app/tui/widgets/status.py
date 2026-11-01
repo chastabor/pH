@@ -10,7 +10,6 @@ the harness will act (G4's 0.85 fraction, Phase 4).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,7 @@ from textual.widgets import Rule, Static
 
 from ph.json import as_str
 from ph.seams.subprocess import first_line
-from ph.seams.tui_status import StatusReading
+from ph.seams.tui_status import ReadingSlot, StatusReading
 from ph.text import duration, thousands
 
 from ...payloads import DaemonLifetime
@@ -30,8 +29,6 @@ from ..state import CatalogEntry, TuiState
 
 __all__ = [
     "COMPACTION_THRESHOLD",
-    "QUALIFIER",
-    "SEPARATOR",
     "Sidebar",
     "StatusBar",
     "children_heading",
@@ -45,7 +42,7 @@ COMPACTION_THRESHOLD = 0.85
 
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
-SEPARATOR = " [$ph-muted]·[/] "
+SEPARATOR = " · "
 """Between the footer's categories: `flash/high · turn 3 · context 12%`.
 
 One space each side. The two it had made each `·` read as a column gap, and a
@@ -60,7 +57,7 @@ already draws, and `·` would make it one more category — which is where the
 effort sat before, three entries from the model it qualifies."""
 
 
-def in_slot(readings: Sequence[StatusReading], slot: str) -> list[StatusReading]:
+def in_slot(readings: Sequence[StatusReading], slot: ReadingSlot) -> list[StatusReading]:
     """The readings a region draws, by the slot their own field declared.
 
     This is what `StatusReading.id` and `slot` bought together. The footer used
@@ -70,18 +67,28 @@ def in_slot(readings: Sequence[StatusReading], slot: str) -> list[StatusReading]
     decision about a ph-core row in ph-app — where renaming the id silently
     moved the reading back onto the line.
 
-    A slot this build does not know still renders somewhere rather than
-    vanishing: `line` is the default and the fallback, which is what keeps a new
-    reading additive for a front end that has not been taught about it.
+    **No fallback for a slot this module does not know**, because there is no
+    such reading: `ReadingSlot` is closed and `StatusReading` validates it, so a
+    client refuses an unknown slot at the wire and an in-process reading carries
+    one of the values this build was typed against. That every value is drawn
+    *somewhere* is a test's to say (`test_every_reading_slot_is_drawn`), not a
+    runtime check's.
     """
-    return [one for one in readings if (one.slot if one.slot in _SLOTS else "line") == slot]
+    return [one for one in readings if one.slot == slot]
 
 
-_SLOTS = frozenset({"line", "session", "model", "context"})
-"""The slots *this* front end draws — written out, not derived from `ReadingSlot`.
+def _piece(reading: StatusReading) -> Content:
+    """One reading as the status line draws it: its own text, amber when warning.
 
-Derived, a slot ph-core adds that no widget here places would vanish rather than
-fall back to the line, which is the opposite of what `in_slot` promises."""
+    Contributed by a row through `ctx.tui_status` — the line knows what a
+    reading *is* and nothing about what any of them mean, which is what lets
+    `limits` show a budget here without ph-app importing the package that owns
+    one. `Content`, never markup: the text is a row's string, so it is never
+    parsed, and a `[` in it is a `[`.
+    """
+    text = reading.text
+    return Content.styled(text, "$ph-warning") if reading.level == "warning" else Content(text)
+
 
 _HOME = str(Path.home())
 
@@ -162,6 +169,14 @@ class StatusBar(Horizontal):
     One column of padding at the right end keeps the text off the side panel's
     border, which is drawn in the very next cell.
 
+    **Drawn in the headings' color**, rule and text alike: `$ph-accent`, the role
+    the side panel's section titles use and the one the transcript's top three
+    Markdown heading levels resolve to (the theme maps it onto Textual's
+    `primary`). A role, not a color, so the bar follows the theme the way the
+    headings do. Set once on the bar and inherited; the only spans that name a
+    color are the ones that must differ from it — a warning reading, and the
+    gauge from the compaction threshold on.
+
     **The rule is a widget beside the text, not padding inside it.** Textual's
     horizontal layout gives the text its own width and the rule what is left, so
     nothing here measures a string against the terminal, and `#status-line`
@@ -177,8 +192,8 @@ class StatusBar(Horizontal):
     """
 
     DEFAULT_CSS = """
-    StatusBar { height: 1; background: $ph-panel; padding: 0 1 0 0; }
-    StatusBar > #status-rule { width: 1fr; height: 1; margin: 0 1 0 0; color: $ph-border; }
+    StatusBar { height: 1; background: $ph-panel; color: $ph-accent; padding: 0 1 0 0; }
+    StatusBar > #status-rule { margin: 0 1 0 0; color: $ph-accent; }
     StatusBar > #status-line { width: auto; height: 1; }
     """
 
@@ -218,72 +233,50 @@ class StatusBar(Horizontal):
         One *segment* per category, `SEPARATOR` between them and `QUALIFIER`
         within: the model with what qualifies it, the turn, the queue, the gauge
         with what qualifies it, then the line's readings in their own order.
-        Every value is a `$variable`, never spliced — a reading is a row's string
-        and this module's rule is that no row string reaches the markup parser.
+        Built from `Content` pieces rather than markup, so a row's string is
+        never parsed at all — and a frame costs no markup parse either.
         """
         line = self._line()
         if line is None:
             return
-        values: dict[str, Any] = {
-            "glyph": self.glyph if state.busy else "●",
-            "model": state.model or "no model",
-        }
-        names = count()
-
-        def piece(reading: StatusReading) -> str:
-            # Contributed by a row through `ctx.tui_status` — the footer knows
-            # what a reading *is* and nothing about what any of them mean, which
-            # is what lets `limits` show a budget here without ph-app importing
-            # the package that owns one.
-            name = f"field{next(names)}"
-            style = "$ph-warning" if reading.level == "warning" else "$ph-muted"
-            values[name] = reading.text
-            return f"[{style}]${name}[/]"
-
-        model = ["[$ph-muted]$model[/]", *map(piece, in_slot(readings, "model"))]
-        segments = [QUALIFIER.join(model)]
+        model = [Content(state.model or "no model"), *map(_piece, in_slot(readings, "model"))]
+        segments = [Content(QUALIFIER).join(model)]
         if state.turn:
-            segments.append("turn $turn")
-            values["turn"] = str(state.turn)
+            segments.append(Content(f"turn {state.turn}"))
         if state.queued:
-            segments.append("$queued queued")
-            values["queued"] = str(state.queued)
-        context: list[str] = []
+            segments.append(Content(f"{state.queued} queued"))
+        context: list[Content] = []
         pressure = state.pressure
         if pressure is not None:
+            gauge = f"context {min(pressure, 1.0) * 100:.0f}%"
             # Amber from the threshold on: the point is to see it coming.
-            style = "$ph-warning" if pressure >= COMPACTION_THRESHOLD else "$ph-muted"
-            context.append(f"[{style}]$context[/]")
-            values["context"] = f"context {min(pressure, 1.0) * 100:.0f}%"
+            warn = pressure >= COMPACTION_THRESHOLD
+            context.append(Content.styled(gauge, "$ph-warning") if warn else Content(gauge))
         # With no gauge — the window unknown — the readings stand alone rather
         # than vanish: a cache rate is still a fact, if a less placed one.
-        context.extend(map(piece, in_slot(readings, "context")))
+        context.extend(map(_piece, in_slot(readings, "context")))
         if context:
-            segments.append(QUALIFIER.join(context))
-        segments.extend(map(piece, in_slot(readings, "line")))
-        line.update(
-            Content.from_markup(f"[$ph-accent]$glyph[/] {SEPARATOR.join(segments)}", **values)
-        )
+            segments.append(Content(QUALIFIER).join(context))
+        segments.extend(map(_piece, in_slot(readings, "line")))
+        glyph = self.glyph if state.busy else "●"
+        line.update(Content(f"{glyph} ") + Content(SEPARATOR).join(segments))
 
     def show_unattached(self, refusal: str | None) -> None:
         """No session yet: why, when a start failed, else that one is on its way.
 
         The refusal is the line that stays once the modal saying it is gone. Its
         first line only: the whole of it was in the modal, and a footer is one row.
-        Substituted rather than spliced into the markup, for the reason
-        `ConfirmModal` gives — a refusal quotes paths and options, and `[…]` is
-        markup.
+        A `Content` piece rather than markup, for the reason `ConfirmModal` gives
+        — a refusal quotes paths and options, and `[…]` is markup.
         """
         line = self._line()
         if line is None:
             return
         if refusal is None:
-            line.update(Content.from_markup("[$ph-muted]●  attaching…[/]"))
+            line.update(Content("● attaching…"))
             return
         why = first_line(refusal) or "could not start"
-        line.update(
-            Content.from_markup("[$ph-warning]●  no session[/]  [$ph-muted]$why[/]", why=why)
-        )
+        line.update(Content.assemble(("● no session", "$ph-warning"), SEPARATOR, why))
 
 
 class Sidebar(Vertical):

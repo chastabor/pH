@@ -228,9 +228,7 @@ TUI chrome plan, T1): the token meter places its `reasoning` reading beside the
 model name and its `cache` reading beside the context gauge, and spells the latter
 `cache 28.8k(98%)`. `slot` is a closed literal, so a client built before this
 refuses the readings a newer daemon stamps with either; restarting the daemon on
-the same release fixes that. A front end on this release that has not learned a
-slot draws the reading on the line — `in_slot`'s fallback — which is what keeps the
-two placements additive rather than a third thing every front end must draw.
+the same release fixes that.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

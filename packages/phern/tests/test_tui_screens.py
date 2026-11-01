@@ -226,9 +226,33 @@ async def test_a_screen_this_build_cannot_draw_is_not_offered(
 # --------------------------------------------------- over the chat, and back --
 
 
+VIEW_ROWS = 7
+"""How tall the transcript is in these tests: short enough that three short turns
+scroll, with room to spare. Jumping to the last prompt must be able to put it at
+the *top* of the view, so what follows it — the prompt's own rows and the
+answer's — has to be taller than the view."""
+
+
+async def _short_view(app: PHTuiApp, pilot: Any) -> None:  # noqa: ANN401
+    """Resize the terminal so the transcript is `VIEW_ROWS` tall.
+
+    **The view, not the terminal**, because the chrome around it is the layout's
+    business and moves: these tests asked for a 12-row terminal when the chrome
+    was five rows, it became two, the view grew to ten, and a jump stopped short
+    with a failure that named the jump.
+    """
+    view = app._view
+    assert view is not None
+    chrome = app.size.height - view.size.height
+    await pilot.resize_terminal(app.size.width, chrome + VIEW_ROWS)
+    await pilot.pause()
+    assert view.size.height == VIEW_ROWS, "the transcript did not take the height it was given"
+
+
 async def _three_turns(app: PHTuiApp, pilot: Any) -> None:  # noqa: ANN401
     """Enough transcript that the view scrolls, so a jump is observable."""
     assert app.front is not None
+    await _short_view(app, pilot)
     await pilot.press(*"first")
     await pilot.press(app.keys.submit)
     await until(pilot, turn_done(app))
@@ -243,7 +267,7 @@ async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
 ) -> None:
     """The gate. A pushed screen, not a second app — so leaving it is `escape`
     and what it returns to is the conversation exactly as it was."""
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app._view is not None
         app._view.scroll_to_seq(0)
@@ -294,7 +318,7 @@ async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeAp
 async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> None:
     """The gate, over the join P3-24 stored and nobody read: a record's
     `source_seq` and a transcript row's `seq` are the same number."""
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         first_user = next(item for item in app.front.state.items if item.role == "user")
@@ -316,7 +340,7 @@ async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> No
 async def test_a_transcript_row_opens_the_record_beside_it(make_tui_app: MakeApp) -> None:
     """The other direction. Rows are widgets in a scroll rather than a table
     with a cursor, so "where the reader is" is the topmost visible row."""
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         last_user = [item for item in app.front.state.items if item.role == "user"][-1]
@@ -337,7 +361,7 @@ async def test_a_seq_with_no_row_lands_on_the_nearest_one_before_it(
 ) -> None:
     """A `request/header` is an auditor's record with no transcript row by
     design. Landing a reader next to it beats landing them nowhere."""
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         rows = [item for item in app.front.state.items if item.seq >= 0]
@@ -397,6 +421,7 @@ async def _turns_with_revisions(
     after its own turn, so each revision has transcript rows on both sides."""
     assert app.front is not None
     front = app.front
+    await _short_view(app, pilot)
     await pilot.press(*"first")
     await pilot.press(app.keys.submit)
     await until(pilot, turn_done(app))
@@ -434,7 +459,7 @@ async def test_the_diff_lists_the_daemons_revisions_and_escape_returns_to_the_ch
         return render(revision)
 
     monkeypatch.setattr(Revision, "texts", counting)
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         landed = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
 
         screen = await _open_diff(app, pilot)
@@ -455,7 +480,7 @@ async def test_enter_on_a_change_goes_to_its_transcript_row(
 ) -> None:
     """The join the trajectory uses, from the other screen: a substitution's entry
     lands on the row the replacement drew."""
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         first, _ = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
         assert app._view is not None
         app._view.scroll_to_seq(0)
@@ -473,7 +498,7 @@ async def test_enter_on_a_change_goes_to_its_transcript_row(
 async def test_opened_from_the_chat_it_starts_at_the_nearest_change_before_the_reader(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    async with running(make_tui_app(), size=(80, 12)) as (app, pilot):
+    async with running(make_tui_app()) as (app, pilot):
         first, second = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
         assert app.front is not None and app._view is not None
         between = next(

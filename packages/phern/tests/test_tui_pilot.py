@@ -18,7 +18,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from daemon_helpers import Daemon, private_runtime
@@ -26,6 +26,7 @@ from daemon_helpers import until as daemon_until
 from textual.app import App
 from textual.binding import Binding
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Input
 from tui_helpers import MakeApp, root_of, running, tui_app, turn_done, until
 
@@ -34,7 +35,7 @@ from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.models import ModelChoice
-from ph.seams.tui_status import StatusReading
+from ph.seams.tui_status import ReadingSlot, StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, raising, simple_tool
@@ -51,7 +52,7 @@ from ph_app.tui.state import ChatItem
 from ph_app.tui.themes import fallback_variables, load_theme_profile
 from ph_app.tui.trajectory_app import run_trajectory
 from ph_app.tui.widgets.prompt import PromptInput
-from ph_app.tui.widgets.status import StatusBar
+from ph_app.tui.widgets.status import Sidebar, StatusBar
 
 pytestmark = pytest.mark.anyio
 
@@ -909,6 +910,63 @@ async def test_escape_closes_the_completion_list_before_interrupting(
         assert prompt.area.text == "/comp"
 
 
+async def test_the_idle_prompt_is_one_row_with_its_text_in_the_transcripts_column(
+    make_tui_app: MakeApp,
+) -> None:
+    """No frame, no hint row: an empty prompt costs the terminal one line, and
+    what is typed into it starts where the conversation's text does.
+
+    Asked while the prompt has focus, because focus is what brought a border
+    back: Textual's `TextArea:focus` rule outranks a plain type selector, so a
+    `border: none` that held for a blurred box failed for the only state a
+    person ever sees it in. Measured against a real transcript row rather than
+    a column number, because the alignment is the point and either side can
+    move — the transcript's gutter is about to.
+
+    Sabotage: drop `compact=True` from the `PromptArea` in `PromptInput.compose`,
+    and the box is three rows tall.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        await pilot.press(*"hi")
+        await pilot.press(app.keys.submit)
+        await until(pilot, turn_done(app))
+        await pilot.pause(0.1)
+        prompt = app.query_one(PromptInput)
+        said = app.query_one(".-user > .row-body").content_region
+
+        assert app.focused is prompt.area
+        assert prompt.area.region.height == 1, "the box has a frame"
+        assert prompt.area.content_region.x == said.x, "the prompt's text is out of line"
+        assert not prompt.query_one("#hint").display, "an empty hint still takes a row"
+        assert prompt.region.height == 1
+
+
+async def test_the_completion_list_and_its_hint_line_up_with_the_prompt(
+    make_tui_app: MakeApp,
+) -> None:
+    """Every row under the box starts its text where the box does, and the hint
+    is there exactly as long as the list is.
+
+    Sabotage: remove `padding-left: 1` from `#completions`, and the list starts a
+    column left of the text it completes.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        prompt = app.query_one(PromptInput)
+        listing = prompt.query_one("#completions")
+        hint = prompt.query_one("#hint")
+        await pilot.press("/")
+        await pilot.pause()
+        assert prompt.has_class("-completing")
+        column = prompt.area.content_region.x
+
+        assert listing.content_region.x == column, "the list is not under the prompt's text"
+        assert hint.display and hint.content_region.x == column
+
+        await pilot.press(app.keys.cancel)
+        await pilot.pause()
+        assert not hint.display, "the hint outlived its list"
+
+
 # ----------------------------------------------------------------- commands --
 
 
@@ -1140,6 +1198,29 @@ async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
         )
 
 
+async def test_every_reading_slot_is_drawn(make_tui_app: MakeApp) -> None:
+    """Each `ReadingSlot` value lands on the status line or in the session panel.
+
+    The check `in_slot` no longer makes at runtime: a slot ph-core adds that no
+    widget here asks for would otherwise draw nowhere, silently. Drawn into the
+    widgets by hand, so what is measured is placement and not which rows mount.
+
+    Sabotage: drop the `in_slot(readings, "context")` read from `StatusBar.show`,
+    and the failure names `context`.
+    """
+    async with running(make_tui_app()) as (app, _pilot):
+        front = app.front
+        assert front is not None
+        slots = get_args(ReadingSlot)
+        readings = [StatusReading(id=f"r-{one}", slot=one, text=f"says-{one}") for one in slots]
+        app.query_one(StatusBar).show(front.state, readings)
+        app.query_one(Sidebar).show(front.state, readings, session_id=front.session_id, cwd="/w")
+
+        drawn = _status_line(app) + str(app.query_one("#session-facts").render())
+        missing = [one for one in slots if f"says-{one}" not in drawn]
+        assert not missing, f"no widget draws the {missing} slot"
+
+
 async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) -> None:
     """Between the conversation and the box, text at the right, a rule to its left.
 
@@ -1162,6 +1243,51 @@ async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) ->
         assert line.right == bar.region.right - 1, "the text does not end one space short"
         assert rule.x == bar.region.x and rule.right == line.x - 1, "the rule does not fill"
         assert rule.width > 0
+
+
+def _ink(widget: Widget, text: str) -> object:
+    """The foreground a widget actually draws `text` in, off its first row.
+
+    Read from the rendered strip rather than from `styles.color`, because most of
+    the status line's color is *inherited*: a span that named a color of its own
+    would pass a check of the widget's style and still draw in something else.
+    """
+    for segment in widget.render_line(0):
+        if text in segment.text and segment.style is not None:
+            return segment.style.color
+    raise AssertionError(f"{text!r} is not on {widget!r}'s first row")
+
+
+async def test_the_status_line_draws_in_the_headings_color(make_tui_app: MakeApp) -> None:
+    """Rule and text in the color of the side panel's section titles — a theme
+    role, so this holds for whichever theme is on — and a warning still not.
+
+    Sabotage: give `piece` in `StatusBar.show` back its `$ph-muted` span, and the
+    reading is drawn in a different color from the heading.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+        await pilot.pause(0.1)
+        heading = _ink(app.query_one(Sidebar).query_one(".section-title"), "session")
+        bar = app.query_one(StatusBar)
+        bar.show(
+            front.state,
+            [
+                StatusReading(id="posture", text="read-only accepted"),
+                StatusReading(id="limits", text="budget 95%", level="warning"),
+            ],
+        )
+        # One layout pass: the text sizes to its content, so until it runs the
+        # widget still has the old line's width and crops the new line's end.
+        await pilot.pause()
+        line = bar.query_one("#status-line")
+        assert "budget 95%" in _status_line(app), "the app redrew the line from the seam"
+
+        assert _ink(line, "fake-1") == heading, "the model is not in the headings' color"
+        assert _ink(line, "read-only accepted") == heading, "a reading is not either"
+        assert _ink(bar.query_one("#status-rule"), "─") == heading, "nor is the rule"
+        assert _ink(line, "budget 95%") != heading, "a warning looks like everything else"
 
 
 async def test_a_narrow_terminal_crops_the_status_line_rather_than_wrapping_it(

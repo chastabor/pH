@@ -115,7 +115,8 @@ Rules, in the order the ask stated them:
    transcript's text.
 5. **Scrollbars on the left, one column wide**, in the transcript and in the completion
    list, which loses its border.
-6. **Colors unchanged.** No theme role is added, removed or re-mapped.
+6. **Colors unchanged** except the status bar, which draws in the headings' role
+   (`$ph-accent`). No theme role is added, removed or re-mapped.
 
 ## Decisions taken for the plan — confirm or overturn
 
@@ -199,7 +200,7 @@ any wire-model change does.
 `_view` are found by query.
 
 **`status.py`.** `StatusBar` is a `Horizontal` holding a Textual `Rule#status-rule`
-(`width: 1fr`, `color: $ph-border`, one column of right margin) and the unchanged
+(its own `width: 1fr`, one column of right margin) and the unchanged
 `Static#status-line` (`width: auto`). The layout gives the text its own width and the
 rule what is left, so nothing measures a string against the terminal, and
 `#status-line` still renders exactly the line `show()` built — which is what the
@@ -217,9 +218,14 @@ auto-width `Static` is never narrower than its content and so never wraps.
 `show_unattached()` lands in the same widget, so "attaching…" and "no session" also
 sit at the right.
 
-**Contrast.** `$ph-border` on `$ph-panel` is the same pairing as the sidebar's left
-edge: faint in ph-dark, ph-light and the catppuccin themes, strong in high-contrast.
-If the rule should read more strongly, `color: $ph-muted` is the one-word change.
+**Color (changed after T3, at the user's request).** Text and rule draw in
+`$ph-accent`, set once on the bar and inherited: the role the side panel's section
+titles use, and the one Markdown headings one to three resolve to, since the theme
+maps it onto Textual's `primary`. A role, so the bar follows the theme. Only a warning
+reading and the gauge past the compaction threshold name a color of their own. The
+unattached lines lost their doubled spaces at the same time (`● attaching…`,
+`● no session · why`). `test_the_status_line_draws_in_the_headings_color` compares
+the drawn colors against a side panel heading.
 
 **Tests.** `test_the_status_line_is_the_prompts_top_edge` (the row ends where the
 prompt begins, the text ends where the row does, the rule runs from the row's start
@@ -230,34 +236,50 @@ sabotaged by swapping the compose order) and
 `test_the_full_app_shell` was regenerated here rather than in T5, so the suite is
 green at this increment.
 
-## T3 — Borderless prompt and completion list, left gutter
+## T3 — Borderless prompt and completion list, left gutter (done)
 
-**`prompt.py` `DEFAULT_CSS`:**
+**`prompt.py`.** The box is `PromptArea(..., compact=True)`: Textual's own borderless
+`TextArea`, applied with `!important`. A plain `border: none` here held only while
+the box was blurred, because the library's `TextArea:focus { border: tall … }`
+outranks a type selector, and the prompt is focused whenever no modal is up.
 
 ```
-PromptInput { height: auto; max-height: 14; }
-PromptInput > TextArea { height: auto; max-height: 8; border: none; padding: 0 1; background: $ph-surface; }
+PromptInput { height: auto; }
+PromptInput > TextArea { height: auto; max-height: 8; background: $ph-surface; }
 PromptInput > #completions {
-    height: auto; max-height: 6; display: none; background: $ph-panel;
-    border: none; scrollbar-size-vertical: 1; scrollbar-gutter: stable;
+    height: auto; max-height: 6; display: none; background: $ph-panel; padding-left: 1;
 }
-PromptInput.-completing > #completions { display: block; }
-PromptInput > #hint { color: $ph-muted; padding-left: 1; display: none; }
-PromptInput.-completing > #hint { display: block; }
+PromptInput > #hint { display: none; color: $ph-muted; padding-left: 1; }
+PromptInput.-completing > #completions, PromptInput.-completing > #hint { display: block; }
 ```
 
-* `padding: 0 1` stays: with the border gone, the left pad *is* the single gutter
-  column, and text lands at column 1. The right pad keeps text off the sidebar's edge.
-* The `:focus` rule is deleted (see decisions).
-* `max-height` values drop by 2 so the prompt's *content* height is what it was (the old
-  caps included two border rows). Keep or revisit — a content line is cheap now.
-* `#hint` shows only while the list is open. Empty, it was still a row: the line under
-  the prompt in every frame, spent on nothing.
-* `#completions` keeps its panel background, which is what still marks it as a popup
-  once its border is gone. `scrollbar-gutter: stable` keeps the items at column 1
-  whether or not the list overflows its six rows.
+* The box keeps Textual's default `padding: 0 1`: the left pad is the gutter column,
+  so text lands at column 1 with the transcript's, and the right pad keeps it off the
+  side panel's border. The idle-prompt test compares the box's text column against a
+  real transcript row, so a change to either side's padding fails there.
+* The hint's text is set once in `compose`; the bindings are fixed for the widget's
+  life, and the hint is hidden whenever there is nothing to accept.
+* The `:focus` rule is gone with the border.
+* `max-height: 8` keeps the box's content height where it was; the old 10 included two
+  border rows. `PromptInput`'s own cap was dropped: its children's caps already bound
+  it, and 16 was less than their sum.
+* The list keeps `max-height: 6`, which now shows six items where the border left four.
+  Completion is transient, so the space it already took shows more choices.
+* The list's `padding-left: 1` holds column 0 until T4 puts the scrollbar there; the
+  hint shows only while the list does, for `/` commands and `@` paths alike.
 
-The `-completing` toggle, `_set_completions` and `_accept_completion` are untouched.
+**Tests.** `test_the_idle_prompt_is_one_row_with_its_text_in_the_transcripts_column`
+(focused, one row, text at column 1, no hint row; sabotaged by dropping `compact=True`)
+and `test_the_completion_list_and_its_hint_line_up_with_the_prompt` (both start at the
+prompt's text column, the hint leaves with the list; sabotaged by dropping the list's
+padding). The full-shell snapshot was regenerated: idle chrome is two rows, down from
+five.
+
+**A test premise moved.** The screens tests that jump around a scrolled transcript
+asked for a 12-row terminal, which left seven rows of transcript under five rows of
+chrome. With two rows of chrome the view grew to ten and one jump stopped short. The
+turn helpers in `test_tui_screens.py` now resize the terminal so the *transcript* is
+`VIEW_ROWS` (seven) tall, whatever the chrome costs, and assert that it is.
 
 ## T4 — The scrollbar on the left
 
@@ -292,7 +314,8 @@ next reader does not look for a `scrollbar-side` property that does not exist.
 * `class TranscriptView(LeftScrollbar, VerticalScroll)`, with
   `TranscriptView { … scrollbar-size-vertical: 1; scrollbar-gutter: stable; }`.
 * `class CompletionList(LeftScrollbar, ListView)` in `prompt.py`, yielded as
-  `#completions`; `query_one("#completions", ListView)` still matches.
+  `#completions`; `query_one("#completions", ListView)` still matches. Its
+  `padding-left: 1` from T3 goes: the reserved gutter is column 0 now.
 * Row margins `0 1 1 1` → `0 1 1 0` on `TranscriptRow`, `StreamingMessage` and
   `ToolCardWidget` (the compaction and thinking variants inherit). With the reserved
   gutter at column 0, plain text is at column 1 and a card bar at column 1 — the

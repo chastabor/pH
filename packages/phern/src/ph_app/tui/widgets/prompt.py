@@ -84,19 +84,32 @@ class PromptArea(TextArea):
 
 
 class PromptInput(Vertical):
-    """A multi-line prompt box with a completion list under it."""
+    """A multi-line prompt box with a completion list under it.
+
+    **No frame.** The status line above is the box's top edge (`StatusBar`), and
+    the surface color is what marks the rest of it — a rounded border spent two
+    rows and two columns of a terminal on saying the same thing. The box is a
+    `compact` `TextArea`, Textual's own borderless mode, rather than `border:
+    none` here: the library's `:focus` rule outranks a plain type selector, so
+    the border came back the moment the prompt took focus.
+
+    **Column 1 is where text starts, in every row of this widget**, which is the
+    column the transcript's text starts in: the box's own padding (Textual's
+    default for a `TextArea`), the list's, and the hint's are each that one
+    column. The list is told apart from the box by its panel color, and the hint
+    is drawn only while there is a list to accept from — empty, it was still a
+    row under the prompt in every frame. Its text is set once: the bindings are
+    this widget's for its whole life.
+    """
 
     DEFAULT_CSS = """
-    PromptInput { height: auto; max-height: 16; }
-    PromptInput > TextArea {
-        height: auto; max-height: 10; border: round $ph-border; background: $ph-surface;
-    }
-    PromptInput > TextArea:focus { border: round $ph-accent; }
+    PromptInput { height: auto; }
+    PromptInput > TextArea { height: auto; max-height: 8; background: $ph-surface; }
     PromptInput > #completions {
-        height: auto; max-height: 6; display: none; background: $ph-panel; border: round $ph-border;
+        height: auto; max-height: 6; display: none; background: $ph-panel; padding-left: 1;
     }
-    PromptInput.-completing > #completions { display: block; }
-    PromptInput > #hint { color: $ph-muted; }
+    PromptInput > #hint { display: none; color: $ph-muted; padding-left: 1; }
+    PromptInput.-completing > #completions, PromptInput.-completing > #hint { display: block; }
     """
 
     class Submitted(Message):
@@ -132,9 +145,9 @@ class PromptInput(Vertical):
         """The walk in progress, or `None` when the box is the person's own."""
 
     def compose(self) -> ComposeResult:
-        yield PromptArea(self, id="prompt-input", soft_wrap=True)
+        yield PromptArea(self, id="prompt-input", soft_wrap=True, compact=True)
         yield ListView(id="completions")
-        yield Static(Content(""), id="hint")
+        yield Static(Content(f"{self.keys.accept_completion} to accept"), id="hint")
 
     # ----------------------------------------------------------------- text --
 
@@ -336,7 +349,6 @@ class PromptInput(Vertical):
         listing.clear()
         self.set_class(state is not None, "-completing")
         if state is None:
-            self.query_one("#hint", Static).update(Content(""))
             return
         for item in state.items:
             listing.append(
@@ -351,11 +363,6 @@ class PromptInput(Vertical):
                 )
             )
         listing.index = 0
-        self.query_one("#hint", Static).update(
-            Content.from_markup(
-                "[$ph-muted]$hint[/]", hint=f"{self.keys.accept_completion} to accept"
-            )
-        )
 
     def _accept_completion(self) -> None:
         state = self._completions
