@@ -150,8 +150,8 @@ async def test_the_footer_is_folded_on_change_and_not_per_frame(
     expensive thing on the frame path, and it could only ever return the same
     answer between appends.
 
-    Sabotage: call `front.status_readings()` from `_advance` instead of reading
-    the cache, and the count climbs with the frame rate.
+    Sabotage: call `front.status_readings()` from `_advance`, and the count
+    climbs with the frame rate.
     """
     async with running(make_tui_app()) as (app, pilot):
         front = app.front

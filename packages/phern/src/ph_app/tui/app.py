@@ -254,12 +254,12 @@ class PHTuiApp(App[str | None]):
         self._spinner: Timer | None = None
         """The frame clock, alive only while a turn is."""
         self._readings: Sequence[StatusReading] = ()
-        """The footer as of the last draw, re-rendered by the spinner.
+        """The footer as of the last draw, which the session panel places too.
 
         Cached because a reading is a *fold of the log* and the log only changes
-        on an append — which marks the view dirty and draws. Recomputing them per
-        frame ran every registered status field over the whole session thirty
-        times a second to get the same answer."""
+        on an append — which marks the footer dirty and refreshes this. A
+        sidebar-only frame reads it rather than folding the log again; the
+        spinner reads nothing, since its glyph has a cell of its own."""
         self._command_disposers: list[Callable[[], None]] = []
         # Held rather than queried. `App.query_one` searches the *top* screen,
         # so every lookup would fail while a modal is up — and the frame timer
@@ -617,11 +617,13 @@ class PHTuiApp(App[str | None]):
             self._spinner = None
 
     def _advance(self) -> None:
-        """One spinner frame: the glyph, the title, and the line they sit in.
+        """One spinner frame: the glyph, and the title.
 
-        Re-renders the status line rather than the transcript, because the glyph
-        is a value `show` composes — and with the *cached* readings, so a frame
-        costs a string build rather than a fold of the log.
+        Only those. The glyph has a cell of its own (`StatusBar`), so a frame
+        repaints one cell; the line beside it is rebuilt by `_draw` when a fact
+        on it changes, which every fact does through a `FOOTER`-dirty frame.
+        Thirty times a second this used to rebuild the line and re-run the
+        layout under it to move one glyph.
 
         It also stops itself if the turn ended without a draw noticing. Belt and
         braces: `_draw` is what normally stops it, and a spinner nobody can stop
@@ -633,7 +635,6 @@ class PHTuiApp(App[str | None]):
             return
         status.tick()
         self.title_writer.set(f"{status.glyph} working")
-        status.show(front.state, self._readings)
 
     def _rows(self, front: FrontSession) -> list[ChatItem]:
         return front.state.visible_items(

@@ -81,28 +81,31 @@ compare readings across the wire as whole models.
 
 ## Target
 
-At 100 columns, with a tool card scrolled into view and the completion list open:
+At 100 columns, with a tool card scrolled into view and the completion list open
+(as built; the first draft of this picture had the card bars in column 1 beside
+the scrollbar, and the user chose the gutter below instead — see T4):
 
 ```
   ·
   This session is waiting for LLAMA_API_KEY, which is not set here — supply it to continue.
- ▐✓ read  packages/phern/README.md
- ▐  232 lines
+▌✓ read  packages/phern/README.md
+▌  232 lines
   pH
   Reading the README first.
-─────────────────────────────── ● flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted
+● ──────────────────────────────── flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted
   /
- ▐/history Search the prompts you have sent.
+▐/history Search the prompts you have sent.
   /permissions Change what pH may do without asking.
   /login Provide a provider credential for this process.
   tab to accept
 ```
 
-(The leading column shown as a space above is column 0 of `#main`: the scrollbar
-track in the transcript and in the completion list, a blank gutter beside the
-prompt and the hint. Column 1 is content everywhere. The `▐` glyphs are a
-one-column scrollbar thumb; the card's own highlight bar sits at column 1, where it
-is today relative to the text.)
+(Column 0 of `#main` is the gutter: in the transcript it is the scrollbar's track
+and thumb *and* the rows' highlight bars, drawn over them — the `▌` beside the card
+is the card's bar in its state color, with the thumb's background showing through
+the right half of the cell; in the status row it is the spinner glyph; beside the
+prompt and the hint it is blank; in the completion list it is that list's scrollbar.
+Column 1 is content everywhere, cards included.)
 
 Rules, in the order the ask stated them:
 
@@ -114,7 +117,8 @@ Rules, in the order the ask stated them:
 4. **A single left gutter column** on the prompt, so its text is at column 1 with the
    transcript's text.
 5. **Scrollbars on the left, one column wide**, in the transcript and in the completion
-   list, which loses its border.
+   list, which loses its border. The transcript's scrollbar also draws the rows'
+   highlight bars, so one column holds both and card text starts in column 1.
 6. **Colors unchanged** except the status bar, which draws in the headings' role
    (`$ph-accent`). No theme role is added, removed or re-mapped.
 
@@ -129,11 +133,12 @@ Rules, in the order the ask stated them:
   the focus cue, and the prompt is focused whenever no modal is. If a cue is wanted
   later, column 0 of the prompt can show `▏` in `$ph-accent` under `:focus-within` —
   one CSS rule, nothing structural.
-* **“Slides over the card bars” means column 0.** The scrollbar takes the column
-  immediately left of the card highlight bars, and the gutter is reserved
-  (`scrollbar-gutter: stable`) so content never shifts when a bar appears. A
-  scrollbar *overlaid on* column 0 content would need a custom bar widget on its own
-  layer and a view that pretends it has none; not proposed.
+* **“Slides over the card bars” — the bars are drawn *on* the scrollbar.** The plan
+  first read this as the scrollbar taking the column beside the bars (bars at column
+  1, card text at column 3). Before T4 the user asked for a feasibility check on the
+  scrollbar as a background behind the bars; a prototype showed Textual gives every
+  cell to one widget, so the scrollbar must draw the bars itself, and the user chose
+  that. T4 records what it took.
 * **The cache wording is tightened in ph-core**, since the mockup drops ` hit` and the
   space before `(`: `cache 28.8k(98%)`; a write-only request `cache 2.0k stored`; both
   `cache 28.8k(98%)+2.0k stored`. The inner ` · ` has to go regardless, because `·` is
@@ -281,59 +286,75 @@ chrome. With two rows of chrome the view grew to ten and one jump stopped short.
 turn helpers in `test_tui_screens.py` now resize the terminal so the *transcript* is
 `VIEW_ROWS` (seven) tall, whatever the chrome costs, and assert that it is.
 
-## T4 — The scrollbar on the left
+## T4 — The gutter: one column that is the scrollbar and the rows' bars (done)
 
-**New module `tui/widgets/gutter.py`** — a bare mixin, deliberately not a `DOMNode`
-subclass, for the reason `selection._SourceSelection` records: Textual builds a
-widget's default CSS from a single `__bases__` chain and a non-`DOMNode` mixin is
-stepped over, while a `Widget`-derived one would truncate the chain and drop the real
-base's CSS.
+**New module `tui/widgets/gutter.py`.** Three things, with the module docstring as
+the design note:
 
-```python
-class LeftScrollbar:
-    """Put the vertical scrollbar in the left gutter. See the module docstring."""
+* `Barred`, a bare mixin a row takes: `gutter_bar()` reads the row's `row--bar`
+  component style and answers its color, or `None` for `transparent`. The color is
+  CSS, so it is themed and switched by the same `-settled`/`-error`/`-thinking`
+  classes that style the rest of the row. The row class declares
+  `COMPONENT_CLASSES = {ROW_BAR}` itself, because Textual gathers those from
+  `DOMNode` bases only.
+* `GutterRender(ScrollBarRender)`: the track and thumb as cell backgrounds, with `▌`
+  in the row's color in the cell beside each barred row. Each cell carries the press
+  action Textual's own renderer gives it (`scroll_up` above the thumb, `grab` on it,
+  `scroll_down` below), so a track click pages and a thumb drag scrolls. **The thumb
+  is whole cells, one length**: the first build reused the stock cells, whose thumb is
+  measured in eighths of a cell with a partial block at each end, and counted each
+  partial end as a whole cell beside a bar — so the thumb was a row longer whenever it
+  straddled a cell boundary, flickering a row on every line scrolled (reported with
+  screenshots after T4). Now the length is the stock arithmetic rounded once, fixed by
+  the window, and only the start moves.
+* `GutterScroll`, a bare mixin for the view: `on_mount` binds the scrollbar's renderer
+  to this view's `gutter_bars()` (per gutter row, the color beside it), and three
+  members put the bar on the left, vertical only. `gutter_bars` asks the screen
+  which widget is under each line's first content column, which reads Textual's
+  visible map; reading every child's `region` instead forced a full-screen
+  rebuild on each scroll step, measured at 24 ms a step at 300 rows and 158 ms at
+  1000, and was caught in the second cleanup pass.
 
-    @property
-    def scrollbar_gutter(self) -> Spacing:
-        return Spacing(0, 0, self.scrollbar_size_horizontal, self.scrollbar_size_vertical)
+**Why the column is padding, not a scrollbar gutter.** Textual places a scroll view's
+children at the left edge of its content box and takes the scrollbar's strip out of
+that box *afterwards* — on the right the same point, on the left a column the rows and
+the bar both claim, and the rows' first character vanished under the bar in the first
+prototype. So the view says `padding-left: 1`, `scrollbar_gutter` reserves nothing
+for the vertical bar, `_get_scrollable_region` carves nothing vertical, and
+`_arrange_scrollbars` places the bar one scrollbar-width left of the content box.
+Two of the three are private; `test_the_textual_members_the_gutter_relies_on_still_exist`
+is the tripwire, with Textual pinned below 9.
 
-    def _get_scrollable_region(self, region: Region) -> Region: ...
-    def _arrange_scrollbars(self, region: Region) -> Iterable[tuple[Widget, Region]]: ...
-```
+**Applied.** `TranscriptView(GutterScroll, VerticalScroll)` with `padding: 1 0 0 1;
+overflow-y: scroll` (the bars live in the column, so it is drawn with nothing to
+scroll), `scrollbar-size-vertical: 1`, track `$ph-background`, thumb `$ph-accent` —
+the headings' color, as the status line is, at the user's request. `_sync` ends with
+`vertical_scrollbar.refresh()`: a
+row that settled changed its color and not its size, the one change nothing else
+repaints the gutter for. The three rows take `Barred`, drop `border-left`/`padding-left`
+and their left margin, and declare their bar colors — pending `$ph-border`, done
+`$ph-tool-success`, failed `$ph-tool-error` (`-error` after `-settled`, since a failed
+call is settled too and the two rules weigh the same), reasoning `$ph-thinking-text`,
+compaction `$ph-warning`; a row whose CSS names no bar color has no bar, so plain
+messages need no rule. `StreamingMessage` also sets
+`padding: 0`: Textual's `Markdown` pads itself `0 2 1 2`, which is why the model's
+answers sat in column 3 with a second blank row under them before this. `CompletionList
+(GutterScroll, ListView)` is the completion list, same gutter and renderer, thumb
+`$ph-accent` on its panel-colored track.
 
-Each override mirrors the Textual member it replaces line for line with the vertical
-strip taken from the left: `region.split_vertical(size_v)` keeping the *second* piece
-for content and the first for the bar; the corner gap, when both bars show, at the
-bottom-left. The `scrollbar-gutter: stable` branch of `_get_scrollable_region` is
-reproduced, since that is what reserves the column while nothing scrolls. The module
-docstring names the three members and why they and not CSS decide the side, so the
-next reader does not look for a `scrollbar-side` property that does not exist.
+**Tests** (`test_tui_gutter.py`, on `tui_helpers.TranscriptApp`, which moved there from
+the snapshot module): the bar is column 0 and every row starts in column 1; each row's
+bar is its own color and prose has none; a card that settles recolors its bar through
+`sync`; a click on the track pages and a drag on the thumb scrolls; the thumb keeps
+one length at every scroll position, top row at the top and last row at the end; the
+thumb is the accent color; the Textual members and `ScrollBar` actions exist with the
+signature `GutterRender` spells. The completion-list test in the
+pilot file checks that list's bar is its column 0. All ten frames regenerated.
 
-**Apply it:**
-
-* `class TranscriptView(LeftScrollbar, VerticalScroll)`, with
-  `TranscriptView { … scrollbar-size-vertical: 1; scrollbar-gutter: stable; }`.
-* `class CompletionList(LeftScrollbar, ListView)` in `prompt.py`, yielded as
-  `#completions`; `query_one("#completions", ListView)` still matches. Its
-  `padding-left: 1` from T3 goes: the reserved gutter is column 0 now.
-* Row margins `0 1 1 1` → `0 1 1 0` on `TranscriptRow`, `StreamingMessage` and
-  `ToolCardWidget` (the compaction and thinking variants inherit). With the reserved
-  gutter at column 0, plain text is at column 1 and a card bar at column 1 — the
-  picture today, shifted left by one.
-
-**Guard the private API.** `tests/test_tui_gutter.py` (phern):
-
-1. Mount a `LeftScrollbar` + `VerticalScroll` with more rows than fit at a fixed size;
-   assert `view.vertical_scrollbar.region.x == view.region.x`, the first child's
-   `region.x == view.region.x + 1`, and `view.vertical_scrollbar.region.width == 1`.
-2. Assert that `Widget` still defines all three overridden names
-   (`hasattr` on each, plus that `_arrange_scrollbars`' signature is unchanged). A
-   Textual bump that renames one then fails here with the name, rather than drawing
-   the bar on the right in production with every test green.
-3. A pilot step: scroll the transcript with the wheel over the content and drag the
-   bar with the mouse at column 0; both move `scroll_y`. Hit-testing is the one path
-   the mixin does not override, and `_compositor.py:922` is the line that makes it
-   work — this test is what notices if that changes.
+**The spinner glyph moved** at the same time, at the user's request: `● ──── text`, the
+glyph in its own one-cell `Static` at the far left — the gutter's column — so a
+spinner frame repaints one cell and `_advance` no longer rebuilds the line (and
+re-ran the layout under it) thirty times a second.
 
 ## T5 — Snapshots, docs, bookkeeping
 

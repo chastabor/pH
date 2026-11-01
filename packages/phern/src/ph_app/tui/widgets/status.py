@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -41,6 +41,9 @@ COMPACTION_THRESHOLD = 0.85
 """Where Phase 4's `compaction-summarize` triggers. The gauge warns here."""
 
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+IDLE = "●"
+"""The glyph between turns, where the spinner runs during one."""
 
 SEPARATOR = " · "
 """Between the footer's categories: `flash/high · turn 3 · context 12%`.
@@ -162,12 +165,18 @@ class StatusBar(Horizontal):
     """One line: spinner, model and its effort, turn, queue depth, context and
     its cache rate, then every reading the rows put on the line.
 
-    **Drawn as the prompt's top edge**, between the transcript and the box: the
-    text right-aligned and a rule filling the row to its left. The prompt has no
-    border of its own any more — two rows and two columns of a terminal spent on
-    a frame — so this row is what separates the conversation from the draft.
-    One column of padding at the right end keeps the text off the side panel's
-    border, which is drawn in the very next cell.
+    **Drawn as the prompt's top edge**, between the transcript and the box:
+    `● ──────── flash/high · turn 3 · read-only accepted`. The glyph at the far
+    left, in the column the transcript's gutter uses; the text right-aligned; a
+    rule filling the row between them. The prompt has no border of its own any
+    more — two rows and two columns of a terminal spent on a frame — so this row
+    is what separates the conversation from the draft. One column of padding at
+    the right end keeps the text off the side panel's border, which is drawn in
+    the very next cell.
+
+    **The glyph is its own cell**, so a spinner frame repaints one cell and
+    nothing else: the line is rebuilt only when a fact on it changes, and the
+    layout — which an auto-width line re-runs on every `update` — not at all.
 
     **Drawn in the headings' color**, rule and text alike: `$ph-accent`, the role
     the side panel's section titles use and the one the transcript's top three
@@ -193,6 +202,7 @@ class StatusBar(Horizontal):
 
     DEFAULT_CSS = """
     StatusBar { height: 1; background: $ph-panel; color: $ph-accent; padding: 0 1 0 0; }
+    StatusBar > #status-glyph { width: 1; margin: 0 1 0 0; }
     StatusBar > #status-rule { margin: 0 1 0 0; color: $ph-accent; }
     StatusBar > #status-line { width: auto; height: 1; }
     """
@@ -202,6 +212,7 @@ class StatusBar(Horizontal):
         self._frame = 0
 
     def compose(self) -> ComposeResult:
+        yield Static(Content(IDLE), id="status-glyph")
         yield Rule(id="status-rule")
         yield Static(Content(""), id="status-line")
 
@@ -210,10 +221,12 @@ class StatusBar(Horizontal):
         return SPINNER[self._frame % len(SPINNER)]
 
     def tick(self) -> None:
+        """One spinner frame. Called only while a turn runs, so the glyph spins."""
         self._frame += 1
+        self._draw_glyph(Content(self.glyph))
 
-    def _line(self) -> Static | None:
-        """The line to draw into, or `None` while there is none.
+    def _part(self, part: Literal["glyph", "line"]) -> Static | None:
+        """The cell or line to draw into, or `None` while there is none.
 
         A frame may land while this widget is mounted and its child is not —
         compose is asynchronous, and so is teardown. A widget owns its children's
@@ -223,12 +236,19 @@ class StatusBar(Horizontal):
         ~45x a generic `query`.
         """
         try:
-            return self.query_one("#status-line", Static)
+            return self.query_one(f"#status-{part}", Static)
         except NoMatches:
             return None
 
+    def _draw_glyph(self, glyph: Content) -> None:
+        """One cell, one column wide by CSS, so no layout runs for it."""
+        cell = self._part("glyph")
+        if cell is not None:
+            cell.update(glyph, layout=False)
+
     def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
-        """`● flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`.
+        """`flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`,
+        with the glyph in its own cell at the bar's far left.
 
         One *segment* per category, `SEPARATOR` between them and `QUALIFIER`
         within: the model with what qualifies it, the turn, the queue, the gauge
@@ -236,7 +256,8 @@ class StatusBar(Horizontal):
         Built from `Content` pieces rather than markup, so a row's string is
         never parsed at all — and a frame costs no markup parse either.
         """
-        line = self._line()
+        self._draw_glyph(Content(self.glyph if state.busy else IDLE))
+        line = self._part("line")
         if line is None:
             return
         model = [Content(state.model or "no model"), *map(_piece, in_slot(readings, "model"))]
@@ -258,8 +279,7 @@ class StatusBar(Horizontal):
         if context:
             segments.append(Content(QUALIFIER).join(context))
         segments.extend(map(_piece, in_slot(readings, "line")))
-        glyph = self.glyph if state.busy else "●"
-        line.update(Content(f"{glyph} ") + Content(SEPARATOR).join(segments))
+        line.update(Content(SEPARATOR).join(segments))
 
     def show_unattached(self, refusal: str | None) -> None:
         """No session yet: why, when a start failed, else that one is on its way.
@@ -269,14 +289,15 @@ class StatusBar(Horizontal):
         A `Content` piece rather than markup, for the reason `ConfirmModal` gives
         — a refusal quotes paths and options, and `[…]` is markup.
         """
-        line = self._line()
+        self._draw_glyph(Content(IDLE) if refusal is None else Content.styled(IDLE, "$ph-warning"))
+        line = self._part("line")
         if line is None:
             return
         if refusal is None:
-            line.update(Content("● attaching…"))
+            line.update(Content("attaching…"))
             return
         why = first_line(refusal) or "could not start"
-        line.update(Content.assemble(("● no session", "$ph-warning"), SEPARATOR, why))
+        line.update(Content.assemble(("no session", "$ph-warning"), SEPARATOR, why))
 
 
 class Sidebar(Vertical):

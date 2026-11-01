@@ -28,6 +28,7 @@ from textual.widgets import ListItem, ListView, Static, TextArea
 from ..autocomplete import CompletionState, build_completion_state
 from ..config import TuiKeybindings
 from ..state import PromptRecord
+from .gutter import GutterScroll
 
 __all__ = ["PromptArea", "PromptInput"]
 
@@ -83,6 +84,15 @@ class PromptArea(TextArea):
         self.owner.intercept_key(event)
 
 
+class CompletionList(GutterScroll, ListView):
+    """The completion list, with its scrollbar in its left padding column.
+
+    The same gutter the transcript has, so a list long enough to scroll keeps
+    its entries in column 1 with the prompt's text, and the bar — one column —
+    appears in column 0 beside them rather than two columns to the right.
+    """
+
+
 class PromptInput(Vertical):
     """A multi-line prompt box with a completion list under it.
 
@@ -106,7 +116,11 @@ class PromptInput(Vertical):
     PromptInput { height: auto; }
     PromptInput > TextArea { height: auto; max-height: 8; background: $ph-surface; }
     PromptInput > #completions {
-        height: auto; max-height: 6; display: none; background: $ph-panel; padding-left: 1;
+        height: auto; max-height: 6; display: none; background: $ph-panel;
+        padding-left: 1; scrollbar-size-vertical: 1;
+        scrollbar-background: $ph-panel; scrollbar-color: $ph-accent;
+        scrollbar-background-hover: $ph-panel; scrollbar-color-hover: $ph-accent;
+        scrollbar-background-active: $ph-panel; scrollbar-color-active: $ph-accent;
     }
     PromptInput > #hint { display: none; color: $ph-muted; padding-left: 1; }
     PromptInput.-completing > #completions, PromptInput.-completing > #hint { display: block; }
@@ -146,7 +160,7 @@ class PromptInput(Vertical):
 
     def compose(self) -> ComposeResult:
         yield PromptArea(self, id="prompt-input", soft_wrap=True, compact=True)
-        yield ListView(id="completions")
+        yield CompletionList(id="completions")
         yield Static(Content(f"{self.keys.accept_completion} to accept"), id="hint")
 
     # ----------------------------------------------------------------- text --

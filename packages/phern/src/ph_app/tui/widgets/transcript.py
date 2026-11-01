@@ -26,7 +26,7 @@ a 200-row transcript re-rendered 200 widgets per frame while streaming.
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import Any, TypeAlias
+from typing import Any, ClassVar, TypeAlias
 
 import anyio
 from textual.app import ComposeResult
@@ -41,6 +41,7 @@ from ph.text import count_of
 
 from ...wire import index_at_or_before
 from ..state import ChatItem, ToolCard
+from .gutter import ROW_BAR, Barred, GutterScroll
 from .selection import SOURCE_BLOCKS
 
 __all__ = [
@@ -91,17 +92,24 @@ def _status_markup(card: ToolCard) -> tuple[str, str]:
     return glyph, ("$ph-tool-error" if card.is_error else "$ph-tool-success")
 
 
-class TranscriptRow(Vertical):
-    """A settled row: a styled label over its body."""
+class TranscriptRow(Barred, Vertical):
+    """A settled row: a styled label over its body.
+
+    Its bar — drawn by the gutter, see `widgets.gutter` — is absent for every
+    role but a compaction marker, which is the one settled row that marks
+    itself: the place the conversation was folded.
+    """
+
+    COMPONENT_CLASSES: ClassVar[set[str]] = {ROW_BAR}
 
     DEFAULT_CSS = """
-    TranscriptRow { height: auto; margin: 0 1 1 1; }
+    TranscriptRow { height: auto; margin: 0 1 1 0; }
     TranscriptRow > .row-label { color: $ph-muted; }
     TranscriptRow > .row-body { height: auto; }
     TranscriptRow.-error > .row-body { color: $ph-error; }
     TranscriptRow.-thinking > .row-body { color: $ph-thinking-text; }
     TranscriptRow.-context > .row-body { color: $ph-muted; }
-    TranscriptRow.-compaction { border-left: outer $ph-warning; padding-left: 1; }
+    TranscriptRow.-compaction > .row--bar { color: $ph-warning; }
     TranscriptRow.-shadowed > .row-body { color: $ph-muted; }
     """
 
@@ -139,7 +147,7 @@ class TranscriptRow(Vertical):
             self.query_one(".row-body", Static).update(Content(self.item.text))
 
 
-class StreamingMessage(Markdown):
+class StreamingMessage(Barred, Markdown):
     """An assistant or thinking row that grows a fragment at a time.
 
     **Copies as Markdown, not as what was drawn.** `SOURCE_BLOCKS` is the whole
@@ -149,14 +157,20 @@ class StreamingMessage(Markdown):
     are `Static`s holding the text already.
     """
 
+    COMPONENT_CLASSES: ClassVar[set[str]] = {ROW_BAR}
+
     DEFAULT_CSS = """
-    StreamingMessage { height: auto; margin: 0 1 1 1; }
+    /* `padding: 0` undoes Textual's own `Markdown { padding: 0 2 1 2 }`: the
+       answer starts in column 1 with every other row and the prompt, and the
+       row's margin is what spaces it — two blank rows under an answer, one
+       under everything else, was that padding's bottom row. */
+    StreamingMessage { height: auto; margin: 0 1 1 0; padding: 0; }
     /* The model's answer carries no label — it is the default voice of the
        transcript. Reasoning does need marking, since it can be toggled off and
-       a reader must be able to tell which they are looking at. */
-    StreamingMessage.-thinking {
-        color: $ph-thinking-text; border-left: outer $ph-thinking-text; padding-left: 1;
-    }
+       a reader must be able to tell which they are looking at: its bar, drawn
+       by the gutter, is the mark. */
+    StreamingMessage.-thinking { color: $ph-thinking-text; }
+    StreamingMessage.-thinking > .row--bar { color: $ph-thinking-text; }
     StreamingMessage.-streaming MarkdownFence { overflow-x: hidden; scrollbar-size-horizontal: 0; }
     StreamingMessage.-finalized MarkdownFence { overflow-x: auto; scrollbar-size-horizontal: 1; }
     """
@@ -222,7 +236,7 @@ class StreamingMessage(Markdown):
             await stream.stop()
 
 
-class ToolCardWidget(Vertical):
+class ToolCardWidget(Barred, Vertical):
     """One tool call: a header line, its body, and any Code Mode sub-dispatches.
 
     Dispatch rows are mounted as they arrive, keyed by call id, rather than
@@ -232,12 +246,16 @@ class ToolCardWidget(Vertical):
     picture, is the P2-01 promise at the widget level.
     """
 
+    COMPONENT_CLASSES: ClassVar[set[str]] = {ROW_BAR}
+
     DEFAULT_CSS = """
-    ToolCardWidget {
-        height: auto; margin: 0 1 1 1; border-left: outer $ph-border; padding-left: 1;
-    }
-    ToolCardWidget.-error { border-left: outer $ph-tool-error; }
-    ToolCardWidget.-settled { border-left: outer $ph-tool-success; }
+    ToolCardWidget { height: auto; margin: 0 1 1 0; }
+    /* The bar the gutter draws beside the card: pending, done, failed. `-error`
+       after `-settled`, because a failed call is settled too and the two rules
+       weigh the same — the later one is the one that shows. */
+    ToolCardWidget > .row--bar { color: $ph-border; }
+    ToolCardWidget.-settled > .row--bar { color: $ph-tool-success; }
+    ToolCardWidget.-error > .row--bar { color: $ph-tool-error; }
     ToolCardWidget > .tool-body { color: $ph-muted; height: auto; }
     ToolCardWidget .dispatch { color: $ph-muted; }
     """
@@ -443,15 +461,26 @@ widget exists to provide. `CodeCellWidget` rides in under `ToolCardWidget`.
 """
 
 
-class TranscriptView(VerticalScroll):
+class TranscriptView(GutterScroll, VerticalScroll):
     """Renders a list of rows, mounting new ones and updating changed ones.
 
     Receives rows already filtered — `TuiState.visible_items` owns which toggles
     hide what — so the view has no opinion about the transcript's meaning.
+
+    Column 0 is the gutter (`widgets.gutter`): the scrollbar, always shown
+    because the rows' bars are drawn in it, over a track the color of the
+    background and a thumb in the headings' color — the status line's and the
+    side panel's, so it follows the theme with them. Rows start in column 1.
     """
 
     DEFAULT_CSS = """
-    TranscriptView { height: 1fr; background: $ph-background; padding: 1 0 0 0; }
+    TranscriptView {
+        height: 1fr; background: $ph-background; padding: 1 0 0 1;
+        overflow-y: scroll; scrollbar-size-vertical: 1;
+        scrollbar-background: $ph-background; scrollbar-color: $ph-accent;
+        scrollbar-background-hover: $ph-background; scrollbar-color-hover: $ph-accent;
+        scrollbar-background-active: $ph-background; scrollbar-color-active: $ph-accent;
+    }
     """
 
     def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
@@ -496,6 +525,10 @@ class TranscriptView(VerticalScroll):
                 # nothing is rendering, and `Markdown.append` refuses it.
                 continue
             await self._update(widget, item)
+        # The gutter draws the rows' bars, and a row that settled or failed in
+        # this pass changed its bar's color without changing its size — which is
+        # the one change nothing else would repaint the gutter for. One column.
+        self.vertical_scrollbar.refresh()
         # Stick to the bottom while rows arrive; release when the reader scrolls
         # up. Textual's `anchor()` does that from one call — but engaged only
         # once there is something to scroll: anchoring an underfull pane scrolls

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.pilot import Pilot
 
@@ -31,7 +32,9 @@ from ph.testing import (
 from ph_app.daemon.supervisor import Root
 from ph_app.payloads import AskKey, ProfileDecision
 from ph_app.tui.app import PHTuiApp
-from ph_app.tui.state import Surface
+from ph_app.tui.state import ChatItem, Surface, TuiState
+from ph_app.tui.themes import DEFAULT_THEME, fallback_variables, load_catalog
+from ph_app.tui.widgets.transcript import TranscriptView
 
 if TYPE_CHECKING:
     # Annotation only, and `daemon_helpers` is not free: importing it composes a
@@ -312,3 +315,41 @@ def rewritten(session: Session, result: SessionEvent, text: str) -> SessionEvent
     message = editable_message(result)
     message["content"][0]["content"] = [{"type": "text", "text": text}]
     return rewrite(session, result, message, revision_record("offload/spilled", {"callId": "c1"}))
+
+
+class TranscriptApp(App[None]):
+    """A transcript and nothing else, fed its rows directly.
+
+    What the snapshot tests draw and what the gutter tests measure: with no
+    model behind it there is no timing, no token order and no session id in the
+    frame, so a diff — or a position — points at the rows.
+    """
+
+    CSS = """
+    Screen { background: $ph-background; color: $ph-foreground; }
+    """
+
+    def __init__(self, items: list[ChatItem], theme: str = DEFAULT_THEME) -> None:
+        super().__init__()
+        self.items = items
+        self._theme_name = theme
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return fallback_variables()
+
+    def compose(self) -> ComposeResult:
+        yield TranscriptView(id="transcript")
+
+    async def on_mount(self) -> None:
+        load_catalog().install(self)
+        self.theme = self._theme_name
+        await self.query_one(TranscriptView).sync(self.items)
+
+
+def rows_of(*items: ChatItem) -> list[ChatItem]:
+    """The rows a `TuiState` holding `items` shows — through the state, so a
+    test's rows are folded and filtered the way the app's are."""
+    state = TuiState()
+    for item in items:
+        state.add(item)
+    return state.visible_items()

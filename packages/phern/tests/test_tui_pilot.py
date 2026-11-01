@@ -27,7 +27,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Input
+from textual.widgets import Input, Static
 from tui_helpers import MakeApp, root_of, running, tui_app, turn_done, until
 
 from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
@@ -535,8 +535,9 @@ def _refused_start(app: App[Any]) -> str:
     return modal.body_text
 
 
-def _status_line(app: PHTuiApp) -> str:
-    return str(app.query_one(StatusBar).query_one("#status-line").render())
+def _status_line(app: PHTuiApp, part: str = "line") -> str:
+    """What the status bar draws: its line, or (`part="glyph"`) the spinner cell."""
+    return str(app.query_one(StatusBar).query_one(f"#status-{part}").render())
 
 
 async def _submit(app: PHTuiApp, pilot: Pilot[str | None], line: str) -> None:
@@ -961,6 +962,11 @@ async def test_the_completion_list_and_its_hint_line_up_with_the_prompt(
 
         assert listing.content_region.x == column, "the list is not under the prompt's text"
         assert hint.display and hint.content_region.x == column
+        # The shipped commands outnumber the list's six rows, so it scrolls — in
+        # the same gutter the transcript has, one column, at its left.
+        assert listing.max_scroll_y > 0, "the list fit; the scrollbar is untested"
+        assert listing.vertical_scrollbar.region.x == listing.region.x
+        assert listing.vertical_scrollbar.region.width == 1
 
         await pilot.press(app.keys.cancel)
         await pilot.pause()
@@ -1194,7 +1200,7 @@ async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
         app.query_one(StatusBar).show(front.state, readings)
 
         assert _status_line(app) == (
-            "● fake-1/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted"
+            "fake-1/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted"
         )
 
 
@@ -1221,13 +1227,42 @@ async def test_every_reading_slot_is_drawn(make_tui_app: MakeApp) -> None:
         assert not missing, f"no widget draws the {missing} slot"
 
 
+async def test_a_spinner_frame_moves_the_glyph_and_leaves_the_line_alone(
+    make_tui_app: MakeApp,
+) -> None:
+    """A frame is one cell: the glyph spins, the line beside it is not rebuilt.
+
+    Sabotage: have `StatusBar.tick` call `show`, and the line is rebuilt (and
+    the layout re-run) thirty times a second to move one glyph; or have it leave
+    the glyph alone, and the spinner never turns.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        front = app.front
+        assert front is not None
+        front.state.status = "running"
+        bar = app.query_one(StatusBar)
+        bar.show(front.state, [StatusReading(id="posture", text="read-only accepted")])
+        await pilot.pause()
+        line = bar.query_one("#status-line", Static)
+        drawn = line.visual
+        was = _status_line(app, "glyph")
+
+        bar.tick()
+
+        now = _status_line(app, "glyph")
+        assert now == bar.glyph != was, "the glyph did not move"
+        assert line.visual is drawn, "the line was rebuilt for a spinner frame"
+
+
 async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) -> None:
-    """Between the conversation and the box, text at the right, a rule to its left.
+    """Between the conversation and the box: the glyph at the left, the text at
+    the right, a rule between them.
 
     Positions rather than a picture, so a theme or a font cannot pass it by
-    accident: the row ends where the prompt begins, the text ends one column
-    short of the row — the space that keeps it off the side panel's border — and
-    the rule runs from the row's start to one column short of the text.
+    accident: the row ends where the prompt begins, the glyph is the row's first
+    cell, the text ends one column short of the row — the space that keeps it
+    off the side panel's border — and the rule runs from one column past the
+    glyph to one column short of the text.
 
     Sabotage: yield `StatusBar` after `PromptInput` in `PHTuiApp.compose`, and the
     first assertion names the order.
@@ -1235,13 +1270,15 @@ async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) ->
     async with running(make_tui_app(), size=(100, 24)) as (app, pilot):
         await pilot.pause(0.1)
         bar = app.query_one(StatusBar)
+        glyph = bar.query_one("#status-glyph").region
         rule = bar.query_one("#status-rule").region
         line = bar.query_one("#status-line").region
         prompt = app.query_one(PromptInput).region
 
         assert bar.region.bottom == prompt.y, "the status line is not directly above the prompt"
+        assert (glyph.x, glyph.width) == (bar.region.x, 1), "the glyph is not the first cell"
         assert line.right == bar.region.right - 1, "the text does not end one space short"
-        assert rule.x == bar.region.x and rule.right == line.x - 1, "the rule does not fill"
+        assert rule.x == glyph.right + 1 and rule.right == line.x - 1, "the rule does not fill"
         assert rule.width > 0
 
 
@@ -1287,6 +1324,7 @@ async def test_the_status_line_draws_in_the_headings_color(make_tui_app: MakeApp
         assert _ink(line, "fake-1") == heading, "the model is not in the headings' color"
         assert _ink(line, "read-only accepted") == heading, "a reading is not either"
         assert _ink(bar.query_one("#status-rule"), "─") == heading, "nor is the rule"
+        assert _ink(bar.query_one("#status-glyph"), "●") == heading, "nor is the glyph"
         assert _ink(line, "budget 95%") != heading, "a warning looks like everything else"
 
 
@@ -1314,7 +1352,7 @@ async def test_a_narrow_terminal_crops_the_status_line_rather_than_wrapping_it(
         assert line.region.height == 1
         assert line.region.right > bar.region.right, "the line fit; the test is too wide"
         shown = line.render_line(0).text[: bar.content_region.right - line.region.x]
-        assert shown.startswith("● fake-1")
+        assert shown.startswith("fake-1")
         assert "accepted" not in shown, "the line was not cropped"
 
 
