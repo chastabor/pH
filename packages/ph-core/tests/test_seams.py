@@ -886,6 +886,25 @@ async def test_a_status_field_reads_and_orders() -> None:
     assert [one.text for one in registry.readings(session)] == ["a", "b"]
 
 
+async def test_a_reading_is_placed_where_its_field_said_and_not_where_it_said() -> None:
+    """`slot` is the field's, stamped by the registry beside `id`: a reading free
+    to answer with a slot of its own could place one row's figure as another's,
+    which is the reason the id is stamped the same way."""
+    registry = TuiStatusRegistry(ctx=Context())
+    registry.register(
+        StatusField(
+            id="effort",
+            read=lambda _s: StatusReading(text="high", slot="line"),
+            order=5,
+            slot="model",
+        )
+    )
+
+    (reading,) = registry.readings(Session("footer"))
+
+    assert (reading.id, reading.slot) == ("effort", "model")
+
+
 async def test_a_field_with_nothing_to_say_shows_nothing() -> None:
     """`None` rather than a placeholder: a line that always carries every field
     is a line where the one that matters cannot be seen."""

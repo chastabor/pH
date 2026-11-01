@@ -21,7 +21,7 @@ import pytest
 
 from ph.agent.types import AgentOptions, RequestErrorAction
 from ph.json import as_obj
-from ph.keys import AGENTS, LLM, SESSIONS, TOKEN_METER
+from ph.keys import AGENTS, LLM, SESSIONS, TOKEN_METER, TUI_STATUS
 from ph.llm.retry import is_transient
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
@@ -30,6 +30,7 @@ from ph.llm.types import (
     Finish,
     FinishReason,
     GenerateOptions,
+    LlmCallConfig,
     LlmFailure,
     Message,
     TextBlock,
@@ -39,6 +40,7 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import TokenMeter
 from ph.session import Session, SurfaceIntent, substitute
+from ph.session.request_header import EpochHeader
 from ph.testing import (
     MountProfile,
     assistant_payload,
@@ -423,7 +425,7 @@ def test_the_cache_reading_is_the_share_of_the_prompt_the_provider_reused() -> N
 
     reading = meter.cache_reading(session)
     assert reading is not None
-    assert reading.text == "cache 1.8k hit (98%)"
+    assert reading.text == "cache 1.8k(98%)"
 
 
 def test_a_stored_prefix_is_not_reported_as_a_hit() -> None:
@@ -444,6 +446,52 @@ def test_a_stored_prefix_is_not_reported_as_a_hit() -> None:
     reading = meter.cache_reading(session)
     assert reading is not None
     assert reading.text == "cache 2.0k stored"
+
+
+def test_a_hit_and_a_store_in_one_request_stay_one_category() -> None:
+    """Both facts, joined with `+` — never with the `·` a footer puts *between*
+    categories, because this reading is half of the context gauge's own
+    (`context 12%/cache …`) and an inner `·` would read as one more category.
+    """
+    meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
+    session = Session("s")
+    payload = assistant_payload("a reply", "m1")
+    payload["usage"] = TokenUsage(
+        input_tokens=33, output_tokens=391, cache_read_tokens=1_777, cache_write_tokens=2_048
+    ).to_wire()
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
+
+    reading = meter.cache_reading(session)
+    assert reading is not None
+    # 1 777 of the 3 858 prompt tokens (33 + 1 777 + 2 048) were reused.
+    assert reading.text == "cache 1.8k(46%)+2.0k stored"
+
+
+async def test_the_token_meter_places_its_readings_beside_what_they_qualify(
+    mount: MountProfile,
+) -> None:
+    """The effort onto the model name, the cache rate onto the context gauge.
+
+    Declared by this row, because it owns both facts; read through the registry,
+    because the registry is what stamps a slot — a test of the field tuples alone
+    would pass with a `slot=` the registration forgot to pass on.
+    """
+    ctx = await mount()
+    session = ctx.require(SESSIONS).create("placed")
+    header = EpochHeader(
+        config=LlmCallConfig(provider="fake", model="m1", reasoning_effort="high"), system=""
+    )
+    log_event(session, "request/header", {"header": header.to_wire(), "reason": "initial"})
+    payload = assistant_payload("a reply", "m1")
+    payload["usage"] = TokenUsage(
+        input_tokens=33, output_tokens=391, cache_read_tokens=1_777
+    ).to_wire()
+    log_event(session, "assistant/message", payload, SurfaceIntent("append", ()))
+
+    placed = {one.id: one.slot for one in ctx.require(TUI_STATUS).readings(session)}
+
+    assert placed["reasoning"] == "model"
+    assert placed["cache"] == "context"
 
 
 def test_measuring_a_message_covers_every_text_carrying_block() -> None:

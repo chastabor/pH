@@ -70,16 +70,39 @@ it, and `command/run` records it), a Textual action, and a key:
 |---|---|---|
 | `/commands` | `ctrl+k` | browse every command, the daemon's and the client's |
 | `/model` | `ctrl+p` | choose the provider and model |
-| `/theme` | `ctrl+y` | `ph-dark`, `ph-light`, `high-contrast` |
+| `/theme` | `ctrl+y` | choose a theme: `ph-dark`, `ph-light`, `high-contrast`, four catppuccin flavors, or one of your own in `$PH_HOME/themes` |
 | `/sessions` | `ctrl+r` | reopen a stored session |
+| `/history` | `alt+r` | search the prompts you have sent |
 | `/permissions` | `ctrl+g` | change what pH may do without asking |
-| `/thinking` | `ctrl+t` | show or hide the model's reasoning |
-| `/tools` | `ctrl+o` | show or hide tool results |
-| `/sidebar` | `ctrl+b` | show or hide the sidebar |
+| `/view <what>` | | show or hide part of the view, below |
+| `/tools` | | list what the model may call |
+| `/skills` | | list the skills installed here |
 | `/login` | | provide a provider credential for this process |
 | `/profile …` | | the session's profile: `show`, `diff`, `save <name>`, `use <name>`, `clear [row]` — the daemon's, registered on every root |
 | `/attach <path> …` | | attach files to the next prompt |
 | `/quit` | `ctrl+d` | |
+
+`/view` takes one word. Three of them have keys of their own:
+
+| `/view …` | key | |
+|---|---|---|
+| `results` | `ctrl+o` | show or hide tool calls, each card whole: its title, its input and what it returned |
+| `thinking` | `ctrl+t` | show or hide the model's reasoning |
+| `sidebar` | `ctrl+b` | show or hide the sidebar |
+| `tools` | | show or hide the sidebar's tools panel |
+| `skills` | | show or hide the sidebar's skills panel |
+| `all` | | both panels at once: shows them, or hides them when both are already shown |
+
+Every toggle but `sidebar` is saved to `tui.json`, so a view you hid stays hidden
+in the next session. `sidebar` belongs to this window and is forgotten on exit.
+
+**Copying.** Drag across the transcript, then press `ctrl+c`. The terminal's own
+copy key (`ctrl+shift+c` in most Linux terminals) finds nothing, because the TUI
+holds the mouse. A model's answer copies as the Markdown it wrote rather than as
+what was drawn: a heading keeps its `#`, a fence its backticks, a table its pipes.
+The text reaches the system clipboard through an OSC 52 escape, which most
+terminals honor and macOS Terminal.app does not. To copy what is on screen
+instead, hold `shift` while dragging, which hands the selection to the terminal.
 
 Rows contribute their own screens and commands through `ctx.tui_screens` and
 `ctx.commands`, and they arrive with the same three routes — `/trajectory` (`f2`)
@@ -92,26 +115,37 @@ may not remove one; `hidden_screens` in `tui.json` hides one from this terminal.
 
 ### `$PH_HOME/tui.json`
 
-Keybindings, theme and preferences. **Never hard-code a key check**: every
+Keybindings and preferences. **Never hard-code a key check**: every
 binding is a named field whose name doubles as the Textual binding id, so one
 `set_keymap` rebinds the whole app, screens and modals included — a contributed
 screen's key is remappable exactly like a built-in.
 
 ```json
 {
-  "theme": "ph-dark",
   "sidebar": "right",
   "turn_notification": "bell",
   "show_thinking": true,
   "show_tool_results": true,
+  "show_tools": true,
+  "show_skills": true,
+  "daemon_keep_alive": "0",
   "hidden_screens": [],
   "keybindings": { "command_palette": "ctrl+k", "quit": "ctrl+d" }
 }
 ```
 
+`daemon_keep_alive` is how long a daemon this TUI starts stays after the
+terminal closes, spelled like `--keep-alive` (`"30s"`, `"5m"`); `"0"` leaves at
+once.
+
+The theme is not in this file. `/theme` writes it to
+`$PH_HOME/themes/theme-profile.yaml`, and a `theme` key left here by an older pH
+is ignored and dropped on the next write.
+
 A file that fails to parse does not stop the TUI starting: it launches on
-defaults and says so. Unrecognized keys are kept rather than dropped, because
-one of them is a plugin screen's binding id.
+defaults and says so. An unrecognized binding id under `keybindings` is kept
+rather than dropped, because it may be a plugin screen's; any other unrecognized
+key is ignored.
 
 ## The browser tab
 

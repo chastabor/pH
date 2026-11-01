@@ -223,6 +223,15 @@ client refuses a 0.10 daemon's status. Three methods are new: `sessions/owed`
 `unknown_method` to a 0.9 daemon. Restarting the daemon on the same release fixes
 both. The session log stays format 4: no record type changed.
 
+The same number covers **`StatusReading.slot` gaining `model` and `context`** (the
+TUI chrome plan, T1): the token meter places its `reasoning` reading beside the
+model name and its `cache` reading beside the context gauge, and spells the latter
+`cache 28.8k(98%)`. `slot` is a closed literal, so a client built before this
+refuses the readings a newer daemon stamps with either; restarting the daemon on
+the same release fixes that. A front end on this release that has not learned a
+slot draws the reading on the line — `in_slot`'s fallback — which is what keeps the
+two placements additive rather than a third thing every front end must draw.
+
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by
 `phern agents doctor`; no client compares it and hangs up. So it documents a

@@ -10,6 +10,7 @@ the harness will act (G4's 0.85 fraction, Phase 4).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,8 @@ from ..state import CatalogEntry, TuiState
 
 __all__ = [
     "COMPACTION_THRESHOLD",
+    "QUALIFIER",
+    "SEPARATOR",
     "Sidebar",
     "StatusBar",
     "children_heading",
@@ -41,6 +44,20 @@ COMPACTION_THRESHOLD = 0.85
 """Where Phase 4's `compaction-summarize` triggers. The gauge warns here."""
 
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+SEPARATOR = " [$ph-muted]·[/] "
+"""Between the footer's categories: `flash/high · turn 3 · context 12%`.
+
+One space each side. The two it had made each `·` read as a column gap, and a
+footer is one line with no columns — the ask said "tighten", and this is the
+whole of what was loose."""
+
+QUALIFIER = "/"
+"""Within a category: the model and its effort, the gauge and its cache rate.
+
+A reading in the `model` or `context` slot is half of a figure this footer
+already draws, and `·` would make it one more category — which is where the
+effort sat before, three entries from the model it qualifies."""
 
 
 def in_slot(readings: Sequence[StatusReading], slot: str) -> list[StatusReading]:
@@ -60,7 +77,11 @@ def in_slot(readings: Sequence[StatusReading], slot: str) -> list[StatusReading]
     return [one for one in readings if (one.slot if one.slot in _SLOTS else "line") == slot]
 
 
-_SLOTS = frozenset({"line", "session"})
+_SLOTS = frozenset({"line", "session", "model", "context"})
+"""The slots *this* front end draws — written out, not derived from `ReadingSlot`.
+
+Derived, a slot ph-core adds that no widget here places would vanish rather than
+fall back to the line, which is the opposite of what `in_slot` promises."""
 
 _HOME = str(Path.home())
 
@@ -131,7 +152,8 @@ def render_subagents(state: TuiState) -> str:
 
 
 class StatusBar(Vertical):
-    """One line: spinner, model, posture, queue depth, context.
+    """One line: spinner, model and its effort, turn, queue depth, context and
+    its cache rate, then every reading the rows put on the line.
 
     Owns the spinner frame, so the footer and the terminal title read the same
     glyph from one counter.
@@ -172,38 +194,57 @@ class StatusBar(Vertical):
             return None
 
     def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
+        """`● flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`.
+
+        One *segment* per category, `SEPARATOR` between them and `QUALIFIER`
+        within: the model with what qualifies it, the turn, the queue, the gauge
+        with what qualifies it, then the line's readings in their own order.
+        Every value is a `$variable`, never spliced — a reading is a row's string
+        and this module's rule is that no row string reaches the markup parser.
+        """
         line = self._line()
         if line is None:
             return
-        parts = [
-            "[$ph-accent]$glyph[/]",
-            "[$ph-muted]$model[/]",
-        ]
         values: dict[str, Any] = {
             "glyph": self.glyph if state.busy else "●",
             "model": state.model or "no model",
         }
-        if state.turn:
-            parts.append("[$ph-muted]·[/] turn $turn")
-            values["turn"] = str(state.turn)
-        if state.queued:
-            parts.append("[$ph-muted]·[/] $queued queued")
-            values["queued"] = str(state.queued)
-        pressure = state.pressure
-        if pressure is not None:
-            # Amber from the threshold on: the point is to see it coming.
-            style = "$ph-warning" if pressure >= COMPACTION_THRESHOLD else "$ph-muted"
-            parts.append(f"[$ph-muted]·[/] [{style}]$context[/]")
-            values["context"] = f"context {min(pressure, 1.0) * 100:.0f}%"
-        for index, reading in enumerate(in_slot(readings, "line")):
+        names = count()
+
+        def piece(reading: StatusReading) -> str:
             # Contributed by a row through `ctx.tui_status` — the footer knows
             # what a reading *is* and nothing about what any of them mean, which
             # is what lets `limits` show a budget here without ph-app importing
             # the package that owns one.
+            name = f"field{next(names)}"
             style = "$ph-warning" if reading.level == "warning" else "$ph-muted"
-            parts.append(f"[$ph-muted]·[/] [{style}]$field{index}[/]")
-            values[f"field{index}"] = reading.text
-        line.update(Content.from_markup("  ".join(parts), **values))
+            values[name] = reading.text
+            return f"[{style}]${name}[/]"
+
+        model = ["[$ph-muted]$model[/]", *map(piece, in_slot(readings, "model"))]
+        segments = [QUALIFIER.join(model)]
+        if state.turn:
+            segments.append("turn $turn")
+            values["turn"] = str(state.turn)
+        if state.queued:
+            segments.append("$queued queued")
+            values["queued"] = str(state.queued)
+        context: list[str] = []
+        pressure = state.pressure
+        if pressure is not None:
+            # Amber from the threshold on: the point is to see it coming.
+            style = "$ph-warning" if pressure >= COMPACTION_THRESHOLD else "$ph-muted"
+            context.append(f"[{style}]$context[/]")
+            values["context"] = f"context {min(pressure, 1.0) * 100:.0f}%"
+        # With no gauge — the window unknown — the readings stand alone rather
+        # than vanish: a cache rate is still a fact, if a less placed one.
+        context.extend(map(piece, in_slot(readings, "context")))
+        if context:
+            segments.append(QUALIFIER.join(context))
+        segments.extend(map(piece, in_slot(readings, "line")))
+        line.update(
+            Content.from_markup(f"[$ph-accent]$glyph[/] {SEPARATOR.join(segments)}", **values)
+        )
 
     def show_unattached(self, refusal: str | None) -> None:
         """No session yet: why, when a start failed, else that one is on its way.

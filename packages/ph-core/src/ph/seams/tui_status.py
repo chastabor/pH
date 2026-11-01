@@ -65,11 +65,27 @@ footer can express without becoming a legend; a third would be a breaking
 change for every front end, which is the right amount of friction."""
 
 
-ReadingSlot: TypeAlias = Literal["line", "session"]
-"""Where a reading belongs: the footer line, or the session panel.
+ReadingSlot: TypeAlias = Literal["line", "session", "model", "context"]
+"""Where a reading belongs, semantically.
 
-Two values for `ReadingLevel`'s reason — two is what a front end can express
-without a legend, and a third is a breaking change for every one of them."""
+* `line` — the footer line, in `order`. The default, and the fallback.
+* `session` — the session panel, beside the directory a session is bound to.
+* `model` — qualifies the model name the line opens with. One model at two
+  efforts is two costs and two answers, so the effort is drawn *onto* the name
+  (`flash/high`) rather than somewhere down the line.
+* `context` — qualifies the context gauge. A cache rate is the other half of
+  "how much of the window is in use", so it is drawn onto the gauge
+  (`context 12%/cache 28.8k(98%)`).
+
+The two joined slots say *what figure a reading is about*, not how the join is
+drawn — the slash is the front end's, as the colors are. A front end that draws
+no gauge, or has not learned a slot at all, renders the reading on the line:
+`in_slot`'s fallback, which is what keeps a slot additive for a front end that
+does not know it.
+
+Closed and small for `ReadingLevel`'s reason: each value is a placement every
+front end must be able to express, and `StatusReading` validates it, so a value
+added here is refused by a client built before it (`PROTOCOL_VERSION` says so)."""
 
 
 class StatusReading(WireModel):
@@ -118,8 +134,10 @@ class StatusField:
     `level`'s shape, and for `level`'s reason: the meaning is the contributing
     row's and the *looks* are the front end's. The sandbox posture is a fact
     about the session — it bounds the directory the session panel already names
-    — while a budget or a cache rate is a live figure that belongs on the line
-    with the others.
+    — while a budget is a live figure that belongs on the line with the others.
+    The reasoning effort qualifies the model name (`model`) and the cache rate
+    qualifies the context gauge (`context`): each is half of a figure the footer
+    already draws, and is drawn onto it.
 
     Front ends that draw only one region ignore this and render everything; the
     alternative it replaced was a hardcoded set of ids in `ph_app`'s status

@@ -26,7 +26,7 @@ one that occasionally compacts a turn early.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, assert_never
 
@@ -48,7 +48,7 @@ from ..llm.types import (
 from ..session import Session, SessionEvent, derive_event_message, shadowed_by
 from ..text import thousands
 from ._registry import contribute_item
-from .tui_status import StatusField, StatusReading
+from .tui_status import ReadingSlot, StatusField, StatusReading
 
 __all__ = [
     "CHARS_PER_TOKEN",
@@ -265,6 +265,12 @@ class TokenMeter:
         one incremental fold, a footer showing a cache rate beside a context
         percentage computed from a different message is the inconsistency worth
         avoiding.
+
+        **Spelled to sit on the gauge.** The field is in the `context` slot, so a
+        footer draws it as `context 12%/cache 28.8k(98%)`: one category, with
+        `·` left to separate categories. Hence no inner `·`, and no space between
+        the count and the share it was of the prompt — `28.8k(98%)`, then
+        `+2.0k stored` when the request also paid to store a prefix.
         """
         usage = self.last_usage(session)
         if usage is None:
@@ -282,14 +288,14 @@ class TokenMeter:
             # that property exists for: a fifth billed term reaches this
             # percentage instead of silently falling out of it.
             prompt = usage.total - usage.output_tokens
-            share = f" ({read * 100 // prompt}%)" if prompt else ""
-            parts.append(f"{thousands(read)} hit{share}")
+            share = f"({read * 100 // prompt}%)" if prompt else ""
+            parts.append(f"{thousands(read)}{share}")
         if written:
             # What this request paid to store, which is the first-turn shape on
             # a route that bills cache writes: it is not a hit and must not be
             # counted as one.
             parts.append(f"{thousands(written)} stored")
-        return StatusReading(text="cache " + " · ".join(parts))
+        return StatusReading(text="cache " + "+".join(parts))
 
     def baseline(self, session: Session, *, pending: Sequence[Message] = ()) -> TokenBaseline:
         """What the next request will cost, from usage when there is any.
@@ -413,15 +419,19 @@ async def apply(ctx: Context, config: None) -> None:
     # row must activate in a profile that mounts no front end at all, and a
     # dependency on `ctx.tui_status` would make the meter — which compaction
     # needs — wait on a registry a headless run never mounts.
-    for field_id, read, order in (
-        # Ahead of the others, because it qualifies the model name the line
-        # opens with: one model at two efforts is two costs and two answers.
-        ("reasoning", meter.reasoning_reading, 5),
-        ("cache", meter.cache_reading, 14),
-    ):
+    fields: tuple[tuple[str, Callable[[Session], StatusReading | None], int, ReadingSlot], ...] = (
+        # `model`: it qualifies the model name the line opens with — one model
+        # at two efforts is two costs and two answers — so a front end draws it
+        # onto the name (`flash/high`) rather than somewhere down the line.
+        ("reasoning", meter.reasoning_reading, 5, "model"),
+        # `context`: the other half of the gauge's number, drawn onto the gauge
+        # (`context 12%/cache 28.8k(98%)`); `cache_reading` says how it spells.
+        ("cache", meter.cache_reading, 14, "context"),
+    )
+    for field_id, read, order, slot in fields:
         contribute_item(
             ctx,
             TUI_STATUS,
-            StatusField(id=field_id, read=read, order=order),
+            StatusField(id=field_id, read=read, order=order, slot=slot),
             label=f"token-meter({field_id})",
         )

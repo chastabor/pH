@@ -822,7 +822,7 @@ The TUI registers its own verbs at runtime rather than through a profile row —
 `/login`, `/view`, `/tools`, `/skills`, `/attach`, `/quit` — each reachable three ways
 (slash command, Textual action, key binding), so adding one is a table row plus a
 method (`tui/commands.py`). A contributed screen gets the same three routes;
-`/trajectory` (F2) is the one that ships.
+`/trajectory` (F2) and `/diff` (F3) are the two that ship.
 
 ### 4.4 Themes, and why they are not a profile row
 

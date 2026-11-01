@@ -34,6 +34,7 @@ from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
 from ph.seams.models import ModelChoice
+from ph.seams.tui_status import StatusReading
 from ph.seams.user_questions import UserQuestion
 from ph.session import SessionHeader
 from ph.testing import StubAgent, not_none, raising, simple_tool
@@ -1105,6 +1106,38 @@ async def test_the_context_gauge_warns_from_the_compaction_threshold(
         rendered = _status_line(app)
         assert "context 86%" in rendered
         assert "fake-1" in rendered
+
+
+async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
+    make_tui_app: MakeApp,
+) -> None:
+    """`● fake-1/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`.
+
+    Hand-built readings rather than the seam's, so what is under test is the
+    footer's own shape: one `·` between categories with a single space each side,
+    `/` within one, the `model` and `context` readings on the figure they qualify
+    wherever the registry ordered them, and a `session` reading nowhere on the
+    line at all.
+    """
+    async with running(make_tui_app()) as (app, _pilot):
+        front = app.front
+        assert front is not None
+        front.state.turn = 3
+        front.state.context_window = 1_000
+        front.state.tokens = 120
+        readings = [
+            StatusReading(id="reasoning", slot="model", text="high"),
+            StatusReading(id="posture", slot="line", text="read-only accepted"),
+            StatusReading(id="sandbox-mode", slot="session", text="workspace-write"),
+            StatusReading(id="cache", slot="context", text="cache 28.8k(98%)"),
+        ]
+        # Drawn and read with no await between, so no frame of the app's own
+        # can redraw the line from the seam's readings in the gap.
+        app.query_one(StatusBar).show(front.state, readings)
+
+        assert _status_line(app) == (
+            "● fake-1/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted"
+        )
 
 
 # ------------------------------------------------------------------- resume --
