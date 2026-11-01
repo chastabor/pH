@@ -42,6 +42,7 @@ __all__ = [
     "app_bindings",
     "local_commands",
     "run_line",
+    "screen_bindings",
 ]
 
 
@@ -75,6 +76,12 @@ class TuiVerb:
     answering the worker question in two places — the same argument
     `ToolDefinition.self_limits` makes about name lists in another package.
     """
+    behind_dialogs: bool = False
+    """Whether its key works while a dialog or another screen is on top — quit,
+    and nothing else. `app_bindings` binds it on the app, which every screen's
+    key chain reaches; every other keyed verb is bound on the chat's base screen
+    (`screen_bindings`), which is in no other screen's chain, so a dialog keeps
+    it quiet by being on top rather than by a check anyone must keep current."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +169,7 @@ TUI_VERBS: tuple[TuiVerb, ...] = (
         argument_hint="<path> …",
         work="queue",
     ),
-    TuiVerb("quit", "Leave pH.", "quit", "quit"),
+    TuiVerb("quit", "Leave pH.", "quit", "quit", behind_dialogs=True),
 )
 
 VIEW_KEYS: tuple[tuple[str, str, str], ...] = (
@@ -182,7 +189,27 @@ every consumer of `TUI_VERBS` a filter, and two tests had written one."""
 
 
 def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
-    """The app-level bindings, one per keyed verb.
+    """The keys that work behind a dialog, for the app: the verbs marked
+    `behind_dialogs` — quit. Every other key is `screen_bindings`'."""
+    bound = keys.as_map()
+    return [
+        Binding(bound[verb.key], verb.action, verb.summary, id=verb.key, priority=True)
+        for verb in TUI_VERBS
+        if verb.key is not None and verb.behind_dialogs
+    ]
+
+
+def screen_bindings(keys: TuiKeybindings) -> list[BindingType]:
+    """The chat's own keys, for its base screen: every other keyed verb, and the
+    view toggles.
+
+    **On the base screen, not the app**, which is what keeps them quiet behind a
+    dialog: Textual walks the *active* screen's chain for a key, and the base
+    screen is in no other screen's chain. The app is in every one, so a key bound
+    there had to be refused by name while a dialog was up — a gate that refused
+    Textual's own Tab with them, and passed any key whose action it had not been
+    told about. The actions are `app.`-namespaced: the screen holds the key, the
+    app holds the verb.
 
     `priority=True` so they are checked before the focused widget: the prompt is
     a `TextArea`, which binds `ctrl+k`, `ctrl+y` and others for editing, and a
@@ -199,12 +226,12 @@ def app_bindings(keys: TuiKeybindings) -> list[BindingType]:
     # `as_map()`'s existence says the dataclass wants to be a mapping anyway.
     bound = keys.as_map()
     bindings: list[BindingType] = [
-        Binding(bound[verb.key], verb.action, verb.summary, id=verb.key, priority=True)
+        Binding(bound[verb.key], f"app.{verb.action}", verb.summary, id=verb.key, priority=True)
         for verb in TUI_VERBS
-        if verb.key is not None
+        if verb.key is not None and not verb.behind_dialogs
     ]
     bindings.extend(
-        Binding(bound[key], f"view({word!r})", summary, id=key, priority=True)
+        Binding(bound[key], f"app.view({word!r})", summary, id=key, priority=True)
         for key, word, summary in VIEW_KEYS
     )
     return bindings

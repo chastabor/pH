@@ -63,7 +63,7 @@ def _binding(app: PHTuiApp, binding_id: str) -> Any:  # noqa: ANN401
     Looked up by id rather than by key, because the id is what a keymap remaps
     and therefore the only stable name a test can hold.
     """
-    for bindings in app._bindings.key_to_bindings.values():
+    for bindings in app.chat._bindings.key_to_bindings.values():
         for binding in bindings:
             if binding.id == binding_id:
                 return binding

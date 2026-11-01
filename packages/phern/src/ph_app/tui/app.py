@@ -10,7 +10,9 @@ contributed through `ctx.tui_screens` (P4-17) — and remapped from `tui.json`
 with one `set_keymap`, screens and modals included, since every binding carries
 an id. `priority=True` puts them ahead of the prompt's `TextArea`, which
 binds `ctrl+k`, `ctrl+y` and others for editing and would otherwise fire as well
-as, or instead of, the app. `check_action` keeps them quiet while a modal is up.
+as, or instead of, the app. They are bound on `ChatScreen`, the app's base
+screen, so a dialog or another screen on top takes them out of the key chain;
+quit alone is bound on the app, which every screen's chain reaches.
 
 Redrawing is **coalesced, not polled**. A streaming turn commits an
 `assistant/chunk` every few tokens, and `view.sync` reconciles a widget list
@@ -45,6 +47,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
 from textual.timer import Timer
 from textual.worker import Worker
 
@@ -63,7 +66,15 @@ from ..payloads import AskKey, ProfileDecision
 from ..protocol import DaemonError
 from ..trust import TrustAnswer, TrustStore, trust_path
 from .autocomplete import PathCompleter
-from .commands import TUI_VERBS, VIEW_USAGE, VIEWS, app_bindings, local_commands, run_line
+from .commands import (
+    TUI_VERBS,
+    VIEW_USAGE,
+    VIEWS,
+    app_bindings,
+    local_commands,
+    run_line,
+    screen_bindings,
+)
 from .config import TuiKeybindings, TuiSettings, load_tui_settings, save_tui_settings
 from .frontend import FrontSession
 from .modals.approval import ApprovalModal
@@ -142,6 +153,18 @@ FRAME_INTERVAL = 1 / 30
 that a burst of chunks costs one layout instead of forty."""
 
 
+class ChatScreen(Screen[None]):
+    """The app's base screen: the chat, and the keys that belong to it.
+
+    A screen of its own only for its bindings (`commands.screen_bindings`): bound
+    here rather than on the app, they are in the key chain exactly while this is
+    the screen on top. The layout is still `PHTuiApp.compose`'s.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = screen_bindings(TuiKeybindings())
+    """Defaults; `PHTuiApp.on_mount` remaps them from the user's settings."""
+
+
 class PHTuiApp(App[str | None]):
     """pH in a terminal.
 
@@ -155,7 +178,8 @@ class PHTuiApp(App[str | None]):
     """pH's palette is `ctx.commands`, opened by its own verb."""
 
     BINDINGS: ClassVar[list[BindingType]] = app_bindings(TuiKeybindings())
-    """Defaults; `on_mount` remaps them from the user's settings."""
+    """The keys that work behind a dialog (quit); `on_mount` remaps them with the
+    rest. The chat's own are `ChatScreen`'s."""
 
     CSS = """
     Screen { background: $ph-background; color: $ph-foreground; layers: base; }
@@ -176,6 +200,9 @@ class PHTuiApp(App[str | None]):
         profile: str = "",
     ) -> None:
         super().__init__()
+        self.chat = ChatScreen()
+        """The base screen — `get_default_screen`'s, and where a contributed
+        screen's key is bound (`add_binding`)."""
         self.profile = profile
         """The profile a session this terminal *creates* runs on (S5); empty is the
         daemon's own. A session it resumes runs on what that session's log records."""
@@ -285,8 +312,12 @@ class PHTuiApp(App[str | None]):
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return fallback_variables()
 
+    def get_default_screen(self) -> ChatScreen:
+        """The chat's own screen, holding the chat's own keys — see `ChatScreen`."""
+        return self.chat
+
     def add_binding(self, binding: Binding) -> Callable[[], None]:
-        """Bind a key on the live app, and hand back its removal.
+        """Bind a key on the chat's screen, and hand back its removal.
 
         Here rather than in `screens.py` because this is the one place that
         reaches into Textual's internals, and it belongs beside the other
@@ -298,7 +329,7 @@ class PHTuiApp(App[str | None]):
         on, so without it a contributed screen's key would be the one key in
         the app a user could not rebind.
         """
-        table = self._bindings.key_to_bindings
+        table = self.chat._bindings.key_to_bindings
         table.setdefault(binding.key, []).append(binding)
         self._refresh_bindings()
 
@@ -321,20 +352,6 @@ class PHTuiApp(App[str | None]):
         """
         if self.is_running:
             self.refresh_bindings()
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Keep global keys quiet while a modal owns the screen — except quit.
-
-        Not while there is no front end. That clause kept every `open_*` verb
-        silent during the attach, and silent after an attach that failed — which
-        made it the half of the dead terminal (H3) that `/theme` and the keys were:
-        a refused action is one Textual reports as nothing. A verb that needs a
-        session says so itself now (`_attached`), and the theme and command pickers
-        never needed one.
-        """
-        if action == "quit":
-            return True
-        return len(self.screen_stack) <= 1
 
     # --------------------------------------------------------------- layout --
 

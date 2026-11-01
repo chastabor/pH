@@ -21,14 +21,14 @@ from typing import Any, ClassVar, NamedTuple, TypeVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Vertical
+from textual.containers import Center, Vertical
 from textual.content import Content
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, ListItem, ListView, Static
 
 from ...wire import matches_terms
 
-__all__ = ["Action", "Choice", "ChoicePicker", "ConfirmModal", "PhModal"]
+__all__ = ["Action", "Answers", "Choice", "ChoicePicker", "ConfirmModal", "PhModal"]
 
 ResultT = TypeVar("ResultT")
 
@@ -197,6 +197,44 @@ class ChoicePicker(PhModal[str | None]):
         self.dismiss(choice.value)
 
 
+class Answers(Vertical):
+    """A dialog's answers: a column of buttons, each centered, walked by the arrows.
+
+    **Each button in a `Center`.** `align-horizontal` on the column would center
+    the answers as one block the width of the widest, leaving a shorter label's
+    button flush with the block's left edge.
+
+    **The arrows are bound here, on the column, not on the dialog.** So they act
+    only while an answer has focus, and move only among the answers. A text box
+    handles Left and Right itself, but not Up and Down; bound on the dialog,
+    those would throw focus out of approval's reason box mid-sentence. Tab still
+    reaches the box. Down and Up carry the picker's ids
+    (`completion_next`, `completion_previous`), so a rebinding in `tui.json`
+    moves both kinds of dialog; Right and Left are a courtesy for whoever reads
+    the answers as a row, and are fixed.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("down", "next_answer", "Next", id="completion_next", show=False),
+        Binding("up", "previous_answer", "Previous", id="completion_previous", show=False),
+        Binding("right", "next_answer", "Next", show=False),
+        Binding("left", "previous_answer", "Previous", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    Answers { height: auto; }
+    """
+
+    def __init__(self, *buttons: Button, **kwargs: Any) -> None:  # noqa: ANN401
+        super().__init__(*(Center(button) for button in buttons), **kwargs)
+
+    def action_next_answer(self) -> None:
+        self.screen.focus_next("Answers Button")
+
+    def action_previous_answer(self) -> None:
+        self.screen.focus_previous("Answers Button")
+
+
 class Action(NamedTuple):
     """One button on a `ConfirmModal`."""
 
@@ -210,6 +248,9 @@ class ConfirmModal(PhModal[str | None]):
 
     The body is rendered as plain `Content`: a plan, a diff, a path, a command
     line — every one of them contains brackets, and none of them is markup.
+
+    The answers are an `Answers` column: centered, and walked by the arrows as
+    well as Tab.
     """
 
     DEFAULT_CSS = """
@@ -220,8 +261,6 @@ class ConfirmModal(PhModal[str | None]):
     }
     ConfirmModal #confirm-title { color: $ph-warning; }
     ConfirmModal #confirm-body { height: auto; max-height: 20; margin: 1 0; }
-    ConfirmModal #confirm-actions { height: auto; }
-    ConfirmModal Button { margin-right: 1; }
     """
 
     def __init__(
@@ -231,12 +270,16 @@ class ConfirmModal(PhModal[str | None]):
         body: str,
         actions: list[Action],
         cancel_value: str | None = None,
+        initial: str | None = None,
     ) -> None:
         super().__init__()
         self.title_text = title
         self.body_text = body
         self.actions = actions
         self.cancel_value = cancel_value
+        self.initial = initial if initial is not None else (actions[0].value if actions else None)
+        """The answer focused when the dialog opens — what a bare Enter chooses.
+        The first action unless the caller names a safer one."""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm"):
@@ -244,13 +287,17 @@ class ConfirmModal(PhModal[str | None]):
                 Content.from_markup("[b]$title[/b]", title=self.title_text), id="confirm-title"
             )
             yield Static(Content(self.body_text), id="confirm-body")
-            with Vertical(id="confirm-actions"):
-                for action in self.actions:
-                    yield Button(action.label, id=f"act-{action.value}", variant=action.variant)  # type: ignore[arg-type]
+            yield Answers(
+                *(
+                    Button(action.label, id=f"act-{action.value}", variant=action.variant)  # type: ignore[arg-type]
+                    for action in self.actions
+                ),
+                id="confirm-actions",
+            )
 
     def on_mount(self) -> None:
-        if self.actions:
-            self.query_one(f"#act-{self.actions[0].value}", Button).focus()
+        if self.initial is not None:
+            self.query_one(f"#act-{self.initial}", Button).focus()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         assert event.button.id is not None

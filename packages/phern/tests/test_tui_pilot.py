@@ -27,7 +27,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Static
 from tui_helpers import MakeApp, root_of, running, tui_app, turn_done, until
 
 from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
@@ -42,10 +42,10 @@ from ph.testing import StubAgent, not_none, raising, simple_tool
 from ph_app.daemon.supervisor import Root
 from ph_app.payloads import AskKey
 from ph_app.trust import TrustStore
-from ph_app.tui.app import VERB_GROUP, PHTuiApp, run_tui
+from ph_app.tui.app import VERB_GROUP, ChatScreen, PHTuiApp, run_tui
 from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
-from ph_app.tui.modals.base import Choice, ChoicePicker, ConfirmModal
+from ph_app.tui.modals.base import Answers, Choice, ChoicePicker, ConfirmModal
 from ph_app.tui.modals.pickers import NEW_SESSION
 from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
 from ph_app.tui.state import ChatItem
@@ -784,6 +784,133 @@ async def test_the_trust_modal_offers_three_answers(make_tui_app: MakeApp, tmp_p
         assert chosen == ["once"]
 
 
+async def test_the_trust_dialog_is_walked_by_tab_and_the_arrows(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """Opened on "this session only", and every answer reachable from the keyboard.
+
+    Tab and Shift+Tab are Textual's, routed to app actions — which the app
+    refused behind a dialog while its own keys were bound on the app and kept
+    quiet by a check, so focus could not leave the first button and Enter meant
+    "trust it forever". The arrows are the dialog's own, to the same actions.
+
+    Sabotage: give `PHTuiApp` a `check_action` that refuses every action but
+    quit while a dialog is up, and Tab leaves focus where it was.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        app.push_screen(project_trust_modal(tmp_path))
+        await pilot.pause()
+
+        def focused() -> str | None:
+            return app.focused.id if app.focused is not None else None
+
+        assert focused() == "act-once", "Enter on an unread prompt must not trust for good"
+        for key, expected in (
+            ("tab", "act-no"),
+            ("shift+tab", "act-once"),
+            ("up", "act-always"),
+            ("down", "act-once"),
+            ("right", "act-no"),
+            ("left", "act-once"),
+        ):
+            await pilot.press(key)
+            await pilot.pause()
+            assert focused() == expected, f"{key} left focus on {focused()}"
+
+
+async def test_the_chat_s_keys_are_quiet_behind_a_dialog_and_quit_is_not(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """A dialog keeps the chat's keys out of reach by being on top — they are
+    bound on the chat's own screen — and quit, bound on the app, still works.
+
+    Sabotage: bind the chat's keys on the app (`PHTuiApp.BINDINGS =
+    screen_bindings(...)`), and the theme picker opens over the trust dialog.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        app.push_screen(project_trust_modal(tmp_path))
+        await pilot.pause()
+        dialog = app.screen
+
+        await pilot.press(app.keys.theme_picker)
+        await pilot.pause()
+        assert app.screen is dialog, "a chat key opened a picker over the dialog"
+
+        await pilot.press(app.keys.quit)
+        await pilot.pause()
+        assert app._exit, "quit did not reach the app from behind the dialog"
+
+
+async def test_the_approval_dialog_is_walked_by_the_arrows_and_its_box_keeps_them(
+    make_tui_app: MakeApp,
+) -> None:
+    """The arrows move among the decisions — and only there: once a decision
+    opens the reason box, Left and Right move its cursor and Up does not throw
+    focus out of it. The box handles Left and Right itself; Up is the key that
+    escapes when the arrows are bound wider than the answers.
+
+    Sabotage: bind the arrows on the dialog (`app.focus_next`, `app.focus_previous`)
+    rather than on `Answers`, and Up in the open box moves focus out of it.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        request = ApprovalRequest(tool_name="bash", arguments={"command": "ls"})
+        app.push_screen(ApprovalModal(request))
+        await pilot.pause()
+
+        def focused() -> str | None:
+            return app.focused.id if app.focused is not None else None
+
+        assert focused() == "approval-approve"
+        for key, expected in (
+            ("down", "approval-edit"),
+            ("down", "approval-respond"),
+            ("up", "approval-edit"),
+            ("right", "approval-respond"),
+            ("left", "approval-edit"),
+        ):
+            await pilot.press(key)
+            await pilot.pause()
+            assert focused() == expected, f"{key} left focus on {focused()}"
+
+        await pilot.press("enter")  # "Edit arguments": the box opens on the call
+        await pilot.pause()
+        box = app.screen.query_one("#approval-why", Input)
+        assert app.focused is box
+        await pilot.press("end")
+        cursor = box.cursor_position
+        await pilot.press("left")
+        await pilot.pause()
+        assert box.cursor_position == cursor - 1, "Left did not move the box's cursor"
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.focused is box, "Up threw focus out of the reason box"
+
+
+@pytest.mark.parametrize("dialog", ["trust", "approval"])
+async def test_a_dialog_s_answers_are_a_centered_column(
+    make_tui_app: MakeApp, tmp_path: Path, dialog: str
+) -> None:
+    """Each answer's middle is the dialog's middle, whatever its label's length —
+    in every dialog with answers, since they share one `Answers` column.
+
+    Sabotage: build `Answers`' children without their `Center`, and the answers
+    line up on the left edge with different middles.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        app.push_screen(
+            project_trust_modal(tmp_path)
+            if dialog == "trust"
+            else ApprovalModal(ApprovalRequest(tool_name="bash"))
+        )
+        await pilot.pause()
+        column = app.screen.query_one(Answers).content_region
+        middle = column.x + column.width / 2
+        for button in app.screen.query(Button):
+            region = button.region
+            offset = region.x + region.width / 2 - middle
+            assert abs(offset) <= 0.5, f"{button.id} is {offset} columns off center"
+
+
 async def test_plan_review_defaults_to_rejecting_on_dismissal(make_tui_app: MakeApp) -> None:
     async with running(make_tui_app()) as (app, pilot):
         chosen: list[Any] = []
@@ -1020,6 +1147,13 @@ async def test_an_unknown_command_is_reported_not_prompted(
         assert "user/message" not in types
 
 
+def _bound_ids(app: PHTuiApp) -> set[str]:
+    """Every key binding id the chat answers to: the app's (quit, which works
+    behind a dialog) and its base screen's (the rest)."""
+    declared = [*app.BINDINGS, *ChatScreen.BINDINGS]
+    return {binding.id for binding in declared if isinstance(binding, Binding) and binding.id}
+
+
 async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
     make_tui_app: MakeApp,
 ) -> None:
@@ -1041,7 +1175,7 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
         # registered anywhere, so the list a person sees is the merge of both
         # ends — which is the thing "reachable as a command" has to mean now.
         registered = {definition.name for definition in app.commands()}
-        bound = {binding.id for binding in app.BINDINGS if isinstance(binding, Binding)}
+        bound = _bound_ids(app)
         for verb in TUI_VERBS:
             assert verb.name in registered
             assert hasattr(app, f"action_{verb.action}"), verb.action
@@ -1108,7 +1242,7 @@ async def test_view_keeps_the_keys_the_old_toggles_had(make_tui_app: MakeApp) ->
         await pilot.pause()
 
         assert app.settings.show_tool_results is not before
-        bound = {binding.id for binding in app.BINDINGS if isinstance(binding, Binding)}
+        bound = _bound_ids(app)
         assert {"toggle_tool_results", "toggle_thinking", "toggle_sidebar"} <= bound
 
 

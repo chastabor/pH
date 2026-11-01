@@ -42,7 +42,7 @@ from ph.seams.approval import (
     Responded,
 )
 
-from .base import PhModal
+from .base import Answers, PhModal
 
 __all__ = ["ApprovalDecision", "ApprovalModal"]
 
@@ -89,7 +89,12 @@ class ApprovalDecision:
 
 
 class ApprovalModal(PhModal[ApprovalDecision]):
-    """Ask whether one tool call may run."""
+    """Ask whether one tool call may run.
+
+    The decisions are an `Answers` column — centered, and walked by the arrows
+    as well as Tab, the same as every other dialog's answers. The arrows move
+    among the decisions only, so once the reason box is open they stay with it.
+    """
 
     DEFAULT_CSS = """
     ApprovalModal { align: center middle; background: $background 60%; }
@@ -101,8 +106,6 @@ class ApprovalModal(PhModal[ApprovalDecision]):
     ApprovalModal #approval-reason { color: $ph-muted; margin: 1 0; }
     ApprovalModal #approval-why { border: none; background: $ph-surface; display: none; }
     ApprovalModal.-explaining #approval-why { display: block; }
-    ApprovalModal #approval-actions { height: auto; }
-    ApprovalModal Button { margin-right: 1; }
     """
 
     def __init__(self, request: ApprovalRequest) -> None:
@@ -119,12 +122,14 @@ class ApprovalModal(PhModal[ApprovalDecision]):
             )
             yield Static(Content(self.request.reason or ""), id="approval-reason")
             yield Input(id="approval-why")
-            with Vertical(id="approval-actions"):
-                for offer in _OFFERS:
-                    if self._offers(offer.decision):
-                        yield Button(
-                            offer.label, id=f"approval-{offer.decision}", variant=offer.variant
-                        )
+            yield Answers(
+                *(
+                    Button(offer.label, id=f"approval-{offer.decision}", variant=offer.variant)
+                    for offer in _OFFERS
+                    if self._offers(offer.decision)
+                ),
+                id="approval-actions",
+            )
 
     def _offers(self, decision: ApprovalDecisionName) -> bool:
         """Whether the asking row will accept this one. Empty means all four."""

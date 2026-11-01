@@ -35,6 +35,9 @@ def project_trust_modal(root: Path) -> ConfirmModal:
             Action("no", "Don't load it", "error"),
         ],
         cancel_value="no",
+        # Enter on an unread prompt picks the answer that ends with the session:
+        # trusting a directory for good should be a choice somebody moved to.
+        initial="once",
     )
 
 

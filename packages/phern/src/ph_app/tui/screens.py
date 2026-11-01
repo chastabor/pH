@@ -136,6 +136,8 @@ def open_screen_action(screen_id: str) -> str:
     """The Textual action string that opens one screen.
 
     One spelling, used by the binding and by the slash command, so a key and a
-    verb cannot come to mean different things.
+    verb cannot come to mean different things. `app.`-namespaced because the key
+    is bound on the chat's base screen (`commands.screen_bindings` says why) and
+    the action lives on the app.
     """
-    return f"open_screen({screen_id!r})"
+    return f"app.open_screen({screen_id!r})"
