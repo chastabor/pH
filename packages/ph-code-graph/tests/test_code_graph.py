@@ -33,23 +33,24 @@ and a recursive CTE) are exactly the ones a fake would not exercise.
 
 from __future__ import annotations
 
-import itertools
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from code_graph_helpers import (
+    SHARED,
+    grammar_cache,  # noqa: F401 - autouse, by being here
+    new_agent,
+)
 
 from ph.cordis import Context
 from ph.json import as_str
-from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
+from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.types import text_of
-from ph.testing import FAKE_OPTIONS, MountProfile, report_section, run_tool
+from ph.testing import MountProfile, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
-from ph.tools.registry import RUN_CODE
 from ph.workspace_caches import WORKSPACE_FILE
-from ph_code_graph import CODE_GRAPH
 from ph_code_graph._extract import (
     INHERITS,
     Definition,
@@ -58,10 +59,16 @@ from ph_code_graph._extract import (
     indexable,
     owners,
 )
+from ph_code_graph.engine import CODE_GRAPH
 
 pytestmark = pytest.mark.anyio
 
-ROW: dict[str, Any] = {"id": "code-graph", "name": "code-graph"}
+ROW: dict[str, Any] = {"id": "code-graph", "name": "code-graph-engine"}
+"""The engine row — the tools themselves, as the `ph-code-graph` command mounts them.
+
+Under the session row's id, as the command spells it, so a config written for
+`code-graph` is read by the row that indexes. The row a session mounts is
+`test_code_graph_row.py`'s subject."""
 
 MODULE = '''\
 """A module."""
@@ -95,57 +102,7 @@ async def apply(ctx, config):
 function, a method, and a module-level `async def` with a nested `def` (the
 shape that crashed the PyPI `codegraph` outright)."""
 
-OTHER = '''\
-def shared(value):
-    """The thing everyone calls."""
-    return value * 2
-'''
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _grammar_cache(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
-    """One writable grammar cache for this module, outside every test's `$PH_CACHE`.
-
-    `tree-sitter-language-pack` materializes even its *bundled* grammars into a
-    writable directory on first use — the wheel ships them as an archive, not as
-    loadable libraries — and fails hard when it cannot create one. So every test
-    that parses needs it, including the ones that call `extract` directly and
-    mount no row.
-
-    **Module-scoped, and not the row's own path.** The suite's `_isolated_home`
-    pins `$PH_CACHE` per test, so leaving the row to choose would re-materialize
-    the grammars for each — the same work tens of times, for isolation nobody
-    wanted. Grammars are read-only content keyed by the pack's version.
-
-    **In this module rather than a `conftest.py`**, which is not a style choice:
-    `ph-rlm`'s tests do `from conftest import BINDINGS_ROW`, importing their
-    conftest as a top-level module, and a second file of that name anywhere in
-    `testpaths` shadows it on `sys.path` — adding one here broke ten of their
-    modules at collection. A module-scoped fixture needs no new module name.
-
-    Set through the environment variable rather than `use_cache`, which is that
-    function's operator-override path — so the run exercises the branch where an
-    operator's own spelling wins.
-    """
-    directory = tmp_path_factory.mktemp("tree-sitter-grammars")
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR", str(directory))
-        yield directory
-
-
-_SEQ = itertools.count()
-
-
-def _agent(ctx: Context) -> Any:  # noqa: ANN401
-    """A fresh agent, on a session id nothing else has taken.
-
-    Counted rather than fixed: a test that needs two agents (an index call and a
-    query call) would otherwise collide on the session id, which fails as
-    `SESSION_ALREADY_EXISTS` several frames from the cause.
-    """
-    return ctx.require(AGENTS).create(
-        ctx.require(SESSIONS).create(f"cg-{next(_SEQ)}"), FAKE_OPTIONS
-    )
+OTHER = SHARED
 
 
 def _tree(root: Path) -> None:
@@ -291,7 +248,7 @@ async def test_indexing_then_asking_answers_with_a_readable_pointer(
     """End to end: the whole reason the package exists."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
@@ -323,7 +280,7 @@ async def test_an_index_records_the_workspace_its_graph_serves(
     ctx = await mount(ROW)
     root = ctx.require(FS).root_for(None)
 
-    built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     assert not built.is_error, text_of(built.content)
     recorded = ctx.require(CODE_GRAPH).store_for(root).path.parent / WORKSPACE_FILE
@@ -336,7 +293,7 @@ async def test_callers_names_the_calling_symbol_and_the_calling_line(
     """Not the definition's line — the line to open."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
@@ -356,7 +313,7 @@ async def test_callers_names_the_calling_symbol_and_the_calling_line(
 async def test_callees_reports_what_a_symbol_reaches(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(ctx, "code_graph", {"mode": "callees", "query": "render"}, agent=agent)
@@ -369,7 +326,7 @@ async def test_impact_walks_transitively_ring_by_ring(mount: MountProfile, tmp_p
     """The recursive CTE — the query `pyturso` refuses. `shared` <- inner <- outer."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(
@@ -401,7 +358,7 @@ async def test_a_symbol_reached_twice_is_reported_at_the_nearer_distance(
         encoding="utf-8",
     )
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(
@@ -417,7 +374,7 @@ async def test_search_ranks_by_name_and_docstring(mount: MountProfile, tmp_path:
     """FTS5 — the other query `pyturso` cannot serve."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(
@@ -438,7 +395,7 @@ async def test_a_models_punctuation_does_not_become_fts_syntax(
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     for query in ("read-before-edit", 'the "widget" thing', "shared: value", "NEAR outer", "*"):
@@ -451,7 +408,7 @@ async def test_entities_lists_the_biggest_definitions_first(
 ) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(
@@ -474,7 +431,7 @@ async def test_an_ambiguous_name_says_it_is_ambiguous(mount: MountProfile, tmp_p
         "from a import register\n\n\ndef go():\n    return register()\n", encoding="utf-8"
     )
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "register"}, agent=agent)
@@ -493,7 +450,7 @@ async def test_a_second_pass_over_an_unchanged_tree_parses_nothing(
     """Content-keyed, so re-running after a turn is cheap and correct."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     first = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
     second = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
@@ -530,7 +487,7 @@ async def test_a_touched_but_unmodified_file_stays_unchanged(
     """An mtime is not content. A rebase moves every mtime in the tree."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     target = tmp_path / "pkg" / "mod.py"
@@ -545,7 +502,7 @@ async def test_an_edit_is_picked_up_and_replaces_the_old_rows(
 ) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     (tmp_path / "pkg" / "helpers.py").write_text(
@@ -588,7 +545,7 @@ async def test_a_renamed_symbol_is_not_found_under_its_old_name(
     # `search` drops it, hiding the defect behind a miss.
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg/helpers.py"]}, agent=agent)
 
     (tmp_path / "pkg" / "helpers.py").write_text(
@@ -605,7 +562,7 @@ async def test_a_renamed_symbol_is_not_found_under_its_old_name(
 async def test_forget_removes_a_path_from_the_index(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     dropped = await run_tool(
@@ -629,7 +586,7 @@ async def test_non_code_and_oversized_files_are_skipped_not_fatal(
     (tmp_path / "pkg" / "README.md").write_text("# notes\n", encoding="utf-8")
     (tmp_path / "pkg" / "huge.py").write_text("x = 1\n" * 5_000, encoding="utf-8")
     ctx = await _indexed(mount, tmp_path, max_bytes=1_000)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
@@ -648,17 +605,53 @@ async def test_a_query_before_any_index_says_what_to_do(
     ctx = await _indexed(mount, tmp_path)
 
     found = await run_tool(
-        ctx, "code_graph", {"mode": "search", "query": "anything"}, agent=_agent(ctx)
+        ctx, "code_graph", {"mode": "search", "query": "anything"}, agent=new_agent(ctx)
     )
 
     assert found.is_error
     assert "run `code_index` first" in text_of(found.content)
 
 
+async def test_the_rows_scope_is_what_a_bare_call_indexes(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A profile points the row at a package, and `code_index` with no arguments
+    indexes that package: its `paths`, less its `exclude`."""
+    for package in ("ours", "theirs"):
+        (tmp_path / package / "tests").mkdir(parents=True)
+        (tmp_path / package / "mod.py").write_text(OTHER, encoding="utf-8")
+        (tmp_path / package / "tests" / "test_mod.py").write_text(OTHER, encoding="utf-8")
+    ctx = await _indexed(mount, tmp_path, index={"paths": ["ours"], "exclude": ["**/tests/**"]})
+    agent = new_agent(ctx)
+
+    built = await run_tool(ctx, "code_index", {}, agent=agent)
+
+    assert built.value["indexed"] == 1
+    found = await run_tool(ctx, "code_graph", {"mode": "define", "query": "shared"}, agent=agent)
+    assert [one["path"] for one in found.value["symbols"]] == ["ours/mod.py"]
+
+
+async def test_a_call_can_narrow_the_rows_scope_and_cannot_lift_its_exclusions(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A call's `exclude` is added to the row's. One that replaced it would make a
+    deployment's exclusion something any call could undo."""
+    (tmp_path / "pkg" / "vendor").mkdir(parents=True)
+    for name in ("a.py", "b.py", "vendor/dep.py"):
+        (tmp_path / "pkg" / name).write_text(OTHER, encoding="utf-8")
+    ctx = await _indexed(mount, tmp_path, index={"exclude": ["**/vendor/**"]})
+
+    built = await run_tool(
+        ctx, "code_index", {"paths": ["pkg"], "exclude": ["**/b.py"]}, agent=new_agent(ctx)
+    )
+
+    assert built.value["indexed"] == 1, "a.py: not b.py, which the call left out, nor vendor/"
+
+
 async def test_a_mode_that_needs_a_query_says_so(mount: MountProfile, tmp_path: Path) -> None:
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(ctx, "code_graph", {"mode": "callers"}, agent=agent)
@@ -682,9 +675,9 @@ async def test_indexing_reads_through_the_fs_seam(mount: MountProfile, tmp_path:
         scope=ctx,
     )
 
-    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
     found = await run_tool(
-        ctx, "code_graph", {"mode": "define", "query": "hidden"}, agent=_agent(ctx)
+        ctx, "code_graph", {"mode": "define", "query": "hidden"}, agent=new_agent(ctx)
     )
 
     assert found.value["symbols"] == [], "a screened file reached the index"
@@ -696,7 +689,7 @@ async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: P
     rows = report_section(ctx, "Code graph")
     assert rows["state"] == "not built — run code_index"
 
-    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
     rows = report_section(ctx, "Code graph")
     assert rows["files"] == "0", "nothing was indexed in this test"
 
@@ -713,7 +706,7 @@ async def test_a_callees_reference_line_names_its_own_file(
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
 
     found = await run_tool(ctx, "code_graph", {"mode": "callees", "query": "inner"}, agent=agent)
@@ -875,41 +868,6 @@ async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
     assert BUNDLE in resolve_profile("rlm-indexed")
 
 
-async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
-    mount: MountProfile, tmp_path: Path
-) -> None:
-    """The claim the whole package rests on for its intended caller.
-
-    Under `tools.mode: code` the model gets one callable and an SDK listing, so
-    "can the RLM use this" is exactly "are these in the listing". Composed from
-    Code Mode's own rows rather than by mounting the `rlm` profile, because the
-    claim is about *any* Code Mode deployment and this way the test does not
-    need `ph-rlm` installed to make it.
-    """
-    ctx = await mount(
-        {"id": "tools", "config": {"mode": "code"}},
-        {"id": "tools-code-mode", "name": "tools-code-mode"},
-        {"id": "code-runtime-stub", "name": "code-runtime-stub"},
-        {**ROW, "config": {"path": str(tmp_path / "graph.db")}},
-    )
-    agent = _agent(ctx)
-
-    view = ctx.require(TOOLS).view(scope=agent.ctx)
-    assert view.mode == "code"
-    assert [schema.name for schema in view.schemas] == [RUN_CODE], (
-        "Code Mode offers one callable, the transport, not a schema per tool"
-    )
-    assert {"code_index", "code_graph"} <= set(view.visible)
-
-    prompt = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
-    sdk = dict(prompt.sections)["tools:sdk"]
-    # The exact spelling the model will write, not merely the name somewhere.
-    assert "async def tools.code_index(" in sdk
-    assert "async def tools.code_graph(" in sdk
-    # And the description it reads to decide whether to reach for them.
-    assert "Ask about a codebase's structure" in sdk
-
-
 async def test_every_row_in_the_rlm_indexed_profile_activates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -982,7 +940,7 @@ async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_pa
     one answer per plugin, asked the same way.
     """
     ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     said = await ctx.require(COMMANDS).dispatch("/code-graph status", agent=agent, scope=agent.ctx)
 
@@ -1014,7 +972,7 @@ async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
             },
         }
     )
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     said = await ctx.require(COMMANDS).dispatch("/code-graph install", agent=agent, scope=agent.ctx)
 
@@ -1038,15 +996,14 @@ async def test_a_grammar_that_is_not_on_disk_is_named(
     re-export bound nothing and the test passed by reporting the host's real
     grammars. Which is what it did when the partition moved next to `local`.
     """
-    import ph_code_graph
-    from ph_code_graph import _extract
+    from ph_code_graph import _extract, engine
 
     monkeypatch.setattr(_extract, "local", lambda language: False)
-    monkeypatch.setattr(ph_code_graph, "ensure", lambda languages: ([], list(languages)))
+    monkeypatch.setattr(engine, "ensure", lambda languages: ([], list(languages)))
     ctx = await mount(
         {**ROW, "config": {"path": str(tmp_path / "graph.db"), "languages": ["python"]}}
     )
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     status = await ctx.require(COMMANDS).dispatch(
         "/code-graph status", agent=agent, scope=agent.ctx
@@ -1077,39 +1034,6 @@ async def test_the_grammars_are_cached_under_a_ph_root(
     assert ctx.require(CODE_GRAPH).grammars.is_dir()
     rows = report_section(ctx, "Code graph")
     assert rows["grammars"] == str(tmp_path / "cache" / "tree-sitter")
-
-
-async def test_the_skill_arrives_with_the_plugin(mount: MountProfile, tmp_path: Path) -> None:
-    """What the RLM reads before it reaches for these tools.
-
-    Registered by the row, so the catalog entry exists exactly when the tools
-    do — a procedure advertised for tools a deployment does not have is worse
-    than no procedure. `skills-progressive` ships an empty `paths` precisely so
-    that a skill is something a distribution installs on purpose (I7), and this
-    is that deliberate act.
-    """
-    from ph.cordis import DEPLOYMENT
-
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
-
-    assert "code-graph" in {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
-    skill = ctx.require(SKILLS).get("code-graph", DEPLOYMENT)
-    assert skill is not None
-    assert {"code_index", "code_graph"} <= set(skill.allowed_tools)
-    # G9: a line in every prompt, a page on disk.
-    assert len(skill.description) < 300
-    body = ctx.require(SKILLS).body("code-graph", DEPLOYMENT)
-    assert body is not None and len(body) > 1_500
-    assert 'code_graph(mode="impact"' in body
-
-
-async def test_the_skill_goes_away_with_the_row(mount: MountProfile) -> None:
-    """A catalog entry for tools nobody has is the failure this must not have."""
-    from ph.cordis import DEPLOYMENT
-
-    ctx = await mount()
-
-    assert "code-graph" not in {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
 
 
 def test_the_grammar_cache_release_restores_the_base_it_replaced(
@@ -1175,14 +1099,14 @@ async def test_a_reindex_under_git_never_opens_an_unchanged_file(
     (root / "pkg" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
     await git(ctx, root, "add", "-A")
     await git(ctx, root, "commit", "-m", "add pkg")
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     first = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
     assert first.value["indexed"] == 1, text_of(first.content)
 
     reads = _counting_reads(monkeypatch)
 
-    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     assert again.value["unchanged"] == 1
     assert again.value["indexed"] == 0
@@ -1201,14 +1125,14 @@ async def test_an_edited_file_is_still_read_and_reindexed(
     (root / "pkg" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
     await git(ctx, root, "add", "-A")
     await git(ctx, root, "commit", "-m", "add pkg")
-    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     (root / "pkg" / "a.py").write_text("def renamed():\n    return 2\n", encoding="utf-8")
-    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     assert again.value["indexed"] == 1, "an uncommitted edit must be picked up"
     found = await run_tool(
-        ctx, "code_graph", {"mode": "define", "query": "renamed"}, agent=_agent(ctx)
+        ctx, "code_graph", {"mode": "define", "query": "renamed"}, agent=new_agent(ctx)
     )
     assert found.value["symbols"], "the new symbol is in the graph"
 
@@ -1227,12 +1151,12 @@ async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
     (root / "pkg").mkdir(exist_ok=True)
     (root / "pkg" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
 
-    first = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    first = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
     assert first.value["indexed"] == 1, text_of(first.content)
 
     reads = _counting_reads(monkeypatch)
 
-    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     assert again.value["unchanged"] == 1
     assert reads == [], f"jj vouched for the file and it was read anyway: {reads}"
@@ -1248,10 +1172,10 @@ async def test_a_tree_with_no_version_control_still_indexes(
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
 
     first = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
-    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=_agent(ctx))
+    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     assert first.value["indexed"] == 2, "the fixture's two modules"
     # Still reported unchanged — by the content hash, which never went away.
@@ -1275,7 +1199,7 @@ async def test_a_deleted_file_leaves_the_index_on_the_next_sweep(
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["."]}, agent=agent)
 
     (tmp_path / "pkg" / "helpers.py").unlink()
@@ -1304,7 +1228,7 @@ async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["."]}, agent=agent)
 
     narrowed = await run_tool(ctx, "code_index", {"paths": ["pkg/helpers.py"]}, agent=agent)
@@ -1316,7 +1240,7 @@ async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
     # And a walk truncated by `max_files`, which *looks* like a full sweep: the
     # arguments are the row's own defaults and `paths` is still only a subset.
     capped = await _indexed(mount, tmp_path / "capped", max_files=1)
-    narrow_agent = _agent(capped)
+    narrow_agent = new_agent(capped)
     await run_tool(capped, "code_index", {"paths": ["."]}, agent=narrow_agent)
     swept = await run_tool(capped, "code_index", {"paths": ["."]}, agent=narrow_agent)
 
@@ -1353,7 +1277,7 @@ async def test_a_forgotten_symbols_docstring_stops_being_searchable(
         'def retired():\n    """A zarquon of the third kind."""\n    return 1\n', encoding="utf-8"
     )
     ctx = await _indexed(mount, tmp_path)
-    agent = _agent(ctx)
+    agent = new_agent(ctx)
     await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
     seen = await run_tool(ctx, "code_graph", {"mode": "search", "query": "zarquon"}, agent=agent)
     assert [one["name"] for one in seen.value["symbols"]] == ["retired"], "never indexed"

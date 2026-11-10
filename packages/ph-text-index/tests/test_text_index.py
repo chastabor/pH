@@ -593,6 +593,40 @@ async def test_an_embedder_claimed_anywhere_brings_both_tools(
     assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is not None
 
 
+async def test_the_rows_scope_is_what_a_bare_call_indexes(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A profile points the row at a tree and says what to leave out, and
+    `text_index` with no arguments indexes exactly that: its `paths`, its
+    `include`, less its `exclude`."""
+    for tree in ("docs", "notes"):
+        (tmp_path / tree / "drafts").mkdir(parents=True)
+        (tmp_path / tree / "guide.md").write_text(DOCUMENT, encoding="utf-8")
+        (tmp_path / tree / "guide.txt").write_text(DOCUMENT, encoding="utf-8")
+        (tmp_path / tree / "drafts" / "wip.md").write_text(DOCUMENT, encoding="utf-8")
+    scope = {"paths": ["docs"], "include": ["**/*.md", "**/*.txt"], "exclude": ["**/drafts/**"]}
+    ctx, _ = await _mounted(mount, tmp_path, index=scope)
+
+    indexed = await run_tool(ctx, "text_index", {}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert sorted(indexed.value["documents"]) == ["docs/guide.md", "docs/guide.txt"]
+
+
+async def test_prose_is_what_a_row_takes_when_nobody_says(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Markdown by default, and a call's `exclude` narrows it."""
+    (tmp_path / "docs").mkdir()
+    for name in ("a.md", "b.md", "c.py"):
+        (tmp_path / "docs" / name).write_text(DOCUMENT, encoding="utf-8")
+    ctx, _ = await _mounted(mount, tmp_path)
+
+    indexed = await run_tool(ctx, "text_index", {"exclude": ["**/b.md"]}, agent=_agent(ctx))
+
+    assert indexed.value["documents"] == ["docs/a.md"]
+
+
 async def test_indexing_a_directory_then_searching_finds_the_passage(
     mount: MountProfile, tmp_path: Path
 ) -> None:

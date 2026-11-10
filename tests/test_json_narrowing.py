@@ -99,9 +99,9 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         # Counters on their way into a CLI table. These are `int`s and the whole
         # point is their text — the gate cannot see that, because a JSON read and
         # a typed read are the same syntax, which is the edge the docstring names.
-        ("ph_code_graph/__init__.py", 'str(stats["files"])'),
-        ("ph_code_graph/__init__.py", 'str(stats["symbols"])'),
-        ("ph_code_graph/__init__.py", 'str(stats["refs"])'),
+        ("ph_code_graph/engine.py", 'str(stats["files"])'),
+        ("ph_code_graph/engine.py", 'str(stats["symbols"])'),
+        ("ph_code_graph/engine.py", 'str(stats["refs"])'),
         ("ph_text_index/__init__.py", 'str(stats["documents"])'),
         ("ph_text_index/__init__.py", 'str(stats["chunks"])'),
         ("ph_text_index/__init__.py", 'str(stats["calibration"])'),

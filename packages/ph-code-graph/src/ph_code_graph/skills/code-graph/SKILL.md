@@ -19,9 +19,12 @@ otherwise do to find out which two files mattered.
 code_index(paths=["packages/thing/src"])
 ```
 
-Point it at a package, not a monorepo. It re-parses only files whose contents
-changed, so running it again after your own edits is cheap and keeps every
-later answer current — do that rather than reasoning about a stale graph.
+Point it at a package, not a monorepo. With no `paths` it indexes what this
+deployment configured, which is the whole workspace unless a profile pointed it
+at a package. `exclude` leaves files out (`exclude=["**/tests/**"]`). It
+re-parses only files whose contents changed, so running it again after your own
+edits is cheap and keeps every later answer current — do that rather than
+reasoning about a stale graph.
 
 If a query says no index exists, this is the step you skipped.
 

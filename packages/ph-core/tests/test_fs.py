@@ -405,6 +405,71 @@ async def test_collect_deduplicates_overlapping_arguments(tmp_path: Path) -> Non
     assert found == ["pkg/a.py"]
 
 
+async def test_collect_takes_a_file_that_matches_any_of_several_patterns(tmp_path: Path) -> None:
+    """A row's `include` is a list. One walk per pattern, and a file two of them
+    match is still one file."""
+    fs = await _mounted(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("prose\n")
+    (tmp_path / "docs" / "notes.txt").write_text("prose\n")
+    (tmp_path / "docs" / "data.json").write_text("{}\n")
+
+    found = await fs.collect(["docs"], ["**/*.md", "**/*.txt", "**/guide.*"], scope=DEPLOYMENT)
+
+    assert found == ["docs/guide.md", "docs/notes.txt"]
+
+
+async def test_an_exclusion_is_read_against_the_workspace_and_under_every_argument(
+    tmp_path: Path,
+) -> None:
+    """`**/tests/**` has to mean one thing whichever directory the walk began in —
+    a row's `paths` names several, and a pattern read against each of them would
+    mean something different under each."""
+    fs = await _mounted(tmp_path)
+    for package in ("one", "two"):
+        (tmp_path / package / "tests").mkdir(parents=True)
+        (tmp_path / package / "mod.py").write_text("m = 1\n")
+        (tmp_path / package / "tests" / "test_mod.py").write_text("t = 1\n")
+    (tmp_path / "one" / "gen.min.py").write_text("g = 1\n")
+
+    found = await fs.collect(
+        ["one", "two"], "**/*.py", scope=DEPLOYMENT, exclude=["**/tests/**", "**/*.min.py"]
+    )
+
+    assert found == ["one/mod.py", "two/mod.py"]
+    # Rooted at the workspace: this one names a single package's tests.
+    rooted = await fs.collect(["one", "two"], "**/*.py", scope=DEPLOYMENT, exclude=["one/tests/**"])
+    assert "two/tests/test_mod.py" in rooted and "one/tests/test_mod.py" not in rooted
+
+
+async def test_an_excluded_directory_is_never_entered(tmp_path: Path) -> None:
+    """The budget an exclusion exists to save. Filtered after the walk, a vendored
+    tree would spend the whole `limit` on files that were then thrown away, and the
+    code beside it would never be reached."""
+    fs = await _mounted(tmp_path)
+    (tmp_path / "a_vendor").mkdir()
+    for n in range(20):
+        (tmp_path / "a_vendor" / f"dep{n}.py").write_text("d = 1\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "ours.py").write_text("o = 1\n")
+
+    found = await fs.collect(["."], "**/*.py", scope=DEPLOYMENT, limit=5, exclude=["a_vendor/**"])
+
+    assert found == ["src/ours.py"]
+
+
+async def test_a_file_named_outright_is_taken_whatever_is_excluded(tmp_path: Path) -> None:
+    fs = await _mounted(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_one.py").write_text("t = 1\n")
+
+    found = await fs.collect(
+        ["tests/test_one.py"], "**/*.py", scope=DEPLOYMENT, exclude=["**/tests/**"]
+    )
+
+    assert found == ["tests/test_one.py"]
+
+
 async def test_collect_honors_the_screens(tmp_path: Path) -> None:
     """It walks through `glob`, so a policy row's screen still decides.
 

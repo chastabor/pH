@@ -28,12 +28,12 @@ dependencies = [
     # **This distribution is the deployment, not just the front end.** `phern` is
     # what a person installs and `phern` is the command they get, so its
     # dependency list is the answer to "what does pH consist of" — which is why
-    # the five optional bundles are named here rather than left to the installer
+    # the six optional bundles are named here rather than left to the installer
     # to assemble from eight PyPI names.
     #
     # **Naming them is not importing them, and the difference is the whole
     # architecture.** `ph_app` may not `import ph_rlm`, `ph_stabilize`,
-    # `ph_text_index`, `ph_code_graph` or `ph_clm` — `test_app_layering.py` imports the
+    # `ph_text_index`, `ph_code_graph`, `ph_utcp` or `ph_clm` — `test_app_layering.py` imports the
     # app's entry points in a fresh interpreter and fails if one drags a bundle in —
     # because every one of them reaches the app the same way a *third-party* wheel
     # would: through the `ph.bundles` entry-point group, resolved at `--profile`
@@ -51,6 +51,7 @@ dependencies = [
     "ph-stabilize==0.10.0",
     "ph-text-index==0.10.0",
     "ph-code-graph==0.10.0",
+    "ph-utcp==0.10.0",
     "ph-clm==0.10.0",
     # Reached through `ph-rlm` already; pinned here too because `ph_rlm.kernel`
     # installs it *by name* into `$PH_CACHE/runtime-venv`, so the version this
@@ -138,6 +139,7 @@ ph-runtime-guest = { workspace = true }
 ph-stabilize = { workspace = true }
 ph-text-index = { workspace = true }
 ph-code-graph = { workspace = true }
+ph-utcp = { workspace = true }
 ph-clm = { workspace = true }
 
 [tool.hatch.build.targets.wheel]

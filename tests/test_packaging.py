@@ -1,4 +1,4 @@
-"""What the eight manifests promise about each other, held against the tree.
+"""What the nine manifests promise about each other, held against the tree.
 
 **Every fact here is declared in a file nothing imports.** A version, a pin, a
 `packages` entry, a classifier — read by the build backend at upload time and by
@@ -60,9 +60,8 @@ def test_every_suite_is_type_checked_and_collected() -> None:
 
     **Only these two.** `pythonpath` and `mypy_path` name the suites that ship an
     *importable helper* beside their tests, which is a smaller set on purpose:
-    `ph-code-graph` and `ph-text-index` hold nothing but `test_*.py`, so their
-    absence there is correct and asserting all four lists together would fail on
-    a truth.
+    `ph-text-index` holds nothing but `test_*.py`, so its absence there is correct
+    and asserting all four lists together would fail on a truth.
     """
     config = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     suites = {name.rsplit("/", 1)[0] for name, _ in workspace_tests() if "/" in name}
@@ -78,8 +77,8 @@ def test_every_suite_is_type_checked_and_collected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The eight versions, held against each other and against the pins between them.
-# `phern` pins the other seven with `==`, so a member bumped without it is not a
+# The nine versions, held against each other and against the pins between them.
+# `phern` pins the other eight with `==`, so a member bumped without it is not a
 # skew a resolver papers over but an install that cannot resolve at all —
 # discovered by whoever runs `pip install phern` after the upload.
 
@@ -131,11 +130,24 @@ def test_the_deployment_pins_every_other_member_at_the_version_it_is() -> None:
     )
 
 
-def test_the_deployment_owns_the_only_console_script() -> None:
-    """One command, declared once, in the package whose module it points into.
+TOOL_COMMANDS = {
+    "ph-code-graph": {"ph-code-graph": "ph_code_graph.cli:main"},
+}
+"""The members that grew a command of their own, each by a decision.
+
+A package that publishes its tools as a UTCP manual needs a command the manual
+can name, and the same command is how a person tries a query by hand
+(`ph.toolcli`). It is the tool's command and not a second way into the harness:
+it mounts the package's own rows and nothing of a session.
+"""
+
+
+def test_the_deployment_owns_the_only_harness_command() -> None:
+    """One command for the harness, declared once, in the package whose module it
+    points into — and beside it, only the tool commands named above.
 
     Two declarations is what the empty umbrella needed and what this file used to
-    police. A second one appearing means either the root is a distribution again
+    police. Another one appearing means either the root is a distribution again
     (the test above catches that) or a member grew a command of its own — which
     is allowed, but should be a decision rather than a surprise, and `phern` has
     to stay the one a person gets.
@@ -147,20 +159,21 @@ def test_the_deployment_owns_the_only_console_script() -> None:
             assert isinstance(declared, dict)
             scripts[directory] = declared
 
-    assert scripts == {"phern": {"phern": "ph_app.cli:main"}}, (
-        f"the console scripts this workspace installs are not the one expected: {scripts}"
+    assert scripts == {"phern": {"phern": "ph_app.cli:main"}, **TOOL_COMMANDS}, (
+        f"the console scripts this workspace installs are not the ones expected: {scripts}"
     )
 
 
-def test_the_declared_console_script_resolves() -> None:
+def test_every_declared_console_script_resolves() -> None:
     """A string that names nothing is the failure this produces at install time."""
-    scripts = project_of(DEPLOYMENT)["scripts"]
-    assert isinstance(scripts, dict)
+    for directory in WORKSPACE_MEMBERS:
+        scripts = project_of(manifest_of(directory)).get("scripts") or {}
+        assert isinstance(scripts, dict)
 
-    for command, target in scripts.items():
-        module_name, _, attribute = target.partition(":")
-        entry = getattr(import_module(module_name), attribute, None)
-        assert callable(entry), f"`{command}` points at nothing callable"
+        for command, target in scripts.items():
+            module_name, _, attribute = target.partition(":")
+            entry = getattr(import_module(module_name), attribute, None)
+            assert callable(entry), f"`{command}` points at nothing callable"
 
 
 def test_the_core_module_reports_the_version_its_manifest_declares() -> None:

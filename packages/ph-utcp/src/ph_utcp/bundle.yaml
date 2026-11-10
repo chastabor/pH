@@ -1,0 +1,15 @@
+# ph-utcp: the `utcp` row, over `ph-base`.
+#
+# A bundle for the reason `ph-code-graph`'s gives: a profile's composability is
+# decided by whether its *bundles* resolve, so a profile layering this one is
+# hidden on an install without this distribution rather than offered and then
+# refused at mount.
+#
+# One row, and it lists no manuals. A manual is deployment configuration — which
+# providers, which paths they may write — so a profile adds them to this row's
+# `manuals`, and a package that publishes its own (`ph-code-graph`,
+# `ph-text-index`) adds it from a row of its own through `ctx.utcp.add`. Mounted
+# with nothing to discover, the row costs one idle client.
+
+- id: utcp
+  name: utcp

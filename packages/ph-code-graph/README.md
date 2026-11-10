@@ -3,18 +3,93 @@
 *`code_index` and `code_graph`: ask a codebase about its own shape, and get back
 a `path:start-end` you can `read`.*
 
-One row, `code-graph`, registering two tools. No Node, no Rust toolchain, no
-submodule — tree-sitter through a Python wheel, the graph in stdlib `sqlite3`.
+Two tools, a command that runs them, and a UTCP manual that describes them. No
+Node, no Rust toolchain, no submodule — tree-sitter through a Python wheel, the
+graph in stdlib `sqlite3`.
 
 ```bash
-phern --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama \
-   -p "index packages/ph-core, then tell me what breaks if I change claim_slot"
+phern --profile rlm-indexed -p "index packages/ph-core, then tell me what breaks if I change claim_slot"
 ```
+
+## Three ways in
+
+**From a pH session.** The `code-graph` row registers this package's manual with
+`ph-utcp`, and the two tools appear under their own names. A profile layers the
+`utcp` bundle and then this one; `rlm-indexed` does.
+
+```yaml
+- id: utcp
+  name: utcp
+- id: code-graph
+  name: code-graph
+  config:
+    languages: [python]
+```
+
+**From a command line**, to try a query by hand or see why one came back empty:
+
+```bash
+ph-code-graph call code_index --paths packages/ph-core --format text
+ph-code-graph call code_graph --mode callers --query claim_slot --format text
+ph-code-graph tools      # the tools and their flags
+ph-code-graph status     # grammars, and what the index holds
+```
+
+`--root` names the workspace and defaults to the working directory. Row config
+comes from `$PH_HOME/tools/ph-code-graph.yaml`, then `$PH_TOOL_CONFIG`, then
+`--config`, each a mapping of row id to config (`code-graph: {languages: [python]}`).
+Without `--format text` a call prints one JSON object, `{ok, value, text}` or
+`{ok, error}`.
+
+**From any other harness that speaks UTCP.** Register what this prints:
+
+```bash
+ph-code-graph manual --registration
+```
+
+That harness then runs `ph-code-graph manual` to discover the tools and the
+command each one names to call it. The working directory of the call is the
+workspace.
+
+### Where the tools run, and what bounds them
+
+In the `ph-code-graph` command's own process — started, in a pH session, by
+`ctx.shell` for the agent that called the tool: in that agent's workspace, under
+that agent's sandbox. So a child agent in its own worktree indexes that worktree,
+and the harness process never loads tree-sitter.
+
+**`permissions-fs` does not screen these tools' reads.** Its rules govern calls
+through a session's `ctx.fs`, and a command is not one. What bounds the command
+is the sandbox, as it bounds `bash`. The index, the grammar cache and the
+command's log are all under `$PH_CACHE`, outside the tree; the row grants those
+paths to the command, and the grant holds in a read-only session, so an agent
+that may not write a tree can still index it.
 
 ## The two tools
 
-**`code_index(paths, glob?, forget?)`** parses each file through `ctx.fs` and
-records what it defines and references.
+**`code_index(paths?, glob?, exclude?, forget?)`** parses each file and records
+what it defines and references.
+
+What it looks at when a call does not say is the row's `index` block:
+
+```yaml
+- id: code-graph
+  name: code-graph
+  config:
+    index:
+      paths: [packages/ph-core]        # directories or files; default ["."]
+      include: ["**/*.py"]             # default ["**/*"] — the language filter is the real one
+      exclude: ["**/tests/**", "**/vendor/**"]
+    languages: [python]
+```
+
+`paths` is how the row is pointed at one package of a monorepo, so a bare
+`code_index` stays under `max_files` instead of walking everything. `exclude` is
+read against the workspace root, so `**/tests/**` means the same thing under
+every entry of `paths`, and a directory it covers is never entered. A call's
+`glob` replaces `include` for that call; a call's `exclude` is *added* to the
+row's, so a call can narrow a deployment's scope and cannot lift an exclusion
+out of it. A file named outright in `paths` is taken whatever is excluded.
 
 **Nothing watches the filesystem.** There is no daemon and no file watcher: the
 index changes when `code_index` runs, and at no other moment. So after your own
@@ -53,7 +128,8 @@ package: the model finds what matters in one call, then `read`s exactly that.
 ## Using it from the RLM
 
 Nothing to do. Under Code Mode the model is handed one callable and a generated
-SDK listing, and *every* registered tool is in that listing — so these arrive as
+SDK listing, and *every* registered tool is in that listing — a tool that
+arrives through a manual included — so these arrive as
 `await tools.code_index(...)` and `await tools.code_graph(...)` with no Code
 Mode work in this package at all. The `rlm-indexed` profile is `rlm-stable` plus
 this bundle and `ph-text-index`'s:
@@ -184,7 +260,13 @@ would make `callers` return every place that merely *mentions* a type.
   workspace, and one whose workspace has been gone a week is removed on the next
   index, so a profile that runs children in worktrees does not leave a database
   per tree forever. `path:` in the row's config names one database instead.
-- **the grammars**: `$PH_CACHE/tree-sitter`, set by the row at mount.
+- **the grammars**: `$PH_CACHE/tree-sitter`, set by the engine row when the
+  command mounts it.
+- **the writer lock**: `graph.db.lock` beside the database. One indexing run at a
+  time per index, across every process on the workspace; a second run waits for
+  the first and then finds most of the tree current.
+- **the command's log**: `$PH_CACHE/logs/ph-code-graph.log`. A call prints one
+  JSON object and nothing on stderr, so this is where a traceback goes.
 
 That second one is not housekeeping. The pack materializes even its *bundled*
 grammars into a writable cache on first use — the wheel ships them as an
@@ -192,8 +274,9 @@ archive, not as loadable libraries — and it **fails hard** when that directory
 cannot be created, rather than falling back to the wheel. Its own default is
 `$XDG_CACHE_HOME/…`, which is right on a laptop and wrong in a container with a
 read-only `HOME`; both measured. So the row hands over the root pH already
-designates for rebuildable artifacts, and refuses at mount with a `MountRefusal`
-sentence — not a `pathlib` traceback — when even that is unwritable.
+designates for rebuildable artifacts, and refuses to mount with one sentence —
+not a `pathlib` traceback — when even that is unwritable. From the command that
+sentence is the call's answer, with the code `MOUNT_REFUSED`.
 
 `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` still wins if an operator set it: their
 spelling is what makes the variable mean anything.
@@ -210,8 +293,10 @@ Provision it on purpose rather than during someone's turn:
 ```
 
 A **command**, not a tool — a person asks the harness to provision, and it costs
-no model turn. `phern doctor` reports the same path and the index's state without
-mounting an agent. It matters less here than for `ph-text-index`, whose model is
+no model turn. In a session it runs `ph-code-graph status` or `install` and shows
+what that said; from a shell, type those directly. `phern doctor` reports the
+index's path, whether it is built and whether the manual was discovered, without
+starting the command. It matters less here than for `ph-text-index`, whose model is
 a download rather than an unpack, but the question should have one answer per
 plugin asked the same way.
 
@@ -239,3 +324,15 @@ Three things it pins deliberately:
   closure, not the 40-line function around it;
 - **incrementality** — a second index pass over an unchanged tree parses nothing
   and a touched-but-unmodified file stays unchanged.
+
+`tests/test_code_graph_cli.py` starts real processes, because what it holds only
+exists between them: the command answers with the values the row answers with,
+two processes indexing one tree report counts that add up, and a real UTCP
+client registers the manual and calls a tool with a list argument and with
+optional arguments left out.
+
+`tests/test_code_graph_row.py` holds the row a session mounts: the tools keep
+their names, values, rendered text and error codes; an agent in its own tree
+indexes that tree; a confined agent that may not write its tree still indexes
+it; and a fresh interpreter that mounts only the session's rows never loads
+tree-sitter.

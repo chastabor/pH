@@ -141,6 +141,67 @@ salient argument. Card kinds are `generic | terminal | diff | search | read | we
 a front end must know how to draw each, so this is a closed set rather than a
 free string.
 
+## Publishing the tool to other harnesses
+
+A tool registered by a row can be offered through
+[UTCP](https://utcp.io) without a second implementation. `ph.toolcli` builds a
+command line from the package's rows:
+
+```python
+from ph.toolcli import ToolCli, main
+
+CLI = ToolCli(
+    program="ph-notes",
+    manual="ph_notes",
+    summary="Search the notes.",
+    version="0.10.0",
+    rows=({"id": "notes", "name": "notes-engine"},),
+)
+
+
+def run() -> None:
+    main(CLI)
+```
+
+Point a `[project.scripts]` entry at `run` and the package has:
+
+* `ph-notes call <tool> --field value …` — mounts the rows in its own process
+  and runs the tool **through the registry**, so the body, the validation and
+  the `render` are the ones the row declared. It prints one JSON object,
+  `{ok, value, text}` or `{ok, error: {code, message}}`, and nothing on stderr.
+* `ph-notes manual` — the UTCP manual, generated from the tools' schemas.
+  `ph-notes manual --registration` prints what another harness registers.
+* `ph-notes tools`, and `status`/`install` when the package has a provisioning
+  command.
+
+Three things the UTCP command-line protocol decides, which `ph.toolcli` handles
+and a tool's author should know:
+
+* **Arguments arrive one at a time, as text.** Top-level fields become flags, and
+  each is decoded by the tool's own schema. Keep the fields a model fills in at
+  the top level; a deeply nested argument object travels as one JSON string.
+* **A failure has to be in the answer.** The client ignores the exit code and
+  merges stderr into the result. Raise a `HarnessError` with a code as you
+  would in a session; it arrives as `error.code`.
+* **The environment is cut down.** A variable the tool reads has to be named in
+  `ToolCli.inherit_env`, or the manual's commands will not see it.
+
+To reach the same tool from a pH session, the session's row registers the manual
+with [`ph-utcp`](../../packages/ph-utcp/README.md) instead of registering the
+tool: `await ctx.require(UTCP).add(Manual(template=manual_call_template(CLI),
+envelope=True, names="bare", …))`. The tool then runs in the command's process,
+in the calling agent's workspace and under its sandbox. `ph-code-graph` is the
+worked example: `ph_code_graph/row.py` is the session's row,
+`ph_code_graph/engine.py` is the row the command mounts, and `_config.py` holds
+what both need — the row id and where the engine writes. Keep the session's row
+out of the package's `__init__`: `python -m <package>` imports it before every
+call. Set `module=` on the `ToolCli` so the manual runs the interpreter that
+printed it, and hand the row's config across with `ph.toolcli.config_env`.
+
+What a manual cannot say — that two calls may overlap, that a call has no
+effect, how a front end draws the card — goes in the `Manual`'s `tools` table.
+Every default there is the careful one.
+
 ## Checklist
 
 - [ ] `parameters` is a model, so the body gets a validated object

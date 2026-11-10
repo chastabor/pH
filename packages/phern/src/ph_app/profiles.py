@@ -240,7 +240,15 @@ PROFILES: dict[str, tuple[Layer, ...]] = {
     # distributions, taking a working profile away to add an optional feature.
     # Here, an install missing one is simply not offered this profile, and
     # `resolve_profile` names the package to install.
-    "rlm-indexed": (*RLM_STABLE_LAYERS, Bundle("code-graph"), Bundle("text-index")),
+    #
+    # `utcp` first: the `code-graph` row registers its package's manual with it, so
+    # the row it waits on is in the profile that asks for the tools.
+    "rlm-indexed": (
+        *RLM_STABLE_LAYERS,
+        Bundle("utcp"),
+        Bundle("code-graph"),
+        Bundle("text-index"),
+    ),
     # `rlm` plus the model editing its own context (ph-clm): the context tools, and
     # the context as a file a cell can edit. On `rlm` rather than `rlm-stable`, so
     # what is measured is the editing, with compaction still the backstop.

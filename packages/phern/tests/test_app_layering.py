@@ -65,7 +65,7 @@ below is the one that may name the package, and does.
 """
 
 
-BUNDLES = ("ph_rlm", "ph_stabilize", "ph_text_index", "ph_code_graph", "ph_clm")
+BUNDLES = ("ph_rlm", "ph_stabilize", "ph_text_index", "ph_code_graph", "ph_utcp", "ph_clm")
 """The bundles `phern` depends on and `ph_app` may not import (`pyproject.toml`): each
 reaches the app as a third-party wheel would, through the `ph.bundles` entry points."""
 

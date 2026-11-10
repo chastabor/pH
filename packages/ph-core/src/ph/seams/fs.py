@@ -39,9 +39,10 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, Self, TypeAlias
 
 import anyio
+from pydantic import Field
 
 from ..agent.types import AgentHandle
 from ..cordis import (
@@ -74,12 +75,14 @@ __all__ = [
     "FsRefused",
     "FsService",
     "GrepMatch",
+    "IndexScope",
     "ReadIntent",
     "WalkDecision",
     "WalkScreen",
     "WriteIntent",
     "Written",
     "apply",
+    "covers_whole",
     "glob_error",
     "literal_head",
     "matches_glob",
@@ -357,6 +360,46 @@ bounds what comes *back*; this bounds what it costs, which `limit` never did.
 The difference between this door and `skip_reason`'s is a raise and a skip, and
 it is the one `skip_reason` explains.
 """
+
+
+class IndexScope(WireModel):
+    """What a bulk reader looks at when a call does not say: which trees, which
+    files in them, which to leave out — `collect`'s arguments, as a row's setting.
+
+    Both indexing rows take one, so a profile that points a row at a package has
+    pointed every bare `…_index` call at it, and the two rows cannot drift on how
+    a call narrows it (`narrowed`). Each subclasses it to say its own `include`.
+    """
+
+    paths: list[str] = Field(default_factory=lambda: ["."])
+    """Directories or files under the workspace root. **How a row is pointed at a
+    package**: a monorepo names the ones it wants and stays under the row's file
+    bound, instead of walking everything to discard most of it."""
+    include: list[str] = Field(default_factory=lambda: ["**/*"])
+    """Which files to take from a directory: a file that matches any is taken
+    once. Read against the directory being walked."""
+    exclude: list[str] = Field(default_factory=list)
+    """Which files to leave out, whatever `include` says. Read against the
+    **workspace root**, so `**/tests/**` means the same thing under every entry
+    of `paths`. A directory a pattern covers is never entered."""
+
+    def narrowed(
+        self, *, paths: Sequence[str] | None, glob: str | None, exclude: Sequence[str] | None
+    ) -> Self:
+        """This scope as one call's arguments narrow it.
+
+        The call's `paths` and `glob` replace the row's; its `exclude` is added to
+        the row's. Narrowing is the direction a call may always go, and a call
+        that could lift a deployment's exclusion would make the exclusion a
+        suggestion.
+        """
+        return self.model_copy(
+            update={
+                "paths": list(paths) if paths is not None else self.paths,
+                "include": [glob] if glob else self.include,
+                "exclude": [*self.exclude, *(exclude or ())],
+            }
+        )
 
 
 @dataclass(slots=True)
@@ -861,25 +904,39 @@ class FsService:
 
     async def glob(
         self,
-        pattern: str,
+        pattern: str | Sequence[str],
         *,
         scope: Boundary,
         root: str | Path | None = None,
         limit: int = 1_000,
         agent: AgentHandle | None = None,
+        exclude: Sequence[str] = (),
     ) -> list[str]:
+        """Files under `root` matching `pattern` — or any of several — as absolute
+        paths, in one walk.
+
+        `exclude` leaves out what matches any of its patterns, **read against the
+        workspace root** rather than against `root`: `**/tests/**` then means the
+        same thing whichever directory the walk started in, which is what a row's
+        setting needs when its `paths` name several. A directory an exclusion
+        covers is never entered, for `_walk`'s reason — a `limit` spent walking
+        `node_modules` to discard it is the budget the exclusion was written to
+        save.
+        """
         base = self.resolve(root, agent=agent) if root is not None else self.root_for(agent)
-        decide = self._decider(agent, scope=scope)
-        return await anyio.to_thread.run_sync(lambda: list(_walk(base, pattern, limit, decide)))
+        decide = _excluding(self.root_for(agent), exclude, self._decider(agent, scope=scope))
+        patterns = (pattern,) if isinstance(pattern, str) else tuple(pattern)
+        return await anyio.to_thread.run_sync(lambda: list(_walk(base, patterns, limit, decide)))
 
     async def collect(
         self,
         paths: Sequence[str],
-        pattern: str,
+        pattern: str | Sequence[str],
         *,
         scope: Boundary,
         limit: int = 1_000,
         agent: AgentHandle | None = None,
+        exclude: Sequence[str] = (),
     ) -> list[str]:
         """The files `paths` names — a directory expanded by `pattern` — as `named`.
 
@@ -918,30 +975,37 @@ class FsService:
         each — 0.9 s of event-loop time for a 20 000-file walk, to recompute a
         prefix the walk had. `named` stays the fallback for anything that somehow
         lands outside, which is the case a slice cannot answer.
+
+        `exclude` is `glob`'s: patterns against the workspace root, applied inside
+        the walk. A **file** named outright in `paths` is taken whatever they say —
+        the caller asked for it by name.
+
+        `pattern` may be several: one walk tries them all, and a file that matches
+        any is taken once.
         """
         base = f"{self.root_for(agent)}/"
-        found: list[str] = []
+        found: set[str] = set()
         for one in paths:
             target = self.resolve(one, agent=agent)
             if not target.is_dir():
-                found.append(self.named(target, agent=agent))
+                found.add(self.named(target, agent=agent))
                 continue
             remaining = limit - len(found)
             if remaining <= 0:
-                # The budget is spent, but keep walking the arguments: a file
-                # named outright is not a walk and should not be dropped because
-                # a directory ahead of it filled the quota.
+                # The budget is spent, but keep walking the arguments: a file named
+                # outright is not a walk and should not be dropped because a
+                # directory ahead of it filled the quota.
                 continue
             for path in await self.glob(
-                pattern, root=one, scope=scope, limit=remaining, agent=agent
+                pattern, root=one, scope=scope, limit=remaining, agent=agent, exclude=exclude
             ):
                 spelled = str(path)
-                found.append(
+                found.add(
                     spelled[len(base) :]
                     if spelled.startswith(base)
                     else self.named(path, agent=agent)
                 )
-        return sorted(set(found))
+        return sorted(found)
 
     def skip_reason(
         self, path: str | Path, *, max_bytes: int, agent: AgentHandle | None = None
@@ -994,7 +1058,7 @@ class FsService:
 
         def scan() -> list[GrepMatch]:
             matches: list[GrepMatch] = []
-            for found in _walk(base, glob, None, decide):
+            for found in _walk(base, (glob,), None, decide):
                 candidate = Path(found)
                 if not _greppable(candidate):
                     continue
@@ -1017,8 +1081,38 @@ GREP_MAX_BYTES = 2 * 1024 * 1024
 match `**/*` must not be read whole into memory line by line."""
 
 
-def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | None) -> Iterator[str]:
-    """Matching files under `base`, pruning refused directories *before* descent.
+def _excluding(
+    root: Path, exclude: Sequence[str], decide: WalkDecider | None
+) -> WalkDecider | None:
+    """`decide`, also leaving out what `exclude` matches under `root`.
+
+    A directory is pruned when a pattern covers it whole (`covers_whole`):
+    `**/tests/**` names the contents of every `tests`, and descending into one to
+    refuse each file in turn is the walk the pattern exists to skip.
+
+    Each question is one compiled alternation rather than a pattern at a time: the
+    screen runs per candidate, and on a 20 000-file walk the loop over patterns
+    cost more than the walk it was screening.
+    """
+    if not exclude:
+        return decide
+    files = _any_glob(tuple(exclude))
+    directories = _any_glob(tuple(whole for one in exclude for whole in _wholesale(one)))
+    cut = len(os.fspath(root)) + 1
+
+    def decided(path: str, name: str, is_dir: bool) -> WalkDecision:
+        if (directories if is_dir else files).match(path[cut:]) is not None:
+            return "prune" if is_dir else "skip"
+        return "yield" if decide is None else decide(path, name, is_dir)
+
+    return decided
+
+
+def _walk(
+    base: Path, patterns: tuple[str, ...], limit: int | None, decide: WalkDecider | None
+) -> Iterator[str]:
+    """Files under `base` matching any of `patterns`, pruning refused directories
+    *before* descent.
 
     `Path.glob` would materialize `node_modules` in full and then discard it; pruning
     `dirs` in place means a refused tree is never entered. Directories and files are
@@ -1041,6 +1135,7 @@ def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | Non
     root = os.fspath(base)
     cut = len(root) + (0 if root.endswith(os.sep) else 1)
     native = os.sep != "/"
+    wanted = _any_glob(patterns)
 
     def posix(path: str) -> str:
         return path.replace(os.sep, "/") if native else path
@@ -1056,7 +1151,7 @@ def _walk(base: Path, pattern: str, limit: int | None, decide: WalkDecider | Non
             ]
         for name in sorted(files):
             full = os.path.join(current, name)
-            if not matches_glob(posix(full[cut:]), pattern):
+            if wanted.match(posix(full[cut:])) is None:
                 continue
             if decide is not None and decide(posix(full), name, False) != "yield":
                 continue
@@ -1113,6 +1208,48 @@ def matches_glob(candidate: str, pattern: str) -> bool:
     permits what the `deny` under it was there to stop.
     """
     return _compiled(pattern).match(candidate) is not None
+
+
+def _wholesale(pattern: str) -> tuple[str, ...]:
+    """The patterns a directory has to match for `pattern` to cover it whole: the
+    pattern, and for `Q/**` also `Q`. `covers_whole` and the walk's exclusions
+    are both this, asked once and asked of a set."""
+    return (pattern, pattern[:-3]) if pattern.endswith("/**") else (pattern,)
+
+
+def covers_whole(pattern: str, directory: str) -> bool:
+    """Whether `pattern` names `directory` and everything inside it.
+
+    **The universal question, and it is the walk's** (D11). Pruning a directory
+    is lossless only when the rule would conceal every entry in it anyway — so
+    the walk asks whether the rule covers the directory *wholesale*, not whether
+    it could match something inside. A rule that covers only some of what a
+    directory holds is enforced file by file on the way past, which conceals
+    exactly what it names and hides nothing else.
+
+    That is why this is not the delete's question with a different rounding. It
+    used to be: one function answered both, with a `require_head` flag bending
+    the answer for the walk. The flag could not be made right — `deny read
+    src/*.pem` pruned all of `src` and hid every allowed file in it, while `deny
+    read **/node_modules/**` pruned no `node_modules` at all. The two callers ask
+    different questions, and giving each its own is what removed the flag.
+
+    Answered entirely by `matches_glob`, so it cannot disagree with the matcher:
+    the directory itself matches, or the pattern is `Q/**` and the directory
+    matches `Q`. Here beside the matcher because two walks prune by it:
+    `permissions-fs`'s screen and a bulk reader's exclusions.
+    """
+    return any(matches_glob(directory, one) for one in _wholesale(pattern))
+
+
+@lru_cache(maxsize=128)
+def _any_glob(patterns: tuple[str, ...]) -> re.Pattern[str]:
+    """One regex matching what any of `patterns` matches, as `matches_glob` reads
+    each — built from the same compiled sources, so the two cannot disagree. Each
+    source is anchored at its end and `match` anchors the start."""
+    if len(patterns) == 1:
+        return _compiled(patterns[0])
+    return re.compile("|".join(f"(?:{_compiled(one).pattern})" for one in patterns))
 
 
 def glob_error(pattern: str) -> str | None:

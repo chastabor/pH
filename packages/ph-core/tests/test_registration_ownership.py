@@ -379,6 +379,7 @@ NOT_A_LIFETIME: dict[str, str] = {
     "CommandRegistry.dispatch": "the boundary the command body runs for",
     # Work run *in* a scope, forwarding to whatever owns the artifact.
     "ShellService.run": "the scope the command runs for",
+    "ShellService.run_argv": "the scope the command runs for",
     "SubprocessService.run": "the scope the child runs for",
     # cordis dispatch. Found only once the walker covered the whole `ph` tree
     # rather than `ph.seams` plus two hand-written names — six methods that a

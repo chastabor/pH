@@ -73,6 +73,7 @@ from ph.seams.fs import (
     FsIntent,
     FsService,
     WalkDecision,
+    covers_whole,
     glob_error,
     matches_glob,
 )
@@ -404,7 +405,7 @@ class FsPermissions:
         if named:
             return "prune"
         covered = self._refuses_under(
-            spellings, "read", path, agent, honor_scope=True, ask=_covers_whole
+            spellings, "read", path, agent, honor_scope=True, ask=covers_whole
         )
         return "prune" if covered else "yield"
 
@@ -433,7 +434,7 @@ class FsPermissions:
         **`ask` is the second difference, and it is a different question rather
         than a different rounding** (D11). A delete asks `_could_match_under` —
         could the rule name anything this removes — and must refuse on "could". A
-        walk asks `_covers_whole` — does the rule name everything in here — because
+        walk asks `covers_whole` — does the rule name everything in here — because
         pruning is only lossless when it does. One function used to answer both,
         with a `require_head` flag bending it for the walk, and no setting of the
         flag was right for both `deny read src/*.pem` and `deny read
@@ -697,32 +698,6 @@ def _could_match_under(pattern: str, directory: str, *, at_root: bool) -> bool:
         if not matches_glob(name, segment):
             return False
     return len(names) <= len(parts)
-
-
-def _covers_whole(pattern: str, directory: str) -> bool:
-    """Whether `pattern` names `directory` and everything inside it.
-
-    **The universal question, and it is the walk's** (D11). Pruning a directory
-    is lossless only when the rule would conceal every entry in it anyway — so
-    the walk asks whether the rule covers the directory *wholesale*, not whether
-    it could match something inside. A rule that covers only some of what a
-    directory holds is enforced file by file on the way past, which conceals
-    exactly what it names and hides nothing else.
-
-    That is why this is not the delete's question with a different rounding. It
-    used to be: one function answered both, with a `require_head` flag bending
-    the answer for the walk. The flag could not be made right — `deny read
-    src/*.pem` pruned all of `src` and hid every allowed file in it, while `deny
-    read **/node_modules/**` pruned no `node_modules` at all. The two callers ask
-    different questions, and giving each its own is what removed the flag.
-
-    Answered entirely by `matches_glob`, so it cannot disagree with the matcher:
-    the directory itself matches, or the pattern is `Q/**` and the directory
-    matches `Q`.
-    """
-    if matches_glob(directory, pattern):
-        return True
-    return pattern.endswith("/**") and matches_glob(directory, pattern[:-3])
 
 
 @plugin("permissions-fs", affects="environment", inject=[FS], config=Config)

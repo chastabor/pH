@@ -55,6 +55,7 @@ ph-runtime-guest = { workspace = true }
 ph-stabilize = { workspace = true }
 ph-text-index = { workspace = true }
 ph-code-graph = { workspace = true }
+ph-utcp = { workspace = true }
 ph-clm = { workspace = true }
 
 [dependency-groups]
@@ -78,6 +79,13 @@ dev = [
     "ph-core[otel]",
     "phern[web]",
     "ph-text-index[local]",
+    # A real UTCP client, for the tests that register a package's manual and call
+    # its tools end to end. Not a runtime dependency of anything that publishes a
+    # manual — `ph.toolcli` writes one as plain JSON — only of the gate that proves
+    # a client can read it. Floors are the versions that were read: 1.1.5 is the
+    # CLI protocol whose arguments reach the shell as environment variables.
+    "utcp>=1.2,<1.3",
+    "utcp-cli>=1.1.5,<1.2",
 ]
 
 # ---------------------------------------------------------------- tooling ----
@@ -97,6 +105,7 @@ src = [
     "packages/ph-stabilize/src",
     "packages/ph-text-index/src",
     "packages/ph-code-graph/src",
+    "packages/ph-utcp/src",
     "packages/ph-clm/src",
 ]
 
@@ -149,7 +158,7 @@ strict = true
 # does below: `daemon_helpers`, `tui_helpers`, `rlm_fixtures` and friends are
 # top-level modules that tests import by name, and both tools have to find them
 # in the same place.
-mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-clm/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:packages/ph-clm/tests:tests"
+mypy_path = "packages/ph-core/src:packages/phern/src:packages/ph-rlm/src:packages/ph-runtime-guest/src:packages/ph-stabilize/src:packages/ph-text-index/src:packages/ph-code-graph/src:packages/ph-utcp/src:packages/ph-clm/src:packages/phern/tests:packages/ph-rlm/tests:packages/ph-stabilize/tests:packages/ph-core/tests:packages/ph-clm/tests:packages/ph-code-graph/tests:tests"
 # One list, because mypy takes `packages` or `files` and not both. The `src`
 # entries are the eight shipped packages, reached by path so `mypy_path` above
 # supplies the base that makes their module names come out as `ph`, `ph_app`
@@ -162,6 +171,7 @@ files = [
     "packages/ph-stabilize/src/ph_stabilize",
     "packages/ph-text-index/src/ph_text_index",
     "packages/ph-code-graph/src/ph_code_graph",
+    "packages/ph-utcp/src/ph_utcp",
     "packages/ph-clm/src/ph_clm",
     "conftest.py",
     "packages/ph-core/tests",
@@ -170,6 +180,7 @@ files = [
     "packages/ph-stabilize/tests",
     "packages/ph-text-index/tests",
     "packages/ph-code-graph/tests",
+    "packages/ph-utcp/tests",
     "packages/ph-clm/tests",
     "packages/ph-runtime-guest/tests",
     "tests",
@@ -193,6 +204,7 @@ pythonpath = [
     "packages/ph-stabilize/tests",
     "packages/ph-core/tests",
     "packages/ph-clm/tests",
+    "packages/ph-code-graph/tests",
 ]
 
 testpaths = [
@@ -202,6 +214,7 @@ testpaths = [
     "packages/ph-stabilize/tests",
     "packages/ph-text-index/tests",
     "packages/ph-code-graph/tests",
+    "packages/ph-utcp/tests",
     "packages/ph-clm/tests",
     "packages/ph-runtime-guest/tests",
     "tests",

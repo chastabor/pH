@@ -18,7 +18,10 @@ would `grep` for are not the words the author used.
 text_index(paths=["docs"])
 ```
 
-It takes `**/*.md` from a directory unless you pass `glob`. Re-indexing a
+With no `paths` it indexes what this deployment configured, which is the whole
+workspace unless a profile pointed it elsewhere. It takes `**/*.md` from a
+directory unless you pass `glob`, and `exclude` leaves files out
+(`exclude=["**/drafts/**"]`). Re-indexing a
 document replaces its passages, so running it again after an edit is correct and
 cheap. `forget: true` removes documents instead.
 

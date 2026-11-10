@@ -47,6 +47,8 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+from ._config import GRAMMAR_CACHE_ENV
+
 __all__ = [
     "INHERITS",
     "Definition",
@@ -200,7 +202,7 @@ def use_cache(directory: Path) -> Path:
     """
     global _configured
 
-    override = os.environ.get("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR")
+    override = os.environ.get(GRAMMAR_CACHE_ENV)
     if override:
         return Path(override)
     directory.mkdir(parents=True, exist_ok=True)

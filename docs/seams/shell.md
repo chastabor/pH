@@ -14,7 +14,8 @@ What is left here is turning a command string into an argv and **asking for
 confinement when the policy says to**.
 
 ```text
-await ctx.shell.run(command, *, agent=..., ...)   # -> ShellResult
+await ctx.shell.run(command, *, agent=..., ...)        # -> ShellResult
+await ctx.shell.run_argv(argv, *, agent=..., ...)      # -> ShellResult
 ```
 
 ## Why it is a seam at all
@@ -32,6 +33,29 @@ run a command.
 kind decides the `SandboxPolicy`, so a read-only tier and a writable one produce
 different confinement without the caller choosing.
 
+## `run_argv`: the same placement, for a caller with its own interpreter line
+
+`run` puts the platform's **login** shell in front of the command — `bash -lc` —
+which is right for a person's command and wrong for one whose *output is data*:
+a login shell reads the person's profile, and whatever a profile prints lands in
+front of the result.
+
+`run_argv` takes the argv as given and does everything else `run` does: the
+agent's working directory, the workspace's redirection variables, the sandbox
+consult. `ph-utcp` is the caller it exists for. A UTCP tool's stdout is parsed
+as its answer, so it runs `/bin/bash -c <script>` through here.
+
+Three settings `run` has no use for, each of which can only narrow or add:
+
+* `keep_env` keeps just the named variables from the deployment's scrubbed
+  environment, for a command that declares what it reads. It selects *from* that
+  environment, so naming a credential does not fetch one.
+* `extra_env` is set over the result: the call's own values.
+* `writable_extra` adds writable paths to the workspace policy, for a command
+  that keeps state outside the workspace — an index under `$PH_CACHE`. The
+  sandbox grants them under either mode, so a read-only session can still build
+  that index. Each path has to exist; a backend grants a path by binding it.
+
 ## What a caller gets
 
 `ShellResult` carries the subprocess result plus `dropped` — the output bound is
@@ -44,8 +68,10 @@ difference lands rather than being spelled at each caller.
 ## What it does not do
 
 * **It does not parse.** The command is handed to a shell, which is what a person
-  and a model both mean by "run this". Anything that needs structure should build
-  an argv and use [`ctx.subprocess`](subprocess.md) directly.
+  and a model both mean by "run this". Anything that needs structure and no
+  agent's placement should build an argv and use
+  [`ctx.subprocess`](subprocess.md) directly; anything run *for an agent* uses
+  `run_argv`, or it skips the sandbox consult this seam exists to make.
 * It does not decide whether a command is dangerous — that is a policy row on
   `tools/pre-execute` returning `ask`, and `ph-stabilize`'s `destructive.py`
   parses the command properly rather than matching patterns against JSON.

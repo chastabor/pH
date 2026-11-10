@@ -144,6 +144,7 @@ def _wire_models() -> set[type[WireModel]]:
         "ph_stabilize",
         "ph_text_index",
         "ph_code_graph",
+        "ph_utcp",
         "ph_clm",
     ):
         try:

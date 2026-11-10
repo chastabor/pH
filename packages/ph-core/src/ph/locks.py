@@ -49,15 +49,25 @@ is the one thing it throws for contention, for the caller to translate.
 from __future__ import annotations
 
 import errno
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
+import anyio
 from filelock import Timeout, UnixFileLock
 
 from .paths import filesystem_of
 
-__all__ = ["LockBusy", "LockUnsupported", "acquire_file_lock", "describe_lock", "file_lock"]
+__all__ = [
+    "LockBusy",
+    "LockUnsupported",
+    "acquire_file_lock",
+    "describe_lock",
+    "file_lock",
+    "try_file_lock",
+    "wait_for_file_lock",
+    "waited_file_lock",
+]
 
 
 class LockBusy(RuntimeError):
@@ -119,6 +129,41 @@ def acquire_file_lock(path: Path | str, *, timeout: float, what: str) -> Callabl
             ) from error
         raise
     return lock.release
+
+
+def try_file_lock(path: Path | str, *, what: str) -> Callable[[], None] | None:
+    """The lock if it is free this instant, else `None`. `LockUnsupported` still
+    raises: nobody holds that lock, and asking again would not help."""
+    try:
+        return acquire_file_lock(path, timeout=0, what=what)
+    except LockBusy:
+        return None
+
+
+async def wait_for_file_lock(
+    path: Path | str, *, what: str, poll: float = 0.1
+) -> Callable[[], None]:
+    """The lock, waited for as long as another holder has it.
+
+    For a writer that is expected to queue behind another — an index being built
+    by a second process — rather than be refused. **Polled rather than blocked in
+    a worker thread**, so a canceled call stops waiting, and no abandoned thread
+    takes the lock after its caller has gone and holds it for nobody.
+    """
+    while (release := try_file_lock(path, what=what)) is None:
+        await anyio.sleep(poll)
+    return release
+
+
+@asynccontextmanager
+async def waited_file_lock(path: Path | str, *, what: str) -> AsyncIterator[None]:
+    """Hold the lock for the body, waited for as `wait_for_file_lock` waits.
+    `file_lock`'s twin for a caller on the event loop."""
+    release = await wait_for_file_lock(path, what=what)
+    try:
+        yield
+    finally:
+        release()
 
 
 @contextmanager

@@ -40,10 +40,27 @@ context teaching the model a capability the deployment does not have.
 
 ## The two tools
 
-**`text_index(paths, glob?, forget?)`** reads each document through `ctx.fs`,
+**`text_index(paths?, glob?, exclude?, forget?)`** reads each document through `ctx.fs`,
 cuts it into passages, embeds them and stores them. Re-indexing a file replaces
 its passages, so running it again after an edit is correct. `forget: true`
 removes instead.
+
+What it looks at when a call does not say is the row's `index` block:
+
+```yaml
+- id: text-index
+  name: text-index
+  config:
+    index:
+      paths: [docs, notes]             # directories or files; default ["."]
+      include: ["**/*.md", "**/*.rst"] # default ["**/*.md"]
+      exclude: ["**/drafts/**"]
+```
+
+`exclude` is read against the workspace root and a directory it covers is never
+entered. A call's `glob` replaces `include` for that call; a call's `exclude` is
+*added* to the row's. A file named outright in `paths` is taken whatever is
+excluded.
 
 **Nothing watches the filesystem** — no daemon, no watcher. The index changes
 when `text_index` runs and at no other moment, so run it again after edits.

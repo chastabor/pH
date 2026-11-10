@@ -58,13 +58,13 @@ from ph.indexable import triage
 from ph.json import JsonObject
 from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.types import ContentBlock
-from ph.locks import LockBusy, acquire_file_lock
+from ph.locks import try_file_lock, wait_for_file_lock, waited_file_lock
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.fs import FsService
+from ph.seams.fs import FsService, IndexScope
 from ph.seams.skills import offer_skills as offer_package_skills
 from ph.text import count_of
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
@@ -140,6 +140,12 @@ corpus was never indexed rather than that nothing matches."""
 # ------------------------------------------------------------------- config ----
 
 
+class Scope(IndexScope):
+    """`IndexScope`, with prose as what is taken when nobody says."""
+
+    include: list[str] = Field(default_factory=lambda: ["**/*.md"])
+
+
 class Config(WireModel):
     """Row config for `text-index`."""
 
@@ -152,12 +158,13 @@ class Config(WireModel):
     `$PH_CACHE` names (Q1). A deployment indexing a corpus that is expensive to
     re-embed points this at `$PH_HOME` instead, and gets it backed up with the
     sessions."""
-    glob: str = "**/*.md"
-    """What `text_index` takes from a directory when the call does not say.
+    index: Scope = Field(default_factory=Scope)
+    """What `text_index` looks at when the call does not say: which trees, which
+    files in them, which to leave out (`ph.seams.fs.IndexScope`).
 
-    Markdown by default because that is what a repository's prose is in, and
-    because a default of `**/*` would index a `node_modules` on the first call
-    somebody made without thinking."""
+    `include` is Markdown by default because that is what a repository's prose is
+    in, and because a default of `**/*` would index a `node_modules` on the first
+    call somebody made without thinking."""
     max_chars: int = 1_200
     """The largest passage, in characters. Roughly 300 tokens.
 
@@ -287,22 +294,10 @@ TEXT_INDEX: ServiceKey[TextIndexSeam] = ServiceKey("text_index")
 """The text index, for `/text-index` and the tools it backs."""
 
 
-def _try_writer_lock(root: Path) -> Callable[[], None] | None:
-    """The writer lock of the index at `root` if it is free this instant, else `None`."""
-    try:
-        return acquire_file_lock(root / "writer.lock", timeout=0, what="the text index")
-    except LockBusy:
-        return None
+WRITER_LOCK = "writer.lock"
+"""The lock file in each index directory that orders its writers (`writing`)."""
 
-
-async def _writer_lock(root: Path) -> Callable[[], None]:
-    """The writer lock, waited for as long as another writer holds it.
-
-    Polled rather than blocked in a worker thread, so a canceled call stops
-    waiting and no abandoned thread takes the lock after its caller has gone."""
-    while (release := _try_writer_lock(root)) is None:
-        await anyio.sleep(0.1)
-    return release
+_LOCKED = "the text index"
 
 
 @dataclass(slots=True)
@@ -391,11 +386,11 @@ class TextIndexSeam:
         store = self._indexes.get(root)
         if store is not None and not store.stale():
             return store
-        release = _try_writer_lock(root)
+        release = try_file_lock(root / WRITER_LOCK, what=_LOCKED)
         if release is None:
             if store is not None:
                 return store
-            release = await _writer_lock(root)
+            release = await wait_for_file_lock(root / WRITER_LOCK, what=_LOCKED)
         try:
             return await self._fresh(root)
         finally:
@@ -420,11 +415,8 @@ class TextIndexSeam:
         # Before the lock: the record and the sweep touch nothing a writer holds.
         await anyio.to_thread.run_sync(use, self._base(), workspace)
         root = self.root(workspace)
-        release = await _writer_lock(root)
-        try:
+        async with waited_file_lock(root / WRITER_LOCK, what=_LOCKED):
             yield await self._fresh(root)
-        finally:
-            release()
 
     async def _fresh(self, root: Path) -> TextIndex:
         """The copy of the index at `root`, loaded again if its files changed.
@@ -483,11 +475,23 @@ class TextIndexSeam:
 
 
 class IndexArgs(ToolModel):
-    paths: list[str] = Field(
-        description="Files or directories to index. Relative to the workspace root."
+    paths: list[str] | None = Field(
+        None,
+        description=(
+            "Files or directories to index, relative to the workspace root. Defaults "
+            "to the row's setting, which is the whole workspace unless a profile "
+            "pointed it elsewhere."
+        ),
     )
     glob: str | None = Field(
         None, description="Which files to take from a directory. Defaults to the row's setting."
+    )
+    exclude: list[str] | None = Field(
+        None,
+        description=(
+            "Glob patterns for files to leave out, read against the workspace root "
+            "(`**/drafts/**`). Added to the row's own exclusions."
+        ),
     )
     forget: bool = Field(False, description="Remove these documents from the index instead.")
 
@@ -635,12 +639,14 @@ async def apply(ctx: Context, config: Config) -> None:
         return dropped
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
+        wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
         documents = await ctx.require(FS).collect(
-            args.paths,
-            args.glob or config.glob,
+            wanted.paths,
+            wanted.include,
             scope=run.scope,
             limit=config.max_files,
             agent=run.agent,
+            exclude=wanted.exclude,
         )
         added = removed = unchanged = 0
         indexed: list[str] = []

@@ -17,6 +17,7 @@ and filled by `ph_app.shell`, its one producer.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -190,8 +191,58 @@ class ShellService:
         `Cancellation`, not `CancelToken`, for `AgentHandle.signal`'s reason: a
         seam may ask whether the work is still wanted and may not end it.
         """
+        return await self.run_argv(
+            (*platform_shell(), command),
+            cwd=cwd,
+            agent=agent,
+            timeout_ms=timeout_ms,
+            policy=policy,
+            scope=scope,
+            signal=signal,
+        )
+
+    async def run_argv(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path | None = None,
+        agent: AgentHandle | None = None,
+        timeout_ms: int | None = None,
+        policy: SandboxPolicy | None = None,
+        scope: Context | None = None,
+        signal: Cancellation | None = None,
+        keep_env: Collection[str] | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        writable_extra: Sequence[str] = (),
+    ) -> ShellResult:
+        """Run one argv for an agent: `run`'s placement and confinement, for a caller
+        that has its own interpreter line.
+
+        `run` is this with the platform's login shell in front. A caller whose
+        *output is data* cannot use that shell — `bash -lc` reads the person's
+        profile, and whatever a profile prints lands in front of the result — so
+        it names its own (`bash -c <script>`) and still gets the agent's working
+        directory, the workspace's redirection variables and the sandbox. `ph-utcp`
+        is that caller: a UTCP tool's stdout is parsed as its answer.
+
+        The environment starts as the deployment's scrubbed one, asked of the
+        subprocess seam, in three layers:
+
+        * `keep_env` keeps just these names from it, for a command that declares
+          what it reads. It selects *from* the scrubbed environment, so naming a
+          variable the deployment dropped — a credential — does not fetch it.
+        * The workspace's redirection variables go over that, because they are
+          where the command runs, not something it opted into: a command that
+          inherits `TMPDIR` gets the agent's.
+        * `extra_env` goes over everything: values the caller supplies itself,
+          which therefore win.
+
+        `writable_extra` adds writable paths to the workspace policy this derives,
+        for a command that keeps state outside the workspace — an index under
+        `$PH_CACHE`. It widens nothing a `policy` passed in already says, and
+        means nothing where no backend confines the command.
+        """
         subprocess_service = self.ctx.require(SUBPROCESS)
-        argv = (*platform_shell(), command)
         workspace = workspace_of(self.ctx, agent)
         if cwd is None:
             fs = self.ctx.get(FS)
@@ -206,6 +257,10 @@ class ShellService:
             sandbox = self.ctx.get(SANDBOX)
             if sandbox is not None and sandbox.available:
                 policy = workspace_policy(workspace)
+                if writable_extra:
+                    policy = policy.model_copy(
+                        update={"writable_extra": [*(policy.writable_extra or []), *writable_extra]}
+                    )
             else:
                 # Said out loud, because `confined_by=None` cannot tell "the tier
                 # wanted confinement and there was no backend" from "nobody
@@ -226,17 +281,20 @@ class ShellService:
             confined = self.ctx.require(SANDBOX).confine(argv, policy, agent=agent_id)
             argv = confined.argv
             confined_by = confined.backend
-        spec = SubprocessSpawnSpec(
-            argv=argv,
-            cwd=cwd,
-            timeout_ms=timeout_ms,
-            # Additive, not wholesale: the redirection variables are the only
-            # thing being said here, and a command that inherited nothing else
-            # would not find its own toolchain.
-            env=subprocess_service.env(extra=workspace.env)
-            if workspace and workspace.env
-            else None,
-        )
+        redirection = workspace.env if workspace is not None and workspace.env else None
+        env: dict[str, str] | None = None
+        if keep_env is not None or extra_env or redirection:
+            # Additive, not wholesale: a command that inherited nothing would not
+            # find its own toolchain, so this starts from the seam's environment
+            # and a caller that wants less says which names (`keep_env`).
+            env = subprocess_service.env()
+            if keep_env is not None:
+                env = {name: env[name] for name in keep_env if name in env}
+            if redirection:
+                env.update(redirection)
+            if extra_env:
+                env.update(extra_env)
+        spec = SubprocessSpawnSpec(argv=argv, cwd=cwd, timeout_ms=timeout_ms, env=env)
         outcome = await subprocess_service.run(spec, scope=scope, signal=signal)
         if confined is not None and outcome.exit_code != 0:
             # stderr first: that is where these sentences come from, and passing the
