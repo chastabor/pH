@@ -47,8 +47,8 @@ from ph.seams._registry import contribute_item
 from ph.toolcli import ToolCli, main
 from ph.tools.errors import HarnessError
 from ph.wire import WireModel
-from ph_text_index._config import ROW
-from ph_text_index._embed import Limit, Vectors, estimate_tokens
+from ph_text_index._config import ROW, Limit
+from ph_text_index._embed import Vectors, estimate_tokens, weigh_by_bytes
 from ph_text_index.engine import TEXT_INDEX
 
 __all__ = [
@@ -131,6 +131,10 @@ class BoundedEmbedder(HashingEmbedder):
     prefix: str = ""
     """What an estimate counts in front of each passage, as an endpoint's
     `document_prefix` is."""
+    breaks: int = 0
+    """Tokens a blank line between two paragraphs costs when a passage is counted
+    whole. Weighing its paragraphs one at a time does not see them: a
+    tokenizer's count of a whole can be more than the sum of its parts'."""
     asked: int = 0
     refused: int = 0
     """How many calls were turned away as too long."""
@@ -143,13 +147,24 @@ class BoundedEmbedder(HashingEmbedder):
             return Limit(self.max_tokens, "configured")
         return None if self.reads is None else Limit(self.reads, "model")
 
-    def measure(self, texts: Sequence[str], bytes_per_token: float) -> list[int]:
+    def measure(
+        self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False
+    ) -> list[int]:
         if self.estimates:
             return [estimate_tokens(f"{self.prefix}{text}", bytes_per_token) for text in texts]
+        return [self._whole(text) for text in texts]
+
+    def _whole(self, text: str) -> int:
+        """What `text` is as one input: its words, and its paragraph breaks."""
+        return len(text.split()) + self.breaks * text.count("\n\n")
+
+    def weigh(self, texts: Sequence[str], bytes_per_token: float) -> Sequence[float]:
+        if self.estimates:
+            return weigh_by_bytes(texts, bytes_per_token)
         return [len(text.split()) for text in texts]
 
     def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
-        longest = max((len(text.split()) for text in texts), default=0)
+        longest = max((self._whole(text) for text in texts), default=0)
         if self.refuses_over is not None and longest > self.refuses_over:
             self.refused += 1
             raise HarnessError(

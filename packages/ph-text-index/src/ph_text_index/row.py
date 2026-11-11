@@ -85,12 +85,13 @@ from pydantic import BaseModel
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
 from ph.framing import answer_one
 from ph.json import as_seq, as_str
-from ph.keys import COMMANDS, FS, LLM, SHELL
+from ph.keys import AGENTS, COMMANDS, FS, LLM, SHELL
 from ph.llm.adapter import EmbeddingRequest, LlmError
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.skills import offer_skills as offer_package_skills
+from ph.session import Session
 from ph.toolcli import (
     ToolCli,
     config_env,
@@ -111,6 +112,7 @@ from ._config import (
     AdapterConfig,
     Config,
     EndpointConfig,
+    Limit,
     LocalConfig,
     weights_cache,
 )
@@ -167,8 +169,19 @@ class Provider:
     name: an endpoint's key."""
     env: Mapping[str, str] = field(default_factory=dict)
     """Variables set on the command: where to ask a session for vectors."""
+    max_tokens: int | None = None
+    """The limit a profile set on the embedder: how long an input it reads."""
+    reads: Callable[[], Limit | None] | None = None
+    """How long an input the embedder reads with no setting, where a session can
+    say without starting the command: a route's window."""
     report: Callable[[], list[tuple[str, str]]] | None = None
     """More rows for `phern doctor`, read live: what the session has embedded."""
+
+    def limit(self) -> Limit | None:
+        """How long an input the embedder reads, as far as a session knows."""
+        if self.max_tokens is not None:
+            return Limit(self.max_tokens, "configured")
+        return None if self.reads is None else self.reads()
 
 
 TEXT_INDEX: ServiceKey[TextIndexRow] = ServiceKey("text_index")
@@ -224,10 +237,19 @@ class TextIndexRow:
         provider = self.provider
         if provider is None or self.state is None:
             return [("embedder", "none registered — text_index is not offered")]
+        limit = provider.limit()
         rows = [
             ("tools", self.state.said()),
             ("command", shlex.join(provider.cli.invocation())),
             ("embedder", provider.label),
+            (
+                "limit",
+                # A model's own length, or a server's, is the command's to ask:
+                # of a local model it means loading it.
+                limit.said()
+                if limit is not None
+                else f"asked of the embedder when it embeds; `/{ROW} status` shows it",
+            ),
             ("index", f"each agent's own, in its scratch ({STATE}/)"),
         ]
         rows.extend(("shared", path) for path in provider.writable)
@@ -365,6 +387,7 @@ async def local(ctx: Context, config: LocalConfig) -> None:
         config=config,
         cli=CLI,
         label=config.model,
+        max_tokens=config.max_tokens,
         # Shared by every agent: weights are the model's content, keyed by its
         # name. A confined command reads them here, and `huggingface_hub` keeps
         # its locks beside them.
@@ -408,6 +431,7 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
             config=config,
             cli=CLI,
             label=f"{config.model} at {where}" if config.model else where,
+            max_tokens=config.max_tokens,
             pass_env=(config.api_key_env,) if config.api_key_env else (),
         ),
         scope=ctx,
@@ -426,6 +450,15 @@ class _Embedding:
 
     Anything that can reach the socket can spend the route: it is granted to the
     commands this session's rows start, as the hosts' sockets are.
+
+    **What it spends is in the log of the agent it was spent for.** A request
+    names the agent its command works for (`ph.toolcli.AGENT_ENV`) — whose index
+    it is, which for a child that shares its parent's is the parent — and the
+    route's door records the spend there (`LlmRuntime.embed`), where a budget
+    and a child's account read it. The name comes from inside a sandbox, so it
+    decides which log of this session's family a record lands in and nothing
+    else; a request that names nobody here is embedded and counted on this row
+    alone.
     """
 
     ctx: Context
@@ -456,8 +489,8 @@ class _Embedding:
         if asked.get("limit"):
             # How long an input the route reads, as far as the route says: its
             # window. The command holds a passage to it.
-            window = self.ctx.require(LLM).resolve_model(config.provider, config.model)
-            return value_envelope({"limit": window.context_window})
+            window = self.window()
+            return value_envelope({"limit": None if window is None else window.tokens})
         inputs = tuple(as_str(one) for one in as_seq(asked.get("inputs")))
         try:
             result = await self.ctx.require(LLM).embed(
@@ -466,7 +499,8 @@ class _Embedding:
                     model=config.model,
                     inputs=inputs,
                     dimensions=config.dimensions,
-                )
+                ),
+                session=self._session_of(asked.get("agent")),
             )
         except LlmError as error:
             # The adapter's own sentence and code: a key that is not set is said
@@ -487,6 +521,21 @@ class _Embedding:
         packed = array("f", chain.from_iterable(result.vectors)).tobytes()
         width = len(result.vectors[0]) if result.vectors else 0
         return value_envelope({"vectors": base64.b64encode(packed).decode("ascii"), "dim": width})
+
+    def window(self) -> Limit | None:
+        """The route's window, when the route says one."""
+        config = self.config
+        window = self.ctx.require(LLM).resolve_model(config.provider, config.model).context_window
+        return None if window is None or window <= 0 else Limit(window, "route")
+
+    def _session_of(self, agent_id: object) -> Session | None:
+        """The log an embedding for `agent_id` is recorded in: that agent's, when
+        it is one of this session's."""
+        registry = self.ctx.get(AGENTS)
+        if registry is None or not isinstance(agent_id, str):
+            return None
+        driver = registry.get(agent_id)
+        return None if driver is None else driver.session
 
     def report(self) -> list[tuple[str, str]]:
         spent = f", {self.tokens} tokens" if self.tokens else ""
@@ -536,6 +585,8 @@ async def adapter(ctx: Context, config: AdapterConfig) -> None:
             config=config,
             cli=CLI,
             label=f"{config.model} through {config.provider}",
+            max_tokens=config.max_tokens,
+            reads=service.window,
             # The socket the command asks on: a confined command connects there.
             writable=(str(directory),),
             env={EMBEDDER_ENV: str(service.path)},

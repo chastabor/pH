@@ -47,12 +47,15 @@ stopped keeps what it embedded.
 
 A model reads so many tokens and no more. Past that a local model drops the rest
 without a word — the tail of the passage is in the index and can never be found
-— and a server refuses the request. So passages are cut to the embedder's limit
-where it can say one (`_embed.TokenBounded`): packed to fewer characters when
-`max_chars` would not fit, measured, and cut smaller where a document's text is
-denser than the estimate. A passage refused as too long all the same is cut
-smaller and sent again rather than failing the run, and the result says when
-any of this happened.
+— and a server refuses the request. So passages are packed by what the embedder
+counts as well as by `max_chars` (`_chunk.Weight`, `_embed.TokenBounded`): its
+own tokens where it has a tokenizer, the text's bytes at the corpus's density
+where it has not. Each passage is as long as both allow, so a table is cut small
+and the prose around it is not, whatever script either is in. What is sent is
+checked, and a passage refused as too long all the same is cut smaller and sent
+again rather than failing the run; the result says when any of this happened.
+A question is held to the same limit: one longer than the embedder reads is
+searched by its head, and the answer says so.
 
 ## Whose index
 
@@ -84,7 +87,7 @@ from pydantic import Field
 
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
 from ph.indexable import Paragraph, triage
-from ph.json import JsonObject
+from ph.json import JsonObject, as_bool
 from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.adapter import too_long_facts
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, ContentBlock
@@ -94,14 +97,22 @@ from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
-from ph.text import count_of
-from ph.toolcli import TOOL_HOST, BackgroundRuns, Progress, RunProgress, claim_home, state_home
+from ph.text import count_of, one_line
+from ph.toolcli import (
+    AGENT_ENV,
+    TOOL_HOST,
+    BackgroundRuns,
+    Progress,
+    RunProgress,
+    claim_home,
+    state_home,
+)
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
 from ph.workspace_caches import digest
 
-from ._chunk import Chunk, chunk_paragraphs
+from ._chunk import Chunk, Weight, chunk_paragraphs, head_of
 from ._config import (
     ADAPTER_ROW,
     EMBEDDER_ENV,
@@ -112,6 +123,7 @@ from ._config import (
     AdapterConfig,
     Config,
     EndpointConfig,
+    Limit,
     LocalConfig,
     index_base,
     weights_cache,
@@ -120,12 +132,12 @@ from ._embed import (
     BYTES_PER_TOKEN,
     Embedder,
     EndpointEmbedder,
-    Limit,
     LocalWeights,
     SentenceTransformerEmbedder,
     SessionEmbedder,
     TokenBounded,
     Vectors,
+    weigh_by_bytes,
 )
 from ._store import Record, TextIndex
 
@@ -148,10 +160,16 @@ TEXT_INDEX_FAILED = "TEXT_INDEX_FAILED"
 TEXT_INDEX_MODEL_MISSING = "TEXT_INDEX_MODEL_MISSING"
 TEXT_INDEX_MODEL_FAILED = "TEXT_INDEX_MODEL_FAILED"
 
-MIN_PASSAGE_CHARS = 64
-"""The smallest a passage is cut to in order to fit an embedder. Under this a
-"passage" is a phrase, and a document the embedder still refuses is skipped
-and said."""
+MIN_PASSAGE_TOKENS = 16
+"""The fewest tokens of its own text a passage is held to in order to fit an
+embedder. Under this a "passage" is a phrase, and a document the embedder still
+refuses is skipped and said."""
+
+BRIEFLY = 8
+"""How many of a list a sentence names before it says how many more there are."""
+
+ECHOED_CHARS = 200
+"""How much of a question a search result repeats back."""
 
 MISSING_TURBOVEC = (
     "the text-index row needs `turbovec`, which ph-text-index depends on; "
@@ -436,35 +454,49 @@ class TextIndexSeam:
         if tokens > 0:
             self.density = max(1.0, min(self.density, size / tokens))
 
-    async def fit(self, limit: Limit | None) -> int:
-        """The size passages are packed to, in characters: the row's `max_chars`,
-        or what `limit` leaves for a passage's own text when that is less.
+    async def room(self, limit: Limit | None, *, query: bool = False) -> int | None:
+        """How many tokens of its own text an input may be: `limit`, less what
+        the embedder puts around it. `None` when nothing says how long an input
+        it reads.
 
-        **What it leaves, and not the limit's worth.** Every passage is sent
+        **Less what is around it, and not the limit.** Every passage is sent
         behind a prefix (`search_document: `) and between the model's own start
         and end markers, and those are in what the embedder counts. Packed to the
-        limit's worth of text, a full passage measured a few tokens over it, and
-        nearly every document was packed again and reported as needing smaller
-        passages — on a live run, 14 of 30, where one was. Counted at this
-        corpus's density, the careful way, so ordinary prose fits at the first
-        cut and nothing is sent to find out."""
-        config = self.config
+        limit itself, a full passage measured a few tokens over it, and nearly
+        every document was packed again and reported as needing smaller
+        passages — on a live run, 14 of 30, where one was. A question has a
+        prefix of its own, which for some models is a sentence."""
         if limit is None:
-            return config.max_chars
-        # What a passage costs before its text — its prefix and the model's
-        # markers — is the measure of an empty one.
-        overhead = max(await self.measure([""]), default=0)
-        text = (limit.tokens - overhead) * self.density
-        return max(MIN_PASSAGE_CHARS, min(config.max_chars, int(text)))
+            return None
+        # What an input costs before its text is the measure of an empty one.
+        overhead = max(await self.measure([""], query=query), default=0)
+        return max(MIN_PASSAGE_TOKENS, limit.tokens - overhead)
 
-    async def measure(self, texts: list[str]) -> list[int]:
-        """How many tokens each text is to the embedder — counted where it has a
-        tokenizer, estimated at this corpus's density where it has not; nothing
-        for one that cannot say."""
+    async def measure(self, texts: list[str], *, query: bool = False) -> list[int]:
+        """How many tokens each text is to the embedder as it is sent — counted
+        where it has a tokenizer, estimated at this corpus's density where it has
+        not; nothing for one that cannot say."""
         embedder = self.embedder
         if not isinstance(embedder, TokenBounded):
             return []
-        return await anyio.to_thread.run_sync(embedder.measure, texts, self.density)
+        return await anyio.to_thread.run_sync(
+            partial(embedder.measure, texts, self.density, query=query)
+        )
+
+    def weigh(self, texts: Sequence[str]) -> Sequence[float]:
+        """How many tokens each text adds to a passage it is part of
+        (`_chunk.Weight.of`): the embedder's own count, or the text's bytes at
+        this corpus's density. Bytes too for an embedder that cannot say how
+        long an input it reads, so that a passage it refuses can still be cut
+        by something. **Blocking**: a tokenizer's."""
+        embedder = self.embedder
+        if isinstance(embedder, TokenBounded):
+            return embedder.weigh(texts, self.density)
+        return weigh_by_bytes(texts, self.density)
+
+    async def heaviest(self, texts: list[str]) -> float:
+        """What the heaviest of `texts` weighs (`weigh`), off the event loop."""
+        return max(await anyio.to_thread.run_sync(self.weigh, texts), default=0.0)
 
     async def embed(self, texts: list[str], *, query: bool) -> Vectors:
         embedder = self.embedder
@@ -500,6 +532,7 @@ class TextIndexSeam:
         store = self._indexes.get(root)
         if store is None:
             if not root.is_dir():
+                rows.append(("limit", self._limit_said(None)))
                 rows.append(("state", "not built — run text_index"))
                 return rows
             # A command asked for its status has opened nothing yet. Read without
@@ -514,6 +547,7 @@ class TextIndexSeam:
         stats = store.stats()
         rows.extend(
             [
+                ("limit", self._limit_said(store.limit)),
                 ("documents", str(stats["documents"])),
                 ("chunks", str(stats["chunks"])),
                 ("vectors", f"{stats['dim']} dim at {stats['bit_width']} bit"),
@@ -521,6 +555,20 @@ class TextIndexSeam:
             ]
         )
         return rows
+
+    def _limit_said(self, stored: str | None) -> str:
+        """How long an input the embedder reads, as far as can be said without
+        asking it: what this process learned, else what the last run to embed
+        into the index wrote beside it (`stored`), else the setting. Asking
+        would load a local model to answer a question about status."""
+        if self.known is not None:
+            return self.known.said()
+        if stored is not None:
+            return f"{stored}, as the last run to embed found it"
+        configured = self.configured_limit()
+        if configured is not None:
+            return Limit(configured, "configured").said()
+        return "not known until a run embeds"
 
 
 # ------------------------------------------------------------------ schemas ----
@@ -568,13 +616,14 @@ class IndexValue(ToolModel):
     """Documents proved unchanged — by the version control, or by their own
     digest — and so never re-embedded."""
     limit: str = ""
-    """The embedder's limit, as a phrase, when it made this run's passages
-    smaller than the row's `max_chars`; empty when it did not."""
-    passage_chars: int = 0
-    """The size this run packed passages to, in characters."""
+    """The embedder's limit, as a phrase, when it ended a passage of this run
+    sooner than the row's `max_chars` would have; empty when it did not."""
+    passage_tokens: int | None = None
+    """How many tokens of its own text a passage was held to, when `limit` is
+    said: the limit, less the prefix and the markers the embedder adds."""
     cut_smaller: list[str] = Field(default_factory=list)
-    """Documents whose passages had to be cut smaller than that to fit: their
-    text is denser than the estimate, or the embedder refused one as too long."""
+    """Documents that were packed a second time, smaller, to fit: what was sent
+    measured over the limit, or the embedder refused a passage as too long."""
     skipped: list[SkippedValue] = Field(default_factory=list)
     total_documents: int
     total_chunks: int
@@ -632,6 +681,9 @@ class SearchValue(ToolModel):
     indexing: IndexingValue | None = None
     """Set while a run is still building the index: the hits are from what it has
     indexed so far."""
+    query_chars: int | None = None
+    """How many characters of the question were searched, when it is longer than
+    the embedder reads and only its head was; `None` when all of it was."""
 
 
 # ------------------------------------------------------------------- render ----
@@ -648,7 +700,14 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
             f"The index holds {count_of(value['total_chunks'], 'passage')} "
             f"from {count_of(value['total_documents'], 'document')} so far."
         )
-    verb = "Removed" if args.get("forget") else "Indexed"
+    return text_content("\n".join(_index_lines(as_bool(args.get("forget")), value)))
+
+
+def _index_lines(forget: bool, value: Any, *, brief: bool = False) -> list[str]:  # noqa: ANN401
+    """What a finished run did, in lines. `brief` for the note about a run nobody
+    waited for (`Progress.note`): its documents are not listed, and what it
+    skipped is counted past the first few."""
+    verb = "Removed" if forget else "Indexed"
     lines = [
         f"{verb} {count_of(len(value['documents']), 'document')}: "
         f"{count_of(value['chunks_added'], 'passage')} added, "
@@ -663,26 +722,30 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
     ]
     if value.get("limit"):
         lines.append(
-            f"Passages are at most {value['passage_chars']} characters, to fit the "
-            f"embedder's limit of {value['limit']}."
+            f"Passages are held to {value['passage_tokens']} tokens of text, to fit "
+            f"the embedder's limit of {value['limit']}."
         )
     if value.get("cut_smaller"):
         cut = value["cut_smaller"]
         lines.append(
             f"{count_of(len(cut), 'document')} needed smaller passages still to fit: "
-            f"{', '.join(cut[:8])}{' …' if len(cut) > 8 else ''}"
+            f"{', '.join(cut[:BRIEFLY])}{' …' if len(cut) > BRIEFLY else ''}"
         )
-    for path in value["documents"][:40]:
-        lines.append(f"  {path}")
-    if len(value["documents"]) > 40:
-        lines.append(f"  [and {len(value['documents']) - 40} more]")
-    for skipped in value["skipped"]:
-        lines.append(f"  skipped {skipped['path']}: {skipped['reason']}")
+    if not brief:
+        for path in value["documents"][:40]:
+            lines.append(f"  {path}")
+        if len(value["documents"]) > 40:
+            lines.append(f"  [and {len(value['documents']) - 40} more]")
+    skipped = value["skipped"]
+    for one in skipped[:BRIEFLY] if brief else skipped:
+        lines.append(f"  skipped {one['path']}: {one['reason']}")
+    if brief and len(skipped) > BRIEFLY:
+        lines.append(f"  [and {len(skipped) - BRIEFLY} more skipped]")
     lines.append(
         f"The index now holds {count_of(value['total_chunks'], 'passage')} "
         f"from {count_of(value['total_documents'], 'document')}."
     )
-    return text_content("\n".join(lines))
+    return lines
 
 
 def _unfinished(value: Any) -> str:  # noqa: ANN401
@@ -697,15 +760,37 @@ def _unfinished(value: Any) -> str:  # noqa: ANN401
     )
 
 
+def _cut_short(value: Any) -> str:  # noqa: ANN401
+    """The warning a search carries when only the head of its question was
+    searched."""
+    searched = value.get("query_chars")
+    if searched is None:
+        return ""
+    return (
+        f"The question is longer than the embedder reads: only its first "
+        f"{searched} characters were searched. Ask something shorter to search by all of it."
+    )
+
+
+def _echoed(query: str) -> str:
+    """The question as a result repeats it, on one line: all of an ordinary one,
+    and the start of one that is a page — the model has it already, in the call."""
+    return repr(one_line(query, ECHOED_CHARS))
+
+
 def _render_search(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     unfinished = _unfinished(value)
+    cut_short = _cut_short(value)
     if not value["hits"]:
         return text_content(
-            f"Nothing matched {value['query']!r} among "
+            f"Nothing matched {_echoed(value['query'])} among "
             f"{count_of(value['searched'], 'indexed passage')}. "
             + (unfinished or "Index the documents first if this corpus is empty.")
+            + (f" {cut_short}" if cut_short else "")
         )
-    lines = [f"{count_of(len(value['hits']), 'passage')} for {value['query']!r}:"]
+    lines = [f"{count_of(len(value['hits']), 'passage')} for {_echoed(value['query'])}:"]
+    if cut_short:
+        lines.append(cut_short)
     if unfinished:
         lines.append(unfinished)
     for hit in value["hits"]:
@@ -755,6 +840,7 @@ async def apply(ctx: Context, config: Config) -> None:
         indexed: list[str] = []
         skipped: list[dict[str, str]] = []
         cut_smaller: list[str] = []
+        held = False
         workspace = ctx.require(FS).root_for(run.agent)
         guard = seam.guard(workspace)
         saved = anyio.current_time()
@@ -826,17 +912,19 @@ async def apply(ctx: Context, config: Config) -> None:
                         paragraphs = kept.kept
                         reason = kept.reason or (None if paragraphs else "is empty")
                     if reason is None:
-                        # Asked here and not sooner: of a local model it means
+                        # Here and not sooner, because it asks the embedder how
+                        # long an input it reads: of a local model that means
                         # loading it, and a run that finds every document
-                        # unchanged has no use for one.
-                        limit = await seam.limit()
-                        packed = await seam.fit(limit)
-                        # Outside the guard: this is the slow part, and a search
-                        # in the same host must not wait for a model.
-                        cut = await _embedded(seam, paragraphs, limit, packed)
+                        # unchanged has no use for one. Outside the guard: this
+                        # is the slow part, and a search in the same host must
+                        # not wait for a model.
+                        cut = await _embedded(seam, paragraphs)
                         if isinstance(cut, _Cut):
-                            if cut.chars < packed:
+                            held = held or cut.held
+                            if cut.again:
                                 cut_smaller.append(path)
+                            if seam.known is not None:
+                                store.limit = seam.known.said()
                             async with guard:
                                 removed += await anyio.to_thread.run_sync(store.forget, path)
                                 added += await anyio.to_thread.run_sync(
@@ -897,27 +985,24 @@ async def apply(ctx: Context, config: Config) -> None:
                 raise
         stats = store.stats()
         # As the run left it: a limit learned from a refusal is lower than the
-        # one it began with.
+        # one it began with. Said when it shaped a passage, and not otherwise.
         known = seam.known
-        fitted = await seam.fit(known)
-        return IndexValue(
+        limit = known.said() if known is not None and (held or cut_smaller) else ""
+        value = IndexValue(
             documents=indexed,
             done=len(documents),
             total=len(documents),
             chunks_added=added,
             chunks_removed=removed,
             unchanged=unchanged,
-            limit=(
-                known.said()
-                if known is not None and (fitted < config.max_chars or cut_smaller)
-                else ""
-            ),
-            passage_chars=fitted,
+            limit=limit,
+            passage_tokens=await seam.room(known) if limit else None,
             cut_smaller=cut_smaller,
             skipped=[SkippedValue(**one) for one in skipped],
             total_documents=stats["documents"],
             total_chunks=stats["chunks"],
         ).model_dump()
+        return value
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
         # In a host the run outlives this call, which answers with the run's
@@ -929,6 +1014,9 @@ async def apply(ctx: Context, config: Config) -> None:
             args,
             partial(index_run, args, run),
             what="documents",
+            # For whoever is told of a run nobody waited for: what the value
+            # says to a caller that did.
+            said=lambda value: "\n".join(_index_lines(args.forget, value, brief=True)),
             raise_if_canceled=run.raise_if_canceled,
         )
         if value is not None:
@@ -946,7 +1034,7 @@ async def apply(ctx: Context, config: Config) -> None:
     async def search_tool(args: SearchArgs, run: ToolRunContext) -> dict[str, Any]:
         workspace = ctx.require(FS).root_for(run.agent)
         store = await seam.index(workspace)
-        vector = await seam.embed([args.query], query=True)
+        vector, searched_chars = await _asked(seam, args.query)
         run.raise_if_canceled()
         progress = seam.indexing(workspace)
         guard = seam.guard(workspace)
@@ -972,6 +1060,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "indexing": (
                 None if progress is None else {"done": progress.done, "total": progress.total}
             ),
+            "query_chars": searched_chars,
             "hits": [
                 HitValue(
                     path=record.path,
@@ -1064,74 +1153,182 @@ async def apply(ctx: Context, config: Config) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Cut:
-    """One document as it was embedded: its passages, their vectors, and the
-    size they were packed to."""
+    """One document as it was embedded: its passages and their vectors."""
 
     chunks: list[Chunk]
     vectors: Vectors
-    chars: int
+    held: bool
+    """Whether the embedder's limit, and not `max_chars`, ended any of them."""
+    again: bool
+    """Whether the document was packed more than once to get here."""
 
 
-async def _embedded(
-    seam: TextIndexSeam, paragraphs: Sequence[Paragraph], limit: Limit | None, packed: int
-) -> _Cut | str:
+async def _packed(
+    seam: TextIndexSeam, paragraphs: Sequence[Paragraph], room: int | None
+) -> tuple[list[Chunk], bool]:
+    """`paragraphs` as passages of at most the row's `max_chars`, and of at most
+    `room` tokens of the embedder's where there is a room to keep to — and
+    whether that is what ended any of them. In a worker thread: weighing is a
+    tokenizer's work."""
+    config = seam.config
+    weight = None if room is None else Weight(of=seam.weigh, most=room)
+    chunks = await anyio.to_thread.run_sync(
+        partial(
+            chunk_paragraphs,
+            paragraphs,
+            max_chars=config.max_chars,
+            overlap_chars=config.overlap_chars,
+            weight=weight,
+        )
+    )
+    return chunks, weight is not None and weight.bound
+
+
+def _lighter(heaviest: float, room: int | None, share: float) -> int:
+    """Less room than `room`, for texts that were too long packed to it: `share`
+    of what the heaviest of them weighed.
+
+    Of what it weighed and not of `room`, because room is not always what ended
+    a passage: where the embedder reads 8,192 tokens and `max_chars` ends a
+    passage at 300, half the room is still thirteen times the passage. Always
+    under `room`, so asking again gets somewhere, and never under
+    `MIN_PASSAGE_TOKENS`."""
+    aimed = int(heaviest * share)
+    if room is not None:
+        aimed = min(aimed, room - 1)
+    return max(MIN_PASSAGE_TOKENS, aimed)
+
+
+async def _refused(
+    seam: TextIndexSeam, error: HarnessError, texts: list[str], room: int | None
+) -> int | None:
+    """The room to pack to after the embedder refused `texts` with `error`, or
+    `None` when they were already as small as a passage gets. Raises `error`
+    when it is not about length: the one failure a smaller passage fixes is the
+    code an adapter classifies a provider's refusal as, whichever embedder said
+    it.
+
+    **What the refusal says is read first.** A llama.cpp names both numbers —
+    how long the input was and how long a one it takes. The second is the limit
+    from here on (`TextIndexSeam.learn`) and the first is how dense this corpus
+    is (`calibrate`). Weighed again at that density, texts heavier than that
+    limit leaves room for are simply packed to it: the refusal said exactly how
+    much fits.
+
+    Otherwise nothing new says how much does — the refusal named no number, or
+    by this seam's own weighing the texts fit already — and the next packing is
+    aimed in proportion where it named two, a little under, and at half the size
+    where it named none."""
+    if error.code != CONTEXT_WINDOW_EXCEEDED:
+        raise error
+    sent, reads = too_long_facts(str(error))
+    density = seam.density
+    if reads is not None:
+        seam.learn(Limit(reads, "refused"))
+    if sent is not None:
+        seam.calibrate(max(len(text.encode("utf-8")) for text in texts), sent)
+    if room is not None and room <= MIN_PASSAGE_TOKENS:
+        return None
+    named = await seam.room(seam.known)
+    heaviest = await seam.heaviest(texts)
+    # Only where packing to it again is a different packing: less room, or the
+    # same room and the texts now weighed heavier.
+    if (
+        named is not None
+        and named < heaviest
+        and (room is None or named < room or (named == room and seam.density < density))
+    ):
+        return named
+    share = reads / sent * 0.9 if sent and reads and sent > reads else 0.5
+    return _lighter(heaviest, room, share)
+
+
+async def _embedded(seam: TextIndexSeam, paragraphs: Sequence[Paragraph]) -> _Cut | str:
     """Cut one document into passages its embedder reads whole, and embed them.
 
-    Packed to `packed` characters, then held to the limit two ways. **Measured**,
-    where the embedder can count: a document whose text is denser than the
-    estimate — code, a table, a script that is a token a character — is packed
-    again, smaller, until its longest passage fits. And **refused**, where it
-    cannot or the count was wrong: a passage the embedder turns away as too long
-    is not the end of the run, the document is packed smaller — to the limit its
-    refusal names, or at half the size — and sent again. Re-packed rather than
-    split in place, so every passage still starts and ends on the lines it says
-    it does.
+    Packed by what the embedder counts (`_packed`), so a passage is as long as
+    the limit and `max_chars` both allow, wherever in the document it is. Then
+    held to the limit two more ways, because a packing adds up the weights of a
+    passage's parts and an embedder counts the whole. **Measured** as it is
+    sent: a document with a passage over the limit is packed again with less
+    room. And **refused**, where the measure was an estimate and wrong, or
+    nothing said how long an input the embedder reads: a passage it turns away
+    as too long is not the end of the run, the document is packed with less room
+    (`_refused`) and sent again. Re-packed rather than split in place, so every
+    passage still starts and ends on the lines it says it does.
 
-    A document that does not fit even at `MIN_PASSAGE_CHARS` is given up on, with
-    the embedder's own words — what comes back in place of a cut is why — and the
-    run goes on to the next.
+    A document that does not fit even at `MIN_PASSAGE_TOKENS` is given up on,
+    with the embedder's own words — what comes back in place of a cut is why —
+    and the run goes on to the next.
     """
-    config = seam.config
-    chars = packed
+    room = await seam.room(await seam.limit())
+    again = False
     while True:
-        chunks = chunk_paragraphs(
-            paragraphs, max_chars=chars, overlap_chars=min(config.overlap_chars, chars // 4)
-        )
+        chunks, held = await _packed(seam, paragraphs, room)
         if not chunks:
             return "is empty"
         texts = [chunk.text for chunk in chunks]
-        if limit is not None and chars > MIN_PASSAGE_CHARS:
+        # As it stands now: a refusal on the way here may have lowered it.
+        limit = seam.known
+        if limit is not None and room is not None and room > MIN_PASSAGE_TOKENS:
             longest = max(await seam.measure(texts), default=0)
             if longest > limit.tokens:
-                # In proportion, and a little under: the next packing is aimed
-                # at the limit rather than walked down to it.
-                chars = max(MIN_PASSAGE_CHARS, int(chars * limit.tokens / longest * 0.9))
+                # In proportion, and a little under: aimed at the limit rather
+                # than walked down to it.
+                share = limit.tokens / longest * 0.9
+                room = _lighter(await seam.heaviest(texts), room, share)
+                again = True
                 continue
         try:
             vectors = await seam.embed(texts, query=False)
         except HarnessError as error:
-            # The one failure a smaller passage fixes, whichever embedder said
-            # it: the code an adapter classifies a provider's refusal as.
-            if error.code != CONTEXT_WINDOW_EXCEEDED:
-                raise
-            sent, reads = too_long_facts(str(error))
-            if reads is not None:
-                seam.learn(Limit(reads, "refused"))
-            if sent is not None:
-                seam.calibrate(max(len(text.encode("utf-8")) for text in texts), sent)
-            if chars <= MIN_PASSAGE_CHARS:
+            smaller = await _refused(seam, error, texts, room)
+            if smaller is None:
                 return (
                     f"has text the embedder refuses as too long even in passages of "
-                    f"{chars} characters: {error}"
+                    f"{room} tokens: {error}"
                 )
-            if sent and reads and sent > reads:
-                # It said how far over: aim at its limit, a little under.
-                aimed = min(chars - 1, int(chars * reads / sent * 0.9))
-                chars = max(MIN_PASSAGE_CHARS, aimed)
-            else:
-                chars = max(MIN_PASSAGE_CHARS, chars // 2)
+            room, again = smaller, True
             continue
-        return _Cut(chunks, vectors, chars)
+        return _Cut(chunks, vectors, held, again)
+
+
+async def _asked(seam: TextIndexSeam, query: str) -> tuple[Vectors, int | None]:
+    """The question's vector, and how many of its characters were embedded when
+    that is not all of them.
+
+    A question is an input like any other: past what the embedder reads, a local
+    model dropped its tail without a word and a server refused the search. So
+    one that measures over the limit is cut to its head — as much of its start
+    as fits (`_chunk.head_of`) — and the search says it was. Its head, and not
+    an average of its parts: what a model that truncates would have searched by,
+    now said. One refused all the same is cut smaller and asked again, as a
+    passage is (`_refused`), until it is as small as a passage gets; then the
+    refusal is the answer.
+
+    Sent as it was typed when it fits, which is nearly always.
+    """
+    limit = await seam.limit()
+    room: int | None = None
+    if limit is not None:
+        longest = max(await seam.measure([query], query=True), default=0)
+        if longest > limit.tokens:
+            room = await seam.room(limit, query=True)
+    while True:
+        text = (
+            query
+            if room is None
+            else await anyio.to_thread.run_sync(head_of, query, Weight(of=seam.weigh, most=room))
+        )
+        try:
+            vectors = await seam.embed([text], query=True)
+        except HarnessError as error:
+            smaller = await _refused(seam, error, [text], room)
+            if smaller is None:
+                raise
+            room = smaller
+            continue
+        return vectors, None if text == query else len(text)
 
 
 async def _read(
@@ -1240,6 +1437,7 @@ async def adapter(ctx: Context, config: AdapterConfig) -> None:
         SessionEmbedder(
             where=where,
             route=f"{config.provider}/{config.model}",
+            agent=os.environ.get(AGENT_ENV, "").strip() or None,
             query_prefix=config.query_prefix,
             document_prefix=config.document_prefix,
             dimensions=config.dimensions,

@@ -22,6 +22,12 @@ What each built step settled, and what it found that the plan had wrong, is unde
 "What U9 settled", "What U8 settled", "What U5 settled", "What U4a and U6 settled" and
 "What U1 to U4 settled" below.
 
+**2026-11-11.** Passages are packed in the embedder's own unit, and the four gaps the
+plan had recorded as not done are closed: a long question is cut, `phern doctor` says
+the limit, a background run's note says what its result would have, and what a route
+spends on embeddings is in the session's log. See "Packed in the embedder's unit, and
+four gaps closed", and "A fourth `/simplify` pass" over it.
+
 ## Decided with the user after U8
 
 10. **The adapter stays in the harness, and the command asks it for vectors over a
@@ -51,8 +57,10 @@ What each built step settled, and what it found that the plan had wrong, is unde
 - **A route whose adapter cannot embed is refused at the row's mount**, when the route
   is there to ask. One registered later is met at the first call instead.
 - **Usage is counted on the row and shown in `phern doctor`**, texts, requests and the
-  tokens the provider reports. It is not in a session's log or its budget: an
-  embedding is not a turn's request, and the log has no record for one. Not built.
+  tokens the provider reports. It was not in a session's log or its budget: an
+  embedding is not a turn's request, and the log had no record for one. Built on
+  2026-11-11 as `llm/embedded`; see "Packed in the embedder's unit, and four gaps
+  closed".
 - **Not available from a shell.** The command says so and names the two rows that are.
 - **Run against the user's llama.cpp at `127.0.0.1:9931`**, serving
   `bge-large-en-v1.5` with `--embeddings --pooling mean`. Both embedders indexed pH's
@@ -134,9 +142,12 @@ Asked for by the user after the live runs, and not a step of the original plan.
 - **The detected limit is asked for late**, only by a run with something to embed: of
   a local model it means loading it. So the digest that says "unchanged" covers a
   limit a profile *set* and not one that was detected.
-- **Not done**: a question longer than the limit is not cut, `phern doctor` does not
-  show the limit, and a background run's completion note does not mention what the
-  result of a waited-for run does.
+- **Not done here, done on 2026-11-11**: a question longer than the limit was not cut,
+  `phern doctor` did not show the limit, and a background run's completion note did
+  not mention what the result of a waited-for run does. And passages are no longer
+  sized in characters at all: what this section says of `fit`, of 762 characters and
+  of documents "packed again" describes the first version. See "Packed in the
+  embedder's unit, and four gaps closed".
 
 ## A second `/simplify` pass
 
@@ -243,7 +254,8 @@ Left as they were, with the reason:
   into bytes at the corpus's density, and the chunker counts characters, so
   non-ASCII text is over on its first cut. The measure and the refusal loops
   catch it. Packing in the embedder's own unit needs the chunker to take a size
-  function, which changes how every passage is cut.
+  function, which changes how every passage is cut. *Done since, at the user's
+  word: the next section. The density table below is of the version it replaced.*
 - **A counting embedder still packs at the careful density, and measured, that is
   right.** The review guessed prose at 4 bytes a token, so MiniLM's 762-character
   passages looked like 30% more vectors than needed. Measured on 2026-11-11 with
@@ -299,6 +311,204 @@ Left as they were, with the reason:
   forbids.
 - **A "still going" answer still asks the runs for the current progress.** The
   run's own progress would report 0/0 while it waits behind another request's run.
+
+## Packed in the embedder's unit, and four gaps closed
+
+Asked for by the user on 2026-11-11: the one skipped item worth doing if a corpus
+is not English, and the four small things this plan had listed as not done.
+
+**Passages are packed by what the embedder counts.**
+
+- **Two bounds, in two units.** `max_chars` still says how big a passage should
+  be. Beside it the packer takes a `Weight` (`_chunk`): what a text weighs, and
+  the most a chunk may. The text index gives it the embedder's tokens — the local
+  model's tokenizer, the text's own tokens with no prefix or markers; bytes over
+  the corpus's density for an endpoint or a route (`TokenBounded.weigh`) — and
+  the limit less what the embedder puts around a passage (`TextIndexSeam.room`).
+  `fit`, its conversion to characters and `MIN_PASSAGE_CHARS` are gone; the floor
+  is `MIN_PASSAGE_TOKENS`, 16.
+- **Each passage for itself.** Paragraphs and lines are weighed a batch at a
+  time and packed while both bounds hold, so a table in a page of prose is cut
+  small and the prose is not, and a script of three bytes a character fits at
+  the first cut. Before, a dense document came out over, was measured, and all
+  of it was packed again to fit its densest passage.
+- **The check stays.** A packing adds the weights of a passage's parts with a
+  joint between them; an embedder counts the whole. For bytes that sum is never
+  under. For a tokenizer it is exact where blank space is not a token, and on the
+  careful side by one a joint. So what is sent is still measured, and a document
+  over the limit is packed again with less room: a guard that does not fire for
+  the models tried, and is tested with a stub whose blank lines cost tokens no
+  paragraph weighed.
+- **A refusal packs to what it named.** With both numbers read, the texts are
+  weighed again at the density the refusal stated and packed to the limit it
+  named, exactly. Only where that changes nothing — the refusal named no number,
+  or by this seam's weighing the texts fit already — is the room aimed in
+  proportion, or halved. Aimed at what the heaviest text weighed and not at the
+  room: under an 8,192-token window with passages ending at 300 tokens, half the
+  room is still thirteen passages.
+- **A line cut inside itself stays in pieces.** Pieces of one line are never put
+  back in a chunk with a blank line between them, which the unequal pieces a
+  weight makes would otherwise allow.
+- **The result says tokens.** `passage_chars` is gone from `text_index`'s value;
+  `passage_tokens` and `limit` are set when the limit ended a passage sooner than
+  `max_chars` would have, which the packer reports (`Weight.bound`).
+  `cut_smaller` now names only documents packed a second time.
+- **Measured, MiniLM (256 tokens) over `docs/seams`, the same 8 questions**:
+
+  | | Passages | Mean tokens a passage | Over the limit | Packed again | Time | Top-1 / Top-3 |
+  |---|---|---|---|---|---|---|
+  | characters, density 3.0 (before) | 388 | 162 | 0 | 3 | 6.9 s | 7/8 / 7/8 |
+  | the model's tokens (now) | 316 | 199 | 0 | 0 | 6.3 s | 7/8 / 7/8 |
+
+  Packing and checking all 30 documents takes 0.12 s of the 6.3. The longest
+  passage is 254 tokens as sent.
+- **Measured, the user's nomic server at 8,192 tokens**, both embedders, from
+  inside a read-only `bwrap`. The two gave the same passages and ranking in
+  every row, and no document was packed again, refused or skipped:
+
+  | `max_chars` | `max_tokens` | Passages (longest) | Indexing | Top-1 / Top-3 |
+  |---|---|---|---|---|
+  | 1,200 | unset | 233 (1,200 chars) | 2.8–3.2 s | 7/8 / 7/8 |
+  | 100,000 | unset | 31 (24,213 chars) | 2.9–3.1 s | 7/8 / 8/8 |
+  | 1,200 | 128 | 802 (360 chars) | 4.1–4.5 s | 5/8 / 8/8 |
+  | 100,000 | 512 | 182 (1,498 chars) | 2.6–3.0 s | 7/8 / 7/8 |
+
+  The first two rows are what the version before gave.
+- **An index built before keeps its passages.** The digest that says "unchanged"
+  covers the text and the settings, not how the packer works, so a document is
+  cut the new way when it next changes. Its old passages fit; they are only
+  smaller than they need be.
+
+**A question is cut to fit** (`engine._asked`, `_chunk.head_of`).
+
+- One that measures over the limit, with the *question's* prefix, is searched by
+  its head: as much of its start as weighs what the limit leaves, back to the
+  end of a word. `text_search`'s value carries `query_chars` and its text says
+  how many characters were searched.
+- One refused all the same is cut and asked again, by the rule a passage is, and
+  what the refusal taught is kept for the next. At 16 tokens the refusal is the
+  search's failure, in the embedder's words.
+- **Its head, not its paragraphs.** The first version packed the question as a
+  document and took the first chunk; on the live server a 16,887-character page
+  asked under a 128-token limit was searched by its 57-character title.
+- A search now asks the embedder what it reads, as an index run does: of a
+  server, one request a process, which a host makes once.
+- A result repeats at most 200 characters of the question back.
+
+**`phern doctor` says the limit.**
+
+- The session's section says a setting, or for `text-index-adapter` the route's
+  window (`Provider.limit`). A model's own length or a server's is the command's
+  to ask — of a local model that means loading it — so for those it points at
+  `/text-index status`.
+- `/text-index status` says what the last run to embed found. The index's
+  sidecar keeps that phrase (`TextIndex.limit`), for people only: it is never
+  read back as the limit, which is why learning it was not persisted before.
+- `Limit` moved to `_config`, which a session's process may import.
+
+**A background run's note says what its result would have.**
+
+- `Progress.note`, made from the run's value by the `said` a tool passes to
+  `BackgroundRuns.run`, and written with the run's last report — so only a run
+  that ended has one. `ph-utcp` adds it to the note that tells the agent the run
+  ended.
+- The text index says the lines of its result without the list of documents,
+  and with what it skipped counted past eight. The code graph passes none yet.
+
+**What a route spends on embeddings is in the log.**
+
+- `LlmRuntime.embed(request, session=…)` records each request in the session it
+  is for: `llm/embedded`, with the route, how many texts and the provider's
+  `usage`; and `llm/embedding-failed`, with the code and the reason. Both are
+  ignorable and audit-only. Asked for nobody, it records nothing.
+- `llm/embedded` is in `SPENDING_TYPES`, so a sub-agent's account includes it. A
+  goal's fold counts it as a source of its own, `embedding`, which a budget
+  charges only where its `token_sources` names it.
+- **Whose log.** `ph-utcp` sets `$PH_TOOL_AGENT` beside `$PH_TOOL_STATE`, naming
+  the agent the state belongs to; the command sends it with each request and
+  the session's row finds that agent's log. A child that shares its parent's
+  index therefore spends on its parent's account. The name comes from inside a
+  sandbox, so it only chooses a log among this session's agents; a request that
+  names none is embedded and counted on the row alone.
+- One record a request: 40 for the 242 texts of the live run, 66,774 tokens,
+  the same total `phern doctor` shows.
+- Only the adapter embedder spends a route. The endpoint is the command's own
+  request and the local model spends nothing, so neither writes a record.
+
+**What breaks**: `text_index`'s `passage_chars` is `passage_tokens`;
+`MIN_PASSAGE_CHARS` and `TextIndexSeam.fit` are gone; an embedder that is
+`TokenBounded` needs `weigh`, and its `measure` takes `query`; `Limit` is
+imported from `_config`; `TokenSource` has a fourth value, `embedding`.
+
+## A fourth `/simplify` pass
+
+Over the diff of the section above, with the same four reviews. What changed:
+
+- **A long line is cut in linear time.** `_lightened` weighed all that was left
+  of a line after every cut, a tokenizer's pass over the line for each piece.
+  Each cut is now aimed by the stretch just ahead of it, twice the last piece,
+  and a stretch that fits is taken whole. One 100,000-character line under
+  MiniLM's tokenizer, with `max_chars` 100,000 and the heaviest passage 254
+  tokens every time:
+
+  | Line | Before | After |
+  |---|---|---|
+  | CJK | 19.5 s, 394 passages | 0.39 s, 394 passages |
+  | base64 | 13.5 s, 256 passages | 0.47 s, 246 passages |
+
+  At the default `max_chars` it was bounded already (0.44 s). A paragraph of
+  one line is weighed once, with the document's paragraphs, and not again as a
+  line and as a piece. `_fitting` is the one cut, for `_lightened` and `head_of`.
+- **A run's note is made from its value.** `BackgroundRuns.run` takes `said`, and
+  the end is written with what it says; `RunProgress.note` and the filter that
+  kept it off a failed run are gone.
+- **The goal fold's sources are keyed by `SPENDING_TYPES`**, and refused at import
+  when they are not. Adding `llm/embedded` took two edits, and a record put in
+  one set alone would have reached children's accounts and no budget. The
+  table's key column, `usage` in every row, is gone.
+- **A failed embedding has the code a failed stream has** (`_failure_of`): an
+  error that is not an `LlmError` is `UNKNOWN` with its message, where it had
+  been the exception's class name.
+- **No empty-string absences:** `TextIndex.limit` and `SessionEmbedder.agent` are
+  `None` when nothing is known.
+- Smaller:
+  - the echoed question is `ph.text.one_line`;
+  - `_embed` no longer re-exports `Limit`;
+  - `query_chars` is set when the question was cut, not when it measured over;
+  - `_refused`'s test is one condition;
+  - `_embedded` reports the bound of the packing it sent;
+  - `estimate_tokens` is `weigh_by_bytes` rounded.
+- `DESIGN.md` said a child's log holds what its tools embedded. That holds when
+  the index is the child's own; a child sharing its parent's index embeds on
+  the parent's account, as the README says.
+- **Live, after the pass**, against the nomic server at 8,192 tokens with both
+  embedders: the same as before it in every row of the table above — 233, 31,
+  802 and 182 passages; the same rankings; the long question searched by 343 and
+  1,495 characters, with `sandbox.md` first; nothing packed again, refused or
+  skipped. The adapter's first run still logged 40 `llm/embedded` records, 242
+  texts and 66,774 tokens, as `phern doctor` said.
+
+Left as they were, with the reason:
+
+- **Pieces of one cut line are kept apart by a flush rule** (`_of_one_line`),
+  not by each block carrying the separator it had in the source. That deeper
+  fix, with a line cut by both bounds in one pass, lets a line's pieces share a
+  passage: a change to how passages are packed, not a cleanup.
+- **`Provider.max_tokens` still copies the config's.** `Provider` is how another
+  package registers an embedder with a config of its own; typing the config to
+  a base in this package would make every such config inherit from it.
+- **A search asks the limit before it opens the index, not beside it.** In a
+  task group a refusal would come out as an `ExceptionGroup`, and the cost is
+  one-call mode against an endpoint with no `max_tokens` set: one `/props`
+  request a search.
+- **The agent-to-session lookup is open-coded once more.** The same few lines
+  are in the sandbox, workspace and subagents seams and `ph-utcp`; a public
+  helper in core would collect all of them.
+- **`$PH_TOOL_AGENT` names whose state it is, not who called.** A child sharing
+  its parent's index charges even its own searches to the parent. Naming the
+  caller would mean passing it with each call.
+- **`Progress.note` is `""` when there is nothing to add.** It is text, and an
+  empty one says nothing; it is not standing in for a missing value.
 
 ## What decision 11 changed
 

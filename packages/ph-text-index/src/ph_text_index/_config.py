@@ -17,6 +17,7 @@ a directory the engine never writes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -37,6 +38,7 @@ __all__ = [
     "AdapterConfig",
     "Config",
     "EndpointConfig",
+    "Limit",
     "LocalConfig",
     "Scope",
     "index_base",
@@ -78,6 +80,30 @@ shell has none, and says so."""
 STATE = "text-index"
 """The directory, in the calling agent's scratch, a session's indexes are kept
 in: one per embedder beneath it."""
+
+
+@dataclass(frozen=True, slots=True)
+class Limit:
+    """How long an input an embedder reads, in its own tokens, and who said so.
+
+    Here and not with the embedders, because a session says it too — a setting,
+    a route's window, in `phern doctor` — and a session's process never imports
+    the module the embedders are in."""
+
+    tokens: int
+    source: Literal["configured", "model", "server", "route", "refused"]
+    """`refused` is one learned the hard way: the embedder turned an input away
+    as too long, and said in doing so how long an input it takes."""
+
+    def said(self) -> str:
+        whose = {
+            "configured": "configured",
+            "model": "the model's",
+            "server": "the server's",
+            "route": "the route's window",
+            "refused": "what its refusal said",
+        }[self.source]
+        return f"{self.tokens} tokens ({whose})"
 
 
 class Scope(IndexScope):

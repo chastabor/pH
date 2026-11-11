@@ -110,6 +110,7 @@ from ph.session import Session
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ph.text import count_of
 from ph.toolcli import (
+    AGENT_ENV,
     HOST_ENV,
     PROGRESS_FILE,
     STATE_ENV,
@@ -507,6 +508,8 @@ class UtcpSeam:
             if value:
                 env[name] = value
         writable = list(manual.writable)
+        if owner is not None:
+            env[AGENT_ENV] = owner.id
         state = self._state(manual, owner)
         if state is not None:
             env[STATE_ENV] = str(state)
@@ -762,6 +765,9 @@ class UtcpSeam:
         else:
             summary = f"The {label} is finished: {progress.said()}"
             text = f"{summary}. Searches now cover all of it."
+            if progress.note:
+                # What its result would have said to a caller that waited.
+                text = f"{text}\n{progress.note}"
         registry = self.ctx.get(AGENTS)
         # Asked of the roster, which holds the driver: a handle is what a reader
         # is given, and has no inbox to put a message in.

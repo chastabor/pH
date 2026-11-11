@@ -370,34 +370,56 @@ without a word — the tail of the passage is in the index and can never be foun
 with the default model, which reads 256 tokens: 144 of 233 passages cut at 1,200
 characters were longer, and the last eleventh of the text was never embedded.
 
-So passages are cut to what the embedder reads, and `max_chars` is the most they
-are, not what they are:
+So passages are packed by what the embedder counts as well as by `max_chars`,
+and each is as long as both allow:
 
-| embedder | where its limit comes from | how a passage is counted |
+| embedder | where its limit comes from | how text is counted |
 |---|---|---|
 | `text-index-local` | the model's own length; `max_tokens` can lower it | the model's tokenizer, exactly |
-| `text-index-endpoint` | `max_tokens`, else a llama.cpp's `/props` | an estimate, three bytes a token |
-| `text-index-adapter` | `max_tokens`, else the route's window | the same estimate |
+| `text-index-endpoint` | `max_tokens`, else a llama.cpp's `/props` | its bytes, three to a token |
+| `text-index-adapter` | `max_tokens`, else the route's window | the same |
 
-- **Packed to fit.** With a limit known, passages are packed to what it leaves
-  for their text — the limit less the passage prefix and the model's start and
-  end markers, at three bytes a token — when that is less than `max_chars`: 762
-  characters for the default model. A larger limit changes nothing — smaller
-  passages retrieve better, so `max_chars` stays the ceiling.
-- **Measured, then packed smaller.** A document denser than the estimate — code,
-  a table, a script that is a token a character — is packed again until its
-  longest passage fits. Re-packed rather than split in place, so every passage
-  still starts and ends on the lines it says.
+- **Packed in the embedder's unit.** `max_chars` says how big a passage should
+  be; the limit says how much the embedder reads, in its tokens, and a
+  character is a quarter of a token in English prose, a third in code, and one
+  or more in a script that is three bytes a character. So the packer keeps two
+  bounds: `max_chars`, and the limit less the passage prefix and the model's
+  start and end markers. Each paragraph and line is weighed for itself, so a
+  table in a page of prose is cut small and the prose around it is not, and
+  text in any script fits at the first cut. On this repository's `docs/seams`
+  with the default model: 316 passages, none over 256 tokens, where sizing in
+  characters gave 388 and packed three documents twice.
+- **A larger limit changes nothing.** Smaller passages retrieve better, so
+  `max_chars` stays the ceiling: under an 8,192-token window the same documents
+  are 233 passages, as with no limit at all.
+- **Checked as it is sent.** A packing adds up the weights of a passage's
+  parts and an embedder counts the whole, so each document's passages are
+  measured before they go. One over the limit — a tokenizer whose count of a
+  whole is more than its parts' — has its document packed again with less room.
+  Re-packed rather than split in place, so every passage still starts and ends
+  on the lines it says.
 - **A refusal is not the end of the run.** A passage the embedder turns away as
-  too long is packed smaller and sent again. Where the refusal says in numbers
-  what it takes and how long the input was — a llama.cpp and OpenAI both do — the
-  first is taken as the limit for the rest of the run and the second as the
-  corpus's own density, so one refusal settles it. A document that will not fit
-  even at 64 characters is skipped, with the embedder's words, and listed.
-- **It says so.** `text_index` reports the size it packed to and the limit that
-  set it ("Passages are at most 762 characters, to fit the embedder's limit of
-  256 tokens (the model's)") and names each document that needed smaller
-  passages still.
+  too long is packed with less room and sent again. Where the refusal says in
+  numbers what it takes and how long the input was — a llama.cpp and OpenAI
+  both do — the first is the limit for the rest of the run and the second is
+  the corpus's own density, so one refusal settles it. One that names no number
+  halves the document's passages and teaches nothing about the next. A document
+  that will not fit even at 16 tokens is skipped, with the embedder's words, and
+  listed.
+- **It says so.** When the limit ended a passage sooner than `max_chars` would
+  have, `text_index` says what passages were held to and by what ("Passages are
+  held to 254 tokens of text, to fit the embedder's limit of 256 tokens (the
+  model's)"), and it names each document that had to be packed again. A run
+  that finished in the background says the same in the note that tells the
+  agent it ended.
+- **A question is held to it too.** One longer than the embedder reads is
+  searched by its head — as much of its start as fits, to the end of a word —
+  and the answer says how many of its characters were searched. A local model
+  did that without a word, and a server refused the search.
+- **`phern doctor` and `/text-index status` say the limit.** `phern doctor`
+  shows a setting, or the route's window for `text-index-adapter`; a model's own
+  length or a server's is learned by asking, which of a local model means
+  loading it, so `/text-index status` shows what the last run to embed found.
 
 What a server reports is not always what it takes. A llama.cpp's `/props` gives
 its window per slot — `-c 8192` with four slots reports 2,048 — and it refuses
@@ -407,8 +429,8 @@ model's whole length, start the server with `-b` and `-ub` as large as the
 window. A hosted API has nothing to ask, so write `max_tokens` there (8191 for
 OpenAI's embedding models): the route's window is its chat model's.
 
-Changing `max_tokens` cuts every document again. A question longer than the
-limit is not cut: a local model reads its beginning and a server refuses it.
+Changing `max_tokens` cuts every document again. Passages already in an index
+stay as they were cut until their document changes.
 
 ## An endpoint instead of a local model
 
@@ -496,6 +518,15 @@ to, named the way a session names a model:
 - **A failure is the adapter's own.** A key that is not set fails the tool with
   `MISSING_CREDENTIAL` and the variable's name, as a model call would; a server that will not embed with its own words. `phern doctor` shows
   the last one, and how much the session has embedded.
+- **What it spends is in the log.** An embedding is not a turn's request, so
+  each one is its own record, `llm/embedded`, in the log of the agent whose
+  index it is: the route, how many texts, and the tokens the provider counted. A
+  request that failed is `llm/embedding-failed`, with its code and reason. A
+  sub-agent's account includes them, and a goal's budget charges them when its
+  `tokenSources` names `embedding`; by default it charges the agent's own
+  replies and nothing else. A child that shares its parent's index spends on
+  its parent's account, since the index and the host that embeds are the
+  parent's.
 - **The provider is sent the text of every document indexed and every question
   asked**, as it is sent the conversation.
 - **Only from a session.** `ph-text-index` typed at a shell has no session to

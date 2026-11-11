@@ -263,6 +263,15 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "workspace/checkpoint",
         # retry
         "llm/retry",
+        # Texts turned into vectors on one of the session's routes, for this
+        # session's agent (`LlmRuntime.embed`): which route, how many texts, and
+        # what the provider said it cost — or why it would not. Not a turn's
+        # request, so no `assistant/message` carries the spend; this is where a
+        # budget and a child's account find it (`SPENDING_TYPES`). Ignorable:
+        # nothing in the conversation moves, and a reader that skips it loses
+        # the metering.
+        "llm/embedded",
+        "llm/embedding-failed",
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
         "tool/code-dispatch",
         "tool/code-dispatch-start",
@@ -418,6 +427,8 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "offload/input-spilled",
         "skill-steps/budget",
         "step/retry",
+        "llm/embedded",
+        "llm/embedding-failed",
         "compaction/summarized",
         "compaction/declined",
         "compaction/args-truncated",
@@ -568,6 +579,10 @@ AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # replacement `user/message` it rides on. `compaction/declined` is not here:
         # a compaction that did not happen leaves no row of its own.
         "compaction/summarized",
+        # What a tool's embeddings cost, and one that failed: the tool's own card
+        # says what it did with them.
+        "llm/embedded",
+        "llm/embedding-failed",
         # A sub-agent's own records (Phase 11), in its own log and never a root's:
         # its spawn and revocation are the root's tool cards, and its log is read in
         # the auditor's view.
@@ -596,6 +611,8 @@ EXPORTED_SESSION_EVENT_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "turn/end": ("reason",),
         # A model call failed in a way worth another try, and which failure it was.
         "llm/retry": ("code",),
+        # A route would not embed: which failure, and its sentence.
+        "llm/embedding-failed": ("code", "reason"),
         "compaction/declined": ("code", "reason"),
         "harness/refine-considered": ("reason",),
         "goal/settled": ("outcome", "detail"),
@@ -699,6 +716,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "user/message",
             }
         ),
+        "ph.llm.adapter": frozenset({"llm/embedded", "llm/embedding-failed"}),
         "ph.llm.media": frozenset({"attachment/degraded", "attachment/oversized"}),
         "ph.llm.retry": frozenset({"llm/retry"}),
         "ph.persistence.resume": frozenset({"session/resumed"}),

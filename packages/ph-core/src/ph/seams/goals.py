@@ -48,7 +48,7 @@ from ..session import Session, SessionEvent, SessionFoldCache
 from ..session.writers import log_writer
 from ..wire import WireModel, literal_lookup
 from .invariants import contribute_fold_cache
-from .token_meter import event_tokens
+from .token_meter import SPENDING_TYPES, event_tokens
 
 _LOG = log_writer(__name__)
 
@@ -98,14 +98,15 @@ A loop that reported the second as the first would be claiming work it did not
 do, which is the failure this whole layer exists to make impossible.
 """
 
-TokenSource: TypeAlias = Literal["own", "compaction", "children"]
+TokenSource: TypeAlias = Literal["own", "compaction", "embedding", "children"]
 """Who spent the tokens a goal's log records (P2).
 
 `own` is the agent's replies (`assistant/message`), `compaction` the summarize
-calls that shortened its context (`compaction/summarized`), `children` the
+calls that shortened its context (`compaction/summarized`), `embedding` the texts
+its tools had one of the session's routes embed (`llm/embedded`), `children` the
 sub-agents admitted under the goal and everything beneath them — read from their
 own logs (Phase 11), since nothing about a child is in this one. The fold counts the
-first two and `GoalService.spent` adds the third; `Budget.token_sources` decides
+first three and `GoalService.spent` adds the fourth; `Budget.token_sources` decides
 which spend `max_tokens`."""
 
 
@@ -138,8 +139,8 @@ class Budget(WireModel):
     timeout_ms: int = 30 * 60 * 1000
     token_sources: list[TokenSource] = Field(default_factory=own_tokens_only)
     """Whose tokens `max_tokens` charges (P2). The agent's own by default, which
-    is what this budget always counted; add `compaction` and `children` for a
-    ceiling on everything the run cost.
+    is what this budget always counted; add `compaction`, `embedding` and
+    `children` for a ceiling on everything the run cost.
 
     **Decided here, not by the fold.** The fold used to answer this by which
     record types it read — only `assistant/message` — so a compaction's summary
@@ -223,16 +224,26 @@ class GoalState:
         return self.outcome is not None
 
 
-_TOKEN_RECORDS: Mapping[str, tuple[TokenSource, str]] = {
-    "assistant/message": ("own", "usage"),
-    "compaction/summarized": ("compaction", "usage"),
+_SOURCES: Mapping[str, TokenSource] = {
+    "assistant/message": "own",
+    "compaction/summarized": "compaction",
+    "llm/embedded": "embedding",
 }
-"""Each record in a goal's own log that spends tokens (`SPENDING_TYPES`): whose they
-are, and the key they sit under. `children` is not a record here — see
-`GoalService.spent`."""
+"""Whose tokens each record in a goal's own log that spends them is. `children` is
+not a record here — see `GoalService.spent`.
 
-_COUNTED = frozenset({SET, CONTINUED, GATE, SETTLED, "turn/end", *_TOKEN_RECORDS})
-"""The eight types this fold reads. Everything else is skipped on a set test.
+Keyed by exactly `SPENDING_TYPES`, which a sub-agent's account reads too, and
+refused at import when it is not: a record added there and not here would be
+counted in a child's account and charged to no budget."""
+
+if _SOURCES.keys() != SPENDING_TYPES:
+    raise RuntimeError(
+        "ph.seams.goals: every record that spends tokens (SPENDING_TYPES) needs a "
+        f"TokenSource here; differing: {sorted(_SOURCES.keys() ^ SPENDING_TYPES)}"
+    )
+
+_COUNTED = frozenset({SET, CONTINUED, GATE, SETTLED, "turn/end", *_SOURCES})
+"""The types this fold reads. Everything else is skipped on a set test.
 
 A real log is mostly `assistant/chunk`, and without this every one of them pays a
 `data.get`, an open-goal scan and the whole `elif` chain to be discarded.
@@ -273,9 +284,8 @@ def fold_goal_event(found: dict[str, GoalState], event: SessionEvent) -> None:
         current.outcome = GOAL_OUTCOMES.get(as_str(data.get("outcome")))
     elif event.type == "turn/end":
         current.spent.turns += 1
-    elif event.type in _TOKEN_RECORDS:
-        source, key = _TOKEN_RECORDS[event.type]
-        current.spent.tokens[source] += event_tokens(event, key)
+    elif event.type in _SOURCES:
+        current.spent.tokens[_SOURCES[event.type]] += event_tokens(event)
 
 
 def goals(session: Session) -> dict[str, GoalState]:

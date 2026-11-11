@@ -391,10 +391,11 @@ def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None
         return None
 
 
-SPENDING_TYPES = frozenset({"assistant/message", "compaction/summarized"})
-"""The records in a log that spend tokens: a model's replies and the summarize calls
-that shortened its context. What a goal's own log charges and what a sub-agent's log
-says it spent read this one set, so a record added to it reaches both."""
+SPENDING_TYPES = frozenset({"assistant/message", "compaction/summarized", "llm/embedded"})
+"""The records in a log that spend tokens: a model's replies, the summarize calls
+that shortened its context, and the texts a tool had one of the session's routes
+embed. What a goal's own log charges and what a sub-agent's log says it spent read
+this one set, so a record added to it reaches both."""
 
 
 def event_tokens(event: SessionEvent, key: str = "usage") -> int:

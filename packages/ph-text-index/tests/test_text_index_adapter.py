@@ -39,9 +39,11 @@ from text_index_helpers import (
 )
 
 from ph.cordis import MountRefusal
+from ph.json import as_int, as_str
 from ph.keys import LLM, SANDBOX, WORKSPACE
 from ph.llm.adapter import EmbeddingAdapter, EmbeddingRequest, LlmError
 from ph.llm.types import text_of
+from ph.seams.token_meter import event_tokens
 from ph.testing import MountProfile, report_section, run_tool, session_of
 from ph.toolcli import CONFIG_ENV
 from ph.workspace_caches import digest
@@ -190,6 +192,12 @@ async def test_a_text_index_embeds_through_a_route_and_the_key_stays_in_the_harn
     rows = report_section(ctx, "Text index")
     assert rows["embedder"] == "fx-embed through fx"
     assert rows["embedded"].startswith("4 texts in ") and "tokens" in rows["embedded"]
+    # And what the route spent is in the log of the agent it was spent for,
+    # where a budget reads every other spend.
+    spent = [one for one in session_of(agent).events if one.type == "llm/embedded"]
+    assert sum(as_int(one.data["texts"]) for one in spent) == 4
+    assert {(one.data["provider"], one.data["model"]) for one in spent} == {("fx", "fx-embed")}
+    assert sum(event_tokens(one) for one in spent) > 0
     [hosted] = ctx.require(UTCP).hosts.values()
     assert hosted.home is not None
     assert {one.name for one in hosted.home.iterdir() if one.is_dir()} == {
@@ -205,8 +213,9 @@ async def test_a_key_that_is_not_set_is_said_by_the_tool_as_a_model_call_would_s
     docs_tree(tmp_path)
     monkeypatch.delenv(KEY_ENV, raising=False)
     ctx = await mount(*_session(endpoint.url))
+    agent = new_agent(ctx)
 
-    refused = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=new_agent(ctx))
+    refused = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=agent)
 
     assert refused.is_error
     assert refused.error is not None and refused.error.info is not None
@@ -214,6 +223,10 @@ async def test_a_key_that_is_not_set_is_said_by_the_tool_as_a_model_call_would_s
     assert f"{KEY_ENV} is not set" in refused.error.message
     assert "MISSING_CREDENTIAL" in report_section(ctx, "Text index")["last failure"]
     assert endpoint.asked == []
+    # The reason is in the agent's log as well: the request that was not made.
+    failed = [one for one in session_of(agent).events if one.type == "llm/embedding-failed"]
+    assert failed and {one.data["code"] for one in failed} == {"MISSING_CREDENTIAL"}
+    assert all(f"{KEY_ENV} is not set" in as_str(one.data["reason"]) for one in failed)
 
 
 async def test_a_route_whose_adapter_cannot_embed_is_refused_at_the_row(
@@ -302,6 +315,8 @@ async def test_passages_are_cut_to_the_routes_window_and_a_setting_wins(
     asking = _route(endpoint.url, contextWindowProbes=[PROPS])
     ctx = await mount(asking, *_session(endpoint.url)[1:])
     by_window = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=new_agent(ctx))
+    # Which a session can say for itself, to `phern doctor`, with no command.
+    assert report_section(ctx, "Text index")["limit"] == "60 tokens (the route's window)"
     await ctx.drain()
     await ctx.dispose()
 
@@ -311,9 +326,10 @@ async def test_passages_are_cut_to_the_routes_window_and_a_setting_wins(
     assert not by_window.is_error, text_of(by_window.content)
     assert by_window.value["limit"] == "60 tokens (the route's window)"
     # Two tokens of each limit are the markers every passage carries.
-    assert by_window.value["passage_chars"] == 174
+    assert by_window.value["passage_tokens"] == 58
     assert by_setting.value["limit"] == "30 tokens (configured)"
-    assert by_setting.value["passage_chars"] == 84
+    assert report_section(set_, "Text index")["limit"] == "30 tokens (configured)"
+    assert by_setting.value["passage_tokens"] == 28
     assert max(endpoint.took) <= 60
 
 

@@ -48,15 +48,15 @@ from text_index_helpers import prose
 from text_index_stub import DOCUMENT, BoundedEmbedder, HashingEmbedder
 
 from ph.cordis import DEPLOYMENT, Context
-from ph.indexable import triage
+from ph.indexable import paragraphs, triage
 from ph.keys import COMMANDS, FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
 from ph.testing import MountProfile, raising, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
-from ph.toolcli import STATE_ENV
+from ph.toolcli import STATE_ENV, read_progress
 from ph.workspace_caches import WORKSPACE_FILE, digest
-from ph_text_index._chunk import chunk_paragraphs, chunk_text
+from ph_text_index._chunk import Weight, chunk_paragraphs, chunk_text, head_of
 from ph_text_index._config import index_base
 from ph_text_index._embed import Vectors
 from ph_text_index._store import IndexMismatch, TextIndex
@@ -238,6 +238,106 @@ def test_a_single_line_too_long_to_be_a_chunk_is_cut_anyway() -> None:
 def test_an_empty_document_yields_nothing() -> None:
     assert chunk_text("", max_chars=100, overlap_chars=0) == []
     assert chunk_text("\n\n   \n", max_chars=100, overlap_chars=0) == []
+
+
+def _in_words(most: float) -> Weight:
+    """A weight that counts words, so a test can add them up by eye."""
+    return Weight(of=lambda texts: [len(text.split()) for text in texts], most=most)
+
+
+def test_a_chunk_keeps_to_a_weight_as_well_as_to_its_characters() -> None:
+    """Characters are how a profile sizes a passage and not what an embedder
+    counts, so the packer takes a second bound in the embedder's unit and every
+    cut keeps to both. Sized in characters alone and converted, a dense
+    document came out over the limit and all of it was packed again smaller.
+
+    Here ten words a chunk, with room in characters for far more. Paragraphs
+    are packed while they fit, a blank line between two counting for one; a
+    paragraph heavier than a chunk is cut between its lines; a line heavier
+    than one is cut inside itself; and every span still names real lines.
+    """
+    paragraph = "one two three four"
+    heavy = "\n".join(["a b c d e f"] * 3)
+    line = " ".join(f"w{n}" for n in range(25))
+    text = "\n\n".join([paragraph, paragraph, paragraph, heavy, line])
+    weight = _in_words(10)
+
+    chunks = chunk_paragraphs(paragraphs(text), max_chars=1_000, overlap_chars=0, weight=weight)
+
+    assert weight.bound, "the weight ended a chunk and did not say so"
+    counted = [len(chunk.text.split()) for chunk in chunks]
+    assert counted[:5] == [8, 4, 6, 6, 6]
+    # Where inside the line a cut lands is the weight's to say: a word cut in two
+    # counts twice, so the pieces are held to the bound and not to a count.
+    assert len(counted) == 8 and all(count <= 10 for count in counted[5:])
+    lines = text.splitlines()
+    for chunk in chunks[:5]:
+        assert chunk.text.splitlines() == lines[chunk.start_line - 1 : chunk.end_line]
+    # The pieces of the one long line all claim it, as when it is cut by
+    # characters, and are never put back together with a blank line between.
+    assert {(chunk.start_line, chunk.end_line) for chunk in chunks[5:]} == {(11, 11)}
+    assert "".join(chunk.text for chunk in chunks[5:]) == line, "characters were lost in the cut"
+
+    # A weight that never binds changes nothing, and says it did not.
+    roomy = _in_words(10_000)
+    assert chunk_paragraphs(
+        paragraphs(text), max_chars=60, overlap_chars=20, weight=roomy
+    ) == chunk_paragraphs(paragraphs(text), max_chars=60, overlap_chars=20)
+    assert not roomy.bound
+
+
+def test_a_long_line_is_weighed_about_once_however_many_pieces_it_makes() -> None:
+    """Each piece cut off a line is weighed, and what is left of the line is
+    estimated from it until it is nearly done. Weighed again at every cut, the
+    rest of the line was a tokenizer's pass per piece: 18 s for one
+    100,000-character line of CJK where `max_chars` let it through whole."""
+    weighed = 0
+
+    def counted(texts: Sequence[str]) -> list[float]:
+        nonlocal weighed
+        weighed += sum(len(text) for text in texts)
+        return [len(text.split()) for text in texts]
+
+    line = " ".join(f"w{n}" for n in range(20_000))
+
+    chunks = chunk_paragraphs(
+        paragraphs(line), max_chars=len(line), overlap_chars=0, weight=Weight(counted, 50)
+    )
+
+    assert len(chunks) > 300
+    assert all(len(chunk.text.split()) <= 50 for chunk in chunks)
+    assert "".join(chunk.text for chunk in chunks) == line, "characters were lost in the cut"
+    assert weighed < 6 * len(line), f"weighed {weighed / len(line):.0f} times the line"
+
+
+def test_what_is_carried_into_a_chunk_is_at_most_a_quarter_of_its_weight() -> None:
+    """The overlap is a budget in the weight's unit too: what is left after the
+    block that starts the chunk, and never more than a quarter of one — so a
+    bound that leaves room for a few sentences does not spend it on the last."""
+    text = "\n\n".join(["one two", "three four five six seven eight"] * 4)
+
+    chunks = chunk_paragraphs(
+        paragraphs(text), max_chars=1_000, overlap_chars=500, weight=_in_words(12)
+    )
+
+    assert all(len(chunk.text.split()) <= 12 for chunk in chunks)
+    # Two words are carried — a quarter of twelve is three — and six never are.
+    assert [chunk.text.split()[0] for chunk in chunks[1:]] == ["one"] * (len(chunks) - 1)
+    assert len(chunks) > 2
+
+
+def test_the_head_of_a_text_is_as_much_of_its_start_as_the_weight_allows() -> None:
+    """For a question, which is wanted as nearly whole as it can be had: all of
+    it when it fits, and otherwise its start, cut where the weight runs out and
+    back to the end of a word. A text with no words to end at is cut anyway."""
+    question = "which\n\n" + " ".join(f"word{n}" for n in range(40))
+
+    assert head_of(question, _in_words(100)) == question
+    head = head_of(question, _in_words(10))
+    assert question.startswith(head) and question[len(head)].isspace()
+    assert 8 <= len(head.split()) <= 10, "packed as paragraphs, the head was the first word"
+    by_characters = Weight(of=lambda texts: [len(text) for text in texts], most=10)
+    assert head_of("x" * 100, by_characters) == "x" * 10
 
 
 # -------------------------------------------------------------------- store ----
@@ -1534,9 +1634,10 @@ async def test_passages_are_packed_to_what_the_embedder_reads(
     had its tail indexed and unfindable — with the default model, the last
     eleventh of this repository's own documentation.
 
-    The limit is the embedder's to say, and passages are packed to it: here a
-    model that reads 50 tokens gets passages of 150 characters, not 1,200, and
-    never an input it would have cut. The spans still name real lines.
+    The limit is the embedder's to say, and passages are packed by what it
+    counts: here a model that reads 50 tokens gets two paragraphs of 18 a
+    passage, where `max_chars` would have packed nine, and never an input it
+    would have cut. The spans still name real lines.
     """
     (tmp_path / "long.md").write_text(prose(12), encoding="utf-8")
     ctx, embedder = await _bounded(mount, reads=50)
@@ -1548,24 +1649,36 @@ async def test_passages_are_packed_to_what_the_embedder_reads(
     assert not indexed.is_error, text_of(indexed.content)
     assert max(embedder.took) <= 50, "an input longer than the model reads was embedded"
     assert indexed.value["limit"] == "50 tokens (the model's)"
-    assert indexed.value["passage_chars"] == 150
+    assert indexed.value["passage_tokens"] == 50
     assert indexed.value["cut_smaller"] == []
-    assert indexed.value["chunks_added"] == 12
-    assert "Passages are at most 150 characters" in text_of(indexed.content)
+    assert indexed.value["chunks_added"] == 6
+    assert embedder.took[0] == 36, "a passage was not as long as the model reads"
+    assert "Passages are held to 50 tokens of text" in text_of(indexed.content)
+    # And whoever is told of a run nobody waited for is told the same.
+    seam = ctx.require(TEXT_INDEX)
+    report = read_progress(seam.home(ctx.require(FS).root_for(agent)))
+    assert report is not None and report.note.splitlines() == [
+        "Indexed 1 document: 6 passages added, 0 removed.",
+        "Passages are held to 50 tokens of text, to fit the embedder's limit of "
+        "50 tokens (the model's).",
+        "The index now holds 6 passages from 1 document.",
+    ]
     [hit] = found.value["hits"]
     lines = (tmp_path / "long.md").read_text(encoding="utf-8").splitlines()
     assert hit["text"].splitlines() == lines[hit["start_line"] - 1 : hit["end_line"]]
     assert "w7l1n3" in hit["text"]
 
 
-async def test_text_denser_than_the_estimate_is_measured_and_packed_smaller(
+async def test_dense_text_is_packed_by_its_tokens_at_the_first_cut(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Characters are an estimate of tokens, and a careful one: three to a token.
-    Code, a table, a script that is a token a character are denser, so each
-    document's passages are measured by the embedder's own count and a document
-    that does not fit is packed again, smaller, until its longest passage does —
-    and the result names it. The prose beside it is left at the first size."""
+    """Characters are not what an embedder counts. Code, a table, a script that
+    is a token a character: as many characters as prose and several times the
+    tokens. Packed by characters, such a document came out over the limit, was
+    measured, and was packed again smaller — all of it, to fit its densest
+    passage — and the result named it. Packed by the embedder's own count each
+    passage is as long as the limit allows the first time, and the prose beside
+    it is not made smaller on its account."""
     # 24 one-letter words a line: as many characters as a line of prose, and
     # four times the tokens.
     line = " ".join("abcdefghijklmnopqrstuvwx")
@@ -1577,10 +1690,79 @@ async def test_text_denser_than_the_estimate_is_measured_and_packed_smaller(
     indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
 
     assert not indexed.is_error, text_of(indexed.content)
-    assert max(embedder.took) <= 50
-    assert indexed.value["cut_smaller"] == ["dense.md"]
-    assert "1 document needed smaller passages still to fit: dense.md" in text_of(indexed.content)
     assert sorted(indexed.value["documents"]) == ["dense.md", "prose.md"]
+    assert max(embedder.took) <= 50
+    assert indexed.value["cut_smaller"] == [], "a document was packed a second time"
+    assert embedder.calls == 2, "a document was sent more than once"
+    # Two lines of the dense document are a passage, and two paragraphs of prose.
+    assert sorted(embedder.took) == [36, 48]
+
+
+async def test_a_mixed_document_is_cut_small_only_where_it_is_dense(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """One table in a page of prose. Packed again as a whole, the page's prose
+    was cut to the size its table needed; each passage is now weighed for
+    itself, so the prose keeps passages as long as the model reads."""
+    line = " ".join("abcdefghijklmnopqrstuvwx")
+    table = "\n".join([line] * 3)
+    (tmp_path / "page.md").write_text(f"{prose(4)}\n\n{table}\n\n{prose(4)}", encoding="utf-8")
+    ctx, _ = await _bounded(mount, reads=50)
+    agent = _agent(ctx)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["page.md"]}, agent=agent)
+
+    assert not indexed.is_error, text_of(indexed.content)
+    seam = ctx.require(TEXT_INDEX)
+    store = await seam.index(ctx.require(FS).root_for(agent))
+    words = [len(record.text.split()) for record in store._records.values()]
+    assert max(words) <= 50
+    # Two lines of the table are a passage and its third goes with the paragraph
+    # after it; the prose around them is still two paragraphs a passage.
+    assert sorted(words) == [18, 36, 36, 36, 42, 48]
+
+
+async def test_text_in_a_script_of_several_bytes_a_character_fits_at_the_first_cut(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """An embedder with no tokenizer estimates by the bytes, and a script that
+    is three bytes a character is three times the bytes of its characters. Sized
+    in characters, such a passage came out three times over the limit and the
+    document was packed again; weighed by its bytes it fits as it is first cut."""
+    paragraph = "\n".join(" ".join("\u6587\u5b57\u5217" for _ in range(6)) for _ in range(3))
+    (tmp_path / "cjk.md").write_text("\n\n".join([paragraph] * 12), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50, estimates=True)
+    agent = _agent(ctx)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["cjk.md"]}, agent=agent)
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert indexed.value["cut_smaller"] == []
+    assert embedder.calls == 1
+    assert indexed.value["limit"] == "50 tokens (the model's)"
+    seam = ctx.require(TEXT_INDEX)
+    store = await seam.index(ctx.require(FS).root_for(agent))
+    assert max(embedder.measure([one.text for one in store._records.values()], 3)) <= 50
+
+
+async def test_what_is_sent_is_measured_and_a_document_over_the_limit_is_packed_again(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A packing adds up what a passage's paragraphs weigh, and an embedder
+    counts the passage. Where the whole is more than its parts — here every
+    blank line costs twenty tokens that no paragraph weighed — the passages are
+    measured as they are sent, and a document with one over the limit is packed
+    again with less room until its longest fits. The result names it."""
+    (tmp_path / "long.md").write_text(prose(12), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50, breaks=20)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert max(embedder.took) <= 50
+    assert embedder.refused == 0
+    assert indexed.value["cut_smaller"] == ["long.md"]
+    assert "1 document needed smaller passages still to fit: long.md" in text_of(indexed.content)
 
 
 async def test_a_passage_the_embedder_refuses_is_cut_smaller_and_sent_again(
@@ -1592,9 +1774,9 @@ async def test_a_passage_the_embedder_refuses_is_cut_smaller_and_sent_again(
     nothing longer than the embedder reads was ever embedded.
 
     **And what the refusal says is read.** A llama.cpp names both numbers — how
-    long the input was and how long a one it takes — so the next cut is aimed
-    rather than halved, and the rest of the run is packed to the limit it named:
-    one refusal for the whole corpus, where a llama.cpp that reports a window it
+    long the input was and how long a one it takes — so the document is packed
+    to the limit it named rather than halved, and so is the rest of the run: one
+    refusal for the whole corpus, where a llama.cpp that reports a window it
     will not take an embedding as long as would otherwise refuse every document.
     """
     (tmp_path / "a.md").write_text(prose(20), encoding="utf-8")
@@ -1608,8 +1790,10 @@ async def test_a_passage_the_embedder_refuses_is_cut_smaller_and_sent_again(
     assert embedder.refused == 1, "the refusal's own numbers were not used"
     assert indexed.value["cut_smaller"] == ["a.md"]
     assert indexed.value["limit"] == "40 tokens (what its refusal said)"
-    assert indexed.value["passage_chars"] == 120
+    assert indexed.value["passage_tokens"] == 40
     assert indexed.value["total_documents"] == 2
+    # The refused document is packed like the one after it: to the limit named.
+    assert indexed.value["total_chunks"] == 20
 
 
 async def test_a_refusal_that_counts_its_input_says_how_dense_the_corpus_is(
@@ -1633,7 +1817,7 @@ async def test_a_refusal_that_counts_its_input_says_how_dense_the_corpus_is(
     assert max(embedder.took) <= 40
     assert embedder.refused == 1, "the second dense document was refused as well"
     assert indexed.value["cut_smaller"] == ["a.md"]
-    assert indexed.value["passage_chars"] < 120, "the density a refusal stated was not used"
+    assert ctx.require(TEXT_INDEX).density < 2, "the density a refusal stated was not used"
 
 
 async def test_a_passage_packed_to_the_limit_fits_with_its_prefix_and_markers(
@@ -1643,8 +1827,8 @@ async def test_a_passage_packed_to_the_limit_fits_with_its_prefix_and_markers(
     well as its text. Packed to the limit's worth of text, every full passage
     measured a few tokens over it and every document was packed again and
     reported as needing smaller passages — 14 of 30 on a live server. So the
-    passage size leaves room for them: here a prefix of 17 bytes and two
-    markers, 8 tokens at three bytes a token, out of 50 — 126 characters."""
+    room a passage's text is packed to leaves them out: here a prefix of 17
+    bytes and two markers, 8 tokens at three bytes a token, out of 50 — 42."""
     for name in ("a", "b", "c"):
         (tmp_path / f"{name}.md").write_text(prose(12), encoding="utf-8")
     ctx, _ = await _bounded(mount, reads=50, estimates=True, prefix="search_document: ")
@@ -1652,7 +1836,7 @@ async def test_a_passage_packed_to_the_limit_fits_with_its_prefix_and_markers(
     indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
 
     assert not indexed.is_error, text_of(indexed.content)
-    assert indexed.value["passage_chars"] == 126
+    assert indexed.value["passage_tokens"] == 42
     assert indexed.value["cut_smaller"] == [], "a passage packed to fit was packed again"
     assert indexed.value["total_documents"] == 3
 
@@ -1675,7 +1859,7 @@ async def test_a_refusal_with_no_numbers_halves_and_teaches_nothing(
     assert not indexed.is_error, text_of(indexed.content)
     assert max(embedder.took) <= 40
     assert indexed.value["cut_smaller"] == ["a.md", "b.md"]
-    assert indexed.value["limit"] == "" and indexed.value["passage_chars"] == 1200
+    assert indexed.value["limit"] == "" and indexed.value["passage_tokens"] is None
     assert "2 documents needed smaller passages still to fit" in text_of(indexed.content)
 
 
@@ -1695,7 +1879,7 @@ async def test_a_document_that_cannot_be_made_to_fit_is_skipped_and_the_run_goes
     assert indexed.value["documents"] == ["short.md"]
     [skipped] = indexed.value["skipped"]
     assert skipped["path"] == "long.md"
-    assert "refuses as too long even in passages of 64 characters" in skipped["reason"]
+    assert "refuses as too long even in passages of 16 tokens" in skipped["reason"]
     assert "too large to process" in skipped["reason"]
 
 
@@ -1722,7 +1906,121 @@ async def test_a_limit_a_profile_sets_recuts_and_an_unchanged_run_asks_for_none(
     recut = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
     assert recut.value["documents"] == ["long.md"]
     assert recut.value["limit"] == "30 tokens (configured)"
-    assert max(embedder.took[-recut.value["chunks_added"] :]) <= 30
+    assert embedder.took[-1] <= 30
+
+
+async def test_doctor_says_how_long_an_input_the_embedder_reads(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A person asking for status is told the limit without the embedder being
+    asked for it — of a local model that would mean loading it. So it is what
+    is known: nothing before a run has embedded, what this process learned, and
+    in a process that has asked nobody, what the last run to embed wrote beside
+    the index."""
+    (tmp_path / "long.md").write_text(prose(4), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50)
+    seam = ctx.require(TEXT_INDEX)
+    before = report_section(ctx, "Text index")["limit"]
+
+    await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=_agent(ctx))
+    learned = report_section(ctx, "Text index")["limit"]
+    # As a command asked for its status is: nothing open, nobody asked.
+    seam.known, seam._limit_asked = None, False
+    seam._indexes.clear()
+    asked = embedder.asked
+    stored = report_section(ctx, "Text index")["limit"]
+
+    assert before == "not known until a run embeds"
+    assert learned == "50 tokens (the model's)"
+    assert stored == "50 tokens (the model's), as the last run to embed found it"
+    assert embedder.asked == asked, "status asked the embedder what it reads"
+
+
+async def test_doctor_says_a_limit_a_profile_set_before_anything_is_indexed(
+    mount: MountProfile,
+) -> None:
+    """A setting needs nobody asked and nothing embedded to be said."""
+    ctx, embedder = await _bounded(mount, max_tokens=30)
+
+    assert report_section(ctx, "Text index")["limit"] == "30 tokens (configured)"
+    assert embedder.asked == 0
+
+
+# ------------------------------------------------ a question fits it as well ----
+
+
+async def test_a_question_longer_than_the_embedder_reads_is_searched_by_its_head(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A question is an input like a passage. Past what the model reads, a local
+    model dropped its tail without a word, so a long question was searched by
+    its beginning and nobody was told. It is measured the way a passage is, cut
+    to as much of its head as fits — whole words of it — and the answer says
+    how much of it was searched. One that fits is sent as it was typed."""
+    (tmp_path / "long.md").write_text(prose(12), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50)
+    agent = _agent(ctx)
+    await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
+    head = "\n".join(" ".join(f"w7l{line}n{n}" for n in range(6)) for line in range(3))
+    question = f"{head}\n\n{' '.join(f'padding{n}' for n in range(60))}"
+
+    long = await run_tool(ctx, "text_search", {"query": question, "k": 1}, agent=agent)
+    short = await run_tool(ctx, "text_search", {"query": "w7l1n3", "k": 1}, agent=agent)
+
+    assert not long.is_error, text_of(long.content)
+    sent, typed = embedder.took[-2:]
+    assert 45 <= sent <= 50, "the question was not cut to as much as the model reads"
+    assert typed == 1
+    searched = long.value["query_chars"]
+    assert len(head) < searched < len(question)
+    assert question[searched].isspace(), "the head ends inside a word"
+    assert long.value["query"] == question
+    assert f"only its first {searched} characters were searched" in text_of(long.content)
+    assert question not in text_of(long.content), "a page of question was repeated back"
+    assert "w7l1n3" in long.value["hits"][0]["text"]
+    assert short.value["query_chars"] is None
+    assert "characters were searched" not in text_of(short.content)
+
+
+async def test_a_question_the_embedder_refuses_is_cut_and_asked_again(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """An embedder that says how long an input it reads only by refusing one. A
+    question it turns away as too long used to fail the search; it is cut to
+    what the refusal names and asked again, and the search says so. What the
+    refusal taught is kept: the next long question is cut before it is sent."""
+    (tmp_path / "a.md").write_text("two words\n", encoding="utf-8")
+    ctx, embedder = await _bounded(mount, refuses_over=40)
+    agent = _agent(ctx)
+    await run_tool(ctx, "text_index", {"paths": ["a.md"]}, agent=agent)
+    question = " ".join(f"word{n}" for n in range(100))
+
+    found = await run_tool(ctx, "text_search", {"query": question}, agent=agent)
+    again = await run_tool(ctx, "text_search", {"query": question}, agent=agent)
+
+    assert not found.is_error, text_of(found.content)
+    assert embedder.refused == 1
+    assert embedder.took[-1] <= 40
+    assert 0 < found.value["query_chars"] < len(question)
+    assert question.startswith(question[: found.value["query_chars"]])
+    assert again.value["query_chars"] == found.value["query_chars"]
+    assert "only its first" in text_of(found.content)
+
+
+async def test_a_question_that_cannot_be_made_to_fit_fails_the_search_in_the_embedders_words(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The floor, as for a passage: a question is not cut below a phrase, and one
+    the embedder refuses even then is the search's failure, said as it said it."""
+    (tmp_path / "a.md").write_text("two words\n", encoding="utf-8")
+    ctx, _ = await _bounded(mount, refuses_over=3)
+    agent = _agent(ctx)
+    await run_tool(ctx, "text_index", {"paths": ["a.md"]}, agent=agent)
+
+    refused = await run_tool(ctx, "text_search", {"query": " ".join(["word"] * 60)}, agent=agent)
+
+    assert refused.is_error
+    assert "too large to process" in text_of(refused.content)
 
 
 def test_the_local_model_says_what_it_reads_and_counts_with_its_own_tokenizer() -> None:
@@ -1731,14 +2029,20 @@ def test_the_local_model_says_what_it_reads_and_counts_with_its_own_tokenizer() 
     it, and a passage is counted the way the model counts it: with its prefix
     and its markers. A fake model, because the fact under test is which of its
     attributes are read."""
-    from ph_text_index._embed import Limit, SentenceTransformerEmbedder, TokenBounded
+    from ph_text_index._config import Limit
+    from ph_text_index._embed import SentenceTransformerEmbedder, TokenBounded
 
     class Model:
         max_seq_length = 8
 
         @staticmethod
-        def tokenizer(texts: list[str], **_settings: object) -> dict[str, list[list[int]]]:
-            return {"input_ids": [[0, *range(len(text.split())), 0] for text in texts]}
+        def tokenizer(
+            texts: list[str], *, add_special_tokens: bool, **_settings: object
+        ) -> dict[str, list[list[int]]]:
+            markers = [0] if add_special_tokens else []
+            return {
+                "input_ids": [[*markers, *range(len(text.split())), *markers] for text in texts]
+            }
 
     embedder = SentenceTransformerEmbedder(model_name="m", document_prefix="passage: ")
     embedder._model = Model()
@@ -1746,6 +2050,8 @@ def test_the_local_model_says_what_it_reads_and_counts_with_its_own_tokenizer() 
     assert isinstance(embedder, TokenBounded)
     assert embedder.limit() == Limit(8, "model")
     assert embedder.measure(["one two three"], 3) == [6], "the prefix and both markers count"
+    assert embedder.measure(["one two three"], 3, query=True) == [5], "a question has no prefix"
+    assert embedder.weigh(["one two three"], 3) == [3], "a part of a passage is its own tokens"
     embedder.max_tokens = 5
     assert embedder.limit() == Limit(5, "configured")
     embedder.max_tokens = 500

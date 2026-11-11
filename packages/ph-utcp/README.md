@@ -46,6 +46,11 @@ writing the tree. Two settings say where such a tool writes:
   It is per session and agent, so two agents never share state, and an agent
   that restarts is told the same directory and finds what it built. A tool made
   with `ph.toolcli` reads it with `state_dir()`.
+- **`$PH_TOOL_AGENT`** names the agent that state belongs to, for a tool that
+  asks the session to do something on that agent's account — the text index's
+  embeddings through a model route are recorded in that agent's log. It is a
+  word from inside a sandbox: a session uses it for bookkeeping and grants
+  nothing by it.
 - **Temporary files go in the scratch too.** Every confined command gets
   `TMPDIR=<the agent's scratch>` from the shell seam: the sandbox leaves it no
   writable `/tmp`, and a model library that makes one temporary file would
@@ -100,7 +105,9 @@ an agent works in:
   directory. While one works the footer says how far it has got ("notes index
   120/539 documents"); when it ends, and somebody is owed word of it — a call was
   answered "still going", or the host began the work unasked — the agent is told,
-  with a note that waits for its next step and starts no turn.
+  with a note that waits for its next step and starts no turn. The note carries
+  what the run itself has to say of its end (`Progress.note`): what the tool's
+  result would have told a caller that waited.
 
 Sockets are under `$PH_RUNTIME/utcp`, granted to the host and to each call. A
 deployment with no job runner or no usable runtime directory runs every call by

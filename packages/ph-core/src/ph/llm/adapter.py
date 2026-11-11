@@ -18,11 +18,12 @@ import logging
 import re
 from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..cordis import Context, Running, events, plugin, running
 from ..json import JsonValue, as_int, as_obj, as_seq
 from ..keys import LLM
+from ..session.writers import log_writer
 from .types import (
     CallSetting,
     Finish,
@@ -33,10 +34,16 @@ from .types import (
     Sampling,
     SamplingSetting,
     StreamChunk,
+    TokenUsage,
     unmapped_effort,
 )
 
+if TYPE_CHECKING:
+    from ..session import Session
+
 __all__ = [
+    "EMBEDDED",
+    "EMBEDDING_FAILED",
     "AdapterHandle",
     "EmbeddingAdapter",
     "EmbeddingRequest",
@@ -57,6 +64,17 @@ __all__ = [
 ]
 
 log = logging.getLogger("ph.llm")
+
+_LOG = log_writer(__name__)
+
+EMBEDDED = "llm/embedded"
+"""Texts were embedded on a route for a session's agent: the route, how many
+texts, and the provider's `usage` when it reports one. A record that spends
+tokens (`ph.seams.token_meter.SPENDING_TYPES`)."""
+
+EMBEDDING_FAILED = "llm/embedding-failed"
+"""A route would not embed: the route, how many texts, and the failure's `code`
+and `reason`."""
 
 events.declare(
     "llm/stream",
@@ -482,22 +500,55 @@ class LlmRuntime:
         handle = self._routes.get(provider)
         return handle is not None and isinstance(handle.adapter, EmbeddingAdapter)
 
-    async def embed(self, request: EmbeddingRequest) -> Embeddings:
+    async def embed(
+        self, request: EmbeddingRequest, *, session: Session | None = None
+    ) -> Embeddings:
         """Embed `request.inputs` through the adapter that owns its route.
 
         Run as the row that registered the adapter, like `stream`. Refused with a
         code when the route has no adapter (`NO_ADAPTER`) or its adapter cannot
-        embed (`NO_EMBEDDINGS`), each naming the provider."""
-        handle = self._route(request.provider)
-        adapter = handle.adapter
-        if not isinstance(adapter, EmbeddingAdapter):
-            raise LlmError(
-                f'the adapter for provider "{request.provider}" does not embed; name a '
-                "provider whose adapter does, or use an embeddings endpoint",
-                "NO_EMBEDDINGS",
+        embed (`NO_EMBEDDINGS`), each naming the provider.
+
+        **`session` is whose spend it is.** An embedding is not a turn's request,
+        so nothing else in a log says a route was used: given a session, what
+        the request cost is recorded in it (`EMBEDDED`), where a budget and a
+        child's account read every other spend, and so is a request the route
+        refused or failed (`EMBEDDING_FAILED`), with why. Without one the caller
+        is embedding for nobody's account, and nothing is recorded."""
+        account: dict[str, JsonValue] = {
+            "provider": request.provider,
+            "model": request.model,
+            "texts": len(request.inputs),
+        }
+        try:
+            handle = self._route(request.provider)
+            adapter = handle.adapter
+            if not isinstance(adapter, EmbeddingAdapter):
+                raise LlmError(
+                    f'the adapter for provider "{request.provider}" does not embed; name a '
+                    "provider whose adapter does, or use an embeddings endpoint",
+                    "NO_EMBEDDINGS",
+                )
+            with running(handle.by):
+                result = await adapter.embed(request)
+        except Exception as error:
+            if session is not None:
+                failure = _failure_of(error)
+                _LOG.append(
+                    session,
+                    EMBEDDING_FAILED,
+                    {**account, "code": failure.code, "reason": failure.message},
+                )
+            raise
+        if session is not None:
+            tokens = result.input_tokens
+            usage = (
+                None
+                if tokens is None
+                else TokenUsage(input_tokens=tokens, output_tokens=0).to_wire()
             )
-        with running(handle.by):
-            return await adapter.embed(request)
+            _LOG.append(session, EMBEDDED, {**account, "usage": usage})
+        return result
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         """Ask the owning adapter what it knows about one exact route."""
@@ -598,6 +649,16 @@ class LlmRuntime:
         return await self.ctx.waterfall("llm/stream", options, inner=inner)
 
 
+def _failure_of(error: Exception) -> LlmFailure:
+    """What an adapter's raise says, as a failure: an `LlmError`'s own, and any
+    other exception's message under `UNKNOWN`. One reading for a stream that
+    ends in error and an embedding that does, so a route that fails both ways
+    is recorded with one code."""
+    if isinstance(error, LlmError):
+        return error.failure
+    return LlmFailure(message=str(error) or type(error).__name__, code="UNKNOWN")
+
+
 async def _normalized(
     source: AsyncIterator[StreamChunk], request: GenerateOptions, by: Running
 ) -> AsyncIterator[StreamChunk]:
@@ -635,11 +696,7 @@ async def _normalized(
                     return
             yield chunk
     except Exception as error:
-        failure = (
-            error.failure
-            if isinstance(error, LlmError)
-            else LlmFailure(message=str(error) or type(error).__name__, code="UNKNOWN")
-        )
+        failure = _failure_of(error)
         log.debug("ph.llm: adapter for %s failed: %s", request.provider, failure.message)
         yield Finish(reason=FinishReason(kind="error", failure=failure))
 

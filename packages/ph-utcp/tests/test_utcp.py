@@ -145,6 +145,7 @@ elif sys.argv[2] == "echo":
         "env": {k: v for k, v in os.environ.items() if k.startswith("FX_")},
         "home": os.environ.get("HOME"),
         "state": os.environ.get("PH_TOOL_STATE"),
+        "agent": os.environ.get("PH_TOOL_AGENT"),
     }))
 elif sys.argv[2] == "write":
     with open(arg("path"), "w") as handle:
@@ -525,6 +526,10 @@ async def test_a_manuals_state_is_a_directory_of_the_calling_agents_scratch(
     assert await told("fx_echo", one) == await told("fx_echo", one)
     assert await told("fx_echo", other) != await told("fx_echo", one)
     assert await told("bare_echo", one) is None
+    # And whose it is, by name, for a tool that asks the session to do something
+    # on that agent's account.
+    named = await run_tool(ctx, "fx_echo", {"text": "x"}, agent=one)
+    assert named.value["agent"] == one.id
 
 
 async def test_a_grant_that_overlaps_the_workspace_is_refused_and_said(

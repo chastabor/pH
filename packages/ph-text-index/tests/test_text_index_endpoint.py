@@ -282,7 +282,7 @@ def test_an_endpoint_says_what_it_reads_where_it_can_be_asked(endpoint: Endpoint
     """A llama.cpp answers `/props` with its window, so nobody has to write it
     down; a server with nothing to ask has no limit known ahead of time; and a
     setting is the answer wherever one is written."""
-    from ph_text_index._embed import Limit
+    from ph_text_index._config import Limit
 
     endpoint.window = 512
     assert EndpointEmbedder(base_url=endpoint.url).limit() == Limit(512, "server")
@@ -307,9 +307,9 @@ async def test_passages_are_cut_to_the_window_a_server_reports(
     assert not indexed.is_error, text_of(indexed.content)
     assert indexed.value["limit"] == "60 tokens (the server's)"
     # 58 tokens of text: two of the 60 are the markers every passage carries.
-    assert indexed.value["passage_chars"] == 174
+    assert indexed.value["passage_tokens"] == 58
     assert max(endpoint.took) <= 60
-    assert "Passages are at most 174 characters" in text_of(indexed.content)
+    assert "Passages are held to 58 tokens of text" in text_of(indexed.content)
 
 
 async def test_a_server_that_refuses_a_passage_is_sent_a_smaller_one(

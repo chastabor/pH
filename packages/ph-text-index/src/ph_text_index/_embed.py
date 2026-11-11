@@ -35,7 +35,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
 
 from ph.framing import FramingError, ask
 from ph.json import JsonValue, as_int, as_obj, as_str, dumps, loads
@@ -44,6 +44,8 @@ from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, MISSING_CREDENTIAL
 from ph.toolcli import read_envelope
 from ph.tools.errors import HarnessError
 
+from ._config import Limit
+
 __all__ = [
     "BYTES_PER_TOKEN",
     "ENDPOINT_FAILED",
@@ -51,13 +53,13 @@ __all__ = [
     "SESSION_GONE",
     "Embedder",
     "EndpointEmbedder",
-    "Limit",
     "LocalWeights",
     "SentenceTransformerEmbedder",
     "SessionEmbedder",
     "TokenBounded",
     "Vectors",
     "estimate_tokens",
+    "weigh_by_bytes",
 ]
 
 BYTES_PER_TOKEN = 3
@@ -89,31 +91,19 @@ that need it, and an annotation must not be what drags it into import time.
 """
 
 
-@dataclass(frozen=True, slots=True)
-class Limit:
-    """How long an input an embedder reads, in its own tokens, and who said so."""
-
-    tokens: int
-    source: Literal["configured", "model", "server", "route", "refused"]
-    """`refused` is one learned the hard way: the embedder turned an input away
-    as too long, and said in doing so how long an input it takes."""
-
-    def said(self) -> str:
-        whose = {
-            "configured": "configured",
-            "model": "the model's",
-            "server": "the server's",
-            "route": "the route's window",
-            "refused": "what its refusal said",
-        }[self.source]
-        return f"{self.tokens} tokens ({whose})"
-
-
 def estimate_tokens(text: str, bytes_per_token: float) -> int:
     """About how many tokens `text` is, for an embedder with no tokenizer to ask:
     its bytes over `bytes_per_token` — `BYTES_PER_TOKEN`, or the corpus's density
     once a refusal said it — and two for the markers a model adds."""
-    return math.ceil(len(text.encode("utf-8")) / bytes_per_token) + 2
+    return math.ceil(weigh_by_bytes([text], bytes_per_token)[0]) + 2
+
+
+def weigh_by_bytes(texts: Sequence[str], bytes_per_token: float) -> list[float]:
+    """About how many tokens each text adds to a passage, where there is no
+    tokenizer to ask: its bytes over `bytes_per_token`, unrounded — so the
+    weights of a passage's parts add up to the passage's, and `estimate_tokens`
+    of the whole is never over what they said."""
+    return [len(text.encode("utf-8")) / bytes_per_token for text in texts]
 
 
 @runtime_checkable
@@ -125,7 +115,8 @@ class TokenBounded(Protocol):
     a profile: a model reads so many tokens and no more. Past that a local model
     drops the rest without a word — the tail of the passage is indexed and can
     never be found — and a server refuses the request. `limit` is where the
-    bound comes from and `measure` is how a passage is held to it.
+    bound comes from, `weigh` is what a passage is packed by and `measure` is
+    how what is sent is checked against it.
     """
 
     max_tokens: int | None
@@ -136,11 +127,18 @@ class TokenBounded(Protocol):
         """The bound, or `None` when nothing says: the setting, else what the
         model or its server reports. May load a model or ask a server."""
 
-    def measure(self, texts: Sequence[str], bytes_per_token: float) -> list[int]:
-        """How many tokens each of `texts` is as a document, prefix and markers
-        included: counted where there is a tokenizer, estimated at
-        `bytes_per_token` — the corpus's density, as far as it is known — where
-        not."""
+    def measure(
+        self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False
+    ) -> list[int]:
+        """How many tokens each of `texts` is as it is sent — as a document, or
+        as a question — prefix and markers included: counted where there is a
+        tokenizer, estimated at `bytes_per_token` — the corpus's density, as far
+        as it is known — where not."""
+
+    def weigh(self, texts: Sequence[str], bytes_per_token: float) -> Sequence[float]:
+        """How many tokens each of `texts` adds to a passage it is part of: its
+        own, with no prefix and no markers. What passages are packed by
+        (`_chunk.Weight`), so it is asked of a paragraph and of a line."""
 
 
 @runtime_checkable
@@ -347,15 +345,31 @@ class SentenceTransformerEmbedder:
             return Limit(own, "model")
         return None if self.max_tokens is None else Limit(self.max_tokens, "configured")
 
-    def measure(self, texts: Sequence[str], bytes_per_token: float) -> list[int]:
-        """Counted by the model's own tokenizer, with the passage prefix and the
-        markers it adds — so "fits" means what the model means by it."""
+    def measure(
+        self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False
+    ) -> list[int]:
+        """Counted by the model's own tokenizer, with the prefix and the markers
+        it adds — so "fits" means what the model means by it."""
+        prefix = self.query_prefix if query else self.document_prefix
+        counted = self._counted([f"{prefix}{text}" for text in texts], markers=True)
+        return _estimated(prefix, texts, bytes_per_token) if counted is None else counted
+
+    def weigh(self, texts: Sequence[str], bytes_per_token: float) -> Sequence[float]:
+        """Counted by the model's own tokenizer: the text's own tokens."""
+        counted = self._counted(texts, markers=False)
+        return weigh_by_bytes(texts, bytes_per_token) if counted is None else counted
+
+    def _counted(self, texts: Sequence[str], *, markers: bool) -> list[int] | None:
+        """How many tokens the model's tokenizer makes of each text, or `None`
+        for a model that has none to ask."""
         tokenizer = getattr(self._load(), "tokenizer", None)
         if tokenizer is None:
-            return _estimated(self.document_prefix, texts, bytes_per_token)
+            return None
+        if not texts:
+            return []
         encoded = tokenizer(
-            [f"{self.document_prefix}{text}" for text in texts],
-            add_special_tokens=True,
+            list(texts),
+            add_special_tokens=markers,
             truncation=False,
             # Or it logs a warning for every text over the model's length, which
             # is the thing being measured.
@@ -399,7 +413,7 @@ class SentenceTransformerEmbedder:
 
 
 def _estimated(prefix: str, texts: Sequence[str], bytes_per_token: float) -> list[int]:
-    """`estimate_tokens` of each text as a passage is sent: behind its prefix."""
+    """`estimate_tokens` of each text as it is sent: behind its prefix."""
     return [estimate_tokens(f"{prefix}{text}", bytes_per_token) for text in texts]
 
 
@@ -445,8 +459,14 @@ class _Remote(ABC):
             return Limit(self.max_tokens, "configured")
         return self._reported()
 
-    def measure(self, texts: Sequence[str], bytes_per_token: float) -> list[int]:
-        return _estimated(self.document_prefix, texts, bytes_per_token)
+    def measure(
+        self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False
+    ) -> list[int]:
+        prefix = self.query_prefix if query else self.document_prefix
+        return _estimated(prefix, texts, bytes_per_token)
+
+    def weigh(self, texts: Sequence[str], bytes_per_token: float) -> Sequence[float]:
+        return weigh_by_bytes(texts, bytes_per_token)
 
     def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
         prefix = self.query_prefix if query else self.document_prefix
@@ -585,6 +605,10 @@ class SessionEmbedder(_Remote):
     """The session's socket."""
     route: str
     """The session's provider and model, `provider/model`."""
+    agent: str | None = None
+    """The agent this command works for (`ph.toolcli.AGENT_ENV`), told to the
+    session with each request so what the route spends is in that agent's log.
+    `None` where nobody said, and then the spend is in no log."""
 
     @property
     def name(self) -> str:
@@ -629,7 +653,7 @@ class SessionEmbedder(_Remote):
         # Heavy, and needed only where an index is built or searched.
         import numpy as np  # noqa: PLC0415
 
-        answered = as_obj(self._request({"inputs": inputs}))
+        answered = as_obj(self._request({"inputs": inputs, "agent": self.agent}))
         packed = base64.b64decode(as_str(answered.get("vectors")))
         rows = np.frombuffer(packed, dtype=np.float32)
         width = as_int(answered.get("dim"))

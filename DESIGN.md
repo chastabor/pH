@@ -1352,7 +1352,9 @@ is woken through `ensure_addressable` first. Pending messages are capped per
 session, and bodies at 16 KiB.
 
 **Usage stays where it was spent.** A child's answers carry their `usage` on its
-own `assistant/message` records, and its compactions on `compaction/summarized`.
+own `assistant/message` records, its compactions on `compaction/summarized`, and
+what its tools had a model route embed on `llm/embedded` — when the index was its
+own: a child that shares its parent's index embeds on the parent's account.
 Nothing is copied into the parent's log; `ChildState.tokens` totals them.
 
 > It is **not an input to the parent's context meter**: `TokenMeter.last_usage`

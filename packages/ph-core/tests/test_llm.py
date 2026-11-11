@@ -21,7 +21,14 @@ from ph.cordis import Context, running
 from ph.json import JsonObject
 from ph.keys import LLM
 from ph.llm import BlockAssembler, named_call
-from ph.llm.adapter import ResolvedModel
+from ph.llm.adapter import (
+    EMBEDDED,
+    EMBEDDING_FAILED,
+    EmbeddingRequest,
+    Embeddings,
+    LlmError,
+    ResolvedModel,
+)
 from ph.llm.adapter import apply as llm_apply
 from ph.llm.types import (
     BlockEnd,
@@ -46,6 +53,8 @@ from ph.llm.types import (
     is_token_delta,
     user_text,
 )
+from ph.seams.token_meter import SPENDING_TYPES, event_tokens
+from ph.session import Session
 from ph.testing import as_kind, block_text, text_chunks
 
 pytestmark = pytest.mark.anyio
@@ -354,6 +363,84 @@ async def test_an_adapters_stream_body_runs_inside_its_rows_binding() -> None:
         pass
 
     assert seen == [row], "the adapter's body ran outside its row's binding"
+    await root.dispose()
+
+
+async def test_an_embedding_is_recorded_in_the_log_of_the_session_it_was_for() -> None:
+    """An embedding is not a turn's request, so no `assistant/message` carries
+    what it cost: a route could be spent through a tool and no log say so. Given
+    the session it is for, the door records each request there — the route, how
+    many texts, and the provider's own count where it gives one — and a request
+    the route failed with why. Asked for nobody, it records nothing.
+
+    The record is one that spends (`SPENDING_TYPES`), which is how a goal's
+    budget and a child's account come to read it.
+    """
+    root = Context()
+    await llm_apply(root, None)
+    runtime = root.require(LLM)
+
+    class Embeds:
+        def stream(self, options: GenerateOptions) -> Any:  # noqa: ANN401
+            raise NotImplementedError
+
+        async def embed(self, request: EmbeddingRequest) -> Embeddings:
+            if request.model == "down":
+                raise LlmError("the model is loading", "PROVIDER_ERROR")
+            counted = None if request.model == "silent" else 7 * len(request.inputs)
+            return Embeddings(tuple((1.0,) for _ in request.inputs), input_tokens=counted)
+
+    runtime.register_adapter(["fx"], Embeds())
+    session = Session("s")
+
+    def asked(model: str) -> EmbeddingRequest:
+        return EmbeddingRequest(provider="fx", model=model, inputs=("a", "b"))
+
+    await runtime.embed(asked("m"), session=session)
+    await runtime.embed(asked("silent"), session=session)
+    with pytest.raises(LlmError):
+        await runtime.embed(asked("down"), session=session)
+    with pytest.raises(LlmError):
+        await runtime.embed(
+            EmbeddingRequest(provider="nobody", model="m", inputs=("a",)), session=session
+        )
+    await runtime.embed(asked("m"))
+
+    records = [(one.type, dict(one.data)) for one in session.events]
+    assert records == [
+        (
+            EMBEDDED,
+            {
+                "provider": "fx",
+                "model": "m",
+                "texts": 2,
+                "usage": {"inputTokens": 14, "outputTokens": 0},
+            },
+        ),
+        (EMBEDDED, {"provider": "fx", "model": "silent", "texts": 2, "usage": None}),
+        (
+            EMBEDDING_FAILED,
+            {
+                "provider": "fx",
+                "model": "down",
+                "texts": 2,
+                "code": "PROVIDER_ERROR",
+                "reason": "the model is loading",
+            },
+        ),
+        (
+            EMBEDDING_FAILED,
+            {
+                "provider": "nobody",
+                "model": "m",
+                "texts": 1,
+                "code": "NO_ADAPTER",
+                "reason": 'no adapter is registered for provider "nobody"',
+            },
+        ),
+    ]
+    assert EMBEDDED in SPENDING_TYPES and EMBEDDING_FAILED not in SPENDING_TYPES
+    assert [event_tokens(one) for one in session.events] == [14, 0, 0, 0]
     await root.dispose()
 
 

@@ -250,6 +250,7 @@ async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
         args,
         partial(index_run, args, run),
         what="documents",
+        said=summary,  # the value in a few lines, for a run nobody waited for
         raise_if_canceled=run.raise_if_canceled,
     )
     if value is not None:
@@ -262,7 +263,9 @@ goes on past the call, and the same request asked again joins it. The work says
 how much there is (`begin`) and how far it has got (`tick`); its end, its
 failure and whether anybody is owed word of them are written for it, to
 `progress.json` in `home` — the tool's state directory. That file is what moves
-the footer and what tells the agent when the run ends. The call's cancellation
+the footer and what tells the agent when the run ends; `said` is what that
+telling says beyond the count — what the value the work returned says to a
+caller that waited, in a few lines. The call's cancellation
 is asked at each `tick`, and only with no host: a run in a host outlives the
 call, so the work never reads `run.raise_if_canceled` itself. Save as you go, so
 a host that is ended keeps what it finished.

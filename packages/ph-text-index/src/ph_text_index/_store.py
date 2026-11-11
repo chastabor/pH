@@ -152,6 +152,11 @@ class TextIndex:
     that was stopped before it could store its token: the next run reads the
     document, finds the digest it has, and embeds nothing. Per document, beside
     `_vcs_ids`, for that field's reason."""
+    limit: str | None = None
+    """The embedder's limit, as a phrase, when a document was last embedded into
+    this index, where one was known. For a person asking its status: a command asked for one has
+    embedded nothing, and asking a local model what it reads means loading it.
+    Never read back as the limit — a server can be given a longer window."""
     _seen: _Signature = (None, None)
     """The files as this copy last read or wrote them. See `stale`."""
 
@@ -206,6 +211,8 @@ class TextIndex:
         # Absent from an index written before documents had one: each then reads
         # as changed once, and is embedded again.
         self._digests = {str(path): str(one) for path, one in (raw.get("digests") or {}).items()}
+        limit = raw.get("limit")
+        self.limit = limit if isinstance(limit, str) else None
         if self.index_path.exists():
             self._index = _turbovec().IdMapIndex.load(str(self.index_path))
         held = {
@@ -307,6 +314,7 @@ class TextIndex:
             "vcs": self._token,
             "vcs_ids": self._vcs_ids,
             "digests": self._digests,
+            "limit": self.limit,
             "model": self.model,
             "dim": self._dim,
             "bit_width": self.bit_width,

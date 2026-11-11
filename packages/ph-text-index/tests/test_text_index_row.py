@@ -420,6 +420,8 @@ async def test_the_rows_report_themselves_to_doctor(mount: MountProfile, tmp_pat
 
     assert rows["tools"] == "text_index, text_search (through UTCP)"
     assert rows["embedder"] == "stub-hashing:96"
+    # No setting, and nothing a session can ask without starting the command.
+    assert rows["limit"] == "asked of the embedder when it embeds; `/text-index status` shows it"
     assert "scratch" in rows["index"]
     assert rows["details"] == "/text-index status"
 
@@ -688,6 +690,9 @@ async def test_a_root_agents_first_step_starts_the_index_and_it_is_told_when_it_
 
     [note] = agent.inbox.next_step
     assert "The text index is finished: 12 documents" in text_of(note.content)
+    # With what the tool's result would have said to a caller that waited for it.
+    assert "Indexed 12 documents: 12 passages added, 0 removed." in text_of(note.content)
+    assert "The index now holds 12 passages from 12 documents." in text_of(note.content)
     # Once for the tree: a later step neither starts another host nor indexes
     # the tree again for nobody.
     [hosted] = utcp.hosts.values()

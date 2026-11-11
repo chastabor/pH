@@ -31,9 +31,9 @@ Do not wait or poll — `text_search` works meanwhile, over what is indexed so
 far, and says "Not finished indexing" when that is the case. Search again after
 the note if the first answer was thin.
 
-Passages are cut to what the embedding model reads, so the result may say they
-are smaller than configured, or name documents that needed smaller ones. That is
-the index working; nothing of a document is dropped.
+Passages are cut to what the embedding model reads, so the result may say how
+many tokens they were held to, or name documents that needed smaller ones. That
+is the index working; nothing of a document is dropped.
 
 A file too large to index is **skipped and reported** in `skipped`, not an
 error — read that list, because a thin corpus and a corpus that quietly refused
@@ -49,6 +49,9 @@ The whole point is that your phrasing need not match the document's. Ask the
 question you actually have. `paths=["docs/seams"]` narrows the search to a
 subtree, which is worth doing when you know roughly where the answer lives — it
 is faster and it removes near-misses from elsewhere.
+
+Ask a question, not a page. One longer than the embedding model reads is
+searched by its beginning only, and the result says how much of it was.
 
 ## Read the answer, then read around it
 

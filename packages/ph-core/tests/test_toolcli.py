@@ -432,6 +432,9 @@ async def test_a_hosts_run_goes_on_past_the_call_and_the_same_request_joins_it(
         progress.tick(2)
         raise ValueError("no")
 
+    def said(value: str) -> str:
+        return f"Three files, and one of them was skipped: {value}."
+
     async with anyio.create_task_group() as tasks:
         host = ToolHost(tasks=tasks)
         first = await runs.run(host, tmp_path, {"paths": ["a"]}, slow, what="files")
@@ -442,10 +445,10 @@ async def test_a_hosts_run_goes_on_past_the_call_and_the_same_request_joins_it(
             await anyio.sleep(0.01)
         ended = read_progress(tmp_path)
 
-        answered = await runs.run(host, tmp_path, {"paths": ["a"]}, quick, what="files")
+        answered = await runs.run(host, tmp_path, {"paths": ["a"]}, quick, what="files", said=said)
         unowed = read_progress(tmp_path)
         with pytest.raises(ValueError, match="no"):
-            await runs.run(host, tmp_path, {"paths": ["b"]}, broken, what="files")
+            await runs.run(host, tmp_path, {"paths": ["b"]}, broken, what="files", said=said)
         failed = read_progress(tmp_path)
         alone = await runs.run(None, tmp_path, {"paths": ["c"]}, quick, what="files")
 
@@ -455,6 +458,10 @@ async def test_a_hosts_run_goes_on_past_the_call_and_the_same_request_joins_it(
     assert ended.started > 0
     assert answered == "counts"
     assert unowed is not None and unowed.owed is False
+    # What the value says goes with the report of the end, and only with that
+    # one: a run that failed has no value to say anything of.
+    assert unowed.note == "Three files, and one of them was skipped: counts."
+    assert ended.note == "" and failed is not None and failed.note == ""
     assert unowed.started > ended.started, "a second run of one request is a new run"
     assert failed is not None and (failed.state, failed.done, failed.failure) == ("failed", 2, "no")
     assert alone == "counts", "with no host the work runs to its end"

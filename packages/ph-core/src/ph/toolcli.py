@@ -92,6 +92,7 @@ from .wire import WireModel
 from .workspace_caches import digest, use
 
 __all__ = [
+    "AGENT_ENV",
     "CONFIG_ENV",
     "HOST_ENV",
     "HOST_ROWS",
@@ -154,6 +155,15 @@ HOST_ENV = "PH_TOOL_HOST"
 Set by whoever started the host — `ph-utcp`, per call, for the agent the host
 serves. A `call` that finds nothing listening there runs by itself, so the
 variable is a hint and never a requirement."""
+
+AGENT_ENV = "PH_TOOL_AGENT"
+"""The id of the agent whose tree a command works on, for a tool that asks the
+session it runs for to do something on that agent's account.
+
+Set by `ph-utcp` beside `STATE_ENV`, and naming the same agent: the one the state
+belongs to, which for a child that shares its parent's index is the parent. A
+word from inside a sandbox, so what a session does with it is bookkeeping and
+never a grant."""
 
 PROGRESS_FILE = "progress.json"
 """In a tool's state directory: how far a background piece of work has got."""
@@ -322,6 +332,10 @@ class Progress(WireModel):
     going", or nobody asked for the run at all — a host started it unasked. A run
     whose own caller got its counts back owes nothing, and whoever watches this
     file says nothing more about it."""
+    note: str = ""
+    """What a finished run has to say beyond its count, in sentences: what a
+    caller that waited for it read in the tool's result. Whoever is owed word of
+    the end is told this with it."""
 
     def said(self) -> str:
         """One compact phrase, for a footer and for a sentence."""
@@ -419,6 +433,7 @@ class RunProgress:
         state: Literal["working", "done", "failed"],
         failure: str = "",
         *,
+        note: str = "",
         to_file: bool = True,
     ) -> None:
         progress = Progress(
@@ -429,6 +444,7 @@ class RunProgress:
             failure=failure,
             started=self.started,
             owed=self.owed,
+            note=note,
         )
         self.runs._progress[self.home] = progress
         if to_file:
@@ -494,10 +510,16 @@ class BackgroundRuns:
         work: Callable[[RunProgress], Awaitable[T]],
         *,
         what: str,
+        said: Callable[[T], str] | None = None,
         raise_if_canceled: Callable[[], None] | None = None,
     ) -> T | None:
         """`work`'s value, or `None` while it goes on in `host` past this call.
         What it raised is raised here.
+
+        `said` is what the value says beyond its count, in a few lines: what the
+        tool's result tells a caller that waited. Written with the end
+        (`Progress.note`), so whoever is told of a run nobody waited for is told
+        that too.
 
         One run a request in a host, and the same request asked again while its
         run is going joins it: a model that calls an index tool to see how far it
@@ -509,7 +531,7 @@ class BackgroundRuns:
         no host."""
         if host is None:
             progress = RunProgress(self, home, what, raise_if_canceled=raise_if_canceled)
-            return await self._through(progress, work)
+            return await self._through(progress, work, said)
         runs = self._runs.setdefault(home, [])
         mine = next((one for one in runs if one.request == request), None)
         if mine is None:
@@ -520,7 +542,8 @@ class BackgroundRuns:
 
             async def drive() -> None:
                 try:
-                    started.value = await self._through(started.progress, work)
+                    value: T = await self._through(started.progress, work, said)
+                    started.value = value
                 except Exception as error:
                     started.error = error
                 finally:
@@ -547,17 +570,21 @@ class BackgroundRuns:
         return value
 
     async def _through[T](
-        self, progress: RunProgress, work: Callable[[RunProgress], Awaitable[T]]
+        self,
+        progress: RunProgress,
+        work: Callable[[RunProgress], Awaitable[T]],
+        said: Callable[[T], str] | None,
     ) -> T:
-        """`work` with its end written: `done`, or `failed` with the reason and
-        how far it got — by this door, so no row can forget either."""
+        """`work` with its end written: `done` with what `said` makes of its
+        value, or `failed` with the reason and how far it got — by this door, so
+        no row can forget either."""
         try:
             value = await work(progress)
         except BaseException as error:
             progress._write("failed", str(error) or type(error).__name__)
             raise
         progress.done = progress.total
-        progress._write("done")
+        progress._write("done", note="" if said is None else said(value))
         return value
 
 

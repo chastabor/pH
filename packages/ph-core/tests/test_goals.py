@@ -35,6 +35,7 @@ import pytest
 
 from ph.agent.types import AgentOptions
 from ph.cordis import Context
+from ph.json import JsonValue
 from ph.keys import AGENTS, COMMANDS, GOALS, SESSIONS
 from ph.seams.goals import (
     Budget,
@@ -152,6 +153,27 @@ def test_the_fold_counts_the_sources_in_its_own_log() -> None:
     spent = _spent_by_two_sources(Session("g"), GoalService())
 
     assert spent.tokens == {"own": 100, "compaction": 50}
+
+
+def test_the_fold_counts_what_a_tools_embeddings_spent_and_a_budget_may_charge_it() -> None:
+    """A tool that embeds through one of the session's routes spends that route's
+    tokens outside any turn (`llm/embedded`). They are a source of their own:
+    counted by the fold like the others, and charged to `max_tokens` where a
+    budget names them — not by default, which is what the budget always counted.
+    A request that reported no count, or failed, spent nothing that is known.
+    """
+    session, service = Session("g"), GoalService()
+    goal = _open(session, service)
+    route: dict[str, JsonValue] = {"provider": "fx", "model": "embed", "texts": 3}
+    log_event(session, "llm/embedded", {**route, "usage": {"inputTokens": 20, "outputTokens": 0}})
+    log_event(session, "llm/embedded", {**route, "usage": None})
+    log_event(session, "llm/embedding-failed", {**route, "code": "X", "reason": "no"})
+
+    spent = goals(session)[goal.id].spent
+
+    assert spent.tokens == {"embedding": 20}
+    assert spent.charged_tokens(Budget(max_tokens=1)) == 0
+    assert spent.charged_tokens(Budget(max_tokens=1, token_sources=["own", "embedding"])) == 20
 
 
 def _admitted_child(ctx: Context, parent: Session, run_id: str, goal_id: str | None) -> Session:

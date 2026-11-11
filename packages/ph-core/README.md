@@ -131,7 +131,7 @@ phern config --row containment --profile tui # one row's knobs, defaults and wha
 | `session-telemetry` | `enabled`, `path` | `enabled: false` in `ph-base` |
 | `subagent-presets` | `presets` | empty — a menu, never a grant: selecting a preset never widens what the parent itself holds |
 | `skills-progressive` | `paths` | **empty on purpose** — scanning a well-known directory would make "install a skill" mean "drop a file somewhere" (I7) |
-| `autonomous` | `maxContinuations`, `maxTurns`, `maxTokens`, `timeoutMs`, `tokenSources` | `3`, `12`, `80000`, `1800000`, `[own]` — add `compaction` and `children` to charge summaries and subagents to `maxTokens` |
+| `autonomous` | `maxContinuations`, `maxTurns`, `maxTokens`, `timeoutMs`, `tokenSources` | `3`, `12`, `80000`, `1800000`, `[own]` — add `compaction`, `embedding` and `children` to charge summaries, a tool's embeddings and subagents to `maxTokens` |
 | `subprocess-local` | `scrub`, `keep`, `maxOutputBytes` | `8388608` |
 | `tool-attach` | `maxBytes` | `33554432` |
 
