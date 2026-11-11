@@ -48,7 +48,10 @@ from publish under their own names — `ph-core`, `ph-rlm`, `ph-runtime-guest`,
 `ph-stabilize`, `ph-text-index`, `ph-code-graph`, `ph-utcp`, `ph-clm` — because
 each is usable on its own. A front end of your own over `ph-core`, or a deployment that wants
 `ph-code-graph`'s two tools and nothing else, installs exactly that and never
-sees this package.
+sees this package. `ph-code-graph` and `ph-text-index` each install a command of
+their own and publish their tools as a [UTCP](https://utcp.io) manual, so another
+harness can use them with no phern at all: `uv tool install ph-code-graph`, and
+that package's README from there.
 
 The *import* names are a third namespace again, and unchanged: `ph`, `ph_app`,
 `ph_rlm`, `ph_runtime`. A distribution name, a module name and a directory name
@@ -91,14 +94,14 @@ reports which ones actually activated.
 | `phern[web]` | `--mode web`, the browser tab | `textual-serve`, with aiohttp and jinja2 behind it |
 | `phern[otel]` | exporting the session log to an OpenTelemetry collector | the OTel SDK and its OTLP exporter |
 
-**The embedder is the one worth thinking about.** Without `[local]`,
-`text_index` and `text_search` are still registered and the index still works —
-you supply the vectors. What is missing is the row that *computes* them, and it
-refuses to mount with a message naming the extra. A deployment that embeds
-through an endpoint instead — llama.cpp's `/v1/embeddings`, a provider's API —
-registers its own embedder on `ctx.text_index` and never wants torch at all.
-That is why it is not a dependency: a gigabyte for one provider of one seam is
-not a cost this package gets to impose on everyone who installs it.
+**The embedder is the one worth thinking about.** Without `[local]` the row
+that *computes* vectors on this machine refuses to mount, with a message naming
+the extra, and `text_index` and `text_search` appear only once some embedder is
+mounted. A deployment that embeds through an endpoint instead — llama.cpp's
+`/v1/embeddings`, a provider's API — mounts `text-index-endpoint`, or
+`text-index-adapter` for one of the session's own model routes, and never wants
+torch at all. That is why it is not a dependency: a gigabyte for one provider of
+one seam is not a cost this package gets to impose on everyone who installs it.
 
 If you do want it and have no GPU, the CPU wheels are a third of the size:
 
@@ -368,6 +371,93 @@ attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` �
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Upgrading from 0.10
+
+0.11 moves the two index tools out of the session's process. `code_index` and
+`code_graph`, `text_index` and `text_search` now run in commands of their own,
+`ph-code-graph` and `ph-text-index`, each described by a [UTCP](https://utcp.io)
+manual, and a new package, `ph-utcp`, turns any UTCP manual into tools a pH agent
+can call. So both packages install and work without phern, from a shell or in
+another harness. What that changes for a 0.10 setup:
+
+- **Restart the daemon.** It still speaks protocol 10, but it stamps status
+  readings with two new slots, `model` and `context`, and a 0.10 client refuses
+  them. `phern agents shutdown`, and the next command that needs one starts the
+  new one.
+- **Sessions from 0.10 carry over.** The session log is still format 4. Two record
+  types are new, `llm/embedded` and `llm/embedding-failed`.
+- **A profile that names `code-graph` or `text-index` names `utcp` before it.**
+  Both rows wait for the row that runs their command, and without it their tools
+  never appear: `phern doctor` shows the row as "waiting on utcp". `rlm-indexed`
+  has it. An install gains `ph-utcp`, and the `utcp` and `utcp-cli` libraries with
+  it.
+- **The tools run in the calling agent's workspace, under its sandbox.**
+  `permissions-fs` no longer screens their reads and `fs/read-intent` no longer
+  fires for them; the sandbox bounds them, as it bounds `bash`. A child in a
+  worktree of its own indexes that worktree.
+- **Indexes are rebuilt, once.** An index is now kept in the scratch of the agent
+  whose tree it is, `$PH_HOME/scratch/<session>/<agent>/`, so one a 0.10 session
+  built under `$PH_CACHE` is not found. That is what lets a read-only session
+  index a tree it may not write. A child shares its parent's index unless it has a
+  tree of its own to write. Both rows' `path` setting is removed.
+- **Run `/code-graph install` once.** The grammars come from GitHub the first
+  time. In 0.10 the tools ran in the session's process and fetched one when a
+  file needed it; a confined agent's command cannot, and skips each file with a
+  reason naming the command. `ph-code-graph install` is the same from a shell.
+- **`glob` on both rows is `index.include`**, a list, in a new `index` block with
+  `paths`, `exclude` and `on_mount`. The old key is refused, not aliased.
+- **Indexing starts unasked, and a call may answer before it ends.** One host for
+  each package and tree is started at a root agent's first step and indexes the
+  row's `index` scope in the background. `code_index` and `text_index` wait
+  `wait_s`, then answer `state: indexing` with a count, and the agent is told when
+  the run ends. `index.on_mount: false` leaves indexing to the calls.
+- **Passages fit the embedder.** `text_index` packs each passage to what its
+  embedder reads, in the embedder's tokens, so its result says `passage_tokens`
+  where it said `passage_chars`. `max_tokens` on an embedder's row lowers the
+  limit. Each document is embedded once more by the first run.
+- **New: two more embedders.** `text-index-endpoint` embeds through an
+  OpenAI-compatible `/v1/embeddings` server, and `text-index-adapter` through one
+  of the session's own model routes, with the key kept in the harness. What a
+  route spends is recorded as `llm/embedded`, and a goal's budget charges it when
+  its `tokenSources` names `embedding`. Neither needs `phern[local]`.
+- **New: `ph-code-graph` and `ph-text-index` are commands.** `call` runs a tool,
+  `status` and `install` provision it, and `manual --registration` prints what
+  another UTCP harness registers. `uv tool install ph-code-graph` is that package
+  and no phern.
+- **New: the `utcp` row.** Give it a manual's call template and each tool the
+  manual names is a pH tool: in the prompt, through the pipeline, in the log and in
+  Code Mode's listing. See [`ph-utcp`](packages/ph-utcp/).
+- **The TUI is tighter.** The status line is the prompt's top border, the prompt
+  has no box of its own, and the scrollbar is in a gutter on the left.
+- **The TUI says why it could not start, and keeps saying it.** A daemon a UI
+  starts writes its stderr to `$PH_HOME/logs/daemon.stderr`, truncated at each
+  spawn, so one that exits before it listens is reported in its own words rather
+  than by exit status. Once it is up, its warnings go to `daemon.log` alone. The
+  terminal keeps that sentence on screen with a retry and a quit beside it, its own
+  verbs such as `/theme` and `/quit` still answer with no session behind the
+  prompt, and a verb that needs one says so instead of doing nothing. Quitting from
+  under a failed start exits 1.
+- **A confined command is killed, not asked to stop.** A command under `bwrap`
+  that was canceled, timed out or outlived its scope was sent `SIGTERM` and given
+  five seconds. `bwrap` passes no signal on, so the command never heard it, and one
+  stopped in its first milliseconds was left running with nobody to end it. It is
+  sent `SIGKILL` now. An unconfined command is still asked first.
+- **For code built on pH:**
+  - `SubprocessSpawnSpec.forwards_signals` says whether a signal reaches the
+    command. Spawn a confined argv with `ConfinedArgv.spawn_spec(cwd, …)`, which
+    carries it, rather than building the spec from `confined.argv`.
+  - `BackgroundRuns.run` requires `said=`, what the run's end tells whoever was
+    not waiting for it.
+  - `ctx.code_graph` and `ctx.text_index` are no longer provided to a session's
+    mount. A deployment that registered its own embedder on `ctx.text_index` mounts
+    `text-index-endpoint`, or writes an embedder row the command mounts.
+  - `ph.toolcli` turns a package's rows into a command and a UTCP manual; see
+    [`docs/cookbook/adding-a-tool.md`](docs/cookbook/adding-a-tool.md).
+  - An adapter that can embed is a `ph.llm.adapter.EmbeddingAdapter`, reached
+    through `ctx.llm.embed`.
+  - `TokenSource` has a fourth value, `embedding`, and `StatusReading.slot` has
+    `model` and `context`.
+
 ## Upgrading from 0.9
 
 0.10 makes a restart something an orchestrator can own: the daemon says which stored
@@ -412,14 +502,6 @@ not be written. What that changes for an 0.9 setup:
   its work ended (`event.reason`), a failed write is an `error` ops record with its
   reason, and a profile that keeps the log with no checkpoint row is warned about at
   mount.
-- **The TUI says why it could not start, and keeps saying it.** A daemon a UI
-  starts writes its stderr to `$PH_HOME/logs/daemon.stderr`, truncated at each
-  spawn, so one that exits before it listens is reported in its own words rather
-  than by exit status. Once it is up, its warnings go to `daemon.log` alone. The
-  terminal keeps that sentence on screen with a retry and a quit beside it, its own
-  verbs such as `/theme` and `/quit` still answer with no session behind the
-  prompt, and a verb that needs one says so instead of doing nothing. Quitting from
-  under a failed start exits 1.
 - **For code built on pH:**
   - A plugin that keeps, exports or flushes the log says where with
     `@plugin(..., log_layer=...)`: `storage`, `telemetry`, `export` or `checkpoint`.
@@ -649,11 +731,18 @@ phern --profile rlm-indexed --provider llama --model <model> --mode tui
 
 An install missing either distribution is simply not offered that profile —
 `phern doctor` lists what this install can compose — rather than being offered one
-that fails at mount. Layer one on its own with `--patch`:
+that fails at mount. Layer one on its own with `--patch`, after the `utcp` row
+that runs its command:
 
 ```bash
-phern --patch '{insert: [{id: code-graph, name: code-graph}]}' --profile llama -p "..."
+phern --patch '{insert: [{id: utcp, name: utcp}, {id: code-graph, name: code-graph}]}' \
+   --profile llama -p "..."
 ```
+
+**Neither needs phern.** Each installs a command, `ph-code-graph` and
+`ph-text-index`, that runs its tools from a shell and prints the UTCP manual
+another harness registers. Each package's README has the install, the command
+line and what a harness needs to know.
 
 `phern config --row code-graph` prints what each row accepts, and all of them
 report to `phern doctor`. Each package's README is the honest account of what its
@@ -668,6 +757,11 @@ time. Each ships a command a person triggers, and reports readiness to
 /code-graph status     /code-graph install      # tree-sitter grammars
 /text-index status     /text-index install      # the embedding model
 ```
+
+Both tools run in a command under the agent's sandbox, so a confined agent cannot
+fetch either: with an empty grammar cache the code graph skips every file and says
+why, and a model that is not downloaded fails the call with a code that names the
+command. Run both once before the first session.
 
 `ph-text-index` additionally takes `preload: true`, which loads the model at
 mount and refuses the mount if it cannot — for a daemon or a scheduled run,
@@ -729,13 +823,13 @@ enumerated list of platform gaps — which is empty on both platforms today.
 ## Building a release
 
 Every member is released together, at one version: each pins the others exactly
-(`ph-core==0.10.0`), so a change in any of them is a release of all eight.
+(`ph-core==0.11.0`), so a change in any of them is a release of all nine.
 
 ```bash
 # 1. The version, everywhere it is written: `version` and the `==` pins between
 #    members in packages/*/pyproject.toml, and `__version__` in
 #    packages/ph-core/src/ph/__init__.py. Then:
-uv lock                                          # moves the eight workspace entries
+uv lock                                          # moves the nine workspace entries
 ./test.sh                                        # the four gates, on the new version
 
 # 2. A wheel and a source distribution per member. dist/ keeps only its

@@ -19,8 +19,8 @@ of cross-file resolution, plus graph, search and context layers — is TypeScrip
 maturin could not build a `#[napi]` crate anyway. Wrapping it would have bought
 a parser Python already has, and left the intelligence behind.
 
-So: `tree-sitter-language-pack` for extraction — 26 languages bundled in a
-3.7 MB wheel and working offline, 371 available — and `sqlite3` from the
+So: `tree-sitter-language-pack` for extraction — a 3.7 MB wheel, 371
+languages fetched once into a cache — and `sqlite3` from the
 standard library for the graph, because two of the five queries here are exactly
 the two `pyturso` cannot serve (`_store` has the measurements).
 
@@ -396,21 +396,36 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
             f"It now holds {count_of(value['total_symbols'], 'symbol')} "
             f"from {count_of(value['total_files'], 'file')}."
         )
+    return text_content(_index_summary(value))
+
+
+SHOWN = 20
+"""How many skipped files a result names before it counts the rest."""
+
+BRIEFLY = 8
+"""How many the note about a run nobody waited for names (`Progress.note`)."""
+
+
+def _index_summary(value: Mapping[str, Any], *, shown: int = SHOWN) -> str:
+    """What a finished run did: its counts, and each file it skipped and why, up
+    to `shown`. The note about a run nobody waited for says the same — a grammar
+    that could not be fetched leaves a graph of nothing, and "finished" alone
+    would not say so."""
     lines = [
         f"Indexed {count_of(value['indexed'], 'file')} "
         f"({value['unchanged']} already current), {count_of(value['symbols'], 'symbol')}."
     ]
-    for skipped in value["skipped"][:20]:
+    for skipped in value["skipped"][:shown]:
         lines.append(f"  skipped {skipped['path']}: {skipped['reason']}")
-    if len(value["skipped"]) > 20:
-        lines.append(f"  [and {len(value['skipped']) - 20} more skipped]")
+    if len(value["skipped"]) > shown:
+        lines.append(f"  [and {len(value['skipped']) - shown} more skipped]")
     lines.append(
         f"The graph holds {count_of(value['total_symbols'], 'symbol')} and "
         f"{count_of(value['total_refs'], 'reference')} across "
         f"{count_of(value['total_files'], 'file')} "
         f"({', '.join(value['languages'][:6]) or 'no languages'})."
     )
-    return text_content("\n".join(lines))
+    return "\n".join(lines)
 
 
 def _ambiguity(value: Any) -> str:  # noqa: ANN401
@@ -546,8 +561,8 @@ async def apply(ctx: Context, config: Config) -> None:
         if importlib.util.find_spec(module) is None:
             raise MountRefusal(MISSING)
 
-    # Before anything parses. The pack materializes even its *bundled* grammars
-    # into a writable cache directory and fails hard without one, so the row
+    # Before anything parses. The pack keeps every grammar it uses in a writable
+    # cache directory and fails hard without one, so the row
     # names a path it can vouch for rather than inheriting whatever `HOME`
     # happens to be — see `use_cache`.
     try:
@@ -597,12 +612,13 @@ async def apply(ctx: Context, config: Config) -> None:
         # In a host the run outlives this call, which answers with the run's
         # counts if it ends within the grace and with how far it has got if not.
         book = store(run)
-        value = await seam.runs.run(
+        value: dict[str, Any] | None = await seam.runs.run(
             ctx.get(TOOL_HOST),
             book.path.parent,
             args,
             partial(index_run, args, run),
             what="files",
+            said=partial(_index_summary, shown=BRIEFLY),
             raise_if_canceled=run.raise_if_canceled,
         )
         if value is not None:
@@ -695,8 +711,8 @@ async def apply(ctx: Context, config: Config) -> None:
                         {
                             "path": path,
                             "reason": (
-                                f"no {language} parser available — a language outside the "
-                                "wheel's bundled set comes from GitHub; /code-graph install"
+                                f"no {language} parser available — grammars come from "
+                                "GitHub the first time; /code-graph install"
                             ),
                         }
                     )
@@ -906,10 +922,8 @@ async def apply(ctx: Context, config: Config) -> None:
         """`/code-graph install|status` — make the grammars ready, on purpose.
 
         A **command** rather than a tool, per the seam's own rule: a person asks
-        the harness to provision, and it costs no model turn. It matters less
-        here than for `text-index` — 26 languages are inside the wheel and only
-        the long tail fetches — but "is this ready" should have one answer per
-        plugin, asked the same way.
+        the harness to provision, and it costs no model turn. A confined agent
+        cannot fetch a grammar, so this is what makes its index work.
         """
         wanted = [one for one in (config.languages or DEFAULT_LANGUAGES) if indexable(one)]
         if verb == "status":
@@ -920,8 +934,8 @@ async def apply(ctx: Context, config: Config) -> None:
         if missing:
             return (
                 f"{len(ready)} of {len(wanted)} grammars ready; could not fetch "
-                f"{', '.join(missing)} — a language outside the wheel's bundled set comes "
-                "from GitHub, so this needs network the first time."
+                f"{', '.join(missing)} — grammars come from GitHub, so this needs "
+                "network the first time."
             )
         return f"all {count_of(len(ready), 'grammar')} ready under {seam.grammars}."
 

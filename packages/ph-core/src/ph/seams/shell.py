@@ -311,7 +311,11 @@ class ShellService:
                 env.update(redirection)
             if extra_env:
                 env.update(extra_env)
-        spec = SubprocessSpawnSpec(argv=argv, cwd=cwd, timeout_ms=timeout_ms, env=env)
+        spec = (
+            SubprocessSpawnSpec(argv=argv, cwd=cwd, timeout_ms=timeout_ms, env=env)
+            if confined is None
+            else confined.spawn_spec(cwd, timeout_ms=timeout_ms, env=env)
+        )
         outcome = await subprocess_service.run(spec, scope=scope, signal=signal)
         if confined is not None and outcome.exit_code != 0:
             # stderr first: that is where these sentences come from, and passing the

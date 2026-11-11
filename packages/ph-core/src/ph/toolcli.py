@@ -45,7 +45,8 @@ Read from `utcp_cli` 1.1.5; every item below is a constraint, not a taste.
 * **The environment is cut to an allowlist.** Naming any variable replaces the
   client's default list, so the template names the defaults again beside the pH
   roots — without them a UTCP call would build a different index from the one a
-  session uses for the same checkout.
+  session uses for the same checkout. A variable only a row's config names is
+  listed too (`ToolEnv`).
 
 @module ph.toolcli
 """
@@ -74,7 +75,15 @@ import anyio
 from anyio.abc import SocketStream, TaskGroup
 from pydantic import BaseModel
 
-from .cordis import DEPLOYMENT, Context, CordisError, Profile, ServiceKey, maybe_await
+from .cordis import (
+    DEPLOYMENT,
+    Context,
+    CordisError,
+    Disposer,
+    Profile,
+    ServiceKey,
+    maybe_await,
+)
 from .cordis.loader import ProfileDocument
 from .documents import DOCUMENT_FAULTS, decode_document
 from .framing import FramingError, answer_one, ask, listening
@@ -84,6 +93,7 @@ from .llm.types import text_of
 from .locks import try_file_lock
 from .paths import resolve_roots, write_atomic
 from .resources import run_until_signaled
+from .seams._registry import claim_entry
 from .seams.commands import CommandContext
 from .tools.definition import ToolDefinition, ToolExecutionInput, ToolExecutionResult
 from .tools.errors import HarnessError
@@ -100,12 +110,14 @@ __all__ = [
     "PROGRESS_FILE",
     "REPORT_EVERY_S",
     "STATE_ENV",
+    "TOOL_ENV",
     "TOOL_HOST",
     "UTCP_VERSION",
     "BackgroundRuns",
     "Progress",
     "RunProgress",
     "ToolCli",
+    "ToolEnv",
     "ToolHost",
     "claim_home",
     "config_env",
@@ -381,6 +393,30 @@ class ToolHost:
 TOOL_HOST: ServiceKey[ToolHost] = ServiceKey("tool_host")
 """The host a row is mounted in, when it is mounted in one (`ToolHost`)."""
 
+
+@dataclass(slots=True)
+class ToolEnv:
+    """The variables this command's rows read that only their configs name.
+
+    `ToolCli.inherit_env` is what a package always reads. This is what one
+    deployment's settings add: the variable an endpoint's key is in, named in a
+    row's config and so known only once that row is mounted. A row registers the
+    name (`contribute_item(ctx, TOOL_ENV, name, …)`), and `manual` lists it in
+    each tool's template, because a UTCP client hands a command only the
+    variables its template names. A name, and never what the variable holds.
+
+    Provided by this command to the rows it mounts, and absent where a row is
+    mounted any other way, so a contribution there waits for nothing."""
+
+    ctx: Context
+    names: list[str] = field(default_factory=list)
+
+    def register(self, name: str, /, *, scope: Context | None = None) -> Disposer:
+        return claim_entry(self.ctx.owner_for(scope), self.names, name, label=f"tool-env({name})")
+
+
+TOOL_ENV: ServiceKey[ToolEnv] = ServiceKey("tool_env")
+
 REPORT_EVERY_S = 0.5
 """How often a run's progress is written, at most."""
 
@@ -510,7 +546,7 @@ class BackgroundRuns:
         work: Callable[[RunProgress], Awaitable[T]],
         *,
         what: str,
-        said: Callable[[T], str] | None = None,
+        said: Callable[[T], str],
         raise_if_canceled: Callable[[], None] | None = None,
     ) -> T | None:
         """`work`'s value, or `None` while it goes on in `host` past this call.
@@ -519,7 +555,8 @@ class BackgroundRuns:
         `said` is what the value says beyond its count, in a few lines: what the
         tool's result tells a caller that waited. Written with the end
         (`Progress.note`), so whoever is told of a run nobody waited for is told
-        that too.
+        that too. Required: a run whose note says only "finished" can hide one
+        that skipped everything.
 
         One run a request in a host, and the same request asked again while its
         run is going joins it: a model that calls an index tool to see how far it
@@ -573,7 +610,7 @@ class BackgroundRuns:
         self,
         progress: RunProgress,
         work: Callable[[RunProgress], Awaitable[T]],
-        said: Callable[[T], str] | None,
+        said: Callable[[T], str],
     ) -> T:
         """`work` with its end written: `done` with what `said` makes of its
         value, or `failed` with the reason and how far it got — by this door, so
@@ -584,7 +621,7 @@ class BackgroundRuns:
             progress._write("failed", str(error) or type(error).__name__)
             raise
         progress.done = progress.total
-        progress._write("done", note="" if said is None else said(value))
+        progress._write("done", note=said(value))
         return value
 
 
@@ -727,7 +764,7 @@ def _result_schema(definition: ToolDefinition) -> dict[str, object]:
     return schema
 
 
-def _template(cli: ToolCli, definition: ToolDefinition) -> dict[str, object]:
+def _template(cli: ToolCli, definition: ToolDefinition, inherit: list[str]) -> dict[str, object]:
     words = [shlex.join((*cli.invocation(), "call", definition.name, "--format", "json"))]
     for name in _properties(definition):
         if _PLACEHOLDER_NAME.fullmatch(name) is None:
@@ -743,15 +780,19 @@ def _template(cli: ToolCli, definition: ToolDefinition) -> dict[str, object]:
     return {
         "call_template_type": "cli",
         "commands": [{"command": " ".join(words)}],
-        "inherit_env_vars": [*INHERITED_ENV, *cli.inherit_env],
+        "inherit_env_vars": inherit,
     }
 
 
-def utcp_manual(cli: ToolCli, definitions: Sequence[ToolDefinition]) -> dict[str, object]:
+def utcp_manual(
+    cli: ToolCli, definitions: Sequence[ToolDefinition], named: Sequence[str]
+) -> dict[str, object]:
     """The UTCP manual for `definitions`: what `manual` prints.
 
     Names are the tools' own. A client prefixes each with the manual's name when
-    it registers them (`ph_code_graph.code_index`)."""
+    it registers them (`ph_code_graph.code_index`). `named` is what the mounted
+    rows registered (`ToolEnv`)."""
+    inherit = [*_inherited(cli), *dict.fromkeys(named)]
     return {
         "utcp_version": UTCP_VERSION,
         "manual_version": cli.version,
@@ -762,7 +803,7 @@ def utcp_manual(cli: ToolCli, definitions: Sequence[ToolDefinition]) -> dict[str
                 "inputs": one.parameters,
                 "outputs": _result_schema(one),
                 "tags": [cli.manual],
-                "tool_call_template": _template(cli, one),
+                "tool_call_template": _template(cli, one, inherit),
             }
             for one in definitions
         ],
@@ -775,8 +816,13 @@ def manual_call_template(cli: ToolCli) -> dict[str, object]:
         "name": cli.manual,
         "call_template_type": "cli",
         "commands": [{"command": shlex.join((*cli.invocation(), "manual"))}],
-        "inherit_env_vars": [*INHERITED_ENV, *cli.inherit_env],
+        "inherit_env_vars": _inherited(cli),
     }
+
+
+def _inherited(cli: ToolCli) -> list[str]:
+    """What every command of the package inherits: the defaults and its own."""
+    return [*INHERITED_ENV, *cli.inherit_env]
 
 
 # ----------------------------------------------------------------- envelope ----
@@ -915,6 +961,7 @@ async def _mounted(
         rows.append({**row, "config": {**as_obj(row.get("config")), **config}} if config else row)
     ctx = Context()
     try:
+        ctx.provide(TOOL_ENV, ToolEnv(ctx))
         if host is not None:
             ctx.provide(TOOL_HOST, host)
         await Profile.from_documents([ProfileDocument(cli.program, rows)]).mount(ctx, project=root)
@@ -1395,7 +1442,7 @@ def _answered(
             if verb == "call":
                 return await _call(cli, ctx, known.tool, known.args_json, rest)
             if verb == "manual":
-                return utcp_manual(cli, _definitions(ctx))
+                return utcp_manual(cli, _definitions(ctx), ctx.require(TOOL_ENV).names)
             if verb == "tools":
                 return _tools(cli, ctx)
             return await _provision(cli, ctx, verb)

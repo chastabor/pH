@@ -100,6 +100,7 @@ from ph.seams.fs import FsService
 from ph.text import count_of, one_line
 from ph.toolcli import (
     AGENT_ENV,
+    TOOL_ENV,
     TOOL_HOST,
     BackgroundRuns,
     Progress,
@@ -1399,7 +1400,10 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
 
     Nothing is asked of the endpoint at mount: a server that is down, or a key
     that is not set, is a sentence on the call that needed a vector, and not a
-    command that will not print its manual."""
+    command that will not print its manual. The key's variable is named for the
+    manual (`ph.toolcli.ToolEnv`); in a session the row's `pass_env` hands it."""
+    if config.api_key_env:
+        contribute_item(ctx, TOOL_ENV, config.api_key_env, label="endpoint key variable")
     contribute_item(
         ctx,
         TEXT_INDEX,

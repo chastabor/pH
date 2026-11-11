@@ -91,7 +91,7 @@ from .sandbox import (
     writable_paths,
 )
 from .sandbox_egress import PROBE_HOST, EgressProxy
-from .subprocess import SubprocessSpawnSpec, first_line
+from .subprocess import first_line
 
 __all__ = [
     "BYPASS_VARIABLES",
@@ -687,7 +687,7 @@ async def probe_sandbox(ctx: Context, backend: LocalBackend, scratch: Path) -> S
         )
         confined = backend.confine(("/bin/sh", "-c", script), policy)
         probe = await ctx.require(SUBPROCESS).run(
-            SubprocessSpawnSpec(argv=confined.argv, cwd=work, env=ctx.require(SUBPROCESS).env())
+            confined.spawn_spec(work, env=ctx.require(SUBPROCESS).env())
         )
         err = probe.stderr
         landed, host = await anyio.to_thread.run_sync(verdict)
@@ -743,9 +743,7 @@ async def probe_egress(
     try:
         confined = backend.confine(backend.egress_probe(bridge), policy)
         probe = await ctx.require(SUBPROCESS).run(
-            SubprocessSpawnSpec(
-                argv=confined.argv, cwd=work, env=ctx.require(SUBPROCESS).env(), timeout_ms=10_000
-            )
+            confined.spawn_spec(work, env=ctx.require(SUBPROCESS).env(), timeout_ms=10_000)
         )
         answer = first_line(probe.stdout)
         if answer.startswith("HTTP/1.1 403"):

@@ -161,7 +161,7 @@ CLI = ToolCli(
     program="ph-notes",
     manual="ph_notes",
     summary="Search the notes.",
-    version="0.10.0",
+    version="0.11.0",
     rows=({"id": "notes", "name": "notes-engine"},),
 )
 
@@ -191,7 +191,10 @@ and a tool's author should know:
   merges stderr into the result. Raise a `HarnessError` with a code as you
   would in a session; it arrives as `error.code`.
 * **The environment is cut down.** A variable the tool reads has to be named in
-  `ToolCli.inherit_env`, or the manual's commands will not see it.
+  `ToolCli.inherit_env`, or the manual's commands will not see it. One that only
+  a row's config names — the variable a key is in — is registered by the row
+  at mount, `contribute_item(ctx, TOOL_ENV, config.api_key_env, label=…)`, and
+  the manual lists it: the name, never the value.
 
 A tool that builds something about the workspace — an index, a database — keeps
 it where its caller says: `ph.toolcli.state_dir()` is the directory, from

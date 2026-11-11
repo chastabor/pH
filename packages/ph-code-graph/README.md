@@ -3,19 +3,69 @@
 *`code_index` and `code_graph`: ask a codebase about its own shape, and get back
 a `path:start-end` you can `read`.*
 
-Two tools, a command that runs them, and a UTCP manual that describes them. No
-Node, no Rust toolchain, no submodule — tree-sitter through a Python wheel, the
-graph in stdlib `sqlite3`.
+Two tools, a command that runs them, and a [UTCP](https://utcp.io) manual that
+describes them. No Node, no Rust toolchain, no submodule — tree-sitter through a
+Python wheel, the graph in stdlib `sqlite3`.
+
+```bash
+ph-code-graph call code_index --paths packages/ph-core --format text
+ph-code-graph call code_graph --mode impact --query claim_slot --format text
+```
+
+The same two tools reach a model three ways: inside a [phern](https://github.com/chastabor/pH)
+session, typed at a shell, or registered with any other harness that speaks
+UTCP. This package needs phern for the first only.
+
+## Installing
+
+Python 3.12 or newer, on Linux or macOS.
+
+**With phern, nothing to do.** `uv tool install phern` brings this package with
+it, and the `rlm-indexed` profile mounts it.
+
+**By itself**, for a shell or for another harness:
+
+```bash
+uv tool install ph-code-graph        # or: pip install ph-code-graph
+ph-code-graph install                # fetch the grammars now, not during a call
+ph-code-graph status
+```
+
+That is the `ph-code-graph` command and nothing of phern's: `ph-core` (the
+registry the tools are written against), `ph-utcp` and the two UTCP libraries it
+names, tree-sitter and its language pack: 24 packages and about 30 MB, measured
+in an empty environment. No model and no torch. The grammars are fetched from
+GitHub once, by `ph-code-graph install` or by the first index that can reach it,
+and nothing needs the network after that.
+
+**The command arrives in 0.11.** `ph-code-graph` 0.10.0 is the plugin
+that ran inside a phern session; it has no command and no manual.
+
+**From a checkout**, `uv sync` puts the command in the workspace's environment
+(`uv run ph-code-graph ...`), and `uv tool install ./packages/ph-code-graph`
+puts it on `PATH`.
+
+## Three ways in
+
+### In a phern session
+
+The `code-graph` row registers this package's manual with `ph-utcp`, and the two
+tools appear under their own names. A profile layers the `utcp` bundle and then
+this one; `rlm-indexed` does:
 
 ```bash
 phern --profile rlm-indexed -p "index packages/ph-core, then tell me what breaks if I change claim_slot"
 ```
 
-## Three ways in
+On another profile, add the two rows:
 
-**From a pH session.** The `code-graph` row registers this package's manual with
-`ph-utcp`, and the two tools appear under their own names. A profile layers the
-`utcp` bundle and then this one; `rlm-indexed` does.
+```bash
+phern --profile llama --provider llama --model <model> \
+   --patch '{insert: [{id: utcp, name: utcp}, {id: code-graph, name: code-graph}]}' \
+   -p "what calls claim_slot?"
+```
+
+Or in a profile document:
 
 ```yaml
 - id: utcp
@@ -26,7 +76,20 @@ phern --profile rlm-indexed -p "index packages/ph-core, then tell me what breaks
     languages: [python]
 ```
 
-**From a command line**, to try a query by hand or see why one came back empty:
+The index is built for you: a host is started at the agent's first step and
+indexes the row's `index` scope in the background (see "The two tools").
+`/code-graph status` and `/code-graph install` ask the command about its
+grammars, and `phern doctor` reports where the index is.
+
+**Run `/code-graph install` once, before the first session.** The grammars come
+from GitHub, and a confined agent cannot reach it: with an empty grammar cache
+its index skips every file, and the note that tells the agent the run ended
+names each as skipped for want of a parser.
+
+### From a command line
+
+To try a query by hand, or to see why one came back empty. Run it **in the tree
+you are asking about**: the workspace is the working directory, or `--root`.
 
 ```bash
 ph-code-graph call code_index --paths packages/ph-core --format text
@@ -35,21 +98,129 @@ ph-code-graph tools      # the tools and their flags
 ph-code-graph status     # grammars, and what the index holds
 ```
 
-`--root` names the workspace and defaults to the working directory. Row config
-comes from `$PH_HOME/tools/ph-code-graph.yaml`, then `$PH_TOOL_CONFIG`, then
-`--config`, each a mapping of row id to config (`code-graph: {languages: [python]}`).
-Without `--format text` a call prints one JSON object, `{ok, value, text}` or
-`{ok, error}`.
+| command | what it does |
+|---|---|
+| `call TOOL [--field value ...]` | run one tool; each of its fields is a flag, or pass them all as `--args-json '{...}'` |
+| `tools` | the tools and their flags |
+| `status` | which grammars are ready, where the index is and what it holds |
+| `install` | fetch every grammar now |
+| `manual` | the UTCP manual; `manual --registration` is what a harness registers |
+| `serve --socket PATH` | stay up and answer `call`s on a unix socket |
 
-**From any other harness that speaks UTCP.** Register what this prints:
+**A call prints one JSON object** and nothing else: `{"ok": true, "value": ...,
+"text": ...}`, or `{"ok": false, "error": {"code": ..., "message": ...}}`.
+`value` is the tool's result as data and `text` is the same result written for a
+model to read; `--format text` prints only that. The exit code is 0, or 1 for a
+failure, and the failure is in the object either way.
+
+**Settings** are the session row's own, by row id, read from three places with
+the later winning: `$PH_HOME/tools/ph-code-graph.yaml`, then `$PH_TOOL_CONFIG`
+(JSON), then `--config FILE`:
+
+```yaml
+# ~/.ph/tools/ph-code-graph.yaml
+code-graph:
+  languages: [python]
+  index:
+    paths: [src]
+    exclude: ["**/tests/**"]
+```
+
+**Where things go** is said by five variables, none of which has to be set:
+
+| variable | default | what the command keeps there |
+|---|---|---|
+| `PH_HOME` | `~/.ph` | `tools/ph-code-graph.yaml`, the settings above |
+| `PH_CACHE` | `$XDG_CACHE_HOME/ph`, so `~/.cache/ph` | the grammars, the log, and the index when nothing else says where |
+| `PH_TOOL_STATE` | unset | the directory for the index; `--state DIR` is the same |
+| `PH_TOOL_CONFIG` | unset | row settings as one JSON object, for a caller that writes no file |
+| `PH_TOOL_HOST` | unset | the socket of a `serve` to ask instead of running the call here |
+
+See "Where things live" for each path.
+
+### From another harness, over UTCP
+
+Install the package where the harness runs its commands, then register what this
+prints:
 
 ```bash
 ph-code-graph manual --registration
 ```
 
-That harness then runs `ph-code-graph manual` to discover the tools and the
-command each one names to call it. The working directory of the call is the
-workspace.
+```json
+{"name": "ph_code_graph",
+ "call_template_type": "cli",
+ "commands": [{"command": "/path/to/python -m ph_code_graph manual"}],
+ "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_TOOL_STATE", "PH_TOOL_HOST"]}
+```
+
+The harness runs that command once to read the manual, and from then on runs the
+command each tool names. With the Python UTCP client, which this package
+installs:
+
+```python
+import asyncio, json, subprocess
+
+from utcp.utcp_client import UtcpClient
+
+
+async def main() -> None:
+    registration = json.loads(
+        subprocess.run(
+            ["ph-code-graph", "manual", "--registration"], check=True, capture_output=True
+        ).stdout
+    )
+    client = await UtcpClient.create(config={"manual_call_templates": [registration]})
+    await client.call_tool("ph_code_graph.code_index", {"paths": ["src"]})
+    found = await client.call_tool(
+        "ph_code_graph.code_graph", {"mode": "callers", "query": "claim_slot"}
+    )
+    print(found["text"] if found["ok"] else found["error"])
+
+
+asyncio.run(main())
+```
+
+What a harness needs to know:
+
+- **The tools are `ph_code_graph.code_index` and `ph_code_graph.code_graph`.** A
+  client prefixes each tool with the manual's name.
+- **The registration names this install.** Its command is the absolute path of
+  the interpreter the package is installed in, so it needs no `PATH`, and it is
+  printed again after the package moves.
+- **The workspace is the directory the command is started in.** Start the
+  harness in the tree, or have it run its commands there. A `working_dir` on
+  the registered template covers reading the manual and not the tool calls, so
+  it does not move the workspace.
+- **Give the model `text`.** Each answer is the envelope above, parsed: `text`
+  is what a model in a phern session reads, and `value` is for code. A failure
+  is `ok: false` with a `code`; the UTCP command-line protocol ignores exit
+  codes, so the envelope is the only place it is said.
+- **Optional arguments may be left out.** The Python client logs "Missing
+  argument" for each one and the call runs.
+- **Nothing watches the tree.** Have the model call `code_index` again after it
+  edits; a file that has not changed is not parsed again.
+- **One index a tree.** Without `PH_TOOL_STATE` the index is kept under
+  `$PH_CACHE`, keyed by the workspace. A harness whose agents work in separate
+  trees needs nothing more; one that wants an index per agent sets
+  `PH_TOOL_STATE` for each.
+- **In a sandbox, three places are written**: the index's directory,
+  `$PH_CACHE/tree-sitter` and `$PH_CACHE/logs`. Nothing in the tree is. The
+  grammars come from GitHub the first time, so run `ph-code-graph install`
+  outside the sandbox; after that the tools need no network.
+- **A host is optional.** A call takes about 0.3 s by itself. A harness that
+  wants indexing to go on in the background starts
+  `ph-code-graph serve --socket PATH --warm code_index` in the tree and sets
+  `PH_TOOL_HOST=PATH` on its calls: `code_index` then answers
+  `state: indexing` after `wait_s` and the run goes on. A call that finds
+  nobody on the socket runs by itself. Keep the path short; a unix socket's is
+  limited to about a hundred characters.
+- **The model's instructions ship with the package**, as
+  `ph_code_graph/skills/code-graph/SKILL.md`: index first, ask the question you
+  have, then read the narrow thing.
+
+phern's own `ph-utcp` row is one such harness, and what it adds is described
+next.
 
 ### Where the tools run, and what bounds them
 
@@ -199,11 +370,14 @@ of importance:
    kernel's 25,242. Wrapping the kernel gets a parser and leaves the product
    behind.
 
-And the parser is the part Python already has. `tree-sitter-language-pack` 1.16
-ships **26 languages compiled into a 3.7 MB wheel, working offline** (python,
-ts/tsx/js, rust, go, java, csharp, c, cpp, ruby, php, swift, kotlin, scala,
-dart, lua, r, and more), with 371 available and the long tail fetched on
-demand — which this row never triggers implicitly.
+And the parser is the part Python already has. `tree-sitter-language-pack` is a
+3.7 MB wheel with 26 languages it calls bundled (python, ts/tsx/js, rust, go,
+java, csharp, c, cpp, ruby, php, swift, kotlin, scala, dart, lua, r, and more)
+and 371 available. **None of them works offline on a fresh cache.** Measured
+2026-11-11 with 1.16.2 and 1.25.0: with no network and an empty cache no parser
+is to be had, python's included; with the network the bundled set arrives as one
+archive from GitHub the first time a parser is asked for. After that the cache
+is all it needs.
 
 ## Why `sqlite3` and not `pyturso`
 
@@ -299,10 +473,9 @@ would make `callers` return every place that merely *mentions* a type.
 - **the command's log**: `$PH_CACHE/logs/ph-code-graph.log`. A call prints one
   JSON object and nothing on stderr, so this is where a traceback goes.
 
-That second one is not housekeeping. The pack materializes even its *bundled*
-grammars into a writable cache on first use — the wheel ships them as an
-archive, not as loadable libraries — and it **fails hard** when that directory
-cannot be created, rather than falling back to the wheel. Its own default is
+That second one is not housekeeping. The pack keeps every grammar it uses in a
+writable cache — its bundled ones too, which it downloads there on first use —
+and it **fails hard** when that directory cannot be created. Its own default is
 `$XDG_CACHE_HOME/…`, which is right on a laptop and wrong in a container with a
 read-only `HOME`; both measured. So the row hands over the root pH already
 designates for rebuildable artifacts, and refuses to mount with one sentence —
@@ -312,9 +485,12 @@ sentence is the call's answer, with the code `MOUNT_REFUSED`.
 `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` still wins if an operator set it: their
 spelling is what makes the variable mean anything.
 
-One consequence worth expecting: the **first** index on a cold grammar cache
-pays for materializing the grammar. Measured on `packages/ph-core/src/ph`, that
-is 9 s cold against 2 s warm, and 0.1 s when nothing changed.
+Two consequences worth expecting. The **first** index on a cold grammar cache
+pays for fetching the grammar: measured on `packages/ph-core/src/ph`, 9 s cold
+against 2 s warm, and 0.1 s when nothing changed. And a command that cannot
+reach GitHub — a confined agent's, a machine with no network — indexes nothing
+until the cache is filled: each file is skipped, with a reason that names
+`/code-graph install`.
 
 Provision it on purpose rather than during someone's turn:
 
@@ -327,9 +503,8 @@ A **command**, not a tool — a person asks the harness to provision, and it cos
 no model turn. In a session it runs `ph-code-graph status` or `install` and shows
 what that said; from a shell, type those directly. `phern doctor` reports the
 index's path, whether it is built and whether the manual was discovered, without
-starting the command. It matters less here than for `ph-text-index`, whose model is
-a download rather than an unpack, but the question should have one answer per
-plugin asked the same way.
+starting the command. `install` fetches all eighteen grammars in about three
+seconds, and it runs outside the sandbox, because it needs the network.
 
 ## The skill
 

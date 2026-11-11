@@ -179,10 +179,10 @@ def cache_release(directory: Path) -> Callable[[], None]:
 def use_cache(directory: Path) -> Path:
     """Point the pack's grammar cache at `directory`. Returns where it landed.
 
-    **Not optional, and not only about the download tail.** The 26 bundled
-    languages are shipped inside the wheel as an archive and *materialized into
-    this directory on first use* — so a deployment whose cache directory is not
-    writable does not fall back to the wheel, it fails:
+    **Not optional.** Every grammar the pack uses is kept in this directory —
+    the ones it calls bundled too, which it downloads here from GitHub the first
+    time a parser is asked for — so a deployment whose cache directory is not
+    writable fails:
 
         Download error: Failed to create cache directory … Permission denied
 
@@ -265,13 +265,10 @@ def local(language: str) -> bool:
     makes it the right question for `/code-graph status`: a person asking "is
     this ready" must not be answered by an action that makes it ready.
 
-    **Deliberately not the indexer's question.** The pack unpacks its 26 bundled
-    grammars from the wheel on first use, with no network, so gating indexing on
-    this would skip `.py` files on a fresh cache and tell the caller to run a
-    command that had nothing to fetch. The indexer asks `parseable`, which
-    admits that unpack; the residue — a language outside the bundle, which does
-    reach GitHub — is what `/code-graph install` is for, and what the skip
-    reason names.
+    **Deliberately not the indexer's question.** The indexer asks `parseable`,
+    which fetches a missing grammar where the network allows, so an unconfined
+    run on a fresh cache still indexes. Where it cannot — a confined command, no
+    network — the file is skipped with a reason that names `/code-graph install`.
     """
     try:
         return language in set(_pack().downloaded_languages())
@@ -282,15 +279,11 @@ def local(language: str) -> bool:
 def parseable(language: str) -> bool:
     """Whether a parser for `language` can be obtained at all.
 
-    Materializing, and that is the point: `get_parser` unpacks a bundled grammar
-    from the wheel — local, and the ordinary case — and only reaches the network
-    for the ~345 outside it. The docstring this replaced claimed to be "the
-    bundled question" and was not, which mattered because it was also the skip
-    *reason*: a network-denied deployment reported every file as an unsupported
-    language rather than an unprovisioned cache.
-
-    So the wording is now about the parser rather than about bundling, and
-    `local` answers the readiness question separately.
+    Materializing, and that is the point: `get_parser` loads a grammar from the
+    cache and fetches one that is not there. Measured 2026-11-11 with packs
+    1.16.2 and 1.25.0: on an empty cache with no network no parser is to be had,
+    python's included — the 26 the pack calls bundled come as one archive from
+    GitHub. `local` answers the readiness question without fetching.
     """
     if not indexable(language):
         return False
@@ -319,14 +312,22 @@ def readiness(languages: Sequence[str]) -> tuple[list[str], list[str]]:
 def ensure(languages: Sequence[str]) -> tuple[list[str], list[str]]:
     """Fetch what is missing. `(ready, unavailable)` — the provisioning door.
 
-    The pack's own `download()` rather than `get_parser`-for-its-side-effect, so
-    the fetch lives in exactly one place: the command a person runs.
+    The pack's `prefetch`, which downloads what is not on disk and loads each.
+    Not `download()`: measured 2026-11-11 on an empty cache, pack 1.16.2's
+    fetches nothing for the languages it calls bundled, and `prefetch` fetches
+    all 18 defaults on 1.16.2 and 1.25.0 in about 3 s. One name the pack cannot
+    fetch fails the whole batch, so the rest are then asked for one at a time.
+    A confined agent cannot reach GitHub and depends on this having run.
     """
     wanted = [one for one in languages if indexable(one)]
-    try:
-        _pack().download(list(wanted))
-    except Exception:
-        log.warning("ph_code_graph: grammar download failed", exc_info=True)
+    _, missing = readiness(wanted)
+    if missing:
+        try:
+            _pack().prefetch(missing)
+        except Exception:
+            log.warning("ph_code_graph: grammar prefetch failed", exc_info=True)
+            for one in readiness(missing)[1]:
+                parseable(one)
     ready, _ = readiness(wanted)
     return ready, [one for one in languages if one not in set(ready)]
 

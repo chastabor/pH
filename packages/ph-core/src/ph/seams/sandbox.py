@@ -70,6 +70,7 @@ from ..session.writers import log_writer
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel, literal_lookup
 from ._registry import claim_slot, contribute_item
+from .subprocess import SubprocessSpawnSpec
 from .tui_status import StatusField, StatusReading
 
 _LOG = log_writer(__name__)
@@ -558,7 +559,9 @@ class ConfinedArgv:
     and adds no namespace, so signals land normally.
 
     A caller with a cooperative stop of its own (the RLM kernel's `cancel` frame)
-    reads this to decide whether the signal is a second route or a demolition. It
+    reads this to decide whether the signal is a second route or a demolition, and
+    `spawn_spec` hands it to the spawn, which kills such a child rather than asking
+    it to stop. It
     is `enforcement`'s shape and for `enforcement`'s stated reason: a property only
     discoverable by confining something and seeing what happens is not one a caller
     can act on beforehand.
@@ -569,6 +572,20 @@ class ConfinedArgv:
     """The *effective* policy the backend enforced — the caller's request with the
     deployment's allowances merged in. Stamped by the seam, so a caller reading the
     result back knows what was actually bounded rather than what it asked for."""
+
+    def spawn_spec(
+        self, cwd: Path, *, env: dict[str, str] | None = None, timeout_ms: int | None = None
+    ) -> SubprocessSpawnSpec:
+        """This argv as a spawn, carrying `forwards_signals` with it: the one door
+        from a confined argv to a child, so no spawn of one can drop the flag that
+        decides how it is stopped (`SubprocessSpawnSpec.forwards_signals`)."""
+        return SubprocessSpawnSpec(
+            argv=self.argv,
+            cwd=cwd,
+            env=env,
+            timeout_ms=timeout_ms,
+            forwards_signals=self.forwards_signals,
+        )
 
 
 @runtime_checkable

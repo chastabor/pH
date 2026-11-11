@@ -8,6 +8,84 @@ back the `path:start-end` it came from, so the model can answer from the passage
 or `read` the file around it.
 
 ```bash
+ph-text-index call text_index --paths docs --format text
+ph-text-index call text_search --query "how a worktree is cleaned up" --format text
+```
+
+Two tools, a command that runs them, and a [UTCP](https://utcp.io) manual that
+describes them. The same two tools reach a model three ways: inside a
+[phern](https://github.com/chastabor/pH) session, typed at a shell, or registered with any other
+harness that speaks UTCP. This package needs phern for the first only.
+
+## Installing
+
+Python 3.12 or newer, on Linux or macOS. **What turns text into vectors is your
+choice, and it decides what you install:**
+
+| embedder | install | what it costs |
+|---|---|---|
+| a model on this machine (`text-index-local`, the default) | `ph-text-index[local]` | `sentence-transformers` and torch, about 4.2 GB with the default CUDA wheels, and the model's weights (90 MB for the default) |
+| an embeddings server or API (`text-index-endpoint`) | `ph-text-index` | turbovec and numpy; nothing is loaded here |
+| one of a phern session's model routes (`text-index-adapter`) | `ph-text-index`, inside phern | the same; only a session can use it |
+
+**With phern**, `uv tool install 'phern[local]'` is the first row and
+`uv tool install phern` the other two. The `rlm-indexed` profile mounts the
+tools with the local model.
+
+**By itself**, for a shell or for another harness:
+
+```bash
+uv tool install 'ph-text-index[local]'    # or: pip install 'ph-text-index[local]'
+ph-text-index install                     # fetch and load the model now
+ph-text-index status
+```
+
+With no GPU, torch's CPU wheels are a third of the size:
+
+```bash
+pip install 'ph-text-index[local]' --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+For an endpoint, install without the extra and name the server (see "From a
+command line" for the file):
+
+```bash
+uv tool install ph-text-index
+```
+
+That is the `ph-text-index` command and nothing of phern's: `ph-core` (the
+registry the tools are written against), `ph-utcp` and the two UTCP libraries it
+names, turbovec and numpy.
+
+**Without the extra and with no other embedder named, the command refuses** —
+`status`, `tools`, `manual` and every `call` — with one sentence naming the
+extra. The tools exist only once something can embed for them.
+`sentence-transformers` is an extra because a gigabyte of torch for one
+provider is a decision that belongs to whoever is installing, and a deployment
+that embeds through an endpoint never wanted it.
+
+**The command arrives in 0.11.** `ph-text-index` 0.10.0 is the plugin
+that ran inside a phern session; it has no command and no manual.
+
+**From a checkout**, `uv sync` puts the command in the workspace's environment
+with the local model beside it (`uv run ph-text-index ...`), and
+`uv tool install ./packages/ph-text-index` puts the command on `PATH`.
+
+## Three ways in
+
+### In a phern session
+
+The `text-index` row and an embedder's row register this package's manual with
+`ph-utcp`, and the two tools appear under their own names. A profile layers the
+`utcp` bundle and then this one; `rlm-indexed` does:
+
+```bash
+phern --profile rlm-indexed -p "tell me how the workspace seam decides a containment tier"
+```
+
+On another profile, add the three rows:
+
+```bash
 phern --profile llama --provider llama --model <model> \
    --patch '{insert: [{id: utcp, name: utcp},
                       {id: text-index, name: text-index},
@@ -15,15 +93,174 @@ phern --profile llama --provider llama --model <model> \
    -p "index docs/ then tell me how the workspace seam decides a containment tier"
 ```
 
-The tools are published as a [UTCP](https://utcp.io) manual, so any harness that
-speaks UTCP can use them, and a person can run them by hand:
+The index is built for you: a host is started at the agent's first step and
+indexes the row's `index` scope in the background (see "Where the tools run").
+`/text-index status` and `/text-index install` ask the command about its model,
+and `phern doctor` reports the embedder, its limit and where the index is.
+Another embedder is another row in place of `text-index-local`: see "An endpoint
+instead of a local model" and "One of the session's own model routes".
+
+### From a command line
+
+To try a query by hand, or to see why one came back empty. Run it **in the tree
+you are asking about**: the workspace is the working directory, or `--root`.
 
 ```bash
 ph-text-index call text_index --paths docs --format text
-ph-text-index call text_search --query "how a worktree is cleaned up" --format text
-ph-text-index status                  # is the model downloaded? what is indexed?
-ph-text-index manual --registration   # what another harness registers
+ph-text-index call text_search --query "how a worktree is cleaned up" --k 3 --format text
+ph-text-index tools      # the tools and their flags
+ph-text-index status     # is the model downloaded? what is indexed?
 ```
+
+| command | what it does |
+|---|---|
+| `call TOOL [--field value ...]` | run one tool; each of its fields is a flag, or pass them all as `--args-json '{...}'` |
+| `tools` | the tools and their flags |
+| `status` | the embedder, whether its model is downloaded, its limit, and what the index holds |
+| `install` | fetch and load the model now; an endpoint has nothing to fetch |
+| `manual` | the UTCP manual; `manual --registration` is what a harness registers |
+| `serve --socket PATH` | stay up and answer `call`s on a unix socket, with the model loaded once |
+
+**A call prints one JSON object** and nothing else: `{"ok": true, "value": ...,
+"text": ...}`, or `{"ok": false, "error": {"code": ..., "message": ...}}`.
+`value` is the tool's result as data and `text` is the same result written for a
+model to read; `--format text` prints only that. The exit code is 0, or 1 for a
+failure, and the failure is in the object either way.
+
+**Each call by itself loads the model first**: four to six seconds with MiniLM
+on disk, measured here, against 0.3 for a search a host answers. For more than
+a query or two, keep one up:
+
+```bash
+ph-text-index serve --socket /tmp/text-index.sock &
+export PH_TOOL_HOST=/tmp/text-index.sock
+ph-text-index call text_search --query "how a worktree is cleaned up" --format text
+```
+
+It leaves by itself after fifteen idle minutes (`--idle SECONDS`), and a call
+that finds nobody on the socket runs by itself.
+
+**Settings** are the session rows' own, by row id, read from three places with
+the later winning: `$PH_HOME/tools/ph-text-index.yaml`, then `$PH_TOOL_CONFIG`
+(JSON), then `--config FILE`. Naming an embedder's row is what chooses it:
+
+```yaml
+# ~/.ph/tools/ph-text-index.yaml
+text-index:
+  index:
+    paths: [docs]
+    include: ["**/*.md", "**/*.rst"]
+text-index-endpoint:                 # leave this out for the local model
+  base_url: http://127.0.0.1:8080/v1
+  model: nomic-embed-text-v1.5
+```
+
+**Where things go** is said by five variables, none of which has to be set:
+
+| variable | default | what the command keeps there |
+|---|---|---|
+| `PH_HOME` | `~/.ph` | `tools/ph-text-index.yaml`, the settings above |
+| `PH_CACHE` | `$XDG_CACHE_HOME/ph`, so `~/.cache/ph` | the model's weights, the log, and the index when nothing else says where |
+| `PH_TOOL_STATE` | unset | the directory for the index; `--state DIR` is the same |
+| `PH_TOOL_CONFIG` | unset | row settings as one JSON object, for a caller that writes no file |
+| `PH_TOOL_HOST` | unset | the socket of a `serve` to ask instead of running the call here |
+
+`HF_ENDPOINT`, `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`, `OMP_NUM_THREADS` and
+`CUDA_VISIBLE_DEVICES` reach the local model as you set them. See "On disk" for
+each path.
+
+### From another harness, over UTCP
+
+Install the package where the harness runs its commands, choose an embedder as
+above, then register what this prints:
+
+```bash
+ph-text-index manual --registration
+```
+
+```json
+{"name": "ph_text_index",
+ "call_template_type": "cli",
+ "commands": [{"command": "/path/to/python -m ph_text_index manual"}],
+ "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_TOOL_STATE", "PH_TOOL_HOST"]}
+```
+
+The harness runs that command once to read the manual, and from then on runs the
+command each tool names. With the Python UTCP client, which this package
+installs:
+
+```python
+import asyncio, json, subprocess
+
+from utcp.utcp_client import UtcpClient
+
+
+async def main() -> None:
+    registration = json.loads(
+        subprocess.run(
+            ["ph-text-index", "manual", "--registration"], check=True, capture_output=True
+        ).stdout
+    )
+    client = await UtcpClient.create(config={"manual_call_templates": [registration]})
+    await client.call_tool("ph_text_index.text_index", {"paths": ["docs"]})
+    found = await client.call_tool(
+        "ph_text_index.text_search", {"query": "how a worktree is cleaned up", "k": 3}
+    )
+    print(found["text"] if found["ok"] else found["error"])
+
+
+asyncio.run(main())
+```
+
+What a harness needs to know:
+
+- **The tools are `ph_text_index.text_index` and `ph_text_index.text_search`.**
+  A client prefixes each tool with the manual's name.
+- **The registration names this install.** Its command is the absolute path of
+  the interpreter the package is installed in, so it needs no `PATH`, and it is
+  printed again after the package moves.
+- **The workspace is the directory the command is started in.** Start the
+  harness in the tree, or have it run its commands there. A `working_dir` on
+  the registered template covers reading the manual and not the tool calls, so
+  it does not move the workspace.
+- **Give the model `text`.** Each answer is the envelope above, parsed: `text`
+  is what a model in a phern session reads, and `value` is for code. A failure
+  is `ok: false` with a `code`; the UTCP command-line protocol ignores exit
+  codes, so the envelope is the only place it is said.
+- **Optional arguments may be left out.** The Python client logs "Missing
+  argument" for each one and the call runs.
+- **Nothing watches the tree.** Have the model call `text_index` again after it
+  edits; a document that has not changed is not embedded again.
+- **One index a tree and embedder.** Without `PH_TOOL_STATE` the index is kept
+  under `$PH_CACHE`, keyed by the workspace. A harness whose agents work in
+  separate trees needs nothing more; one that wants an index per agent sets
+  `PH_TOOL_STATE` for each.
+- **Start a host if the model is local.** A call by itself loads the model
+  every time. Start `ph-text-index serve --socket PATH --warm text_index` in
+  the tree and set `PH_TOOL_HOST=PATH` on the calls: the model is loaded once,
+  the tree is indexed in the background, `text_index` answers
+  `state: indexing` after `wait_s` while the run goes on, and `text_search`
+  answers meanwhile from what is indexed so far. Keep the path short; a unix
+  socket's is limited to about a hundred characters.
+- **In a sandbox, three places are written**: the index's directory, the
+  weights under `$PH_CACHE/models` and `$PH_CACHE/logs`. Nothing in the tree
+  is. A local model needs the network only to download, so run
+  `ph-text-index install` outside the sandbox first; an endpoint needs its host
+  reachable on every call.
+- **An endpoint's key travels by name.** `api_key_env` names a variable, and the
+  command reads it from its own environment. A UTCP client passes a command
+  only the variables its template names, so the manual names that one in each
+  tool's template: set the variable where the harness runs and the client hands
+  it across. The manual holds the name and never the key. Settings a harness
+  changes after it read the manual need the manual read again.
+- **`text-index-adapter` is phern's.** It asks a running phern session to embed
+  and refuses anywhere else; use the local model or an endpoint.
+- **The model's instructions ship with the package**, as
+  `ph_text_index/skills/text-search/SKILL.md`: how to scope a search, and that a
+  score is not a confidence.
+
+phern's own `ph-utcp` row is one such harness, and what it adds is described
+next.
 
 ## Where the tools run
 
@@ -261,16 +498,6 @@ until an embedder is claimed, so a bundle shipping only `text-index` would mount
 a service and advertise nothing, with no error anywhere. A deployment bringing
 its own embedder disables `text-index-local` and mounts its own provider row.
 
-## Installing
-
-`sentence-transformers` is an **extra**: `pip install 'ph-text-index[local]'`
-(or `phern[local]`) adds the local embedder, and most of a gigabyte of torch
-with it. Without the extra the package installs the seam, the tools and the
-command, and `text-index-local` refuses to mount with a sentence naming the
-extra — which is what a deployment that embeds through an endpoint wants. The
-seam/provider split keeps the choice cheap either way: nothing but the local
-embedder imports the model, and only in the command's process.
-
 ## Switching models
 
 The default is **`sentence-transformers/all-MiniLM-L6-v2`** — 384-dimensional,
@@ -460,9 +687,10 @@ llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place of
 - **No key is stored.** `api_key_env` names a variable. A command's environment
   drops every name that looks like a credential, so the row has `ph-utcp` hand
   that one variable across from the environment pH was started in, each time it
-  starts the command. A command that finds it empty fails with
-  `MISSING_CREDENTIAL` — an adapter's code for the same thing — names the
-  variable, and sends nothing.
+  starts the command. Another harness is told the same name by the manual,
+  which lists it among the variables each tool inherits. A command that finds
+  it empty fails with `MISSING_CREDENTIAL` — an adapter's code for the same
+  thing — names the variable, and sends nothing.
 - **A confined agent needs the host allowed.** A sandboxed command has the
   network its deployment allows: name the endpoint's host and port in
   `sandbox-allow` (`hosts: ["127.0.0.1:8080"]`). One that is not allowed, or is

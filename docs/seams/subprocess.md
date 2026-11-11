@@ -9,7 +9,7 @@ Two properties matter more than convenience.
 ## The spec is fully explicit
 
 ```text
-SubprocessSpawnSpec = argv | cwd | stdio | env | grace_ms | timeout_ms | max_output
+SubprocessSpawnSpec = argv | cwd | stdio | env | grace_ms | timeout_ms | max_output | forwards_signals
 ```
 
 **No hidden defaults.** A caller that did not think about the working directory
@@ -57,7 +57,11 @@ ctx.subprocess.max_output
 
 Every spawn is an **effect of its scope** (§4.9, I2), so a disposed scope
 terminates and reaps the child — `grace_ms` is how long the polite signal is
-given before the impolite one. A lint fails the build on a raw
+given before the impolite one. A child whose wrapper passes no signal on
+(`forwards_signals: false`, which `ConfinedArgv.spawn_spec` sets for a command
+under `bwrap`)
+gets the impolite one at once: asked first, a command stopped in its first
+milliseconds was left running with no parent. A lint fails the build on a raw
 `subprocess.Popen` outside the seams, because the fiftieth plugin author will not
 have read §4.9.
 

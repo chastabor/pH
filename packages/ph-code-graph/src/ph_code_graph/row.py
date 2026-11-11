@@ -71,8 +71,8 @@ from .cli import CLI
 __all__ = ["Config", "apply", "manual"]
 
 PROVISION_TIMEOUT_MS = 10 * 60 * 1000
-"""How long `/code-graph install` may run. A grammar outside the wheel's bundled
-set is fetched from GitHub, so this is a download's budget and not a query's."""
+"""How long `/code-graph install` may run. Grammars are fetched from GitHub, so
+this is a download's budget and not a query's."""
 
 
 def manual(config: Config) -> Manual:

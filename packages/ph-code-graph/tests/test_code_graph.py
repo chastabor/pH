@@ -1011,6 +1011,80 @@ async def test_a_grammar_that_is_not_on_disk_is_named(
     assert said is not None and "needs network the first time" in said
 
 
+@pytest.mark.parametrize("fetchable", [True, False])
+def test_install_fetches_what_is_missing_in_one_batch_and_one_at_a_time_if_it_fails(
+    monkeypatch: pytest.MonkeyPatch, fetchable: bool
+) -> None:
+    """`ensure` asks the pack's `prefetch` for the grammars not on disk, which
+    fetches all of them where pack 1.16.2's `download()` fetched none it calls
+    bundled. One name the pack cannot fetch fails the whole batch, so then each
+    still missing is asked for alone, and the one that cannot be had is named.
+
+    A pack of one method stands in for the real one: which grammars a host has
+    cached is not something a test can pin.
+    """
+    from ph_code_graph import _extract
+
+    on_disk = {"rust"}
+    batches: list[list[str]] = []
+    alone: list[str] = []
+
+    class Pack:
+        def prefetch(self, languages: list[str]) -> None:
+            batches.append(languages)
+            if not fetchable:
+                raise RuntimeError("Download error: kotlin is not in the manifest")
+            on_disk.update(languages)
+
+    def materialized(language: str) -> bool:
+        alone.append(language)
+        if language != "kotlin":
+            on_disk.add(language)
+        return language in on_disk
+
+    monkeypatch.setattr(_extract, "_pack", Pack)
+    monkeypatch.setattr(_extract, "indexable", lambda language: language != "sql")
+    monkeypatch.setattr(_extract, "local", lambda language: language in on_disk)
+    monkeypatch.setattr(_extract, "parseable", materialized)
+
+    ready, unavailable = _extract.ensure(["python", "rust", "kotlin", "sql"])
+
+    assert batches == [["python", "kotlin"]], "rust is on disk, and sql has no tags query"
+    if fetchable:
+        assert (alone, ready, unavailable) == ([], ["python", "rust", "kotlin"], ["sql"])
+    else:
+        assert alone == ["python", "kotlin"]
+        assert (ready, unavailable) == (["python", "rust"], ["kotlin", "sql"])
+
+
+def test_a_note_about_a_run_nobody_waited_for_says_what_it_skipped_and_why() -> None:
+    """A background run's end is told with what its result would have said. For
+    a graph that means the skips: a grammar that could not be fetched leaves
+    every file skipped, and "finished: 34 files" alone reads as a built graph."""
+    from ph_code_graph.engine import BRIEFLY, SHOWN, _index_summary
+
+    reason = "no python parser available — /code-graph install"
+    value = {
+        "indexed": 0,
+        "unchanged": 0,
+        "symbols": 0,
+        "skipped": [{"path": f"src/m{n}.py", "reason": reason} for n in range(BRIEFLY + 3)],
+        "total_symbols": 0,
+        "total_refs": 0,
+        "total_files": 0,
+        "languages": [],
+    }
+
+    brief = _index_summary(value, shown=BRIEFLY).splitlines()
+    whole = _index_summary(value).splitlines()
+
+    assert brief[0] == "Indexed 0 files (0 already current), 0 symbols."
+    assert brief[1] == f"  skipped src/m0.py: {reason}"
+    assert brief[-2] == "  [and 3 more skipped]"
+    assert brief[-1] == "The graph holds 0 symbols and 0 references across 0 files (no languages)."
+    assert len(whole) == 2 + BRIEFLY + 3 <= 2 + SHOWN, "a caller that waited is shown every one"
+
+
 async def test_the_grammars_are_cached_under_a_ph_root(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -458,7 +458,11 @@ async def test_a_root_agents_first_step_builds_the_graph_and_it_is_told_when_it_
     await settled(lambda: bool(agent.inbox.next_step), "the completion note", seconds=60)
 
     [note] = agent.inbox.next_step
-    assert "The code graph is finished: 5 files" in text_of(note.content)
+    said = text_of(note.content)
+    assert "The code graph is finished: 5 files" in said
+    # And what a caller that waited would have read: the run's own counts.
+    assert "Indexed 5 files (0 already current)" in said
+    assert "The graph holds" in said
     asked = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
     assert len(asked.value["edges"]) == 4
     assert asked.value["indexing"] is None

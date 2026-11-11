@@ -260,6 +260,21 @@ class SubprocessSpawnSpec:
     """How much of each stream to keep, or `None` for the deployment's own.
 
     See `MAX_OUTPUT` — a spec that says nothing still caps, which is the point."""
+    forwards_signals: bool = True
+    """Whether a signal sent to this argv reaches the command it runs
+    (`ConfinedArgv.forwards_signals`). `False` for a wrapper that keeps the
+    command in a PID namespace, as `bwrap` does, and such a child is killed
+    outright: `terminate` asks nothing of it first.
+
+    **Because asking leaves it running.** The wrapper passes no `SIGTERM` on, so
+    the grace was never the command's. And for its first milliseconds the
+    namespace's init ignores `SIGTERM`, as an init does, and has not yet armed
+    `--die-with-parent`: the wrapper dies of the signal, this seam sees its child
+    gone and stops, and the command starts with no parent. Measured 2026-11-11,
+    `bwrap … --unshare-pid sleep` with its group signaled 0 to 50 ms after the
+    spawn: `SIGTERM` left 30 of 88 running, all between 1 and 6 ms, and
+    `SIGKILL` left none. A stop has to leave nothing behind, so that a restart
+    begins clean; a polite one is only worth having where it is heard."""
 
 
 @dataclass(slots=True)
@@ -357,7 +372,9 @@ class SubprocessHandle:
             self.process.terminate()
 
     async def terminate(self) -> None:
-        """Ask, wait out the grace, then insist — and always reap.
+        """Ask, wait out the grace, then insist — and always reap. A child whose
+        wrapper passes no signal on is not asked: it is killed
+        (`SubprocessSpawnSpec.forwards_signals`).
 
         The `wait()` in the finally is what keeps a zombie from accumulating
         (F4): a child that exited but was never awaited stays in the table for
@@ -373,7 +390,7 @@ class SubprocessHandle:
         """
         with anyio.CancelScope(shield=True):
             try:
-                if self.process.returncode is None:
+                if self.process.returncode is None and self.spec.forwards_signals:
                     self._signal(kill=False)
                     with anyio.move_on_after(self.spec.grace_ms / 1000):
                         await self.process.wait()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-utcp"
-version = "0.10.0"
+version = "0.11.0"
 description = "pH plugin: tools published as UTCP manuals, as tools a pH agent can call."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -40,7 +40,7 @@ classifiers = [
 # `mcp` manuals installs that plugin and names the type in the row's
 # `protocols` — two steps on purpose, because those run inside the harness
 # process and outside the sandbox.
-dependencies = ["ph-core==0.10.0", "utcp>=1.2,<1.3", "utcp-cli>=1.1.5,<1.2"]
+dependencies = ["ph-core==0.11.0", "utcp>=1.2,<1.3", "utcp-cli>=1.1.5,<1.2"]
 
 [project.urls]
 Homepage = "https://github.com/chastabor/pH"

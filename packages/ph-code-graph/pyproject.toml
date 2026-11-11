@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-code-graph"
-version = "0.10.0"
+version = "0.11.0"
 description = "pH plugin: `code_index` and `code_graph`, a Python-native tree-sitter code graph with line-accurate answers."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -25,16 +25,16 @@ classifiers = [
     "Typing :: Typed",
 ]
 # Both are hard dependencies and both are small: `tree-sitter` is the binding
-# and `tree-sitter-language-pack` is a 3.7 MB wheel with 26 languages compiled
-# in (371 available, the rest fetched on demand — which this row never does
-# implicitly; see `_extract.indexable`). No Rust toolchain, no Node, no
-# submodule: the graph itself is stdlib `sqlite3`.
+# and `tree-sitter-language-pack` is a 3.7 MB wheel whose 371 grammars are
+# fetched from GitHub into a cache the first time each is used, or by
+# `ph-code-graph install` (measured: 26 it calls bundled are fetched too). No
+# Rust toolchain, no Node, no submodule: the graph itself is stdlib `sqlite3`.
 #
 # `ph-utcp` because the row a session mounts registers this package's manual with
 # it rather than registering the tools itself; the tools run in `ph-code-graph`.
 dependencies = [
-    "ph-core==0.10.0",
-    "ph-utcp==0.10.0",
+    "ph-core==0.11.0",
+    "ph-utcp==0.11.0",
     "tree-sitter>=0.25",
     "tree-sitter-language-pack>=1.16",
 ]

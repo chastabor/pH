@@ -28,6 +28,180 @@ the limit, a background run's note says what its result would have, and what a r
 spends on embeddings is in the session's log. See "Packed in the embedder's unit, and
 four gaps closed", and "A fourth `/simplify` pass" over it.
 
+**2026-11-11, before publishing as 0.11.0.** Both READMEs say how to install and use
+the tools three ways, the manual names an endpoint's key variable, and four of the
+records under "Not verified" were run for real. Three of those runs found something.
+See "Before publishing".
+
+## Before publishing
+
+**Built.**
+
+- **The manual names the variable an endpoint's key is in.** A UTCP client hands a
+  command only the variables its template names, and `api_key_env` is known only once
+  the endpoint's row has its config. A mounted row now names such a variable to the
+  command (`ph.toolcli.ToolEnv`, `contribute_item(ctx, TOOL_ENV, name, …)`), and `manual` lists
+  it in each tool's `inherit_env_vars` after the package's own: the name, never the
+  value. The registration that reads the manual names no key. Inside pH nothing
+  changes: a session's row hands the variable across by `pass_env`, and the scrubbed
+  environment still drops a credential a template names.
+  - Gate: the library's own UTCP client, with no pH around it, indexes and searches
+    against the fixture server and the server sees the key.
+  - Live, against the nomic server: 30 documents, 233 passages in 2.9 s with
+    `LOCAL_LLAMA_API_KEY` set where the client runs; `MISSING_CREDENTIAL` with it
+    unset.
+- **`/code-graph install` fetches on both pack versions.** See the second finding.
+- **The code graph's background run says what it did**, as the text index's does
+  (`said=`): its counts, and the first five files it skipped with why.
+- **Version 0.11.0** in every member, the pins between them and `uv.lock`; "Upgrading
+  from 0.10" in the root README. Building into `dist/`, the tag and `uv publish` are
+  not done.
+
+**Verified, from "Not verified".**
+
+- **A real daemon, a real agent loop, a restart.** `phern daemon` on the `headless`
+  profile with its scripted model, the `utcp`, `code-graph`, `text-index` and
+  `text-index-endpoint` rows, and `sandbox-allow` naming the embeddings server.
+  - `phern agents send` took a step: `agent/pre-step` fired, both hosts started under
+    `bwrap`, the text index embedded 30 documents (233 passages) through the
+    deployment's egress proxy, and both notes were spliced into the root's log.
+  - `phern agents shutdown` ended both hosts.
+  - A second daemon, a second turn on the same root: new hosts, the same scratch, and
+    the text index's note read "0 passages added, 0 removed; 30 unchanged and not
+    re-embedded". `chunks.json` was not rewritten.
+- **A tree that moved a long way.** A clone of this repository indexed at `0.9.0`, then
+  checked out at `f870c9f`: 211 files changed under `packages` and `docs`.
+
+  | | First index | Unchanged | After the move |
+  |---|---|---|---|
+  | Code graph, `packages` | 8.9 s, 516 files | 0.39 s | 3.0 s: 174 parsed, 380 current |
+  | Text index, `docs`, nomic endpoint | 7.3 s, 60 documents | 0.46 s | 1.6 s: 6 embedded, 55 unchanged |
+
+- **The model's load time here.** MiniLM with its weights on disk: a search by itself
+  3.9 s, the same search answered by a host 0.26 s, the host's first 3.4 s.
+- **Both packages alone.** Wheels of `ph-core`, `ph-utcp` and `ph-code-graph` in an
+  empty environment are 24 packages and about 30 MB, with no phern. The command, the
+  settings file, a host on a socket and the Python UTCP client were each run there.
+
+**Found, and fixed.**
+
+- **The grammars are downloaded, and a confined command cannot.** This plan and the
+  README both said the pack's 26 bundled grammars unpack from the wheel with no
+  network. Measured with 1.16.2 and 1.25.0, an empty cache and no network: no parser,
+  python's included. With the network the bundled set arrives as one archive from
+  GitHub the first time a parser is asked for. In 0.10 the tools ran in the session's
+  process and fetched it unnoticed; a confined host is refused (`sandbox/denied`,
+  `github.com:443`), indexed nothing, and told the agent "The code graph is finished:
+  34 files".
+  - `ensure` now calls the pack's `prefetch` for what is not on disk, and asks for each
+    one alone only if the batch fails. On 1.16.2 `download()` fetched none of them, so
+    `/code-graph install` reported 0 of 18 ready with the network up; it now fetches
+    all 18 in about 3 s on both pack versions, and an index with no network works
+    after it.
+  - The note says what was skipped and why, and the reason names `/code-graph install`.
+  - Both READMEs and the upgrade notes say to run it once before the first session.
+  - The docstrings, the skip reason, the install message and `pyproject.toml`'s comment
+    no longer say the bundled grammars need no network.
+
+- **A sandboxed command ended in its first few milliseconds outlived pH.** pH ended
+  a command with SIGTERM to its group, and sent SIGKILL only if its own child was
+  still there after the grace. Under `bwrap` that child is the wrapper's outer
+  process; the command is under an inner one, which is init of a PID namespace. For
+  the first milliseconds the inner one ignores SIGTERM, as a namespace's init does,
+  and has not yet armed `--die-with-parent`. The outer one dies, pH sees its child
+  gone and stops, and the inner one goes on to start the command.
+  - Measured with `bwrap … --unshare-pid --new-session --unshare-net sleep`, the
+    group signaled after a delay, 8 trials at each of 0, 1, 2, 3, 4, 5, 6, 8, 12, 20
+    and 50 ms:
+
+    | How it was ended | Trials that left the command running |
+    |---|---|
+    | SIGTERM to the group, as today | 30 of 88, all between 1 and 6 ms |
+    | SIGTERM, then SIGKILL to the pid `bwrap` reported on `--json-status-fd` | 0 of 88 |
+    | SIGKILL to the group | 0 of 88 |
+
+  - `--unshare-pid` is what it takes: without it nothing is left, and without
+    `--new-session` the same trials are.
+  - How it showed: `phern -p` with the scripted model ends its turn in 0.3 s, just as
+    the eager hosts start. Five runs of five left both hosts up under
+    `systemd --user`; the journal shows both wrappers spawned and reaped. A host
+    leaves by itself after its idle time; a `bash` command would run to its end.
+  - It is `ph.seams.subprocess` and `sandbox_local`, not this plan's code, and 0.10.0
+    has the same two lines. A turn of a real model lasts longer than the window; a
+    first step that fails at once — a missing key — does not.
+  - *An earlier version of this record said SIGKILL left it too, over 3 to 100 ms.
+    That run was counting a second copy of itself.*
+  - **Fixed, the way the user chose: such a command is killed, not asked.** A spawn
+    says whether a signal reaches its command (`SubprocessSpawnSpec.forwards_signals`,
+    carried from `ConfinedArgv.forwards_signals` by `ConfinedArgv.spawn_spec`, the one
+    door from a confined argv to a spawn: `ctx.shell` and both sandbox probes), and
+    `terminate` sends SIGKILL at once to one whose wrapper passes none on. `bwrap`
+    never passed SIGTERM to the command, so the grace was not the command's to use,
+    and a stop that leaves nothing running is what a clean restart needs. An
+    unconfined command and one under `sandbox-exec`, which do hear SIGTERM, are
+    still asked first. Reporting the sandbox's pid on `--json-status-fd` and ending
+    that was the other design; it is not built.
+  - Gates: a confined command stopped 0 to 8 ms after its spawn leaves no mark, under
+    a real `bwrap`, and the same test with the child asked first leaves three; a
+    handle sends `kill` alone to such a child. Eight `phern -p` runs left no host.
+
+**Found, and not fixed.**
+
+- **A daemon restarted with the `--patch '{insert: …}'` it was started with refuses
+  its own roots.** The root's log holds the insert as a `profile/override`, the
+  daemon's patch declares the rows again, and `phern agents send` answers "row id
+  "utcp" is already declared by profile/override". Started without the patch, the
+  root resumes with the rows its log holds. Rows a deployment always wants belong in
+  a profile document.
+
+**Still not verified.** Other languages' UTCP clients; a model with remote code under
+a sandbox (`einops` and nomic's weights are not installed here); a hosted embeddings
+API and Google's; a fan-out of real sub-agents under `rlm-indexed`. The last three
+need a key or a chat model this machine does not have.
+
+## A fifth `/simplify` pass, over "Before publishing"
+
+Fixed:
+
+- **`ToolEnv` is registered through the shared door** (`Registers`, `contribute_item`),
+  so the endpoint row needs no `ctx.get` and a name leaves with its row. `manual`
+  builds the inherited list once (`_inherited`), and de-duplicates the names.
+- **`ConfinedArgv.spawn_spec`** is the one way from a confined argv to a spawn. The
+  sandbox's two mount probes built their specs by hand and dropped `forwards_signals`;
+  they now go through it, with `ctx.shell` and the test.
+- **`BackgroundRuns.run` requires `said`.** Defaulting to nothing is how the code graph
+  told an agent "finished: 34 files" over a graph that held none.
+- **`ensure` calls `prefetch` once** for what `readiness` says is missing, and asks for
+  each one alone only if the batch fails (one unknown name fails it). Cold, 2.9 s on
+  1.16.2 and 3.2 s on 1.25.0, against 6.2 s one language at a time.
+- **The code graph's summary is one function with a count** (`_index_summary(shown=)`),
+  its note names 8 skipped files as the text index's does, and `said` is a `partial`.
+- **The "bundled grammars need no network" text is corrected** in `_extract`, the
+  skip reason, the install message, `row.py` and `pyproject.toml`.
+- Tests: one recording fake process in `test_subprocess.py`; the real-sandbox test
+  waits 0.5 s rather than 1.2 s and still fails three times of three with the child
+  asked first.
+
+Left as they were, with the reason:
+
+- **The endpoint's key variable is still named twice**, as the session row's
+  `pass_env` and as the command's `ToolEnv` registration. Declaring it once, as a
+  marked config field both of `ph.toolcli`'s doors read, means `config_env` returning
+  names and the command resolving each row's config model: a design change, not a
+  cleanup.
+- **A process that ignores SIGTERM after its group's leader exits still outlives an
+  unconfined stop.** `terminate` sends SIGKILL only while its own child lives. Killing
+  the spawn-time group on the stop path even after the leader has gone, as the RLM
+  kernel's teardown does, would change every unconfined command's stop; it is a
+  decision, recorded here.
+- **A confined indexer still asks GitHub for each missing grammar on every call.**
+  Gating it on `local` would make `ensure` the only fetch; it changes what an
+  unconfined run on a fresh cache does.
+- **`BRIEFLY` and the "[and N more]" line are still per package.** One constant in
+  core for two callers is not worth the import.
+- **The UTCP-client test still searches after it indexes** (0.3 s): the search hit is
+  half of what it proves.
+
 ## Decided with the user after U8
 
 10. **The adapter stays in the harness, and the command asks it for vectors over a
@@ -608,7 +782,8 @@ Left open by this step:
   until it leaves or the row remounts.
 - **Other harnesses get none of this.** `serve` and `$PH_TOOL_HOST` are in the manual's
   inherited variables, so another harness could start a host; nothing in UTCP starts
-  one for it.
+  one for it. *Both READMEs now say how a harness starts one, and it was run from a
+  shell: see "Before publishing".*
 
 ## Before U5
 
@@ -1242,6 +1417,9 @@ then U8 to U10.
 Nothing is left. What each step settled where the code was read is recorded above.
 
 ## Not verified
+
+*2026-11-11: the second, third, fourth and sixth of these were run; see "Before
+publishing". The rest stand.*
 
 - How UTCP clients in other languages stringify list and boolean arguments. The decoder
   accepts JSON, Python repr and comma-separated forms for that reason.

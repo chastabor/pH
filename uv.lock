@@ -1393,7 +1393,7 @@ wheels = [
 
 [[package]]
 name = "ph-clm"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-clm" }
 dependencies = [
     { name = "ph-core" },
@@ -1404,7 +1404,7 @@ requires-dist = [{ name = "ph-core", editable = "packages/ph-core" }]
 
 [[package]]
 name = "ph-code-graph"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-code-graph" }
 dependencies = [
     { name = "ph-core" },
@@ -1423,7 +1423,7 @@ requires-dist = [
 
 [[package]]
 name = "ph-core"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-core" }
 dependencies = [
     { name = "anyio" },
@@ -1455,7 +1455,7 @@ provides-extras = ["otel"]
 
 [[package]]
 name = "ph-rlm"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-rlm" }
 dependencies = [
     { name = "dill" },
@@ -1472,7 +1472,7 @@ requires-dist = [
 
 [[package]]
 name = "ph-runtime-guest"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-runtime-guest" }
 dependencies = [
     { name = "dill" },
@@ -1483,7 +1483,7 @@ requires-dist = [{ name = "dill", specifier = ">=0.3.8" }]
 
 [[package]]
 name = "ph-stabilize"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-stabilize" }
 dependencies = [
     { name = "ph-core" },
@@ -1494,7 +1494,7 @@ requires-dist = [{ name = "ph-core", editable = "packages/ph-core" }]
 
 [[package]]
 name = "ph-text-index"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-text-index" }
 dependencies = [
     { name = "numpy" },
@@ -1531,7 +1531,7 @@ provides-extras = ["local", "nomic"]
 
 [[package]]
 name = "ph-utcp"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/ph-utcp" }
 dependencies = [
     { name = "ph-core" },
@@ -1548,7 +1548,7 @@ requires-dist = [
 
 [[package]]
 name = "phern"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "packages/phern" }
 dependencies = [
     { name = "anyio" },

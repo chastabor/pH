@@ -19,6 +19,9 @@ proves the join: that naming the endpoint in a profile is enough for the
 package's own command to mount that embedder, and that the one variable the row
 names reaches a command whose environment drops everything that looks like a
 credential.
+
+A third, for a harness that is not pH: a UTCP client of the library's own, which
+hands a command the variables its template names and no others.
 """
 
 from __future__ import annotations
@@ -43,10 +46,13 @@ from text_index_helpers import (
 from ph.keys import SANDBOX, WORKSPACE
 from ph.llm.types import text_of
 from ph.testing import MountProfile, report_section, run_tool, session_of
+from ph.toolcli import CONFIG_ENV, INHERITED_ENV, manual_call_template
 from ph.workspace_caches import digest
 from ph_text_index._embed import EndpointEmbedder
+from ph_text_index.cli import CLI, MODEL_ENV
 from ph_text_index.row import TEXT_INDEX
 from ph_utcp import UTCP
+from ph_utcp._library import UtcpClient
 
 pytestmark = pytest.mark.anyio
 
@@ -329,3 +335,39 @@ async def test_a_server_that_refuses_a_passage_is_sent_a_smaller_one(
     assert endpoint.took and max(endpoint.took) <= 40
     assert indexed.value["cut_smaller"] == ["docs/long.md"]
     assert indexed.value["total_documents"] == 1
+
+
+# ---------------------------------------------------------- another harness --
+
+
+async def test_a_utcp_client_of_another_harness_hands_the_key_to_the_command(
+    tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside pH nothing hands a variable across by `pass_env`: a UTCP client
+    passes a command what its template names. So the manual names the variable
+    the endpoint's config names — after the ones the package always reads, and
+    by name alone — and the library's own client, with no pH around it, embeds
+    with the key.
+    """
+    docs_tree(tmp_path, documents=3)
+    # A UTCP call runs in the client's working directory, which is the workspace.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(KEY_ENV, "sekrit")
+    settings = {"baseUrl": endpoint.url, "model": "fx-embed", "apiKeyEnv": KEY_ENV}
+    monkeypatch.setenv(CONFIG_ENV, json.dumps({"text-index-endpoint": settings}))
+    client = await UtcpClient.create(config={"manual_call_templates": [manual_call_template(CLI)]})
+
+    tools = await client.config.tool_repository.get_tools()
+    indexed = await client.call_tool("ph_text_index.text_index", {"paths": ["docs"]})
+    found = await client.call_tool("ph_text_index.text_search", {"query": "containment tier"})
+
+    assert [one.name for one in tools] == ["ph_text_index.text_index", "ph_text_index.text_search"]
+    for tool in tools:
+        assert tool.tool_call_template.inherit_env_vars == [*INHERITED_ENV, *MODEL_ENV, KEY_ENV]
+    # Reading the manual embeds nothing, so its own template names no key.
+    assert KEY_ENV not in str(manual_call_template(CLI))
+    assert indexed["ok"] is True, indexed
+    assert found["ok"] is True, found
+    assert found["value"]["hits"][0]["path"] == "docs/w.md"
+    assert set(endpoint.keys) == {"Bearer sekrit"}
+    assert "sekrit" not in json.dumps([tool.model_dump() for tool in tools])

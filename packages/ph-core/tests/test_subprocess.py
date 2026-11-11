@@ -222,6 +222,39 @@ async def test_a_cancel_token_stops_a_running_child(tmp_path: Path) -> None:
     assert result.canceled, "a cancel was indistinguishable from a command that failed"
 
 
+class _Recorded:
+    """A process with no group, that records what it was sent and dies of either."""
+
+    pid = -1
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.sent: list[str] = []
+
+    def terminate(self) -> None:
+        self.sent.append("terminate")
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.sent.append("kill")
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        return self.returncode or 0
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _handle(
+    tmp_path: Path, process: _Recorded, *, forwards_signals: bool = True
+) -> SubprocessHandle:
+    return SubprocessHandle(
+        spec=SubprocessSpawnSpec(argv=("true",), cwd=tmp_path, forwards_signals=forwards_signals),
+        process=process,  # type: ignore[arg-type]
+    )
+
+
 def test_the_handle_signals_the_group_before_the_process(tmp_path: Path) -> None:
     """And falls back, because both reasons it cannot are ordinary.
 
@@ -229,29 +262,27 @@ def test_the_handle_signals_the_group_before_the_process(tmp_path: Path) -> None
     has no group — in both cases the direct child is the honest best effort, and
     it is what this did before there were groups at all.
     """
+    process = _Recorded()
 
-    class _Gone:
-        """A process whose group is no longer there."""
+    _handle(tmp_path, process)._signal(kill=False)
 
-        returncode: int | None = None
-        pid = -1
-        terminated = False
+    assert process.sent == ["terminate"], "no group, and the child was not signalled either"
 
-        def terminate(self) -> None:
-            self.terminated = True
 
-        def kill(self) -> None:  # pragma: no cover — not reached here
-            self.terminated = True
+async def test_a_child_whose_wrapper_passes_no_signal_on_is_killed_and_not_asked(
+    tmp_path: Path,
+) -> None:
+    """`terminate` asks, waits and then insists — of a child that can hear the
+    asking (`SubprocessSpawnSpec.forwards_signals`). `test_sandbox_local` holds
+    the same with a real wrapper."""
 
-    process = _Gone()
-    handle = SubprocessHandle(
-        spec=SubprocessSpawnSpec(argv=("true",), cwd=tmp_path),
-        process=process,  # type: ignore[arg-type]
-    )
+    async def ended(*, forwards_signals: bool) -> list[str]:
+        process = _Recorded()
+        await _handle(tmp_path, process, forwards_signals=forwards_signals).terminate()
+        return process.sent
 
-    handle._signal(kill=False)
-
-    assert process.terminated, "no group, and the child was not signalled either"
+    assert await ended(forwards_signals=True) == ["terminate"]
+    assert await ended(forwards_signals=False) == ["kill"]
 
 
 async def test_a_canceled_command_is_an_abort_rather_than_an_exit_code() -> None:

@@ -533,8 +533,9 @@ class EndpointEmbedder(_Remote):
             if not key:
                 raise HarnessError(
                     f"the embeddings endpoint's key is missing: ${self.api_key_env} is not "
-                    "set where the command runs. Set it in the environment pH is started "
-                    "from; the `text-index-endpoint` row hands it to the command by name.",
+                    "set where the command runs. Set it in the environment pH, or the "
+                    "harness that runs this command, is started from; the command is "
+                    "handed it by name.",
                     MISSING_CREDENTIAL,
                 )
             headers["Authorization"] = f"Bearer {key}"

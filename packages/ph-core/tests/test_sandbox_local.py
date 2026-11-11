@@ -56,9 +56,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import Context, maybe_await
 from ph.keys import SANDBOX, SUBPROCESS
 from ph.seams.sandbox import Egress, SandboxError, SandboxPolicy, writable_paths
 from ph.seams.sandbox_egress import PROBE_HOST
@@ -398,6 +399,29 @@ async def test_an_absolute_path_write_is_refused(mount: MountProfile, tmp_path: 
     )
     assert escaped != 0, "the kernel must refuse this"
     assert outside.read_text(encoding="utf-8") == "host", "and the host file must be untouched"
+
+
+async def test_a_confined_command_stopped_as_it_starts_does_not_run_on(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A stop leaves nothing running, whenever it comes. Each of these is stopped
+    0 to 8 ms after its spawn, the window in which a wrapper asked to stop left
+    its command running (`SubprocessSpawnSpec.forwards_signals`), and would
+    otherwise leave its mark a fifth of a second later."""
+    ctx, workspace = await _enforcing(mount, tmp_path)
+    policy = SandboxPolicy(mode="workspace-write", workspace_root=str(workspace))
+    sandbox, subprocess = ctx.require(SANDBOX), ctx.require(SUBPROCESS)
+
+    for after_ms in range(9):
+        mark = workspace / f"ran-on-{after_ms}"
+        confined = sandbox.confine(("/bin/sh", "-c", f"sleep 0.2; : > {mark}"), policy)
+        child = await subprocess.spawn(confined.spawn_spec(workspace, env=scrub_env()))
+        await anyio.sleep(after_ms / 1000)
+        assert child.dispose is not None
+        await maybe_await(child.dispose())
+
+    await anyio.sleep(0.5)
+    assert sorted(one.name for one in workspace.glob("ran-on-*")) == []
 
 
 async def test_read_only_mode_refuses_the_workspace_too(
