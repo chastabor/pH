@@ -26,11 +26,12 @@ from typing import Any
 import pytest
 from daemon_helpers import logged, running, until
 
+from ph.framing import MAX_LINE
 from ph.json import as_seq
 from ph.keys import ATTACHMENTS
 from ph.llm.types import AttachmentRef
 from ph_app.daemon.client import DaemonClient
-from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES, MAX_LINE
+from ph_app.daemon.framing import MAX_ATTACHMENT_BYTES
 from ph_app.protocol import DaemonError
 
 pytestmark = pytest.mark.anyio

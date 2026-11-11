@@ -68,7 +68,7 @@ from ph.seams.code_runtime import (
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy, SandboxSeam
 from ph.seams.subprocess import first_line, scrub_env, signal_group
-from ph.seams.workspace import Workspace, workspace_of, workspace_policy
+from ph.seams.workspace import Workspace, confined_env, workspace_of, workspace_policy
 from ph.text import count_of
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph.tools.errors import error_message
@@ -1687,14 +1687,20 @@ class PythonCodeRuntime:
         closes it. The same whether the namespace is the agent's own or another it
         runs beside, such as the H1 probe's."""
         workspace = self.workspace_for(agent_id)
+        confine = self.confiner(agent_id, workspace)
+        env: Mapping[str, str] = {}
+        if workspace is not None:
+            # As `ctx.shell` gives a confined command: a confined kernel has no
+            # `/tmp` of its own (`confined_env`).
+            env = confined_env(workspace) if confine is not None else workspace.env
         kernel = Kernel(
             namespace=namespace,
             environment=await self.environment(),
             limits=self.limits,
             journal=self.journal,
             cwd=None if workspace is None else workspace.root,
-            env={} if workspace is None else workspace.env,
-            confine=self.confiner(agent_id, workspace),
+            env=env,
+            confine=confine,
             snapshots=self.snapshots,
             skills=self.skill_modules,
             boot_timeout=self.boot_timeout,

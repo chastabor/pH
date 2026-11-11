@@ -112,9 +112,7 @@ def _tree(root: Path) -> None:
 
 
 async def _indexed(mount: MountProfile, tmp_path: Path, **config: object) -> Context:
-    settings = {"path": str(tmp_path / "graph.db"), **config}
-    ctx = await mount({**ROW, "config": settings})
-    return ctx
+    return await mount({**ROW, "config": config})
 
 
 # ---------------------------------------------------------------- extraction ----
@@ -939,7 +937,7 @@ async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_pa
     the wheel and only the long tail fetches — but "is this ready" should have
     one answer per plugin, asked the same way.
     """
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
+    ctx = await mount(ROW)
     agent = new_agent(ctx)
 
     said = await ctx.require(COMMANDS).dispatch("/code-graph status", agent=agent, scope=agent.ctx)
@@ -967,7 +965,6 @@ async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
         {
             **ROW,
             "config": {
-                "path": str(tmp_path / "graph.db"),
                 "languages": ["python", "sql", "not-a-language"],
             },
         }
@@ -1000,9 +997,7 @@ async def test_a_grammar_that_is_not_on_disk_is_named(
 
     monkeypatch.setattr(_extract, "local", lambda language: False)
     monkeypatch.setattr(engine, "ensure", lambda languages: ([], list(languages)))
-    ctx = await mount(
-        {**ROW, "config": {"path": str(tmp_path / "graph.db"), "languages": ["python"]}}
-    )
+    ctx = await mount({**ROW, "config": {"languages": ["python"]}})
     agent = new_agent(ctx)
 
     status = await ctx.require(COMMANDS).dispatch(
@@ -1028,7 +1023,7 @@ async def test_the_grammars_are_cached_under_a_ph_root(
     monkeypatch.delenv("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR", raising=False)
     monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
 
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
+    ctx = await mount(ROW)
 
     assert ctx.require(CODE_GRAPH).grammars == tmp_path / "cache" / "tree-sitter"
     assert ctx.require(CODE_GRAPH).grammars.is_dir()
@@ -1093,7 +1088,7 @@ async def test_a_reindex_under_git_never_opens_an_unchanged_file(
     whether the file was opened, and a test that watched the counts alone would
     pass against both implementations.
     """
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
+    ctx = await mount(ROW)
     root = await git_repo(ctx, tmp_path)
     (root / "pkg").mkdir(exist_ok=True)
     (root / "pkg" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
@@ -1119,7 +1114,7 @@ async def test_an_edited_file_is_still_read_and_reindexed(
 ) -> None:
     """The safe direction. git's index still holds the old blob id for it, so
     this is `status` doing its job — see `ph.seams.changes`."""
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
+    ctx = await mount(ROW)
     root = await git_repo(ctx, tmp_path)
     (root / "pkg").mkdir(exist_ok=True)
     (root / "pkg" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
@@ -1146,7 +1141,7 @@ async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
     The interesting half is that the *first* run stores a usable token even
     though it proved nothing, which is what makes the second run cheap.
     """
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "graph.db")}})
+    ctx = await mount(ROW)
     root = await jj_repo(ctx, tmp_path)
     (root / "pkg").mkdir(exist_ok=True)
     (root / "pkg" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")

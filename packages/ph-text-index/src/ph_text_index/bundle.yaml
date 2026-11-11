@@ -5,17 +5,21 @@
 # *bundles* resolve, so a profile layering this one is hidden on an install
 # without this distribution instead of being offered and then failing at mount.
 #
-# **Both rows, and both enabled.** The seam registers no tools until an embedder
-# is claimed (see the package's module docstring), so a bundle that shipped only
+# **Both rows, and both enabled.** The package's manual is registered by an
+# embedder's claim (see `ph_text_index.row`), so a bundle that shipped only
 # `text-index` would mount a service and advertise nothing — the failure would
-# be a silence, not an error. A deployment that wants the seam with an embedder
-# of its own disables `text-index-local` and mounts its own provider row; that
-# is one line, and it is the case the seam/provider split exists for.
+# be a silence, not an error. A deployment that wants another embedder disables
+# `text-index-local` and mounts that embedder's row; that is one line, and it is
+# the case the seam/provider split exists for.
+#
+# Both wait on `ctx.utcp`: the tools run in the `ph-text-index` command, and
+# `ph-utcp` is the row that runs it. A profile layers the `utcp` bundle first.
 
 - id: text-index
   name: text-index
 
-# The `sentence-transformers` provider. Its model downloads on first use, not at
-# mount, so layering this bundle costs nothing until something indexes.
+# The `sentence-transformers` provider. Its model loads in the command, on first
+# use and not at mount, so layering this bundle costs nothing until something
+# indexes.
 - id: text-index-local
   name: text-index-local

@@ -132,6 +132,7 @@ def test_the_deployment_pins_every_other_member_at_the_version_it_is() -> None:
 
 TOOL_COMMANDS = {
     "ph-code-graph": {"ph-code-graph": "ph_code_graph.cli:main"},
+    "ph-text-index": {"ph-text-index": "ph_text_index.cli:main"},
 }
 """The members that grew a command of their own, each by a decision.
 

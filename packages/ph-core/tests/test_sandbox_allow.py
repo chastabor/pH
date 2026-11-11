@@ -33,6 +33,7 @@ from ph.seams.sandbox import (
     SandboxMode,
     SandboxPolicy,
     SandboxSeam,
+    grants_apart,
     host_allowed,
     writable_paths,
 )
@@ -171,6 +172,28 @@ async def test_the_read_only_preset_reaches_the_shell_policy(
     # An agent with no logged posture is unchanged — a policy built for a probe
     # or a test still means what it says.
     assert sandbox.effective(asked).mode == "workspace-write"
+
+
+def test_a_grant_holds_in_every_mode_and_never_reopens_the_workspace(tmp_path: Path) -> None:
+    """Read-only bars the workspace, not a tool's working state. A caller's grant
+    is in the writable set under `read-only` — so a tool that changes no file of a
+    repository can still build an index of it — and a grant that is the workspace,
+    is inside it or contains it is refused, or naming the tree would be all it
+    took to write it in a session whose person said no."""
+    workspace = tmp_path / "repo"
+    apart = tmp_path / "state"
+    link = tmp_path / "link"
+    workspace.mkdir()
+    link.symlink_to(workspace, target_is_directory=True)
+    grants = [str(apart), str(workspace), str(workspace / "src"), str(tmp_path), str(link / "x")]
+
+    honored, refused = grants_apart(str(workspace), grants)
+
+    assert honored == [str(apart)]
+    assert refused == [str(workspace), str(workspace / "src"), str(tmp_path), str(workspace / "x")]
+    for mode in ("read-only", "workspace-write"):
+        policy = SandboxPolicy(mode=mode, workspace_root=str(workspace), writable_extra=honored)
+        assert str(apart) in writable_paths(policy)
 
 
 def test_the_callers_own_extras_are_kept_and_not_duplicated(tmp_path: Path) -> None:

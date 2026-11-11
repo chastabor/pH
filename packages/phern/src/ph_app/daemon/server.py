@@ -48,6 +48,7 @@ from anyio.streams.stapled import MultiListener
 
 from ph.agent.types import AgentCancelCause
 from ph.cordis import Profile
+from ph.framing import listening
 from ph.keys import ATTACHMENTS, COMMANDS, CREDENTIALS, PERMISSION_PRESETS, TOOLS
 from ph.lingering import RuntimeLifetime, lifetime, socket_identity
 from ph.llm.types import AttachmentRef
@@ -144,7 +145,7 @@ from ..trust import TrustStore, trust_path
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
-from .launch import SPAWN_TIMEOUT, listening
+from .launch import SPAWN_TIMEOUT
 from .notify import notify
 from .planner import Planner
 from .probes import (
@@ -396,7 +397,7 @@ class _Connection:
     spoke: bool = False
     """Whether this connection has ever sent a frame — a client, not a knock.
 
-    `launch.listening()` is a connect and an immediate close, and every spawn,
+    `ph.framing.listening()` is a connect and an immediate close, and every spawn,
     every stale-socket check and every `_await_socket` poll runs it. Nothing at
     the socket layer tells that apart from a front end, so the first frame is
     what does.

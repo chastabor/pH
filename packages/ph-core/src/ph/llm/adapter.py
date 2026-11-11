@@ -15,11 +15,13 @@ sees it, so a consumer never handles two shapes for the same failure.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable, Collection, Sequence
+import re
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from ..cordis import Context, Running, events, plugin, running
+from ..json import JsonValue, as_int, as_obj, as_seq
 from ..keys import LLM
 from .types import (
     CallSetting,
@@ -36,13 +38,22 @@ from .types import (
 
 __all__ = [
     "AdapterHandle",
+    "EmbeddingAdapter",
+    "EmbeddingRequest",
+    "Embeddings",
     "LlmAdapter",
     "LlmError",
     "LlmRuntime",
     "MediaRoute",
     "ResolvedModel",
     "apply",
+    "input_too_long",
+    "openai_embeddings_body",
+    "openai_vectors",
     "resolved",
+    "too_long_facts",
+    "vector_of",
+    "vectors_of",
 ]
 
 log = logging.getLogger("ph.llm")
@@ -236,6 +247,157 @@ class LlmAdapter(Protocol):
     def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class EmbeddingRequest:
+    """Texts to turn into vectors, on one route."""
+
+    provider: str
+    model: str
+    inputs: tuple[str, ...]
+    dimensions: int | None = None
+    """A width to ask for, where the model can shorten its vectors."""
+
+
+@dataclass(frozen=True, slots=True)
+class Embeddings:
+    """One vector an input, in the inputs' order, as the provider returned them."""
+
+    vectors: tuple[tuple[float, ...], ...]
+    input_tokens: int | None = None
+    """What the provider says the request cost, when it says."""
+
+
+_TOO_LONG = (
+    "context length",
+    "context window",
+    "context size",
+    "exceeds the available context",
+    "exceed context",
+    "too many tokens",
+    "maximum number of tokens",
+    "too large to process",
+    "too long",
+)
+"""How embeddings servers say an input did not fit. llama.cpp: *"input (1602
+tokens) is too large to process"*, with a 500; OpenAI: *"maximum context length is
+8192 tokens"*, with a 400. Phrases, because the status says nothing either way."""
+
+
+def input_too_long(body: str) -> bool:
+    """Whether an embeddings server refused a request because an input did not fit.
+
+    The one list, for every client of an embeddings API — an adapter, and an
+    embedder that speaks the wire itself — because a refusal one of them reads
+    as "too long" and another as a plain failure sends the same server's answer
+    down two roads: one sends a smaller input and goes on, the other ends the
+    run. Classified as `CONTEXT_WINDOW_EXCEEDED`, which is what a caller can act
+    on."""
+    lowered = body.lower()
+    return any(phrase in lowered for phrase in _TOO_LONG)
+
+
+_SENT = (r"input \((\d+) tokens\)", r"requested (\d+) tokens", r"resulted in (\d+) tokens")
+_READS = (r"batch size: (\d+)", r"maximum context length is (\d+)")
+
+
+def too_long_facts(body: str) -> tuple[int | None, int | None]:
+    """What a refusal `input_too_long` recognizes says in numbers: how many
+    tokens the input was, and how many the server takes. Either may be missing.
+
+    A llama.cpp says both — *"input (702 tokens) is too large to process …
+    (current batch size: 512)"* — and so does OpenAI. They are worth reading
+    because they are exact where a caller's own count is an estimate: the first
+    says how far over the input was, so the next one is aimed rather than
+    halved, and the second is the server's real limit, which is not always the
+    one it reports when asked. Beside `_TOO_LONG` because both read the same
+    servers' prose; a refusal in other words simply has no numbers."""
+
+    def found(patterns: tuple[str, ...]) -> int | None:
+        for pattern in patterns:
+            match = re.search(pattern, body)
+            if match is not None:
+                return int(match.group(1))
+        return None
+
+    return found(_SENT), found(_READS)
+
+
+def openai_embeddings_body(
+    model: str, inputs: Sequence[str], dimensions: int | None
+) -> dict[str, JsonValue]:
+    """The OpenAI `/embeddings` request: `model` left out when empty — a server
+    that serves one model needs no name — and `dimensions` when not asked for."""
+    body: dict[str, JsonValue] = {"input": list(inputs)}
+    if model:
+        body["model"] = model
+    if dimensions is not None:
+        body["dimensions"] = dimensions
+    return body
+
+
+def openai_vectors(reply: JsonValue, expected: int) -> tuple[tuple[float, ...], ...]:
+    """The vectors of an OpenAI `/embeddings` answer, in the inputs' order:
+    placed by `index`, because the wire allows them back in any order."""
+    data = sorted(
+        (as_obj(one) for one in as_seq(as_obj(reply).get("data"))),
+        key=lambda one: as_int(one.get("index")),
+    )
+    return vectors_of(data, expected, "embedding")
+
+
+def vectors_of(items: Sequence[object], expected: int, key: str) -> tuple[tuple[float, ...], ...]:
+    """Each of `items`' `key` as a vector, and exactly `expected` of them.
+
+    An answer with another count of embeddings than inputs is the provider
+    answering in another shape, and refused: matched up by position it would
+    file each passage under a neighbor's vector."""
+    if len(items) != expected:
+        raise LlmError(
+            f"the embeddings API answered {expected} inputs with {len(items)} embeddings",
+            _BAD_VECTOR,
+        )
+    return tuple(vector_of(item.get(key) if isinstance(item, Mapping) else None) for item in items)
+
+
+def vector_of(values: object) -> tuple[float, ...]:
+    """A provider's JSON array of numbers as one vector.
+
+    The narrowing an embedding adapter needs and the one place it is written:
+    anything in the array that is not a number is the provider answering in
+    another shape, and is refused rather than coerced — `float("nan")` from a
+    string would be a vector that scores against nothing and says so nowhere."""
+    if not isinstance(values, (list, tuple)):
+        raise LlmError("the embeddings API returned an embedding that is not a list", _BAD_VECTOR)
+    vector: list[float] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise LlmError("the embeddings API returned a value that is not a number", _BAD_VECTOR)
+        vector.append(float(value))
+    return tuple(vector)
+
+
+_BAD_VECTOR = "REQUEST_FAILED"
+
+
+@runtime_checkable
+class EmbeddingAdapter(Protocol):
+    """An adapter that can embed. **Optional capability.**
+
+    Its own Protocol beside `LlmAdapter`, and asked with `isinstance`, never a
+    `getattr` probe — the rule this tree states for every optional capability:
+    a probe reports an adapter whose method is misnamed as one that cannot.
+    An adapter for a provider with no embeddings API implements none of this and
+    is simply not an instance.
+
+    The credential is resolved inside `embed`, at the adapter's edge, as it is
+    for `stream`: a caller hands texts in and gets vectors back, and at no point
+    holds a key. That is what lets a confined tool embed through a route — it
+    asks the harness, and the harness asks this.
+    """
+
+    async def embed(self, request: EmbeddingRequest) -> Embeddings: ...
+
+
 @dataclass(slots=True)
 class AdapterHandle:
     """One adapter registration, and the routes it claims."""
@@ -313,6 +475,29 @@ class LlmRuntime:
         if handle is None:
             raise LlmError(f'no adapter is registered for provider "{provider}"', "NO_ADAPTER")
         return handle
+
+    def embeds(self, provider: str) -> bool:
+        """Whether the adapter registered for `provider` can embed. `False` for a
+        provider nothing is registered for, too: there is no adapter to ask."""
+        handle = self._routes.get(provider)
+        return handle is not None and isinstance(handle.adapter, EmbeddingAdapter)
+
+    async def embed(self, request: EmbeddingRequest) -> Embeddings:
+        """Embed `request.inputs` through the adapter that owns its route.
+
+        Run as the row that registered the adapter, like `stream`. Refused with a
+        code when the route has no adapter (`NO_ADAPTER`) or its adapter cannot
+        embed (`NO_EMBEDDINGS`), each naming the provider."""
+        handle = self._route(request.provider)
+        adapter = handle.adapter
+        if not isinstance(adapter, EmbeddingAdapter):
+            raise LlmError(
+                f'the adapter for provider "{request.provider}" does not embed; name a '
+                "provider whose adapter does, or use an embeddings endpoint",
+                "NO_EMBEDDINGS",
+            )
+        with running(handle.by):
+            return await adapter.embed(request)
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         """Ask the owning adapter what it knows about one exact route."""

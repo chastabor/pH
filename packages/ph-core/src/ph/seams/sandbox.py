@@ -99,6 +99,7 @@ __all__ = [
     "allowed_paths_of",
     "apply",
     "enforcement_of",
+    "grants_apart",
     "held_under",
     "host_allowed",
     "narrower",
@@ -385,6 +386,35 @@ def held_under(path: str, roots: Sequence[str]) -> bool:
     """Whether canonical `path` is one of `roots` or inside one — what a narrowed
     child's directory must be of its parent's, at admission and at every bind."""
     return any(is_under(Path(path), Path(root)) for root in roots)
+
+
+def grants_apart(workspace_root: str, grants: Sequence[str]) -> tuple[list[str], list[str]]:
+    """A caller's writable grants, split into those honored and those refused.
+
+    **Read-only is a barrier for the workspace, not for a tool's working state.**
+    A grant is honored under every mode (`writable_paths` returns the extras under
+    `read-only` too), which is what lets a tool that changes no file of a
+    repository still build an index of it. The other half of that rule is here: a
+    grant that *is* the workspace root, is inside it, or contains it is refused,
+    because honoring it would make the repository writable in a session whose
+    person said it is not — a manual would only have to name the tree.
+
+    Refused whatever the mode. Under `workspace-write` the root is writable
+    already, so nothing is lost by it; and a rule that depended on the mode would
+    be one a change of posture mid-session silently widened.
+
+    Each grant is spelled as the kernel will match it (`allowance_path`) before it
+    is compared, and the honored ones are returned in that spelling. The workspace
+    root is taken as given: the workspace seam hands out canonical roots.
+    """
+    root = Path(workspace_root)
+    honored: list[str] = []
+    refused: list[str] = []
+    for grant in grants:
+        spelled = allowance_path(grant)
+        overlaps = is_under(Path(spelled), root) or is_under(root, Path(spelled))
+        (refused if overlaps else honored).append(spelled)
+    return honored, refused
 
 
 def host_allowed(hosts: Sequence[str], host: str, port: int) -> bool:

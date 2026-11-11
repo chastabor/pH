@@ -34,7 +34,16 @@ import anyio
 from ph.cordis import Context, plugin
 from ph.json import as_int, as_obj, as_seq, as_str
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
-from ph.llm.adapter import LlmError, ResolvedModel, resolved
+from ph.llm.adapter import (
+    EmbeddingRequest,
+    Embeddings,
+    LlmError,
+    ResolvedModel,
+    input_too_long,
+    openai_embeddings_body,
+    openai_vectors,
+    resolved,
+)
 from ph.llm.types import (
     AttachmentRef,
     BlockEnd,
@@ -463,6 +472,26 @@ class OpenAiCompatibleAdapter:
             ) from error
         for chunk in state.finish():
             yield chunk
+
+    async def embed(self, request: EmbeddingRequest) -> Embeddings:
+        """`/embeddings`, the half of this wire that returns vectors
+        (`ph.llm.adapter.EmbeddingAdapter`).
+
+        Every server that speaks this shape is asked the same way; one that does
+        not embed — a llama.cpp started without `--embeddings` — answers with a
+        status and its own sentence, which is the error. `index` places each
+        vector, because the wire allows them back in any order."""
+        reply, _ = await self.http.post_raw(
+            f"{self.profile.base_url.rstrip('/')}/embeddings",
+            headers=self._headers(),
+            json=openai_embeddings_body(request.model, request.inputs, request.dimensions),
+            is_overflow=input_too_long,
+        )
+        usage = as_obj(reply.get("usage")).get("prompt_tokens")
+        return Embeddings(
+            vectors=openai_vectors(reply, len(request.inputs)),
+            input_tokens=usage if isinstance(usage, int) else None,
+        )
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         # This wire takes `response_format: {"type": "json_schema", …}` with

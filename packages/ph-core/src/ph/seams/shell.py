@@ -28,9 +28,9 @@ from ..json import JsonObject, JsonValue
 from ..keys import FS, SANDBOX, SHELL, SUBPROCESS
 from ..session import Session, SessionEvent, intents_of
 from ..session.kinds import SHELL_COMMAND
-from .sandbox import ConfinedArgv, SandboxPolicy
+from .sandbox import ConfinedArgv, SandboxPolicy, grants_apart
 from .subprocess import SubprocessSpawnSpec, platform_shell
-from .workspace import workspace_of, workspace_policy
+from .workspace import confined_env, workspace_of, workspace_policy
 
 log = logging.getLogger("ph.seams.shell")
 
@@ -233,14 +233,19 @@ class ShellService:
           variable the deployment dropped — a credential — does not fetch it.
         * The workspace's redirection variables go over that, because they are
           where the command runs, not something it opted into: a command that
-          inherits `TMPDIR` gets the agent's.
+          inherits `TMPDIR` gets the agent's. A confined command gets a `TMPDIR`
+          in the agent's scratch whatever its workspace, because the sandbox
+          leaves it no other writable temporary directory.
         * `extra_env` goes over everything: values the caller supplies itself,
           which therefore win.
 
         `writable_extra` adds writable paths to the workspace policy this derives,
-        for a command that keeps state outside the workspace — an index under
-        `$PH_CACHE`. It widens nothing a `policy` passed in already says, and
-        means nothing where no backend confines the command.
+        for a command that keeps something outside the workspace and the agent's
+        scratch — a grammar cache under `$PH_CACHE`. A grant holds under every
+        sandbox mode, `read-only` included, and one that overlaps the workspace
+        is dropped (`ph.seams.sandbox.grants_apart`): read-only bars writing the
+        tree, and no grant reopens it. It widens nothing a `policy` passed in
+        already says, and means nothing where no backend confines the command.
         """
         subprocess_service = self.ctx.require(SUBPROCESS)
         workspace = workspace_of(self.ctx, agent)
@@ -258,8 +263,17 @@ class ShellService:
             if sandbox is not None and sandbox.available:
                 policy = workspace_policy(workspace)
                 if writable_extra:
+                    # Honored under every mode, and refused where one overlaps the
+                    # workspace: see `grants_apart` for both halves of the rule.
+                    granted, refused = grants_apart(str(workspace.root), writable_extra)
+                    if refused:
+                        log.debug(
+                            "ph.seams.shell: not granted, because it overlaps the workspace %s: %s",
+                            workspace.root,
+                            ", ".join(refused),
+                        )
                     policy = policy.model_copy(
-                        update={"writable_extra": [*(policy.writable_extra or []), *writable_extra]}
+                        update={"writable_extra": [*(policy.writable_extra or []), *granted]}
                     )
             else:
                 # Said out loud, because `confined_by=None` cannot tell "the tier
@@ -281,7 +295,10 @@ class ShellService:
             confined = self.ctx.require(SANDBOX).confine(argv, policy, agent=agent_id)
             argv = confined.argv
             confined_by = confined.backend
-        redirection = workspace.env if workspace is not None and workspace.env else None
+        redirection: Mapping[str, str] = {}
+        if workspace is not None:
+            # A confined command has no `/tmp` of its own (`confined_env`).
+            redirection = confined_env(workspace) if confined is not None else workspace.env
         env: dict[str, str] | None = None
         if keep_env is not None or extra_env or redirection:
             # Additive, not wholesale: a command that inherited nothing would not

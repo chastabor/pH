@@ -3,6 +3,10 @@
 Gates: *no embedder means no tool; a reopened index answers the same question;
 a chunk's line span names the lines it actually came from.*
 
+The **engine** rows, mounted here as the `ph-text-index` command mounts them. The
+rows a session mounts are `test_text_index_row.py`'s subject, and the command
+itself `test_text_index_cli.py`'s.
+
 ## Why a stub embedder rather than the real model
 
 The shipped provider is `sentence-transformers`, which downloads weights on
@@ -30,8 +34,6 @@ an expected number.
 
 from __future__ import annotations
 
-import hashlib
-import itertools
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -40,79 +42,32 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-import numpy as np
 import pytest
+from text_index_helpers import new_agent as _agent
+from text_index_helpers import prose
+from text_index_stub import DOCUMENT, BoundedEmbedder, HashingEmbedder
 
 from ph.cordis import DEPLOYMENT, Context
 from ph.indexable import triage
-from ph.json import as_str
-from ph.keys import AGENTS, COMMANDS, FS, SESSIONS, SKILLS, SYSTEM_PROMPT, TOOLS
+from ph.keys import COMMANDS, FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
-from ph.testing import FAKE_OPTIONS, MountProfile, raising, report_section, run_tool
+from ph.testing import MountProfile, raising, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
-from ph.workspace_caches import WORKSPACE_FILE
-from ph_text_index import TEXT_INDEX, Config, TextIndexSeam
+from ph.toolcli import STATE_ENV
+from ph.workspace_caches import WORKSPACE_FILE, digest
 from ph_text_index._chunk import chunk_paragraphs, chunk_text
+from ph_text_index._config import index_base
 from ph_text_index._embed import Vectors
 from ph_text_index._store import IndexMismatch, TextIndex
+from ph_text_index.engine import TEXT_INDEX, Config, TextIndexSeam
 
 pytestmark = pytest.mark.anyio
 
-ROW: dict[str, Any] = {"id": "text-index", "name": "text-index"}
-
-DOCUMENT = """# Workspaces
-
-The workspace seam decides where an agent's writes land.
-
-A containment tier is what a deployment asks for: advisory keeps the agent in
-the person's own checkout, and a worktree branches a fresh one.
-
-## Sandboxing
-
-Confinement is a different question, answered by the sandbox backend — bwrap on
-Linux and Seatbelt on macOS.
-"""
-
-
-@dataclass(slots=True)
-class HashingEmbedder:
-    """A deterministic bag-of-words embedder. See the module docstring."""
-
-    dim: int = 96
-    calls: int = 0
-
-    @property
-    def name(self) -> str:
-        return f"stub-hashing:{self.dim}"
-
-    def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
-        self.calls += 1
-        rows = np.zeros((len(texts), self.dim), dtype=np.float32)
-        for index, text in enumerate(texts):
-            for token in "".join(
-                character if character.isalnum() else " " for character in text.lower()
-            ).split():
-                digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-                rows[index, int.from_bytes(digest, "big") % self.dim] += 1.0
-        norms = np.linalg.norm(rows, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        return np.ascontiguousarray(rows / norms, dtype=np.float32)
-
-
-_SEQ = itertools.count()
-
-
-def _agent(ctx: Context) -> Any:  # noqa: ANN401
-    """A fresh agent, on a session id nothing else has taken.
-
-    Counted rather than fixed: a test needing two agents would otherwise collide
-    on the session id and fail as `SESSION_ALREADY_EXISTS`, several frames from
-    the cause. The sibling package's helper says the same.
-    """
-    return ctx.require(AGENTS).create(
-        ctx.require(SESSIONS).create(f"ti-{next(_SEQ)}"), FAKE_OPTIONS
-    )
+ROW: dict[str, Any] = {"id": "text-index", "name": "text-index-engine"}
+"""The engine row — the tools themselves, as the `ph-text-index` command mounts
+them. Under the session row's id, as the command spells it, so a config written
+for `text-index` is read by the row that indexes."""
 
 
 def _opened(ctx: Context) -> TextIndex:
@@ -135,8 +90,7 @@ async def _mounted(
     for the same settling, which is what `test_subagent_task` spells as an
     explicit `profile/mounted` for the same reason.
     """
-    settings = {"path": str(tmp_path / "index"), **config}
-    ctx = await mount({**ROW, "config": settings})
+    ctx = await mount({**ROW, "config": config})
     embedder = HashingEmbedder()
     ctx.require(TEXT_INDEX).register(embedder)
     await ctx.reconcile()
@@ -425,9 +379,9 @@ def test_a_vector_the_sidecar_never_named_is_removed_on_open(
     assert _store(tmp_path / "ix").documents() == ["docs/next.md", "docs/w.md"]
 
 
-def _seam(root: Path, embedder: HashingEmbedder) -> TextIndexSeam:
+def _seam(embedder: HashingEmbedder) -> TextIndexSeam:
     """The service on its own, as a second root or process would hold it."""
-    seam = TextIndexSeam(ctx=Context(), config=Config(path=str(root)))
+    seam = TextIndexSeam(ctx=Context(), config=Config())
     seam.provider = embedder
     return seam
 
@@ -449,7 +403,7 @@ async def test_two_writers_sharing_a_directory_both_keep_their_documents(
     the first writer's document is gone.
     """
     embedder, tree = HashingEmbedder(), tmp_path / "tree"
-    first, second = _seam(tmp_path / "ix", embedder), _seam(tmp_path / "ix", embedder)
+    first, second = _seam(embedder), _seam(embedder)
     await second.index(tree)  # a copy loaded before the other writer's change
 
     await _index_one(first, tree, "docs/w.md", DOCUMENT)
@@ -467,7 +421,7 @@ async def test_a_second_writer_waits_for_the_first(tmp_path: Path) -> None:
     the first holds it.
     """
     embedder, tree = HashingEmbedder(), tmp_path / "tree"
-    first, second = _seam(tmp_path / "ix", embedder), _seam(tmp_path / "ix", embedder)
+    first, second = _seam(embedder), _seam(embedder)
     entered = anyio.Event()
 
     async def wait_to_write() -> None:
@@ -494,7 +448,7 @@ async def test_a_search_does_not_load_what_a_writer_is_part_way_through(
     the writer's change before the writer has let go.
     """
     embedder, tree = HashingEmbedder(), tmp_path / "tree"
-    reader, writer = _seam(tmp_path / "ix", embedder), _seam(tmp_path / "ix", embedder)
+    reader, writer = _seam(embedder), _seam(embedder)
     await reader.index(tree)
 
     async with writer.writing(tree) as store:
@@ -513,14 +467,14 @@ async def test_each_workspace_has_its_own_index(tmp_path: Path) -> None:
     Sabotage: key `root` by the embedder alone, and one workspace's document is in
     the other's index.
     """
-    seam = _seam(tmp_path / "ix", HashingEmbedder())
+    seam = _seam(HashingEmbedder())
     here, there = tmp_path / "here", tmp_path / "there"
 
     await _index_one(seam, here, "docs/w.md", DOCUMENT)
 
     assert (await seam.index(there)).documents() == []
     assert (await seam.index(here)).documents() == ["docs/w.md"]
-    assert seam.root(here).parent.parent == seam.root(there).parent.parent == tmp_path / "ix"
+    assert seam.root(here).parent.parent == seam.root(there).parent.parent == index_base()
 
 
 async def test_a_change_records_the_workspace_its_index_serves(tmp_path: Path) -> None:
@@ -529,13 +483,34 @@ async def test_a_change_records_the_workspace_its_index_serves(tmp_path: Path) -
 
     Sabotage: drop the `use` call from `writing`, and nothing is recorded.
     """
-    seam = _seam(tmp_path / "ix", HashingEmbedder())
+    seam = _seam(HashingEmbedder())
     here = tmp_path / "here"
 
     await _index_one(seam, here, "docs/billing.md", "Invoices are issued monthly.")
 
     recorded = seam.root(here).parent / WORKSPACE_FILE
     assert recorded.read_text(encoding="utf-8") == str(here)
+
+
+async def test_an_index_goes_where_its_caller_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$PH_TOOL_STATE`: a session names a directory of the calling agent's scratch,
+    a person names one with `--state`. The index is then in it, under the
+    embedder's own directory — so a second model still gets a second index — and
+    it is not recorded for the sweep, which removes what nobody owns: this
+    directory has an owner."""
+    state = tmp_path / "scratch" / "text-index"
+    monkeypatch.setenv(STATE_ENV, str(state))
+    seam, here = _seam(HashingEmbedder()), tmp_path / "here"
+
+    await _index_one(seam, here, "docs/w.md", DOCUMENT)
+
+    assert seam.root(here) == state / digest(seam.embedder.name)
+    assert seam.root(here) == seam.root(tmp_path / "there"), "the caller keys it, not the root"
+    assert (await seam.index(here)).documents() == ["docs/w.md"]
+    assert not (state / WORKSPACE_FILE).exists()
+    assert not index_base().exists()
 
 
 def test_a_filter_that_matches_nothing_returns_nothing_rather_than_raising(
@@ -576,12 +551,19 @@ def test_searching_an_empty_index_is_empty_and_not_an_error(tmp_path: Path) -> N
 # ---------------------------------------------------------------- the whole row ----
 
 
-async def test_no_embedder_means_no_tools(mount: MountProfile, tmp_path: Path) -> None:
-    """A tool refused on every call would teach a capability nobody has."""
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
+async def test_without_an_embedder_a_call_says_so(mount: MountProfile, tmp_path: Path) -> None:
+    """The command always mounts one embedder row, so this is a profile only a
+    test builds — and the tools say what is missing rather than fail some other
+    way. A session's profile with no embedder offers no tools at all: that rule
+    is the session rows' (`test_text_index_row.py`)."""
+    (tmp_path / "w.md").write_text(DOCUMENT, encoding="utf-8")
+    ctx = await mount(ROW)
 
-    assert ctx.require(TOOLS).get("text_index", scope=DEPLOYMENT) is None
-    assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is None
+    refused = await run_tool(ctx, "text_index", {"paths": ["w.md"]}, agent=_agent(ctx))
+
+    assert refused.error is not None and refused.error.info is not None
+    assert refused.error.info["code"] == "TEXT_INDEX_FAILED"
+    assert "no embedder is registered" in refused.error.message
 
 
 async def test_an_embedder_claimed_anywhere_brings_both_tools(
@@ -814,68 +796,32 @@ async def test_indexing_reads_through_the_fs_seam(mount: MountProfile, tmp_path:
 
 
 async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: Path) -> None:
+    """What the command's `status` prints. Before anything is indexed it says so;
+    after, the counts — read from disk, because a command asked for its status
+    has opened nothing."""
+    (tmp_path / "w.md").write_text(DOCUMENT, encoding="utf-8")
     ctx, embedder = await _mounted(mount, tmp_path)
 
-    assert report_section(ctx, "Text index")["embedder"] == embedder.name
+    before = report_section(ctx, "Text index")
+    await run_tool(ctx, "text_index", {"paths": ["w.md"]}, agent=_agent(ctx))
+    ctx.require(TEXT_INDEX)._indexes.clear()
+    after = report_section(ctx, "Text index")
+
+    assert before["embedder"] == embedder.name
+    assert before["state"] == "not built — run text_index"
+    assert after["documents"] == "1"
 
 
 async def test_doctor_says_when_no_embedder_is_registered(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """The one thing an operator needs told when the tools are simply absent."""
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
+    ctx = await mount(ROW)
 
     assert "none registered" in report_section(ctx, "Text index")["embedder"]
 
 
-# ---------------------------------------------------- the bundle, and the RLM ----
-
-
-def test_the_bundle_is_discoverable_without_importing_it() -> None:
-    """The entry point is the whole coupling between a profile and this package."""
-    from ph.bundles import installed_bundles, resolve_bundle
-    from ph_text_index import BUNDLE
-
-    assert "text-index" in installed_bundles()
-    assert resolve_bundle("text-index") == BUNDLE
-
-
-def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
-    from ph.cordis import Profile
-    from ph.cordis.loader import resolve_plugin
-    from ph_text_index import BUNDLE
-
-    rows = Profile.from_paths([BUNDLE]).dump()
-    assert rows, "the bundle declares no rows"
-    for row in rows:
-        name = as_str(row["name"])
-        assert resolve_plugin(name) is not None, name
-
-
-def test_the_bundle_ships_the_provider_beside_the_seam() -> None:
-    """**The subtlety that would otherwise be a silence.**
-
-    This seam registers no tools until an embedder is claimed, so a bundle
-    carrying only `text-index` would mount a service and advertise nothing —
-    and nothing would fail. The profile would compose, the row would activate,
-    `phern doctor` would show the section, and the model would simply never be
-    offered `text_search`. Both rows, or the bundle means nothing.
-    """
-    from ph.cordis import Profile
-    from ph_text_index import BUNDLE
-
-    assert [row.id for row in Profile.from_paths([BUNDLE]).enabled_rows()] == [
-        "text-index",
-        "text-index-local",
-    ]
-
-
-async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
-    from ph_app.profiles import available_profiles, resolve_profile
-    from ph_text_index import BUNDLE
-
-    assert "rlm-indexed" in available_profiles()
-    assert BUNDLE in resolve_profile("rlm-indexed")
+# ------------------------------------------------------------------ Code Mode ----
 
 
 async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
@@ -892,7 +838,7 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
         {"id": "tools", "config": {"mode": "code"}},
         {"id": "tools-code-mode", "name": "tools-code-mode"},
         {"id": "code-runtime-stub", "name": "code-runtime-stub"},
-        {**ROW, "config": {"path": str(tmp_path / "index")}},
+        ROW,
     )
     ctx.require(TEXT_INDEX).register(HashingEmbedder())
     agent = _agent(ctx)
@@ -906,29 +852,6 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
     assert "async def tools.text_index(" in sdk
     assert "async def tools.text_search(" in sdk
     assert "Search the text index by meaning" in sdk
-
-
-async def test_no_embedder_means_the_sdk_offers_nothing_either(
-    mount: MountProfile, tmp_path: Path
-) -> None:
-    """The absence is complete, not partial: no tool, and no SDK line.
-
-    A listing that named `text_search` while the seam had no provider would
-    teach the model a capability every call would refuse — the whole reason the
-    tools wait for the claim.
-    """
-    ctx = await mount(
-        {"id": "tools", "config": {"mode": "code"}},
-        {"id": "tools-code-mode", "name": "tools-code-mode"},
-        {"id": "code-runtime-stub", "name": "code-runtime-stub"},
-        {**ROW, "config": {"path": str(tmp_path / "index")}},
-    )
-    agent = _agent(ctx)
-
-    prompt = await ctx.require(SYSTEM_PROMPT).assemble(agent=agent, scope=agent.ctx)
-    sdk = dict(prompt.sections)["tools:sdk"]
-    assert "text_search" not in sdk
-    assert "text_index" not in sdk
 
 
 def test_a_model_that_brings_its_own_code_is_reachable_by_config() -> None:
@@ -1041,6 +964,18 @@ class LoadableEmbedder(HashingEmbedder):
     def ready(self) -> bool:
         return self.loaded
 
+    def cached(self) -> bool:
+        return self.loaded
+
+
+@dataclass(slots=True)
+class UnfetchedEmbedder(LoadableEmbedder):
+    """A model that is not on disk and cannot be reached: what a confined command
+    meets when the hub is not among the hosts its deployment allows."""
+
+    def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
+        raise RuntimeError("403 Forbidden")
+
 
 async def test_the_command_reports_and_then_provisions(mount: MountProfile, tmp_path: Path) -> None:
     """A person types this, and it costs no model turn — the seam's own rule.
@@ -1049,7 +984,7 @@ async def test_the_command_reports_and_then_provisions(mount: MountProfile, tmp_
     question to answer *before* an agent is mid-turn, which is the whole reason
     this is not left to the first `text_index` call.
     """
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
+    ctx = await mount(ROW)
     embedder = LoadableEmbedder()
     ctx.require(TEXT_INDEX).register(embedder)
     agent = _agent(ctx)
@@ -1057,7 +992,7 @@ async def test_the_command_reports_and_then_provisions(mount: MountProfile, tmp_
     before = await ctx.require(COMMANDS).dispatch(
         "/text-index status", agent=agent, scope=agent.ctx
     )
-    assert before is not None and "not loaded" in before
+    assert before is not None and "not downloaded" in before
     assert embedder.loads == 0, "status must not download anything"
 
     said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
@@ -1065,7 +1000,7 @@ async def test_the_command_reports_and_then_provisions(mount: MountProfile, tmp_
     assert embedder.loads == 1
 
     after = await ctx.require(COMMANDS).dispatch("/text-index status", agent=agent, scope=agent.ctx)
-    assert after is not None and "loaded" in after and "not loaded" not in after
+    assert after is not None and "loaded" in after and "not downloaded" not in after
 
 
 async def test_a_failed_install_says_what_upstream_said(
@@ -1077,26 +1012,51 @@ async def test_a_failed_install_says_what_upstream_said(
     successfully and then fails at import with "requires the following packages
     that were not found in your environment: einops" — a transitive dependency
     only the model's own code knows about. That sentence is the useful half, so
-    the command reports it rather than rewording it, and returns a line rather
-    than raising, because a person asked and is waiting for words.
+    the command reports it rather than rewording it. Raised, under a code of its
+    own, so the command exits failing: a session that asked for the model at its
+    mount (`preload`) refuses on that, with this sentence.
     """
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
+    from ph.tools.errors import HarnessError
+
+    ctx = await mount(ROW)
     ctx.require(TEXT_INDEX).register(
         LoadableEmbedder(fails="requires the following packages ...: einops")
     )
     agent = _agent(ctx)
 
-    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
+    with pytest.raises(HarnessError) as refused:
+        await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
 
-    assert said is not None and "did not load" in said
-    assert said is not None and "einops" in said, "the actionable half of the message was dropped"
+    assert refused.value.code == "TEXT_INDEX_MODEL_FAILED"
+    assert "did not load" in str(refused.value)
+    assert "einops" in str(refused.value), "the actionable half of the message was dropped"
+
+
+async def test_a_model_that_cannot_be_fetched_says_how_a_person_fetches_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A tool call fetches a model that is not on disk, and one made for a
+    confined agent often cannot — its network is the deployment's allowlist. The
+    upstream sentence is kept and the way out is named, under a code of its own:
+    `/text-index install` is a person's command and runs outside the sandbox."""
+    (tmp_path / "w.md").write_text(DOCUMENT, encoding="utf-8")
+    ctx = await mount(ROW)
+    ctx.require(TEXT_INDEX).register(UnfetchedEmbedder())
+
+    refused = await run_tool(ctx, "text_index", {"paths": ["w.md"]}, agent=_agent(ctx))
+
+    assert refused.is_error
+    assert refused.error is not None and refused.error.info is not None
+    assert refused.error.info["code"] == "TEXT_INDEX_MODEL_MISSING"
+    assert "403 Forbidden" in refused.error.message
+    assert "/text-index install" in refused.error.message
 
 
 async def test_an_embedder_with_nothing_to_download_says_so(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """An endpoint-backed embedder has no weights, and must not be made to pretend."""
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
+    ctx = await mount(ROW)
     ctx.require(TEXT_INDEX).register(HashingEmbedder())
     agent = _agent(ctx)
 
@@ -1109,7 +1069,7 @@ async def test_the_command_is_absent_rather_than_broken_without_a_provider(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """It is still registered — a person may type it to find out *why* nothing works."""
-    ctx = await mount({**ROW, "config": {"path": str(tmp_path / "index")}})
+    ctx = await mount(ROW)
     agent = _agent(ctx)
 
     said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
@@ -1117,48 +1077,19 @@ async def test_the_command_is_absent_rather_than_broken_without_a_provider(
     assert said is not None and "No embedder is registered" in said
 
 
-async def test_preload_refuses_the_mount_rather_than_failing_mid_turn(
+async def test_the_command_does_not_preload_whatever_its_config_says(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cookbook's rule, and the whole reason `preload` exists.
-
-    An unattended run — a daemon, a scheduled tick, `phern -p` in CI — has nobody
-    to type `/text-index install`, so without this the first thing it learns
-    about an unreachable model is a failed tool call inside somebody's turn.
-    `MountRefusal` is what every command that mounts a profile turns into a
-    sentence and an exit code, rather than a traceback.
+    """`preload` is the session's: it asks this command to `install` once, at its
+    own mount, and refuses on the answer (`test_text_index_row.py`). Read here as
+    well, it loaded the model to answer `status` — and on every call, for a
+    person whose config file set it. So the command mounts, offers its tools,
+    and the model is met where it is needed: by `install`, or the first embed.
 
     The load is patched on the class rather than pointed at a bogus model id: a
     404 from the hub would make this a network test to prove a local branch.
     """
-    from ph.cordis import MountRefusal
-    from ph_text_index._embed import SentenceTransformerEmbedder
-
-    def explode(self: object) -> int:
-        raise RuntimeError("requires the following packages ...: einops")
-
-    monkeypatch.setattr(SentenceTransformerEmbedder, "load", explode)
-
-    with pytest.raises(MountRefusal, match="asked to preload"):
-        await mount(
-            {**ROW, "config": {"path": str(tmp_path / "index")}},
-            {
-                "id": "text-index-local",
-                "name": "text-index-local",
-                "config": {"preload": True},
-            },
-        )
-
-
-async def test_without_preload_the_mount_survives_a_model_that_cannot_load(
-    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The default, and why it is the default.
-
-    A person at a TUI would rather the harness start now and pay for the model
-    when they use it — and find out about a bad one from `/text-index install`,
-    which is a sentence they asked for, rather than from a refused startup.
-    """
+    from ph.tools.errors import HarnessError
     from ph_text_index._embed import SentenceTransformerEmbedder
 
     def explode(self: object) -> int:
@@ -1167,15 +1098,18 @@ async def test_without_preload_the_mount_survives_a_model_that_cannot_load(
     monkeypatch.setattr(SentenceTransformerEmbedder, "load", explode)
 
     ctx = await mount(
-        {**ROW, "config": {"path": str(tmp_path / "index")}},
-        {"id": "text-index-local", "name": "text-index-local"},
+        ROW,
+        {
+            "id": "text-index-local",
+            "name": "text-index-local-engine",
+            "config": {"preload": True},
+        },
     )
     agent = _agent(ctx)
 
-    # Mounted, tools offered — and the command is where the truth comes out.
     assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is not None
-    said = await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
-    assert said is not None and "no network" in said
+    with pytest.raises(HarnessError, match="no network"):
+        await ctx.require(COMMANDS).dispatch("/text-index install", agent=agent, scope=agent.ctx)
 
 
 async def test_the_weights_land_under_the_cache_root(
@@ -1186,7 +1120,7 @@ async def test_the_weights_land_under_the_cache_root(
     Left to `sentence-transformers` a gigabyte of weights would sit somewhere
     `phern doctor` never mentions and `rm -rf $PH_CACHE` would not reclaim.
     """
-    from ph_text_index import LocalConfig
+    from ph_text_index._config import LocalConfig, weights_cache
     from ph_text_index._embed import SentenceTransformerEmbedder
 
     monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
@@ -1195,48 +1129,12 @@ async def test_the_weights_land_under_the_cache_root(
     default = LocalConfig()
     assert default.cache == "", "the row decides, so the field stays empty"
     expected = str(resolve_roots().cache / "models")
+    assert str(weights_cache(default)) == expected
+    assert weights_cache(LocalConfig(cache=str(tmp_path / "w"))) == tmp_path / "w"
 
     built = SentenceTransformerEmbedder(model_name="m", cache_folder=expected)
     assert built.cache_folder == expected
     assert str(tmp_path) in built.cache_folder
-
-
-# ------------------------------------------------------------------- the skill ----
-
-
-async def test_the_skill_arrives_with_the_plugin(mount: MountProfile, tmp_path: Path) -> None:
-    """What the RLM reads before it reaches for these tools.
-
-    Registered on the **provider's** scope, so it is in the catalog exactly when
-    the tools are — a procedure advertised for tools a deployment does not have
-    is worse than no procedure, and `skills-progressive` ships an empty `paths`
-    precisely so a skill is something a distribution installs on purpose (I7).
-    """
-    from ph.cordis import DEPLOYMENT
-
-    ctx, _ = await _mounted(mount, tmp_path)
-
-    names = {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
-    assert "text-search" in names
-
-    skill = ctx.require(SKILLS).get("text-search", DEPLOYMENT)
-    assert skill is not None
-    assert "meaning" in skill.description
-    # The tools it names are the ones this package registers.
-    assert {"text_index", "text_search"} <= set(skill.allowed_tools)
-
-
-async def test_only_the_description_rides_the_prompt(mount: MountProfile, tmp_path: Path) -> None:
-    """G9: the catalog is in every request, the body is read when asked for."""
-    from ph.cordis import DEPLOYMENT
-
-    ctx, _ = await _mounted(mount, tmp_path)
-
-    skill = ctx.require(SKILLS).get("text-search", DEPLOYMENT)
-    assert skill is not None and len(skill.description) < 300
-    body = ctx.require(SKILLS).body("text-search", DEPLOYMENT)
-    assert body is not None and len(body) > 1_500, "the body is a page, and stays on disk"
-    assert "text_search(query=" in body
 
 
 # ------------------------------------------------- the version-control filter ----
@@ -1358,26 +1256,92 @@ async def test_a_document_the_index_never_held_is_not_vouched_for(
     )
 
 
-async def test_without_version_control_the_behavior_is_what_it_was(
+async def test_without_version_control_a_document_is_known_by_its_own_digest(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The filter is an optimization, and losing it must cost only speed.
+    """A tree with no git and no jj — a tarball, a notes directory — re-embedded
+    every document on every call, because only the version control could say
+    "unchanged". Each document's text now says it for itself: read, found to be
+    what was indexed, and not embedded again. An edit is still an edit.
 
-    This loop has no content digest, so with no backend an unchanged document is
-    re-embedded exactly as it was before — stated as a test rather than left for
-    someone to discover as a regression when they index a tarball.
+    Sabotage: drop the digest comparison in `index_run`, and the second run
+    embeds the document it already holds.
     """
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "w.md").write_text(DOCUMENT, encoding="utf-8")
     ctx, embedder = await _mounted(mount, tmp_path)
-    before = embedder.calls
 
     first = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=_agent(ctx))
+    embedded = embedder.calls
     again = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=_agent(ctx))
-
     assert first.value["chunks_added"] > 0
+    assert (again.value["unchanged"], again.value["chunks_added"]) == (1, 0)
+    assert embedder.calls == embedded, "an unchanged document was embedded again"
+
+    (tmp_path / "docs" / "w.md").write_text(DOCUMENT + "\nA new paragraph.\n", encoding="utf-8")
+    edited = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=_agent(ctx))
+    assert edited.value["documents"] == ["docs/w.md"]
+    assert embedder.calls > embedded
+
+
+async def test_a_change_to_how_documents_are_cut_cuts_them_again(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The digest covers the cut as well as the text. A profile that halves the
+    passage size would otherwise be told every document is unchanged, and go on
+    searching passages of the old size."""
+    (tmp_path / "w.md").write_text(DOCUMENT, encoding="utf-8")
+    ctx, _ = await _mounted(mount, tmp_path)
+    await run_tool(ctx, "text_index", {"paths": ["w.md"]}, agent=_agent(ctx))
+    await ctx.drain()
+    await ctx.dispose()
+
+    recut, _ = await _mounted(mount, tmp_path, max_chars=120, overlap_chars=0)
+    again = await run_tool(recut, "text_index", {"paths": ["w.md"]}, agent=_agent(recut))
+
+    assert again.value["documents"] == ["w.md"]
     assert again.value["unchanged"] == 0
-    assert embedder.calls > before
+
+
+async def test_a_run_that_is_stopped_keeps_what_it_embedded(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """It saved once, at the end — so a run stopped at the ninth minute of ten
+    kept nothing and the next one embedded all of it again. What a stopped run
+    embedded is whole, each document's passages and vectors together, so it is
+    saved on the way out; the next run finds those documents by their digests and
+    embeds only the rest.
+
+    Sabotage: drop the save in `index_run`'s `except`, and the second run embeds
+    all three.
+    """
+    for name in ("a", "b", "c"):
+        (tmp_path / f"{name}.md").write_text(f"# {name}\n\nAbout {name}.\n", encoding="utf-8")
+    ctx = await mount(ROW)
+    embedder = FailingAfter(limit=2)
+    ctx.require(TEXT_INDEX).register(embedder)
+
+    stopped = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+    embedder.limit = 100
+    resumed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert stopped.is_error and "out of budget" in text_of(stopped.content)
+    assert resumed.value["unchanged"] == 2
+    assert resumed.value["documents"] == ["c.md"]
+    assert resumed.value["total_documents"] == 3
+
+
+@dataclass(slots=True)
+class FailingAfter(HashingEmbedder):
+    """An embedder that fails once it has been asked `limit` times: a run that is
+    stopped part-way, without a process to kill."""
+
+    limit: int = 2
+
+    def encode(self, texts: Sequence[str], *, query: bool) -> Vectors:
+        if self.calls >= self.limit:
+            raise RuntimeError("out of budget")
+        return HashingEmbedder.encode(self, texts, query=query)
 
 
 async def test_a_deleted_document_leaves_the_index_on_the_next_sweep(
@@ -1478,7 +1442,7 @@ async def test_a_workspace_sweep_does_not_forget_an_indexed_spill(
     assert swept.value["total_documents"] == 2
 
 
-async def test_a_minified_bundle_is_skipped_and_a_doc_with_a_blob_keeps_its_prose(
+async def test_a_minified_bundle_is_skipped_and_a_doc_with_a_blob_keeps_itsprose(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """X6 — garbage in, garbage out, so the garbage does not go in.
@@ -1499,7 +1463,7 @@ async def test_a_minified_bundle_is_skipped_and_a_doc_with_a_blob_keeps_its_pros
     caller that never learns what was passed over cannot tell a quiet corpus
     from a broken one.
 
-    Sabotage: drop the `triage` reason check in `_passages` and the bundle is
+    Sabotage: drop the `triage` reason check in `index_run` and the bundle is
     indexed; keep every block in `triage` and the blob is too.
     """
     import base64
@@ -1532,7 +1496,7 @@ async def test_a_minified_bundle_is_skipped_and_a_doc_with_a_blob_keeps_its_pros
     # none of the blob. Asserted on the chunks rather than on a search result,
     # because a ranked answer can hide an unwanted passage behind a better one:
     # the question is what is *in* the index, not what came back first.
-    # What `_passages` hands the packer: the blocks `triage` kept. `chunk_text`
+    # What `index_run` hands the packer: the blocks `triage` kept. `chunk_text`
     # on its own is policy-free by design, so asserting on it would test the
     # packer rather than what reaches the index.
     guide = (tmp_path / "docs" / "guide.md").read_text(encoding="utf-8")
@@ -1550,3 +1514,239 @@ async def test_a_minified_bundle_is_skipped_and_a_doc_with_a_blob_keeps_its_pros
     )
     assert not found.is_error, text_of(found.content)
     assert "worktree" in text_of(found.content)
+
+
+# ------------------------------------------- a passage fits its embedder ----
+
+
+async def _bounded(mount: MountProfile, **settings: Any) -> tuple[Any, BoundedEmbedder]:  # noqa: ANN401
+    ctx = await mount(ROW)
+    embedder = BoundedEmbedder(**settings)
+    ctx.require(TEXT_INDEX).register(embedder)
+    return ctx, embedder
+
+
+async def test_passages_are_packed_to_what_the_embedder_reads(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """**The failure this fixes was silent.** A model reads so many tokens and
+    drops the rest, so a passage cut at `max_chars` for a model that reads less
+    had its tail indexed and unfindable — with the default model, the last
+    eleventh of this repository's own documentation.
+
+    The limit is the embedder's to say, and passages are packed to it: here a
+    model that reads 50 tokens gets passages of 150 characters, not 1,200, and
+    never an input it would have cut. The spans still name real lines.
+    """
+    (tmp_path / "long.md").write_text(prose(12), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50)
+    agent = _agent(ctx)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
+    found = await run_tool(ctx, "text_search", {"query": "w7l1n3", "k": 1}, agent=agent)
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert max(embedder.took) <= 50, "an input longer than the model reads was embedded"
+    assert indexed.value["limit"] == "50 tokens (the model's)"
+    assert indexed.value["passage_chars"] == 150
+    assert indexed.value["cut_smaller"] == []
+    assert indexed.value["chunks_added"] == 12
+    assert "Passages are at most 150 characters" in text_of(indexed.content)
+    [hit] = found.value["hits"]
+    lines = (tmp_path / "long.md").read_text(encoding="utf-8").splitlines()
+    assert hit["text"].splitlines() == lines[hit["start_line"] - 1 : hit["end_line"]]
+    assert "w7l1n3" in hit["text"]
+
+
+async def test_text_denser_than_the_estimate_is_measured_and_packed_smaller(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Characters are an estimate of tokens, and a careful one: three to a token.
+    Code, a table, a script that is a token a character are denser, so each
+    document's passages are measured by the embedder's own count and a document
+    that does not fit is packed again, smaller, until its longest passage does —
+    and the result names it. The prose beside it is left at the first size."""
+    # 24 one-letter words a line: as many characters as a line of prose, and
+    # four times the tokens.
+    line = " ".join("abcdefghijklmnopqrstuvwx")
+    dense = "\n\n".join("\n".join([line] * 3) for _ in range(8))
+    (tmp_path / "dense.md").write_text(dense, encoding="utf-8")
+    (tmp_path / "prose.md").write_text(prose(6), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert max(embedder.took) <= 50
+    assert indexed.value["cut_smaller"] == ["dense.md"]
+    assert "1 document needed smaller passages still to fit: dense.md" in text_of(indexed.content)
+    assert sorted(indexed.value["documents"]) == ["dense.md", "prose.md"]
+
+
+async def test_a_passage_the_embedder_refuses_is_cut_smaller_and_sent_again(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """An embedder that cannot say how long an input it reads — a hosted API with
+    nothing to ask — finds out by refusing one. That used to end the run. The
+    document is packed at half the size and sent again until it is taken, and
+    nothing longer than the embedder reads was ever embedded.
+
+    **And what the refusal says is read.** A llama.cpp names both numbers — how
+    long the input was and how long a one it takes — so the next cut is aimed
+    rather than halved, and the rest of the run is packed to the limit it named:
+    one refusal for the whole corpus, where a llama.cpp that reports a window it
+    will not take an embedding as long as would otherwise refuse every document.
+    """
+    (tmp_path / "a.md").write_text(prose(20), encoding="utf-8")
+    (tmp_path / "b.md").write_text(prose(20), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, refuses_over=40)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert embedder.took and max(embedder.took) <= 40
+    assert embedder.refused == 1, "the refusal's own numbers were not used"
+    assert indexed.value["cut_smaller"] == ["a.md"]
+    assert indexed.value["limit"] == "40 tokens (what its refusal said)"
+    assert indexed.value["passage_chars"] == 120
+    assert indexed.value["total_documents"] == 2
+
+
+async def test_a_refusal_that_counts_its_input_says_how_dense_the_corpus_is(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """An embedder with no tokenizer measures by the bytes, three to a token, and
+    technical text is denser than that. So a dense passage passes the estimate
+    and is refused — and the refusal says how many tokens it really was. That is
+    the corpus's own density, exact where the guess was not, and the documents
+    after it are packed by it: one refusal, where every dense document was
+    refused in its turn."""
+    line = " ".join("abcdefghijklmnopqrstuvwx")
+    dense = "\n\n".join("\n".join([line] * 3) for _ in range(6))
+    for name in ("a", "b", "c"):
+        (tmp_path / f"{name}.md").write_text(dense, encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=40, refuses_over=40, estimates=True)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert max(embedder.took) <= 40
+    assert embedder.refused == 1, "the second dense document was refused as well"
+    assert indexed.value["cut_smaller"] == ["a.md"]
+    assert indexed.value["passage_chars"] < 120, "the density a refusal stated was not used"
+
+
+async def test_a_passage_packed_to_the_limit_fits_with_its_prefix_and_markers(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """An embedder counts the passage's prefix and the model's own markers as
+    well as its text. Packed to the limit's worth of text, every full passage
+    measured a few tokens over it and every document was packed again and
+    reported as needing smaller passages — 14 of 30 on a live server. So the
+    passage size leaves room for them: here a prefix of 17 bytes and two
+    markers, 8 tokens at three bytes a token, out of 50 — 126 characters."""
+    for name in ("a", "b", "c"):
+        (tmp_path / f"{name}.md").write_text(prose(12), encoding="utf-8")
+    ctx, _ = await _bounded(mount, reads=50, estimates=True, prefix="search_document: ")
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert indexed.value["passage_chars"] == 126
+    assert indexed.value["cut_smaller"] == [], "a passage packed to fit was packed again"
+    assert indexed.value["total_documents"] == 3
+
+
+async def test_a_refusal_with_no_numbers_halves_and_teaches_nothing(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A provider whose refusal names no number. Each document is halved until
+    it is taken, and nothing is concluded for the next one: the size one
+    document happened to be taken at says as much about that document as about
+    the embedder, and packing every later one to it would shrink the corpus to
+    fit its densest page. The result names both, which is the cue to write
+    `max_tokens`."""
+    (tmp_path / "a.md").write_text(prose(20), encoding="utf-8")
+    (tmp_path / "b.md").write_text(prose(20), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, refuses_over=40, vague=True)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert max(embedder.took) <= 40
+    assert indexed.value["cut_smaller"] == ["a.md", "b.md"]
+    assert indexed.value["limit"] == "" and indexed.value["passage_chars"] == 1200
+    assert "2 documents needed smaller passages still to fit" in text_of(indexed.content)
+
+
+async def test_a_document_that_cannot_be_made_to_fit_is_skipped_and_the_run_goes_on(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The floor. A passage is not cut below a phrase to satisfy an embedder; a
+    document it refuses even then is reported with the embedder's own words, as
+    a file too large to index is, and the rest of the corpus is still indexed."""
+    (tmp_path / "long.md").write_text(prose(4), encoding="utf-8")
+    (tmp_path / "short.md").write_text("two words\n", encoding="utf-8")
+    ctx, _ = await _bounded(mount, refuses_over=3)
+
+    indexed = await run_tool(ctx, "text_index", {"paths": ["."]}, agent=_agent(ctx))
+
+    assert not indexed.is_error, text_of(indexed.content)
+    assert indexed.value["documents"] == ["short.md"]
+    [skipped] = indexed.value["skipped"]
+    assert skipped["path"] == "long.md"
+    assert "refuses as too long even in passages of 64 characters" in skipped["reason"]
+    assert "too large to process" in skipped["reason"]
+
+
+async def test_a_limit_a_profile_sets_recuts_and_an_unchanged_run_asks_for_none(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Two things about when the limit is learned. A *setting* is part of how a
+    document is cut, so changing it cuts every document again. And what a model
+    reports is learned by asking it — which of a local model means loading it —
+    so a run that finds every document unchanged does not ask."""
+    (tmp_path / "long.md").write_text(prose(12), encoding="utf-8")
+    ctx, embedder = await _bounded(mount, reads=50)
+    agent = _agent(ctx)
+
+    await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
+    asked = embedder.asked
+    again = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
+    assert (again.value["unchanged"], again.value["chunks_added"]) == (1, 0)
+    assert embedder.asked == asked, "an unchanged run asked the embedder for its limit"
+
+    embedder.max_tokens = 30
+    seam = ctx.require(TEXT_INDEX)
+    seam.known, seam._limit_asked = None, False
+    recut = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
+    assert recut.value["documents"] == ["long.md"]
+    assert recut.value["limit"] == "30 tokens (configured)"
+    assert max(embedder.took[-recut.value["chunks_added"] :]) <= 30
+
+
+def test_the_local_model_says_what_it_reads_and_counts_with_its_own_tokenizer() -> None:
+    """`sentence-transformers` truncates every input to the model's
+    `max_seq_length`, silently. So that is the bound, a setting can only lower
+    it, and a passage is counted the way the model counts it: with its prefix
+    and its markers. A fake model, because the fact under test is which of its
+    attributes are read."""
+    from ph_text_index._embed import Limit, SentenceTransformerEmbedder, TokenBounded
+
+    class Model:
+        max_seq_length = 8
+
+        @staticmethod
+        def tokenizer(texts: list[str], **_settings: object) -> dict[str, list[list[int]]]:
+            return {"input_ids": [[0, *range(len(text.split())), 0] for text in texts]}
+
+    embedder = SentenceTransformerEmbedder(model_name="m", document_prefix="passage: ")
+    embedder._model = Model()
+
+    assert isinstance(embedder, TokenBounded)
+    assert embedder.limit() == Limit(8, "model")
+    assert embedder.measure(["one two three"], 3) == [6], "the prefix and both markers count"
+    embedder.max_tokens = 5
+    assert embedder.limit() == Limit(5, "configured")
+    embedder.max_tokens = 500
+    assert embedder.limit() == Limit(8, "model"), "a setting above the model's put the silence back"

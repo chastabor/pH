@@ -500,6 +500,10 @@ class LlmFailure(WireModel):
 
 
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
+MISSING_CREDENTIAL = "MISSING_CREDENTIAL"
+"""A route's key is not set where it is resolved. Named here, beside the other
+codes a caller routes on, because the embedders that resolve a key outside an
+adapter have to say it the way an adapter does."""
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
 FILE_EXPIRED = "FILE_EXPIRED"
 """A request referenced an uploaded file the provider no longer has (P7-03).

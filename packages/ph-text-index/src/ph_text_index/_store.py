@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 from ph.json import as_int, as_str
-from ph.paths import write_atomic
+from ph.paths import file_stamp, write_atomic
 
 from ._chunk import Chunk
 
@@ -84,7 +84,7 @@ CALIBRATION_SAMPLE = 1_024
 """Rows turbovec's own guidance calls enough for a calibration fit."""
 
 _Signature: TypeAlias = tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]
-"""The sidecar's and the vectors' `_stamp`."""
+"""The sidecar's and the vectors' `file_stamp`."""
 
 
 class IndexMismatch(RuntimeError):
@@ -145,6 +145,13 @@ class TextIndex:
     Beside the digests rather than inside a `Record`, because it is one fact per
     *document* while a record is one per passage: storing it per chunk would be
     the same string repeated once for every paragraph of every file."""
+    _digests: dict[str, str] = field(default_factory=dict)
+    """Path → a digest of the document's text when this path was last indexed.
+
+    What says "unchanged" in a tree with no version control, and after a run
+    that was stopped before it could store its token: the next run reads the
+    document, finds the digest it has, and embeds nothing. Per document, beside
+    `_vcs_ids`, for that field's reason."""
     _seen: _Signature = (None, None)
     """The files as this copy last read or wrote them. See `stale`."""
 
@@ -196,6 +203,9 @@ class TextIndex:
         self._next_id = as_int(raw.get("next_id"), 1)
         self._token = as_str(raw.get("vcs"))
         self._vcs_ids = {str(path): str(one) for path, one in (raw.get("vcs_ids") or {}).items()}
+        # Absent from an index written before documents had one: each then reads
+        # as changed once, and is embedded again.
+        self._digests = {str(path): str(one) for path, one in (raw.get("digests") or {}).items()}
         if self.index_path.exists():
             self._index = _turbovec().IdMapIndex.load(str(self.index_path))
         held = {
@@ -263,7 +273,7 @@ class TextIndex:
         )
 
     def _signature(self) -> _Signature:
-        return (_stamp(self.sidecar_path), _stamp(self.index_path))
+        return (file_stamp(self.sidecar_path), file_stamp(self.index_path))
 
     def stale(self) -> bool:
         """Whether another writer changed the files since this copy read or wrote them.
@@ -296,6 +306,7 @@ class TextIndex:
             "format": FORMAT,
             "vcs": self._token,
             "vcs_ids": self._vcs_ids,
+            "digests": self._digests,
             "model": self.model,
             "dim": self._dim,
             "bit_width": self.bit_width,
@@ -321,6 +332,17 @@ class TextIndex:
         """What the backend called this document's content when it was indexed."""
         return self._vcs_ids.get(path, "")
 
+    def digest(self, path: str) -> str:
+        """The digest of this document's text when it was indexed, or `""`."""
+        return self._digests.get(path, "")
+
+    def vouch(self, path: str, vcs_id: str) -> None:
+        """Record what the backend calls this document's content now, for a
+        document found unchanged by its digest — so the next run is told by the
+        backend, and does not have to read it to find out."""
+        if vcs_id:
+            self._vcs_ids[path] = vcs_id
+
     def holds(self, path: str) -> bool:
         """Whether this index has passages for `path` at all.
 
@@ -337,6 +359,7 @@ class TextIndex:
     def forget(self, path: str) -> int:
         """Drop every chunk of one document. Returns how many there were."""
         self._vcs_ids.pop(path, None)
+        self._digests.pop(path, None)
         ids = self._by_path.pop(path, [])
         for id_ in ids:
             self._records.pop(id_, None)
@@ -350,6 +373,7 @@ class TextIndex:
         chunks: list[Chunk],
         vectors: Vectors,
         vcs_id: str = "",
+        digest: str = "",
     ) -> int:
         """Index `chunks`, whose rows are `vectors`. Returns how many landed.
 
@@ -363,6 +387,7 @@ class TextIndex:
         if not chunks:
             return 0
         self._vcs_ids[path] = vcs_id
+        self._digests[path] = digest
         rows = np.ascontiguousarray(vectors, dtype=np.float32)
         width = int(rows.shape[1])
         if self._index is None:
@@ -489,18 +514,6 @@ class TextIndex:
                 else "empty"
             ),
         }
-
-
-def _stamp(path: Path) -> tuple[int, int, int] | None:
-    """One file's `(inode, mtime, size)`, or `None` when it is absent.
-
-    The inode is what catches the sidecar, which `write_atomic` replaces; the
-    mtime and size catch the vectors, which `sync` appends to in place."""
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return None
-    return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
 def _turbovec() -> Any:  # noqa: ANN401

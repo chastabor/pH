@@ -60,6 +60,8 @@ from ph.cordis import MountRefusal
 from ph.seams.shell import ShellService
 from ph.tools.errors import HarnessError
 
+log = logging.getLogger("ph_utcp")
+
 _root = logging.getLogger()
 _handlers, _level = list(_root.handlers), _root.level
 try:
@@ -107,7 +109,9 @@ class Call:
 
     shell: ShellService
     root: Path
-    """The agent's workspace, which a template's relative `working_dir` is under."""
+    """The tree the call is about — the agent's workspace, or the one whose state
+    it shares — where the command runs and a template's relative `working_dir` is
+    under."""
     timeout_ms: int
     """pH's budget for the command, in place of the library's fixed one."""
     env: Mapping[str, str]
@@ -157,6 +161,18 @@ def require_ran(call: Call, what: str) -> None:
 class PhCliProtocol(CliCommunicationProtocol):  # type: ignore[misc]
     """The library's `cli` protocol, with its commands started by `ctx.shell`."""
 
+    def _log_error(self, message: str) -> None:
+        """The library's errors, less the one that is not an error.
+
+        It logs "Missing argument" at ERROR for every placeholder the call gave
+        no argument for — which is every optional field a model left out, on every
+        call. The placeholder it substitutes is one the command reads as absent
+        (`ph.toolcli`), so inside a pH call that line is narration."""
+        if _CALL.get() is not None and message.startswith("Missing argument"):
+            log.debug("ph_utcp: %s", message)
+            return
+        super()._log_error(message)
+
     def _prepare_environment(self, provider: Any) -> dict[str, str]:  # noqa: ANN401
         call = _CALL.get()
         if call is None:
@@ -190,7 +206,9 @@ class PhCliProtocol(CliCommunicationProtocol):  # type: ignore[misc]
             # Not the platform's login shell: `bash -lc` reads the person's
             # profile, and what a profile prints would be parsed as the answer.
             ("/bin/bash", "-c", script),
-            cwd=None if working_dir is None else call.root / working_dir,
+            # In the tree the call is about (`UtcpSeam._tree`), which is how a
+            # `ph.toolcli` command is told its root.
+            cwd=call.root if working_dir is None else call.root / working_dir,
             agent=call.agent,
             # pH's budget, not the library's fixed 60 and 120 seconds: how long a
             # tool may take is the row's to say.

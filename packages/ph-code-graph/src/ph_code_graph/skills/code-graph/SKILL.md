@@ -28,6 +28,11 @@ reasoning about a stale graph.
 
 If a query says no index exists, this is the step you skipped.
 
+On a large tree `code_index` answers `state: indexing` with how far it has got,
+and the run goes on in the background; you are told when it finishes. Do not
+wait or poll — `code_graph` answers meanwhile from what is indexed so far, and
+says "Not finished indexing" when that is the case.
+
 ## Then ask the question you actually have
 
 | you want to know | call |

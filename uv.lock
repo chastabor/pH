@@ -1499,6 +1499,7 @@ source = { editable = "packages/ph-text-index" }
 dependencies = [
     { name = "numpy" },
     { name = "ph-core" },
+    { name = "ph-utcp" },
     { name = "turbovec" },
 ]
 
@@ -1521,6 +1522,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.20" },
     { name = "ph-core", editable = "packages/ph-core" },
     { name = "ph-text-index", extras = ["local"], marker = "extra == 'nomic'", editable = "packages/ph-text-index" },
+    { name = "ph-utcp", editable = "packages/ph-utcp" },
     { name = "sentence-transformers", marker = "extra == 'local'", specifier = ">=3.0" },
     { name = "torch", marker = "extra == 'local'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
     { name = "turbovec", specifier = ">=1.0" },

@@ -6,9 +6,10 @@ mounts indexes by it. In a module of its own so the session's row can import the
 model without importing the engine — and with it the extractor and the store.
 
 So are the facts both processes need about where the engine keeps things: the
-row id the config travels under, and the paths the engine writes, which the
-session's row grants to the confined command and reports to `phern doctor`. One
-derivation each, so a grant cannot name a directory the engine never writes.
+row id the config travels under, the directory name its index takes in an agent's
+scratch, and the shared paths the engine writes, which the session's row grants
+to the confined command. One derivation each, so a grant cannot name a directory
+the engine never writes.
 
 @module ph_code_graph._config
 """
@@ -22,13 +23,15 @@ from pydantic import Field
 
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams.fs import IndexScope
+from ph.toolcli import state_home
 from ph.wire import WireModel
-from ph.workspace_caches import digest
 
 __all__ = [
     "GRAMMAR_CACHE_ENV",
     "ROW",
+    "STATE",
     "Config",
+    "Scope",
     "grammar_cache",
     "grammar_default",
     "index_base",
@@ -39,23 +42,34 @@ ROW = "code-graph"
 """The session row's id, the id the command mounts the engine under — so one
 config serves both — and the name of the provisioning command both offer."""
 
+STATE = "code-graph"
+"""The directory, in the calling agent's scratch, a session's index is kept in."""
+
+DATABASE = "graph.db"
+
 GRAMMAR_CACHE_ENV = "TREE_SITTER_LANGUAGE_PACK_CACHE_DIR"
 """The pack's own override for where grammars are materialized. An operator who
 set it means it for the session and for every command alike."""
 
 
+class Scope(IndexScope):
+    """`IndexScope`, and whether a session starts on it unasked."""
+
+    on_mount: bool = True
+    """Start indexing this scope when a root session's agent takes its first
+    step, in the background, so the graph is being built before anything asks
+    for it. The footer says how far it has got and the agent is told when it
+    finishes.
+
+    `false` leaves indexing to `code_index` calls. Either way the command that
+    answers the tools stays up between calls: `on_mount` decides only whether it
+    starts unasked."""
+
+
 class Config(WireModel):
     """Row config for `code-graph`."""
 
-    path: str = ""
-    """Where the index lives. Defaults to `$PH_CACHE/code-graph/<root digest>/graph.db`;
-    a path set here is one database, used as given.
-
-    Under the cache root because the index is **rebuildable** — the source is the
-    truth and this is derived, which is the lifecycle `$PH_CACHE` names (Q1).
-    Keyed by a digest of the workspace root so two checkouts do not share one
-    index and answer each other's questions."""
-    index: IndexScope = Field(default_factory=IndexScope)
+    index: Scope = Field(default_factory=Scope)
     """What `code_index` looks at when the call does not say: which trees, which
     files in them, which to leave out.
 
@@ -78,19 +92,34 @@ class Config(WireModel):
     a thin graph from a broken one."""
     max_files: int = 20_000
     """How many files one `code_index` call will consider."""
+    wait_s: float = 15.0
+    """How long `code_index` waits for its run before it answers "indexing" and
+    lets the run go on in the background. Where the tools are answered by a host,
+    which is in a session; a call that runs by itself always waits to the end.
+
+    Long enough that an ordinary run — a package, a second run over a tree —
+    answers with its counts. What it bounds is the run nobody should sit through:
+    a first pass over a large tree."""
 
 
 def index_base() -> Path:
-    """Where the per-workspace indexes live, when no `path` names one database."""
+    """Where the per-workspace indexes live, for a caller that names no state
+    directory."""
     return default_cache_path(None, "code-graph")
 
 
-def index_path(config: Config, root: Path) -> Path:
-    """The database `root`'s index lives in: the row's `path` as given, or one per
-    workspace under `index_base`, keyed by a digest of the root."""
-    if config.path:
-        return default_cache_path(config.path, "code-graph")
-    return index_base() / digest(str(root)) / "graph.db"
+def index_path(root: Path) -> Path:
+    """The database `root`'s index lives in (`ph.toolcli.state_home`).
+
+    **Where the caller said**: a session's `ph-utcp` names a directory of the
+    calling agent's scratch, so the index is that agent's — writable in a
+    read-only session, which the workspace is not, and the one the same agent
+    finds after a restart. A person names one with `--state`.
+
+    **Otherwise one per workspace under `$PH_CACHE`**. Under the cache root
+    because the index is rebuildable: the source is the truth and this is
+    derived (Q1)."""
+    return state_home(index_base(), root) / DATABASE
 
 
 def grammar_default() -> Path:

@@ -102,9 +102,9 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         ("ph_code_graph/engine.py", 'str(stats["files"])'),
         ("ph_code_graph/engine.py", 'str(stats["symbols"])'),
         ("ph_code_graph/engine.py", 'str(stats["refs"])'),
-        ("ph_text_index/__init__.py", 'str(stats["documents"])'),
-        ("ph_text_index/__init__.py", 'str(stats["chunks"])'),
-        ("ph_text_index/__init__.py", 'str(stats["calibration"])'),
+        ("ph_text_index/engine.py", 'str(stats["documents"])'),
+        ("ph_text_index/engine.py", 'str(stats["chunks"])'),
+        ("ph_text_index/engine.py", 'str(stats["calibration"])'),
         # A `sqlite3.Row`, not a payload: the column is whatever SQLite stored.
         ("ph_code_graph/_store.py", 'str(row["value"])'),
         ("ph_code_graph/_store.py", 'int(row["value"])'),
@@ -118,7 +118,7 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         # Not JSON either: a typed stats mapping, and the file descriptor and
         # frame limit (F8) the guest is handed in its environment — the limit's
         # reader catches the `ValueError` and keeps the default.
-        ("ph_text_index/__init__.py", 'int(store.stats()["chunks"])'),
+        ("ph_text_index/engine.py", 'int(store.stats()["chunks"])'),
         ("ph_runtime/channel.py", "int(os.environ.get(FD_ENV, PROTOCOL_FD))"),
         ("ph_runtime/channel.py", 'int(os.environ.get(FRAME_BYTES_ENV, ""))'),
         # **The five boot limits, where a quiet default is the dangerous answer.**

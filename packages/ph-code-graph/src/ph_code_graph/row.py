@@ -29,12 +29,15 @@ tools' reads are bounded by the sandbox, as `bash`'s are.
 
 ## What this row still does itself
 
-The things a manual has no word for. It grants the command the paths it writes
-outside the workspace — the index and the grammar cache, both under `$PH_CACHE` —
-which holds in a read-only session too, so an agent that may not touch a tree can
-still index it. It hands its own config across in `$PH_TOOL_CONFIG`. And it
-offers the skill, the `/code-graph` command and the `phern doctor` section, as it
-did when the tools were registered here.
+The things a manual has no word for. It names where the index goes: a directory
+of the calling agent's scratch (`Manual.state`), which is writable under every
+sandbox mode — so an agent that may not touch a tree can still index it, and
+cannot write the tree doing so — and is the same directory for the same agent
+after a restart, so a resumed session re-parses only what changed. It grants the
+command what agents share, the grammar cache and its log, both under `$PH_CACHE`.
+It hands its own config across in `$PH_TOOL_CONFIG`. And it offers the skill, the
+`/code-graph` command and the `phern doctor` section, as it did when the tools
+were registered here.
 
 If the manual cannot be discovered the row stands down rather than refusing the
 mount: no tools, no skill, and a `phern doctor` line saying why.
@@ -56,13 +59,13 @@ from pathlib import Path
 from ph.cordis import Context, plugin
 from ph.keys import COMMANDS, FS, SHELL
 from ph.seams._registry import contribute_item
-from ph.seams.commands import Provisioning, install_or_status
+from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.skills import offer_skills as offer_package_skills
 from ph.toolcli import config_env, manual_call_template
-from ph_utcp import UTCP, Manual, ManualState, ToolTraits, ToolView
+from ph_utcp import UTCP, Host, Manual, ToolTraits, ToolView, command_said
 
-from ._config import ROW, Config, grammar_cache, index_base, index_path
+from ._config import ROW, STATE, Config, grammar_cache
 from .cli import CLI
 
 __all__ = ["Config", "apply", "manual"]
@@ -74,26 +77,35 @@ set is fetched from GitHub, so this is a download's budget and not a query's."""
 
 def manual(config: Config) -> Manual:
     """This package's manual, and what `ph-utcp` needs to know to run it."""
-    writable = [
-        # One directory per workspace beneath it, each with its database and the
-        # lock file that orders its writers.
-        index_base(),
-        # The pack materializes even its bundled grammars into a writable
-        # directory on first use, and fails hard without one.
-        grammar_cache(),
-        # The command logs to a file, because under UTCP its stderr is discarded.
-        CLI.log_file().parent,
-    ]
-    if config.path:
-        writable.append(index_path(config, Path()).parent)
     return Manual(
         template=manual_call_template(CLI),
         # The only source of these two names, so they keep them: the skill, the
         # prompts and every program a model has written say `code_graph`.
         names="bare",
         envelope=True,
-        writable=[str(path) for path in writable],
+        # The database and the lock file that orders its writers: each agent's
+        # own, in its scratch.
+        state=STATE,
+        writable=[
+            # The pack materializes even its bundled grammars into a writable
+            # directory on first use, and fails hard without one. Shared:
+            # grammars are the package's content, keyed by its version, and say
+            # nothing of a repository.
+            str(grammar_cache()),
+            # The command logs to a file, because under UTCP its stderr is
+            # discarded.
+            str(CLI.log_file().parent),
+        ],
         env=config_env({ROW: config}),
+        # One process that stays up for each tree: a call does not pay to start
+        # an interpreter, and a long indexing run goes on past the call that
+        # started it.
+        host=Host(
+            command=[*CLI.invocation(), "serve"],
+            label="code graph",
+            warm=["code_index"],
+            eager=config.index.on_mount,
+        ),
         tools={
             "code_index": ToolTraits(
                 # One index, one writer at a time: the lock makes two runs
@@ -120,32 +132,30 @@ def offer_skills(ctx: Context) -> None:
 @plugin(ROW, affects="environment", inject=[UTCP, FS, SHELL], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Register the manual, and offer what goes with its tools."""
-    state = await ctx.require(UTCP).add(manual(config), scope=ctx)
+    utcp = ctx.require(UTCP)
+    own = manual(config)
+    state = await utcp.add(own, scope=ctx)
     if state.available:
         # The skill follows the tools. Offered without them, its catalog line
         # would ride every prompt naming two tools the session does not have.
         offer_skills(ctx)
 
-    async def provision(verb: Provisioning) -> str:
+    async def provision(verb: Provisioning, invocation: CommandContext) -> str:
         """`/code-graph install|status` — the command's own answer, asked of it.
 
         A **command** rather than a tool, per the seam's own rule: a person asks
-        the harness to provision, and it costs no model turn. Run for no agent,
-        so in the session's own root and unconfined, as it was when the grammars
-        were fetched in this process: a person asked, and `install` needs the
-        network.
+        the harness to provision, and it costs no model turn. Unconfined, as it
+        was when the grammars were fetched in this process: a person asked, and
+        `install` needs the network.
+
+        About the agent that typed it: the index its `code_index` builds, so
+        `status` counts what its `code_graph` would answer from
+        (`UtcpSeam.run_command`).
         """
-        root = ctx.require(FS).root_for(None)
-        result = await ctx.require(SHELL).run_argv(
-            (*CLI.invocation(), verb, "--root", str(root)),
-            cwd=root,
-            timeout_ms=PROVISION_TIMEOUT_MS,
-            extra_env=config_env({ROW: config}),
+        result = await utcp.run_command(
+            own, (*CLI.invocation(), verb), invocation.agent, timeout_ms=PROVISION_TIMEOUT_MS
         )
-        said = result.stdout.strip() or result.stderr.strip()
-        if result.exit_code != 0:
-            return f"{CLI.program} {verb} failed (exit {result.exit_code}): {said}"
-        return said
+        return command_said(CLI.program, verb, result)
 
     contribute_item(
         ctx,
@@ -161,20 +171,12 @@ async def apply(ctx: Context, config: Config) -> None:
     def report() -> list[tuple[str, str]]:
         """`phern doctor`'s section: what this row knows without starting the
         command. Counts and grammar readiness are the command's to say."""
-        index = index_path(config, ctx.require(FS).root_for(None))
         return [
-            ("tools", _said(state)),
+            ("tools", state.said()),
             ("command", shlex.join(CLI.invocation())),
-            ("index", str(index)),
-            ("state", "built" if index.exists() else "not built — run code_index"),
+            ("index", f"each agent's own, in its scratch ({STATE}/)"),
+            ("grammars", str(grammar_cache())),
             ("details", f"/{CLI.command} status"),
         ]
 
     contribute(ctx, Diagnostic(id=ROW, title="Code graph", order=60, read=report))
-
-
-def _said(state: ManualState) -> str:
-    if state.available and not state.problems:
-        return f"{', '.join(state.tools)} (through UTCP)"
-    reasons = "; ".join(state.problems) or "the manual named no tools"
-    return f"{', '.join(state.tools) or 'unavailable'} — {reasons}"

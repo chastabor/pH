@@ -3,47 +3,511 @@
 *2026-11-10. A review of `ph-code-graph` and `ph-text-index` against the UTCP Python
 library cloned at `sources/python-utcp` (utcp 1.2.0, utcp-cli 1.1.5), and a plan to
 make UTCP the way phern reaches both packages' tools and any tool published later.
-Revised twice the same day on the user's direction; every decision that was the user's
-has been taken.*
+Revised three times the same day on the user's direction; every decision that was the
+user's has been taken.*
 
-**Status, 2026-11-10.** U1 to U4 are built: the command line and the file lock, the
-manual and the lenient decoder, the `ph-utcp` row, and the code graph reached through
-it. Of U7, the `index` block's `paths`, `include` and `exclude` are built on both rows,
-with `exclude` on both tools' arguments; `on_mount` waits for the worker that reads it.
-Not started: U5 (the worker), U6 (the text index through `ph-utcp`), U8 and U9 (the two
-embedder stages). The text index is still registered in-process and works as before.
-The READMEs, the shell seam page and the tool cookbook describe what is built. What
-each built step settled, and what it found that the plan had wrong, is under "What U1
-to U4 settled" below; what was learned about the worker is under "Before U5".
+**Status, 2026-11-10.** U1 to U7 are built, with U4a: the command line and the file
+lock, the manual and the lenient decoder, the `ph-utcp` row, the code graph and the
+text index reached through it, each agent's tool state in its scratch, the host that
+stays up for each tree with its background indexing, progress and completion note, and
+the whole `index` block. A `/simplify` pass over U1 to U4 is applied, and so is the one
+fix it deferred (`ToolRunContext.present`).
+
+U8 and U9 are built too: `text-index-endpoint`, the OpenAI-compatible `/v1/embeddings`
+embedder, and `text-index-adapter`, which embeds through one of the session's own
+model routes. U10's documents were written with each step: both READMEs, `ph-utcp`'s,
+the cookbook and the two skills. **Every step of the plan is built.**
+
+What each built step settled, and what it found that the plan had wrong, is under
+"What U9 settled", "What U8 settled", "What U5 settled", "What U4a and U6 settled" and
+"What U1 to U4 settled" below.
+
+## Decided with the user after U8
+
+10. **The adapter stays in the harness, and the command asks it for vectors over a
+    socket** — so a route's key is held where the seam holds it, and an agent cannot
+    reveal it to a model's context by accident.
+11. **Children share their parent's index and host.** A child builds its own only when
+    it is writable and would need one. A read-only fan-out, which is what `rlm-indexed`
+    runs, shares one index.
+
+## What U9 settled
+
+- **`EmbeddingAdapter` is an optional Protocol beside `LlmAdapter`**, asked with
+  `isinstance`; `ctx.llm.embed` routes a request to it and `ctx.llm.embeds` says
+  whether a provider can. phern's OpenAI-compatible adapter posts `/embeddings` and
+  its Google adapter `models/<model>:batchEmbedContents`. The Anthropic API has no
+  embeddings call, so that adapter is not one.
+- **The command does not mount an adapter row.** The plan had it mount one, with phern
+  installed beside it. The session's row opens a unix socket under `$PH_RUNTIME/utcp`
+  and the command's embedder sends its passages there, a batch a connection; the
+  session calls `ctx.llm.embed` and sends vectors back. The command is told the socket
+  in `$PH_TEXT_INDEX_EMBEDDER` and is given no variable to pass, by value or by name.
+- **A confined agent needs no network for it.** The session asks the provider. Held
+  under a real `bwrap` with no host allowed.
+- **A failure crosses the socket as the adapter's own code and sentence**, under this
+  package's prefix: `TEXT_INDEX_MISSING_CREDENTIAL` names the variable, as a model
+  call does.
+- **A route whose adapter cannot embed is refused at the row's mount**, when the route
+  is there to ask. One registered later is met at the first call instead.
+- **Usage is counted on the row and shown in `phern doctor`**, texts, requests and the
+  tokens the provider reports. It is not in a session's log or its budget: an
+  embedding is not a turn's request, and the log has no record for one. Not built.
+- **Not available from a shell.** The command says so and names the two rows that are.
+- **Run against the user's llama.cpp at `127.0.0.1:9931`**, serving
+  `bge-large-en-v1.5` with `--embeddings --pooling mean`. Both embedders indexed pH's
+  `docs/seams` — 30 documents, 233 passages, 1024-wide vectors — in under five
+  seconds, the adapter path from inside a read-only `bwrap` with no host allowed. Of
+  eight questions with a known document, seven had it first and all eight had it in
+  the first three; each search took 0.3 s. A second run embedded nothing. The command
+  on the adapter path was given the socket and its config, and no variable.
+- **What the earlier attempts on that server found.** Without `--embeddings` it
+  answers 501, without a pooling type 400, and with a wrong key 401: each reached the
+  agent as a coded failure in the server's own words. A chat model served with
+  `--pooling last` returned vectors that depended only on a text's first word, so
+  every search returned the same documents; asked directly, the server gave the same
+  vectors. An index cannot tell that from a working embedder.
+- **That model reads 512 tokens.** A longer input is refused with a 500, which fails
+  the indexing run that sent it. None of this corpus's passages reached it at the
+  default `max_chars` of 1,200 (254 tokens a passage on average); a corpus of dense
+  text could, and the setting to lower is `max_chars`.
+
+## Passages are cut to what the embedder reads
+
+Asked for by the user after the live runs, and not a step of the original plan.
+
+- **The failure was silent.** Passages were cut by characters and the embedder's own
+  length was nobody's business. The default local model reads 256 tokens and truncates
+  without a word: on `docs/seams` 144 of 233 passages were longer, and an eleventh of
+  the text was never embedded. A server refused instead, which ended the run.
+- **`max_tokens` on each embedder row, detected when unset**: the local model's own
+  length, a llama.cpp's `/props` for the endpoint, the route's window for the adapter
+  (`_embed.TokenBounded`). Passages are packed to what the limit leaves for their text,
+  at three bytes a token, when that is under `max_chars`; measured — exactly, by the
+  local model's tokenizer; by the bytes elsewhere — and a document denser than the
+  estimate is packed again, smaller.
+  Re-packed, not split in place, so line spans stay true.
+- **A refusal is read, not only survived.** A passage refused as too long is packed
+  smaller and sent again. Where the refusal names numbers, the limit it names becomes
+  the run's limit and the token count it names becomes the corpus's density. A first
+  version learned the limit from the size a document happened to be taken at; on the
+  live server that shrank every later document to fit the densest one, and was
+  replaced.
+- **What a llama.cpp reports is not what it takes.** `/props` gives the window per
+  slot — `-c 8192` with four slots reports 2,048 — and an embedding is refused past
+  the batch size, 512 by default, which `/props` does not give. Run against the user's
+  server with `max_chars` raised to 20,000: one refusal, the limit learned as 512, the
+  other 29 documents packed to fit and none refused.
+- **Run with the real local model**: 381 passages packed to 768 characters, the
+  longest 244 tokens against a limit of 256, none over.
+- **A passage is packed to what the limit leaves for its text**, after its prefix
+  and the model's start and end markers (`TextIndexSeam.fit`, measured as an empty
+  passage). Packed to the limit's worth of text, every full passage measured a few
+  tokens over it once measuring used the corpus's density, and the live server run
+  reported 14 of 30 documents as needing smaller passages. After: 4 — the one the
+  server refused, and three measured denser than the density that refusal set —
+  and with the real local model 762 characters, 388 passages, none over 256.
+- **Run again with the user's server at an 8,192-token window** — `nomic-embed-text-v1.5`,
+  four slots, `/props` reporting 8,192 a slot and the batch raised to match. Asked
+  directly, it embedded a 4,463-token input and refused a 9,090-token one, naming a
+  batch size of 8,192. Indexing `docs/seams` from inside a read-only `bwrap`, both
+  embedders, each at three passage sizes:
+
+  | `max_chars` | passages (longest) | limit used | indexing | first / top three |
+  |---|---|---|---|---|
+  | 1,200, the default | 233 (1,200 chars) | none needed | 2.8–3.0 s | 7/8 / 7/8 |
+  | 20,000 | 32 (19,968 chars) | none needed | 2.9–3.2 s | 7/8 / 8/8 |
+  | 100,000 | 31 (24,213 chars) | 8,192: the route's window, and `/props` | 3.0–3.1 s | 7/8 / 8/8 |
+
+  The two embedders gave the same passages and the same ranking in every row. At
+  100,000 the limit was read before anything was sent — no refusal, no document cut
+  smaller — and passages were capped at 24,552 characters, so only `subagents.md`
+  (40 KB) was split. The one first-place miss in every row is "approve a tool call
+  before it runs", which ranks `tools.md` or `user_questions.md` over `approval.md`.
+- **A larger window is not a reason to raise `max_chars`.** A search returns each
+  hit's whole passage, so whole-document passages at `k=3` put up to 70,000
+  characters in front of the model a search. What the window buys is that a long
+  paragraph is embedded whole rather than refused or truncated; the default stays.
+- **The result says it**: the size packed to, the limit that set it and where that
+  came from, and each document that needed smaller passages still. A document that
+  does not fit at 64 characters is skipped with the embedder's words.
+- **The detected limit is asked for late**, only by a run with something to embed: of
+  a local model it means loading it. So the digest that says "unchanged" covers a
+  limit a profile *set* and not one that was detected.
+- **Not done**: a question longer than the limit is not cut, `phern doctor` does not
+  show the limit, and a background run's completion note does not mention what the
+  result of a waited-for run does.
+
+## A second `/simplify` pass
+
+Over everything after U4, with four reviews (reuse, simplification, efficiency,
+altitude). What changed:
+
+- **`ph.framing`** is the daemon's JSONL framing moved down into core, with a
+  blocking `ask` and a one-request `answer_one`. The tool host, its client and the
+  session's embedding socket use it in place of three hand-rolled copies that
+  lacked the second length check.
+- **`BackgroundRuns.run`** is the one door for a long piece of work, host or not.
+  It writes the run's start, end and failure itself; the work only says `begin`
+  and `tick` (`RunProgress`). The code graph had reported a failure as "0 of N";
+  a run that ended just before its caller gave up was announced to nobody; and a
+  person's call beside a warm one was counted as unasked. All three are gone with
+  the copies.
+- **A command runs in the tree it is about.** `$PH_TOOL_ROOT` is removed; the note
+  that paths belong to another tree is keyed on where the command ran.
+- **`UtcpSeam.run_command`** runs a manual's own `install` or `status` with what its
+  tools are given; both rows' copies are gone. `ManualState.said` replaces two
+  copies of the doctor line.
+- **`preload` runs the command's `install`**, which now exits failing when the model
+  will not load. The command no longer reads `preload`, so a tool call is not told
+  to skip it and a person's config file does not load the model on every call.
+- **The shell seam gives every confined command a `TMPDIR`** in the agent's
+  scratch; `ph-utcp`'s copy of that rule is gone.
+- **"Input too long" is one list in `ph.llm.adapter`** (`input_too_long`), and one
+  code, `CONTEXT_WINDOW_EXCEEDED`. A missing key is `MISSING_CREDENTIAL` from every
+  embedder. The session passes the adapter's code through unprefixed.
+- **The session socket sends vectors as base64 float32**, a quarter the size, and
+  the harness does no per-number work for them beyond the adapter's own check.
+- **Hosts are warmed once a tree**, and the step that warms one does not wait for
+  it. The owner is resolved once a call; the socket directory once a mount; the
+  progress file is read only when its stat changes.
+- **A measured passage uses the corpus's density** where the embedder has no
+  tokenizer, so a refusal that said how dense the text is shortens the next cut.
+- Smaller: one batching helper for both remote embedders, the limit cached once,
+  the text-index engine registers its tools at mount, `vectors_of` in core, shared
+  test builders.
+
+Left as they were, with the reason:
+
+- A call answered by a host still starts an interpreter (about 0.25 s). Sending it
+  to the host from `ph-utcp` would bypass the manual's own command, which is what
+  another harness runs.
+- Embedding stays one request a document; batching across documents would have to
+  reckon with a document re-packed after a refusal.
+- `text_search` loads the index and embeds the query one after the other: run side
+  by side, a failure arrived as an exception group in place of the tool's code.
+- The engines' own tool traits stay beside the manual's: the engine rows are public
+  and can be mounted in a session.
+- The owner rule stays in `ph-utcp` rather than the workspace seam, which would
+  have to keep each workspace's base.
+- A confined pH process still sees the host's runtime directory read-only.
+- The command's log stays under `$PH_CACHE` with its grant: moved into the state
+  directory it landed inside the tree in a layout where the scratch is.
+- A host's `preload` still loads the model twice, once in `install`.
+
+## A third `/simplify` pass
+
+Over the whole diff, with the same four reviews, after the token-limit work.
+What changed:
+
+- **The caller's cancellation is `RunProgress`'s.** `BackgroundRuns.run` takes
+  `raise_if_canceled` and asks it at every `tick` where the run is the caller's
+  alone, with no host. Both engines' `detached` flag and its `if` are gone, so a
+  third package cannot forget it.
+- **A document is embedded or given a reason, not both.** `_embedded` returns a
+  cut or the reason it could not make one. A document refused even at the smallest
+  passage had been reported as both skipped and "needed smaller passages".
+- **The digest is compared before `triage`.** The same text gets the same answer,
+  so an unchanged document is no longer classified only for the result to be
+  thrown away (about 110 µs a document, every run with no version control).
+- **The seam's limit is one public field, `known`.** `learn` takes a `Limit`, and
+  `fit` measures the empty passage itself instead of caching it by density.
+- **One module reads the servers' wording.** `too_long_facts` sits in
+  `ph.llm.adapter` beside `input_too_long`, and the OpenAI `/embeddings` request
+  and answer (`openai_embeddings_body`, `openai_vectors`) are shared by the
+  adapter and `EndpointEmbedder`. The two remote embedders share one base for
+  estimating, batching, the setting-first limit and the name.
+- **Shared doors in core:**
+  - `ph.framing.listening` for the daemon launcher and a tool host;
+  - `ph.resources.run_until_signaled` for `serve`, so a host stops on a signal
+    as every host does;
+  - `ph.toolcli.failure_envelope` and `value_envelope` for the session's
+    embedding socket;
+  - `ph.paths.file_stamp` for ph-utcp's watcher and the text index's store.
+- **`confined_env` in the workspace seam.** It gives a confined process a
+  `TMPDIR` in its scratch. `ctx.shell` and the code kernel (`ph-rlm`) both call
+  it, because a kernel confined in a shared workspace had no writable temporary
+  directory either.
+- **A read-only `$PH_RUNTIME` is logged at debug.** Inside a sandbox it is the
+  expected state, and it had been a warning on every call. The `subprocess`
+  diagnostic still says the journal is unavailable.
+- Smaller:
+  - an earlier host's report is dropped as it is read, instead of being filtered
+    in two places;
+  - `UtcpSeam.state_of` is gone;
+  - `ph.testing.new_agent` replaces copies in three packages' tests.
+
+Left as they were, with the reason:
+
+- **Passages are sized in bytes and cut in characters.** `fit` turns the limit
+  into bytes at the corpus's density, and the chunker counts characters, so
+  non-ASCII text is over on its first cut. The measure and the refusal loops
+  catch it. Packing in the embedder's own unit needs the chunker to take a size
+  function, which changes how every passage is cut.
+- **A counting embedder still packs at the careful density, and measured, that is
+  right.** The review guessed prose at 4 bytes a token, so MiniLM's 762-character
+  passages looked like 30% more vectors than needed. Measured on 2026-11-11 with
+  MiniLM (256 tokens) over `docs/seams` and the 8 questions:
+  - the corpus is 3.66 bytes a token by MiniLM's tokenizer, 3.01 to 3.95 per
+    document, so 3.0 is close to the truth;
+  - the density was set before each run:
+
+    | Density | Passages | Packed to | Cut again | Mean tokens a passage | Time | Top-1 / Top-3 |
+    |---|---|---|---|---|---|---|
+    | 3.0 (today) | 388 | 762 chars | 3 | 162 | 6.9 s | 7/8 / 7/8 |
+    | 3.5 | 358 | 889 | 14 | 176 | 6.5 s | 7/8 / 8/8 |
+    | 4.0 | 374 | 1,016 | 26 | 167 | 6.6 s | 7/8 / 8/8 |
+    | 4.3 | 371 | 1,092 | 28 | 169 | 7.8 s | 7/8 / 8/8 |
+
+  - **Past the real density it backfires.** Most documents come out over on
+    the first cut and are cut again, and a second cut shrinks the whole document
+    to fit its densest passage, so 4.0 ends with more passages than 3.5.
+  - **The best case saves 30 of 388 passages and no time.** The model's cost
+    follows tokens, and the total is the same.
+  - **Ranking is the same within noise.** The one top-3 difference is the
+    approval question.
+  - **More notes for the model.** Every document cut again is named in the
+    result as needing smaller passages: 14 at 3.5 against 3 today.
+  - It bears only on a local model whose window is below `max_chars`. The
+    endpoint and session embedders estimate rather than count, and at nomic's
+    8,192 tokens `max_chars` binds first.
+- **Discovering a manual costs about 0.3 s at mount, one row after another.**
+  Overlapping them needs discovery moved out of mount, since tools must be
+  registered before the first step, or a cache keyed on the installed command.
+- **`vectors_of` checks every number on the daemon's loop**, about 3.5 ms for 32
+  vectors. Carrying float32 arrays in `Embeddings` would change a core type for one
+  consumer.
+- **Where the limit comes from stays as it is.** The route's window and
+  llama.cpp's `n_ctx` answer a different question than the embedding limit, and
+  making the embedding route own that fact is a profile design.
+- **The learned limit is not persisted.** Learning only goes downward, so a server
+  reconfigured upward, as this one was from 512 to 8,192, would stay at the stale
+  number.
+- **Refusal numbers are still read from the error's text, not carried as fields.**
+  The reading itself moved to core.
+- **Some per-package code stays per package:**
+  - each tool's "still indexing" model and its sentences;
+  - `Scope.on_mount`, since `IndexScope` is the fs seam's and knows nothing of
+    hosts;
+  - the remote configs' fields, whose docstrings differ by row;
+  - the two rows' manuals, which share only four arguments.
+- **Vector packing stays in `row.py`.** The session's process must never import
+  `_embed`, and a test holds it to that.
+- **Two test helpers stay copied in both packages' tests:** the runtime-and-cache
+  fixture and the CLI `_call` check. In `ph.testing` they would be core source
+  calling `subprocess.run` and `tempfile.mkdtemp`, which core's resource gate
+  forbids.
+- **A "still going" answer still asks the runs for the current progress.** The
+  run's own progress would report 0/0 while it waits behind another request's run.
+
+## What decision 11 changed
+
+- **Who owns a tree is decided by what the child was granted, not only by its root**
+  (`UtcpSeam.owner_of`). A child shares its parent's index and host when it works in
+  the parent's checkout, or when its workspace grants only reading the project:
+  `readonly-scratch` and the two ephemeral kinds (`ph.seams.workspace.project_access`).
+  A `worktree` or an `overlay` is a tree written for keeps, and gets its own.
+- **A sharing child's command is told which tree it works on** (`$PH_TOOL_ROOT`). A
+  `readonly-scratch` child's own directory is empty: without this it would have indexed
+  nothing into its parent's index and swept every document out as gone. Its results
+  carry a line saying which tree their paths belong to.
+- **An ephemeral worktree shares too**, though its holder can write it: those writes
+  reach nobody, so what it was granted of the project is reading. A child that edits a
+  throwaway checkout and asks the index is answered from its parent's tree.
+
+## What U8 settled
+
+- **One row, one request.** `text-index-endpoint` posts `{model, input}` to
+  `<base_url>/embeddings` with the standard library, a batch at a time, and normalizes
+  what comes back. No dependency was added, and nothing of the local model is imported.
+- **The key travels by name, through `ph-utcp`.** The plan had the template's
+  `env_vars` carry a `${VAR}` reference. A host is started by `ph-utcp` and not by the
+  UTCP client, so that reference would not have been resolved for it. `Manual.pass_env`
+  names variables the row reads from the harness's environment each time it starts a
+  command, a call or a host, and holds nowhere.
+- **Three named failures**: `TEXT_INDEX_CREDENTIAL_MISSING`, which sends nothing;
+  `TEXT_INDEX_ENDPOINT_UNREACHABLE`, which names `sandbox-allow`; and
+  `TEXT_INDEX_ENDPOINT_FAILED`, with the server's own words.
+- **The row does not ask for a network allowance.** Allowances are the deployment's
+  statement (`sandbox-allow`), and no row adds to them. The README says which host to
+  name. Checked under a real `bwrap`: with `127.0.0.1:<port>` allowed a confined
+  command indexes through the egress proxy, and without it the call fails with a code
+  and the server is never reached.
+- **The identity is the model, the prefixes and an asked-for width, and not the
+  address**, so moving a server keeps the index.
+- **No fallback embedder.** One embedder a session; an endpoint that cannot be reached
+  is the answer. A second embedder would be a second index answering under the first
+  one's name.
+
+## What U5 settled
+
+The worker is built, and it is called a **host**. It differs from "Before U5" in four
+places, each because the code allowed something simpler.
+
+- **No new spawn door.** A host is started for an agent, after that agent holds its
+  workspace, so `ctx.shell.run_argv` already places and confines it; a job
+  (`ctx.jobs`) owns it, and waiting for the command to end is what a job body does.
+- **It does not start at mount.** At mount there is no agent, so no tree and no
+  scratch to keep an index in. `ph-utcp` listens on `agent/pre-step` and starts a root
+  agent's hosts before its first step, with the index tool to run. That is the first
+  moment "the root session" has a workspace; it is also every later step, so a host
+  that left when idle is started again by the next one.
+- **One host a tree, not one an agent.** A child that shares its parent's workspace
+  root uses its parent's host and its parent's state (`UtcpSeam.owner_of`). Decision 9
+  names the agent, and for a root agent and for a child in its own worktree that is
+  what happens. For a child in its parent's tree the literal reading was the same
+  documents embedded again and a 400 MB model held for every child of a fan-out, which
+  is what `rlm-indexed` does. The state path is still `<session>/<agent>/<tool>`; the
+  agent is the tree's owner.
+- **The footer reading is polled**, twice a second while a host runs, and kept in
+  memory. One small file, and `ph.path_watch` would have needed the same fallback.
+
+What it is:
+
+- **`ph.toolcli serve`**: mounts the rows once and answers `call`s on a unix socket, a
+  line of JSON each way. `call` uses the host in `$PH_TOOL_HOST` when one is there and
+  runs alone when not, and when the host says the call is for another tree or index.
+  The host leaves when idle and removes its socket.
+- **Background work** (`BackgroundRuns`): in a host an index tool waits `wait_s` for
+  its run — 5 s for the text index, 15 s for the code graph — and then answers
+  `state: indexing` with how far it has got. The same request asked again joins the
+  run. Searches and graph queries carry "Not finished indexing: 120 of 539 documents"
+  while one is going. A command run for one call still runs to the end.
+- **`progress.json`** in the state directory. Each report carries which run it is and
+  whether its end is owed to anybody: a call was answered "still going", or the host
+  began the run unasked. `ph-utcp` tells the agent on that, with `inject`, so a run
+  whose own caller got its counts back is not announced twice.
+- **The text index keeps a digest per document and saves as it goes** (`save_every_s`,
+  30 s, and on the way out). A tree with no git or jj no longer embeds every document
+  on every call.
+- **`index.on_mount`** on both rows, default true.
+- **Sockets under `$PH_RUNTIME/utcp`**, granted to the host and to each call.
+
+Measured with MiniLM under a read-only `bwrap`: 30 documents indexed from a cold host
+in 9.5 s, the footer moving from 0/30 to 28/30, the note delivered, and each search
+after it 0.3 s — against 6 s for a command that loads the model itself.
+
+Left open by this step:
+
+- **Killing a host loses up to `save_every_s` of embedding.** The gate holds "embeds
+  nothing twice" up to the last save.
+- **A stale `progress.json` is told apart by the lock and by when its run began**, not
+  removed. A session that never starts a host again leaves it.
+- **A host started for a tree is not told when the row's config changes.** A changed
+  config applies to the next host; the running one keeps what it was started with
+  until it leaves or the row remounts.
+- **Other harnesses get none of this.** `serve` and `$PH_TOOL_HOST` are in the manual's
+  inherited variables, so another harness could start a host; nothing in UTCP starts
+  one for it.
 
 ## Before U5
 
-Three facts found while building U3 and U4 that the worker design above gets wrong or
-leaves open. U5 starts from these.
+*Kept as written before U5, for what it weighed. "What U5 settled" above says which of
+these held.*
 
-- **A worker cannot be started from inside a tool call.** A confined command runs in
-  its own process namespace, and everything in it is killed when the command ends. So
-  "the worker starts on the first tool call" cannot mean the command starts it. The
-  session's row has to: `ph-utcp` needs a hook that runs before a manual's call, in the
-  harness, for the calling agent.
-- **There is no agent when a row mounts.** "Through the same door as any command for
-  that agent" has no agent to name at mount, and `ctx.shell` confines only a command
-  run for an agent that holds a workspace. A worker started at mount is confined by a
-  policy the row states itself: the session's root as the workspace, plus the paths
-  the manual grants.
+What building U1 to U4 found that the worker design below gets wrong or leaves open.
+Checked against the code; U5 starts from these.
+
+- **U6 comes first** (decided). The worker runs the text index's tools, which are not a
+  command until U6, and U4a decides where both packages keep their state.
+- **A worker cannot be started from inside a tool call.** `bwrap` runs every confined
+  command with `--unshare-pid --die-with-parent`, so nothing a command starts outlives
+  it. The session's row starts the worker, in the harness. A child in its own worktree
+  gets its worker lazily, which needs a `ph-utcp` hook that runs in the harness, for
+  the calling agent, before a manual's command.
+- **A long-lived confined process needs a door of its own.** `run_argv` waits for its
+  command to finish, and `ctx.shell` confines only a command run for an agent that holds
+  a workspace; at mount no agent exists. U5 adds a spawn door with `run_argv`'s
+  placement, environment and grants, taking an explicit policy — the root as the
+  workspace, the agent's scratch, and the manual's grants — and returning a handle owned
+  by the row's scope. The subprocess seam journals it like any child.
+- **A worker lives and dies with its mount.** Every spawn is in the orphan journal,
+  which is swept at each pH start, and a child dies with the scope that owns it. So a
+  restarted daemon does not pick up a live worker; the remounted row starts a new one.
+  That is cheap because the indexes are incremental — the code graph's sha256 and the
+  text index's per-document digest and interval saves — and because U4a keeps each
+  index where the same agent finds it again.
+- **One worker per root, and per child that asks; never shared.** Sharing one across
+  roots or processes is the cross-root coordination the "roots are self-contained" rule
+  forbids. A daemon with N roots on one workspace runs N workers, each text-index worker
+  holding a model of about 400 MB.
+- **The worker needs the agent it indexes for.** U4a puts state in an agent's scratch,
+  and at mount there is a root session but no agent yet. U5 settles which ids the root's
+  worker uses: the root agent's, known from the session's own log when it is resumed.
+- **The footer reading is cached.** A status field is read on every redraw and must not
+  do I/O. The row watches the progress file (`ph.path_watch`) and keeps the last reading
+  in memory.
+- **The completion notice has a recipient.** The root agent for a root's worker, the
+  child for a child's; delivered with `inject`, so it waits for the agent's next step,
+  starts no turn, and is in that agent's log.
+- **The tools' outputs change shape.** `code_index` and `text_index` gain a state
+  (`indexing`, `done`, `failed`) and progress counts; a search gains its "not finished
+  indexing" warning. Only a worker answers early: a direct `ph-code-graph call` still
+  runs to completion, so trying a query by hand keeps working.
 - **Where the socket goes.** The caller and the worker are in two sandboxes, so the
-  socket has to be on a path both can reach, and short enough for a socket address
-  (108 bytes). A directory under `$PH_RUNTIME`, granted to the manual, fits both; the
-  index directory under `$PH_CACHE` does not fit the length in a test tree.
+  socket is on a path both reach and short enough for a socket address (108 bytes): a
+  directory under `$PH_RUNTIME`, granted to the manual.
 
-A design that follows from them, not yet built: `ph.toolcli` gains `serve`, a process
-that mounts the profile once and answers calls on that socket; `call` uses a running
-host when there is one and runs directly otherwise, and never starts one. The engine
-row indexes in the background only when it is mounted in a host, and otherwise runs to
-completion as now, which keeps the engine's tests as they are. Progress goes to a file
-in the index directory, which the session's row reads for the footer and for the
-completion notice — a message delivered with `inject`, so it waits for the agent's
-next step and starts no turn.
+A design that follows from them: `ph.toolcli` gains `serve`, a process that mounts the
+profile once and answers calls on that socket; `call` uses a running host when there is
+one and runs directly otherwise, and never starts one. The engine row indexes in the
+background only when it is mounted in a host. Progress goes to a file beside the index,
+which the session's row watches for the footer and the completion notice.
+
+## What U4a and U6 settled
+
+- **The index location is the caller's to say, and nothing else's.** `--state` and
+  `$PH_TOOL_STATE`, read by a row with `ph.toolcli.state_dir()`. Both rows' `path`
+  setting is removed: it named a place outside the scratch, which a session could not
+  grant without reopening the question decision 9 closed.
+- **A grant that overlaps the workspace is refused**, whatever the mode
+  (`ph.seams.sandbox.grants_apart`): inside it, the root itself, or a directory that
+  contains it. `ctx.shell` drops it per call, against the calling agent's root, and
+  `ph-utcp` says so in `phern doctor` when a manual is added.
+- **A session started where the workspace contains `$PH_CACHE` loses its grants.** The
+  home directory is the case. The index is unaffected, being in the scratch; the code
+  graph's grammar cache and both commands' logs are refused. Under `workspace-write`
+  nothing is lost, since the root is writable. Under `read-only` the grammars cannot be
+  materialized and `code_index` fails. Not handled; the fix would be a grammar cache
+  that falls back to the state directory.
+- **A child that shares its parent's workspace has its own index**, because the scratch
+  is per agent. For the code graph that is about a second per package. For the text
+  index it is every document embedded again, per child. The user's decision 9 names the
+  agent, so this is as decided; a profile that fans out children over one tree
+  (`rlm-indexed`) pays it until something lets a child read its parent's index.
+- **`/code-graph status` and `/text-index status` answer for the agent that typed
+  them.** `install_or_status` now hands its body the invocation, and the row passes the
+  asking agent's state directory to the command.
+- **A `2>/dev/null` on a template does nothing.** The UTCP client wraps each command as
+  `$(<command> 2>&1)` and the later redirection wins, so a model library's progress bar
+  was in front of the answer. The command now closes its own stderr for the length of a
+  `call` or a `manual` (`--verbose` keeps it), and the templates carry no redirection.
+- **A confined command has no temporary directory** under a read-only sandbox when the
+  workspace is the person's own checkout: `/tmp` is not writable and that kind of
+  workspace gets no redirection. `ph-utcp` sets `TMPDIR` to the calling agent's scratch.
+- **A downloaded model is loaded without asking the hub.** `sentence-transformers`
+  checks the repository on every load, and a confined command's network is the
+  deployment's allowlist, which answered `403`. A model that is not downloaded is still
+  fetched by the first call where the network allows; where it does not, the call fails
+  with `TEXT_INDEX_MODEL_MISSING` and names `/text-index install`, which runs outside
+  the sandbox.
+- **A tool's command does not sweep the orphan journal.** Inside a sandbox it is in
+  another PID namespace, where every process the journal names looks dead. And
+  `host_journal` now treats a `$PH_RUNTIME` it cannot write as no journal, which is what
+  a confined command sees: one warning a call, in a log that is now rotated at 1 MiB.
+- **Which embedder a command mounts is chosen by naming its row** (`ToolCli.providers`):
+  the one a config names, or the first. `config_env` therefore names every row it is
+  given, a default one as `{}`. This is the door E2 and E3 use.
+- **The session's embedder row is a claim, not a model.** `text-index` publishes
+  `ctx.text_index`; an embedder's row claims it with which row of which command makes
+  the vectors, and that row's config. The manual is registered by the claim, on the
+  claiming row's scope, so no embedder still means no tools and no skill.
+- **`preload` is asked of the command, once, at the session row's mount.** Tool calls
+  are never told to preload.
+- **The library logged every omitted optional argument at ERROR.** Demoted to DEBUG
+  inside a pH call.
+- **Verified with the real model**, MiniLM, under a read-only `bwrap`: indexed into the
+  scratch, searched, and `status` counted it. The download was 20 s and a search 6 s.
 
 ## What U1 to U4 settled
 
@@ -55,7 +519,9 @@ next step and starts no turn.
 - **A granted path is writable in a read-only session.** The plan expected indexing to
   be refused there. The sandbox reads a policy's extra paths under either mode, so a
   confined agent that may not write its tree still builds an index under `$PH_CACHE`.
-  A test holds this under a real `bwrap`, in both modes.
+  A test holds this under a real `bwrap`, in both modes. The user has since made it a
+  rule rather than a side effect, and moved the state it protects into the agent's
+  scratch; see "Where the tools keep their state".
 - **A granted path has to exist.** A backend grants a path by binding it. `ph-utcp`
   makes each one when a manual is added, and says which it could not.
 - **`ctx.shell.run` is a login shell**, so it cannot carry a command whose stdout is
@@ -87,7 +553,12 @@ Open from these steps:
   rules is not designed.
 - The session's `phern doctor` section for the code graph no longer shows counts or
   grammar readiness; it points at `/code-graph status`, which asks the command.
-- Both READMEs still describe the tools as registered in-process (U10).
+- **Fixed after the `/simplify` review:** an enveloped tool's text was put in place by
+  `finalize_content`, after `tools/post-execute`, so it overwrote what those rows wrote
+  (ph-clm's receipt, offload's preview). A body now says what the value it returns
+  renders as (`ToolRunContext.present`); the registry uses that wherever it renders
+  that value, and a row that replaces the value gets the definition's rendering of the
+  replacement.
 
 ## The goal
 
@@ -112,6 +583,11 @@ tool reads and writes the filesystem the agent calling it sees.
    to leave out.
 7. **The text index can choose its embedding model, and reach local and remote models
    through an adapter.** This is added in stages, E1 to E3 below.
+8. **U6 comes before U5.**
+9. **Read-only is a barrier for the repo, not for a tool's working state.** These tools
+   change no file of the repo; they build data to probe it. So under a read-only
+   sandbox they may not write the workspace and may write a designated area of their
+   own — the agent's scratch — where an agent that restarts finds what it built.
 
 ## What exists today
 
@@ -286,26 +762,63 @@ as now. At mount it:
 - registers the package's manual with `ph-utcp`, under the tool names used today
   (`code_index`, not `ph_code_graph.code_index`), so skills and prompts do not change;
 - hands its row config to the command through the environment;
-- names the index directory under `$PH_CACHE` as an extra writable path;
+- names the directories it writes outside the workspace — the grammars and its log —
+  as extra writable paths, and from U4a keeps its index in the agent's scratch;
 - offers the package's skill, its slash command and its `phern doctor` section, with
   the last two answered by running the command's `status`.
+
+### Where the tools keep their state
+
+Decision 9, against what pH already has. Every agent has a **scratch** directory,
+`$PH_HOME/scratch/<session>/<agent>` (`ph.seams.workspace.scratch_of`): per session and
+agent, under `$PH_HOME` so it survives a restart, outside the worktree by design, and in
+the workspace's writable set in every sandbox mode — "the one place a read-only or
+ephemeral agent is told it may write". The workspace root is writable only under
+`workspace-write`. So the barrier the user asked for exists, and the designated area is
+the scratch.
+
+- **Each tool keeps its state in a directory of the scratch named for it:**
+  `<scratch>/code-graph/` holds the graph database and its lock, and
+  `<scratch>/text-index/<embedder>/` the vectors, the sidecar and the writer lock.
+- **The command is told where.** `ph.toolcli` gains `--state DIR`, and reads
+  `$PH_TOOL_STATE` when the flag is absent. The engine rows take it as their index
+  location in place of the per-workspace cache directory. A manual declares the
+  directory name it wants (`Manual.state: "code-graph"`), and `ph-utcp` sets
+  `PH_TOOL_STATE=<scratch of the calling agent>/<name>` on each call — the session and
+  the agent are on the call, so this needs no per-agent manual.
+- **Reused on restart.** A resumed session has the same session and agent ids, so the
+  same scratch, so the same index: a re-run parses or embeds only what changed. A child
+  in its own worktree has its own agent, so its own index of its own tree.
+- **With no session** — a person at a shell typing `ph-code-graph call …` — the state
+  goes where it goes today, `$PH_CACHE/<tool>/<digest of the root>`, unless `--state`
+  names a directory.
+- **What stays shared:** the tree-sitter grammars and the embedding model's weights.
+  Both are package content keyed by version, not data about a repo, and copying them
+  per agent would cost the 4 s unpack and the 90 MB download each time. They stay under
+  `$PH_CACHE` as grants, with the command's log.
+- **The rule, stated in the sandbox seam:** a grant (`writable_extra`) is honored in
+  every mode, and a grant inside the workspace root is refused — otherwise a manual
+  could name the repo and make it writable in a read-only session.
+- **The cost:** two sessions on one checkout no longer share an index, so a new session
+  builds its own — about a second for a package's code graph, 20 s to 185 s of
+  embedding for this repo's `docs/`. A resumed one does not.
 
 ### Indexing as a background worker with visible progress
 
 This is the user's proposal, and it replaces the earlier "call again to collect"
 design. An index tool never waits for indexing to finish.
 
-- **A worker process per package and workspace.** The registration row starts it as a
-  `ctx.jobs` job when it mounts, through the same door as any command for that agent,
-  so it sees the agent's filesystem. The job belongs to the row's scope, so unmounting
-  cancels it. A child agent in its own worktree gets its worker on its first tool
+- **A worker process per package and root, and per child that asks.** The registration
+  row starts it as a `ctx.jobs` job when it mounts, through the spawn door "Before U5"
+  describes, confined to the root's workspace and the agent's scratch. The job belongs
+  to the row's scope, so unmounting cancels it. A child agent in its own worktree gets its worker on its first tool
   call, because each text-index worker holds a loaded model (about 400 MB) and a
   throwaway worktree may never search. A harness with no such row also gets the worker
   on the first call.
 - **It loads what it needs once and stays up.** For the text index that is the
   embedding model. It indexes, then answers `text_search` queries without loading the
   model again, and exits after an idle period.
-- **It reports progress** to a small file in the index directory, written atomically:
+- **It reports progress** to a small file beside the index, written atomically:
   state, documents done, documents total, and the failure text when there is one. It
   holds the writer lock while it works, so "is it alive" is asked of the lock and not
   of a pid.
@@ -314,12 +827,12 @@ design. An index tool never waits for indexing to finish.
   from what has been saved so far and carries a warning, "Not finished indexing: 120 of
   539 documents". The code graph follows the same contract.
 - **The front end shows it.** The row contributes a reading to `ctx.tui_status`,
-  "indexing 120/539", from the last progress it read. When the job settles
-  (`job/settled`) the person gets a completion notice and the model gets a note. Which
-  transcript mechanism carries the notice is chosen in U5.
-- **After a daemon restart** the remounted row reads the progress file and the lock: a
-  live worker is picked up, a dead one is started again, and the index's own
-  increments mean nothing is embedded twice.
+  "indexing 120/539", from the last progress it read — watched, not read per redraw.
+  When the job settles (`job/settled`) the person gets a completion notice and the
+  agent the worker indexes for gets a note through `inject`.
+- **After a daemon restart** the old worker is gone — it died with its mount, or the
+  orphan sweep ended it — and the remounted row starts a new one. The index's own
+  increments mean nothing is parsed or embedded twice.
 
 Three changes inside the text index make this honest: a per-document digest, saves at
 intervals instead of once at the end, and a search that reads a saved copy while a
@@ -439,6 +952,15 @@ slash command, the doctor section. *Gate: `rlm-indexed` offers `code_index` and
 `code_graph` under their present names, a child agent in a worktree indexes its own
 tree, and the session process never imports `tree_sitter`.*
 
+**U4a. Each agent's tool state in its scratch.** `--state` and `$PH_TOOL_STATE` in
+`ph.toolcli`, the engine rows reading them, `Manual.state` and the per-call variable in
+`ph-utcp`, the sandbox rule that refuses a grant inside the workspace, and the code
+graph's grants reduced to the grammars and the log. *Gate: under a read-only sandbox an
+agent's `code_index` cannot write the repo and builds its index in its scratch; a
+resumed session's `code_index` parses nothing unchanged; a child in a worktree has its
+own index; `ph-code-graph call` with no session still indexes under `$PH_CACHE`, and
+with `--state` where it says.*
+
 **U5. The worker and its progress.** The text index's digest and interval saves, the
 worker, the answer-at-once contract, the progress file, the status reading, the
 completion notice. *Gate: a second `text_search` does not load the model again; a
@@ -447,7 +969,8 @@ moves; a worker killed with SIGKILL is replaced at the next mount and embeds not
 twice.*
 
 **U6. Text index through `ph-utcp`, with E1.** Its command, manual and registration
-rows, and the local model's config passed through. *Gate: U4's gate for the text tools
+rows, and the local model's config passed through, with its state in the agent's
+scratch from the start (U4a) and the model's weights a shared grant. *Gate: U4's gate for the text tools
 with the suite's stub embedder; the session process never imports
 `sentence_transformers`; a profile that names a different model gets a separate
 index.*
@@ -468,8 +991,8 @@ without the capability is refused at the row with a sentence naming it.*
 **U10. Documentation.** Both READMEs, a `ph-utcp` README, and a section in
 `docs/cookbook/adding-a-tool.md` on publishing a tool as a UTCP manual.
 
-U7 can move ahead of U5 if choosing what to index is wanted before the worker exists;
-it depends only on U4.
+The order is U4a, U6, U5, then the rest of U7 (`on_mount`, which only the worker reads),
+then U8 to U10.
 
 ## What breaks
 
@@ -477,40 +1000,54 @@ it depends only on U4.
   `ctx.text_index` are no longer provided to a session's mount. A deployment that
   registered its own embedder on `ctx.text_index` configures it in the tool's own
   profile instead.
-- **Index tools return before the work is done.** A caller that read `IndexValue` as a
-  finished count reads a state and a progress count.
+- **Index tools may return before the work is done.** In a session, where a host
+  answers, a run longer than the row's `wait_s` answers `state: indexing` with a
+  progress count, and its final counts are in no tool result: the agent is told it
+  ended, with the total. A caller that read `IndexValue` as a finished count reads
+  `state` first.
 - **`permissions-fs` no longer screens these tools' reads**, and `fs/read-intent` no
   longer fires for them. The sandbox bounds them, as it bounds `bash`.
-- **Indexing needs a writable index directory.** In a session whose sandbox mode is
-  read-only the index tools are expected to be refused while search still works; U3
-  confirms what the seam does with an extra writable path in that mode.
+- **Indexes move into the agent's scratch (U4a).** An index under
+  `$PH_CACHE/<tool>/<workspace digest>` built by a session is not found by the next
+  session; it is rebuilt in that session's scratch. Indexing works in a read-only
+  session, and never writes the repo.
+- **A manual's `writable` grant inside the workspace is refused (U4a).**
 - **Row config reaches the tool through the environment**, so a change to it applies
   to the next command and to the next worker start.
 - **`glob` on both rows becomes `index.include`**, a list. The old key is removed, not
   aliased.
-- New: two console scripts, a lock file in each code-graph index directory, a digest
-  and a progress file in each text index (an index built before U5 is rebuilt), one
-  worker process per indexed workspace.
+- New: two console scripts, a lock file in each code-graph index directory, a progress
+  file in each state directory, a digest per document in each text index (one built
+  before has none, and each document is embedded once more), and one host process per
+  package for each tree an agent works in, started at a root agent's first step unless
+  `index.on_mount` is false.
+- **Both rows' `path` setting is removed.** `--state` and `$PH_TOOL_STATE` say where an
+  index goes.
+- **`install_or_status`'s body takes the invocation as well as the verb.**
+- **`config_env` names every row it is given**, a default one as `{}`, where it used
+  to leave a default row out.
 
 ## Left for the step that meets it
 
-Nothing waits on the user. These are settled where the code is read:
-
-- Which transcript mechanism carries the completion notice (U5).
-- Whether the worker's framing reuses pieces of `ph_app.daemon` moved down into
-  `ph-core`, or is a small JSON-lines protocol of its own (U5).
-- Whether E2's fallback list is worth having, or one embedder per row is enough (U8).
+Nothing is left. What each step settled where the code was read is recorded above.
 
 ## Not verified
 
-- That utcp 1.2.0 and utcp-cli 1.1.5 are the versions published on PyPI. The clone is
-  what was read; `sources/` is ignored by git, so the dependency has to come from an
-  index.
 - How UTCP clients in other languages stringify list and boolean arguments. The decoder
   accepts JSON, Python repr and comma-separated forms for that reason.
 - The model load time on this machine. No weights are cached here, and none were
   downloaded for this review; the 19 s and 26 s figures are the README's.
-- Which rows the headless profile needs beyond the registry, `fs-local` and the local
-  subprocess row. U1 finds out by mounting it.
-- What a confined command can write when the session's sandbox mode is read-only and
-  the policy names an extra path. U3 finds out.
+- How long a resumed session's re-index takes when its scratch survived but the tree
+  moved a long way under it — a rebase across hundreds of files. U4a's gate measures
+  the unchanged case only.
+- A resumed session finding its index through a real daemon restart. The gates hold the
+  two halves: the state directory is a function of the session and agent ids, and a
+  second process given the same directory parses or embeds nothing unchanged.
+- `nomic-embed-text-v1.5`, or any model with remote code, under a sandbox. Only MiniLM
+  was run.
+- A host across a real daemon restart, and a real agent loop taking a step: the gates
+  call the `agent/pre-step` listener themselves.
+- A hosted embeddings API, and Google's. The OpenAI-compatible request was run against
+  a real llama.cpp; Google's only against a fixture server that speaks it.
+- A fan-out of real sub-agents on one tree, spawned by `rlm-indexed`. The gates build
+  the parent and its children by hand, one reader and one writer.

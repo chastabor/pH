@@ -369,6 +369,68 @@ async def test_post_execute_can_replace_content_or_block() -> None:
     assert block_text(blocked.content[0]) == "try again"
 
 
+def _presenting(value: object = "the value") -> Any:  # noqa: ANN401
+    """A tool whose rendering was made where it ran, as a UTCP command's is."""
+
+    def body(_args: object, run: ToolRunContext) -> object:
+        run.present(value, text_content("rendered where it ran"))
+        return value
+
+    return simple_tool("remote", body)
+
+
+async def test_presented_content_is_what_every_post_execute_row_sees_and_edits() -> None:
+    """The text a tool rendered elsewhere is the content from the start, so a row
+    that measures it (`projected`) or appends to it works on what the model will
+    read — and its edit stands, rather than being replaced after it ran."""
+    root, tools = tool_runtime()
+    tools.register(_presenting())
+    seen: list[str] = []
+
+    async def receipt(execution: ToolExecution, result: Any, next_: object) -> Any:  # noqa: ANN401
+        seen.append(block_text(result.content[0]))
+        projected = tools.projected(execution, result.value)
+        assert projected is not None
+        seen.append(block_text(projected[0]))
+        return Accept(content=[*result.content, *text_content("[receipt]")])
+
+    root.on("tools/post-execute", receipt)
+    result = await tools.execute(_call("remote"))
+
+    assert not result.is_error
+    assert seen == ["rendered where it ran", "rendered where it ran"]
+    assert [block_text(one) for one in result.content] == ["rendered where it ran", "[receipt]"]
+    assert result.value == "the value"
+
+
+async def test_a_replaced_value_is_rendered_by_the_definition_and_not_by_the_presentation() -> None:
+    """The presented text describes the value the body returned. A row that swaps
+    the value gets the tool's own rendering of the swap — matched by identity, so
+    an equal-looking replacement is not mistaken for the original."""
+    root, tools = tool_runtime()
+    tools.register(_presenting())
+
+    async def swap(execution: ToolExecution, result: Any, next_: object) -> Any:  # noqa: ANN401
+        return Accept(value="a replacement", has_value=True)
+
+    root.on("tools/post-execute", swap)
+    result = await tools.execute(_call("remote"))
+
+    assert result.value == "a replacement"
+    assert block_text(result.content[0]) == "a replacement"
+
+
+async def test_presenting_does_not_excuse_the_value_from_its_declared_output() -> None:
+    _root, tools = tool_runtime()
+    tools.register(_presenting(value={"not": "a string"}))
+
+    result = await tools.execute(_call("remote"))
+
+    assert result.is_error
+    assert result.error is not None
+    assert result.error.info == {"name": "ToolOutputError", "code": "INVALID_TOOL_OUTPUT"}
+
+
 async def test_post_execute_runs_on_a_denied_call() -> None:
     root, tools = tool_runtime()
     tools.register(_echo())

@@ -36,6 +36,17 @@ Resolving properly means an import graph, scope, and per-language type
 inference. That is the 29 708 lines this package declined to port. Name-based
 answers most of what an agent actually asks and reports where it cannot.
 
+## One call, or a host
+
+Run for one call, `code_index` finishes before it answers. Mounted in a host
+(`ph-code-graph serve`, `ph.toolcli.TOOL_HOST`) the process outlives the call, so
+the tool answers at once when a run is long — `state: indexing`, with how far it
+has got — and the run goes on in the background; `code_graph` answers meanwhile
+from what is indexed so far, and says the index is still being built. Either way
+the run reports to `progress.json` beside the database. Nothing else differs:
+each file is its own transaction, so a run that is stopped keeps every file it
+finished, and the next one finds them by their digests.
+
 ## Where this row is mounted
 
 In the `ph-code-graph` command's own process, and not in a session's. A session
@@ -54,7 +65,8 @@ import importlib.util
 import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -64,20 +76,28 @@ from pydantic import Field
 from ph.cordis import Context, MountRefusal, ServiceKey, plugin
 from ph.json import JsonObject, as_int
 from ph.keys import COMMANDS, FS, TOOLS
-from ph.llm.types import ContentBlock
+from ph.llm.types import ContentBlock, text_of
 from ph.locks import waited_file_lock
 from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
-from ph.seams.commands import Provisioning, install_or_status
+from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService
 from ph.text import count_of
+from ph.toolcli import TOOL_HOST, BackgroundRuns, Progress, RunProgress, claim_home
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
-from ph.workspace_caches import use
 
-from ._config import GRAMMAR_CACHE_ENV, ROW, Config, grammar_default, index_base, index_path
+from ._config import (
+    GRAMMAR_CACHE_ENV,
+    ROW,
+    Config,
+    grammar_cache,
+    grammar_default,
+    index_base,
+    index_path,
+)
 from ._extract import (
     cache_release,
     detect_language,
@@ -128,6 +148,14 @@ run first."""
 # --------------------------------------------------------------------- seam ----
 
 
+_LOCKED = "the code index"
+
+
+def _lock_of(store: CodeGraphStore) -> Path:
+    """The lock file beside a database that orders its writers."""
+    return store.path.with_name(f"{store.path.name}.lock")
+
+
 CODE_GRAPH: ServiceKey[CodeGraphSeam] = ServiceKey("code_graph")
 """The code graph, for `/code-graph` and the tools it backs."""
 
@@ -144,21 +172,28 @@ class CodeGraphSeam:
     """
 
     ctx: Context
-    config: Config
     grammars: Path
     """Where the tree-sitter grammar cache was pointed. See `_extract.use_cache`."""
+    runs: BackgroundRuns = field(default_factory=BackgroundRuns)
+    """The indexing runs, by index directory, and how far each has got."""
 
     def store_for(self, root: Path) -> CodeGraphStore:
-        """This workspace's index: a directory per root, or the row's `path` as given.
+        """This workspace's index: where the caller said, or a directory per root
+        (`_config.index_path`).
 
-        Keyed per root on purpose — a worktree at another revision holds
-        different line numbers, so sharing one index would hand out pointers
-        that are quietly stale. The cost is that under a profile whose children
-        run in worktrees, every throwaway tree leaves a database behind, so the
-        directory records its workspace and one whose workspace is gone is swept
-        on a later index (`ph.workspace_caches`).
+        Never shared between two trees — a worktree at another revision holds
+        different line numbers, so one index for both would hand out pointers
+        that are quietly stale. A session's caller names a directory of the
+        agent's own scratch, which goes when the agent's scratch does; the
+        per-root directory under `$PH_CACHE` records its workspace, and one whose
+        workspace is gone is swept on a later index (`ph.workspace_caches`).
         """
-        return CodeGraphStore(path=index_path(self.config, root))
+        return CodeGraphStore(path=index_path(root))
+
+    def indexing(self, store: CodeGraphStore) -> Progress | None:
+        """The run building `store` right now, or `None`
+        (`BackgroundRuns.working`): a run holds the index's lock while it works."""
+        return self.runs.working(store.path.parent, _lock_of(store), what=_LOCKED)
 
     @asynccontextmanager
     async def writing(self, store: CodeGraphStore) -> AsyncIterator[None]:
@@ -177,9 +212,7 @@ class CodeGraphSeam:
         behind the first, and then finds most of the tree already current. The
         directory needs no making here — taking the lock makes it.
         """
-        async with waited_file_lock(
-            store.path.with_name(f"{store.path.name}.lock"), what="the code index"
-        ):
+        async with waited_file_lock(_lock_of(store), what=_LOCKED):
             yield
 
     def report(self) -> list[tuple[str, str]]:
@@ -244,14 +277,21 @@ class SkippedValue(ToolModel):
 
 
 class IndexValue(ToolModel):
-    indexed: int
+    state: Literal["done", "indexing"] = "done"
+    """`indexing`: the run goes on in the background, and the counts below are
+    how far it has got. Only a host answers that; a call that ran by itself
+    answers `done`."""
+    done: int = 0
+    total: int = 0
+    """Files this run has been through, and how many it will go through."""
+    indexed: int = 0
     """Files parsed this call — changed or new only."""
-    unchanged: int
+    unchanged: int = 0
     """Files already current, by content digest."""
-    removed: int
-    symbols: int
+    removed: int = 0
+    symbols: int = 0
     """Symbols written this call."""
-    skipped: list[SkippedValue]
+    skipped: list[SkippedValue] = Field(default_factory=list)
     total_files: int
     total_symbols: int
     total_refs: int
@@ -304,6 +344,11 @@ class RingValue(ToolModel):
     symbols: list[SymbolValue]
 
 
+class IndexingValue(ToolModel):
+    done: int
+    total: int
+
+
 class GraphValue(ToolModel):
     mode: str
     query: str | None
@@ -314,6 +359,9 @@ class GraphValue(ToolModel):
     offset: int
     truncated: bool
     indexed_files: int
+    indexing: IndexingValue | None = None
+    """Set while a run is still building the index: the answer is from what it
+    has indexed so far."""
     symbols: list[SymbolValue] = Field(default_factory=list)
     edges: list[EdgeValue] = Field(default_factory=list)
     rings: list[RingValue] = Field(default_factory=list)
@@ -332,6 +380,16 @@ def _doc(one: dict[str, Any]) -> str:
 
 
 def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
+    if value.get("state") == "indexing":
+        return text_content(
+            f"Indexing in the background: {value['done']} of "
+            f"{count_of(value['total'], 'file')} so far. `code_graph` answers now, from "
+            "what is indexed already, and says while the index is still being built. "
+            "You will be told when it finishes; call `code_index` again to see how far "
+            "it has got.\n"
+            f"The graph holds {count_of(value['total_symbols'], 'symbol')} "
+            f"from {count_of(value['total_files'], 'file')} so far."
+        )
     if args.get("forget"):
         return text_content(
             f"Removed {count_of(value['removed'], 'file')} from the index. "
@@ -366,6 +424,21 @@ def _ambiguity(value: Any) -> str:  # noqa: ANN401
 
 
 def _render_graph(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
+    """The answer, and under it the warning it carries while its index is still
+    being built."""
+    answer = _render_answer(args, value)
+    indexing = value.get("indexing")
+    if not indexing:
+        return answer
+    return text_content(
+        f"{text_of(answer)}\n"
+        f"[Not finished indexing: {indexing['done']} of "
+        f"{count_of(indexing['total'], 'file')}. This answer covers what is indexed so "
+        "far; ask again once it finishes.]"
+    )
+
+
+def _render_answer(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     mode = value["mode"]
     if mode in ("search", "define"):
         if not value["symbols"]:
@@ -477,7 +550,6 @@ async def apply(ctx: Context, config: Config) -> None:
     # into a writable cache directory and fails hard without one, so the row
     # names a path it can vouch for rather than inheriting whatever `HOME`
     # happens to be — see `use_cache`.
-    grammar_cache = grammar_default()
     try:
         # Through `ctx.effect` and in a worker thread, for two reasons that
         # happen to share one line. The effect is so the library's
@@ -486,10 +558,9 @@ async def apply(ctx: Context, config: Config) -> None:
         # `use_cache` imports `tree_sitter_language_pack`, a 20 ms dlopen that
         # a profile mounting many rows would otherwise serialize on the loop.
         await ctx.effect(
-            lambda: anyio.to_thread.run_sync(cache_release, grammar_cache),
+            lambda: anyio.to_thread.run_sync(cache_release, grammar_default()),
             label="tree-sitter-cache",
         )
-        grammars = grammar_cache
     except OSError as error:
         # `MountRefusal`, not the `OSError`: every command that mounts a profile
         # turns this one type into a sentence and an exit code, and leaves
@@ -504,7 +575,9 @@ async def apply(ctx: Context, config: Config) -> None:
             f"{GRAMMAR_CACHE_ENV}."
         ) from error
 
-    seam = CodeGraphSeam(ctx=ctx, config=config, grammars=grammars)
+    seam = CodeGraphSeam(
+        ctx=ctx, grammars=grammar_cache(), runs=BackgroundRuns(grace=config.wait_s)
+    )
     ctx.provide(CODE_GRAPH, seam)
 
     def store(run: ToolRunContext) -> CodeGraphStore:
@@ -521,6 +594,40 @@ async def apply(ctx: Context, config: Config) -> None:
         return book.forget(gone) if gone else 0
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
+        # In a host the run outlives this call, which answers with the run's
+        # counts if it ends within the grace and with how far it has got if not.
+        book = store(run)
+        value = await seam.runs.run(
+            ctx.get(TOOL_HOST),
+            book.path.parent,
+            args,
+            partial(index_run, args, run),
+            what="files",
+            raise_if_canceled=run.raise_if_canceled,
+        )
+        if value is not None:
+            return value
+        progress = seam.indexing(book)
+        stats: dict[str, Any] = (
+            await anyio.to_thread.run_sync(book.stats)
+            if await anyio.to_thread.run_sync(book.exists)
+            else {"files": 0, "symbols": 0, "refs": 0, "languages": []}
+        )
+        return IndexValue(
+            state="indexing",
+            done=0 if progress is None else progress.done,
+            total=0 if progress is None else progress.total,
+            total_files=stats["files"],
+            total_symbols=stats["symbols"],
+            total_refs=stats["refs"],
+            languages=stats["languages"],
+        ).model_dump()
+
+    async def index_run(
+        args: IndexArgs, run: ToolRunContext, progress: RunProgress
+    ) -> dict[str, Any]:
+        """One indexing run, to its end. Its caller's cancellation is asked at
+        each `progress.tick`, for as long as the run is that caller's own."""
         fs = ctx.require(FS)
         book = store(run)
         wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
@@ -534,12 +641,13 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         skipped: list[dict[str, str]] = []
         indexed = unchanged = symbols = removed = 0
+        total = len(paths)
 
-        if not config.path:
-            # Before the lock: the record and the sweep touch nothing an index
-            # holds. Not for a configured `path`, one database the row was given.
-            await anyio.to_thread.run_sync(use, index_base(), fs.root_for(run.agent))
+        # Before the lock: the record and the sweep touch nothing an index holds.
+        await anyio.to_thread.run_sync(claim_home, index_base(), fs.root_for(run.agent))
         async with seam.writing(book):
+            # Under the lock, so the report is this run's and not one waiting.
+            progress.begin(total)
             await anyio.to_thread.run_sync(book.prepare)
             if args.forget:
                 # Falls through to the one `stats` read and the one return
@@ -558,8 +666,8 @@ async def apply(ctx: Context, config: Config) -> None:
             parsers: dict[str, bool] = {}
             stored_token = await anyio.to_thread.run_sync(book.token)
             state = await tree_state(ctx, fs.root_for(run.agent), since=stored_token)
-            for path in paths:
-                run.raise_if_canceled()
+            for count, path in enumerate(paths):
+                progress.tick(count)
                 language = detect_language(path)
                 # Derived from the pack rather than checked against a name
                 # list: `.txt`, `.ini`, `.proto` and a dozen others are
@@ -674,6 +782,9 @@ async def apply(ctx: Context, config: Config) -> None:
             stats = await anyio.to_thread.run_sync(book.stats)
 
         return {
+            "state": "done",
+            "done": total,
+            "total": total,
             "indexed": indexed,
             "unchanged": unchanged,
             "removed": removed,
@@ -694,6 +805,7 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         if args.mode != "entities" and not args.query:
             raise HarnessError(f"mode={args.mode} needs `query`", CODE_GRAPH_FAILED)
+        progress = seam.indexing(book)
 
         # `file_count`, not `stats()`: the header needs one number and `stats`
         # counts symbols and refs and groups files by language — three full
@@ -757,6 +869,9 @@ async def apply(ctx: Context, config: Config) -> None:
             "definitions": defined,
             "offset": args.offset,
             "indexed_files": indexed,
+            "indexing": (
+                None if progress is None else {"done": progress.done, "total": progress.total}
+            ),
             **body,
         }
 
@@ -787,7 +902,7 @@ async def apply(ctx: Context, config: Config) -> None:
         )
     )
 
-    async def grammar_command(verb: Provisioning) -> str:
+    async def grammar_command(verb: Provisioning, _invocation: CommandContext) -> str:
         """`/code-graph install|status` — make the grammars ready, on purpose.
 
         A **command** rather than a tool, per the seam's own rule: a person asks

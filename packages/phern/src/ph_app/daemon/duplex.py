@@ -56,6 +56,7 @@ import anyio
 from anyio.abc import ByteStream, TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
+from ph.framing import FramingError, read_frames, write_frame
 from ph.json import as_str
 from ph.wire import WireModel
 
@@ -71,7 +72,6 @@ from ..protocol import (
     respond,
     result_of,
 )
-from .framing import FramingError, read_frames, write_frame
 
 __all__ = ["IN_FLIGHT", "OUTBOX", "Handler", "Notification", "Peer", "answering"]
 

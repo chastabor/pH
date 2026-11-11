@@ -29,11 +29,13 @@ from typing import Any
 
 import pytest
 from code_graph_helpers import (
+    cache_beside_the_tree,  # noqa: F401 - autouse, by being here
     grammar_cache,  # noqa: F401 - autouse, by being here
     new_agent,
     shared_tree,
 )
 
+from ph.agent.types import PreStepDecision, PreStepRequest
 from ph.cordis import DEPLOYMENT
 from ph.cordis.loader import MOUNT
 from ph.keys import (
@@ -46,11 +48,11 @@ from ph.keys import (
 )
 from ph.llm.types import text_of
 from ph.paths import resolve_roots
-from ph.testing import MountProfile, report_section, run_tool
+from ph.seams.workspace import scratch_of
+from ph.testing import MountProfile, report_section, run_tool, session_of, settled
 from ph.testing.git import git, git_repo
 from ph.toolcli import CONFIG_ENV
 from ph.tools.registry import RUN_CODE
-from ph.workspace_caches import digest
 from ph_code_graph.row import Config, manual
 from ph_utcp import UTCP
 
@@ -61,6 +63,12 @@ ROWS: tuple[dict[str, Any], ...] = (
     {"id": "code-graph", "name": "code-graph"},
 )
 """What the `utcp` and `code-graph` bundles add to a profile, in their order."""
+
+
+def _index(ctx: Any, agent: Any) -> Path:  # noqa: ANN401
+    """Where `agent`'s index is: the row's directory in that agent's scratch."""
+    return scratch_of(ctx, agent.session.id, agent) / "code-graph" / "graph.db"
+
 
 # -------------------------------------------------------------- what is equal --
 
@@ -178,17 +186,16 @@ async def test_an_agent_in_its_own_tree_indexes_that_tree(
     """**The gate.** Two agents, two trees, one session's rows.
 
     The command runs in the calling agent's workspace, so the index it builds is
-    that workspace's: the child's own files, in the directory keyed by the
-    child's own root. Registered in-process, the same tool read whichever root
-    `ctx.fs` resolved for the agent — and this is the proof the command line
-    kept that.
+    that workspace's: the child's own files, kept in the child's own scratch.
+    Registered in-process, the same tool read whichever root `ctx.fs` resolved
+    for the agent — and this is the proof the command line kept that.
     """
     shared_tree(tmp_path, callers=2)
     worktree = shared_tree(tmp_path.parent / f"{tmp_path.name}-worktree", callers=5)
     ctx = await mount(*ROWS)
     parent, child = new_agent(ctx), new_agent(ctx)
     await ctx.require(WORKSPACE).acquire(
-        session_id=child.session.id, agent_id=child.id, base=worktree
+        session_id=session_of(child).id, agent_id=child.id, base=worktree
     )
 
     for agent in (parent, child):
@@ -200,31 +207,39 @@ async def test_an_agent_in_its_own_tree_indexes_that_tree(
 
     assert len(theirs.value["edges"]) == 5
     assert len(ours.value["edges"]) == 2
-    indexes = resolve_roots().cache / "code-graph"
-    assert (indexes / digest(str(worktree)) / "graph.db").exists()
-    assert (indexes / digest(str(tmp_path)) / "graph.db").exists()
+    indexes = {_index(ctx, parent), _index(ctx, child)}
+    assert len(indexes) == 2
+    assert all(index.exists() for index in indexes)
+    assert not (resolve_roots().cache / "code-graph").exists(), "nothing is shared"
 
 
 @pytest.mark.needs_git
 async def test_a_confined_agent_that_may_not_write_its_tree_still_indexes_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The default posture is read-only, and on a host with a sandbox backend that
-    is enforced. The command writes its index, its grammars and its log outside
-    the tree, in the directories the manual grants — so the index is built, by an
-    agent whose own `bash` could not create a file beside the code.
+    """**The gate.** Read-only bars the repository, and not what a tool builds
+    about it.
+
+    The default posture is read-only, and on a host with a sandbox backend that
+    is enforced. The command keeps its index in the agent's scratch — writable
+    under every mode — and its grammars and log in the directories the manual
+    grants. So the index is built, by an agent whose own `bash` could not create a
+    file beside the code, and the tree is exactly as it was.
 
     A git repository, so the command asks git what changed: the path that spawns a
-    child of its own from inside the sandbox.
+    child of its own from inside the sandbox. In a directory of its own, because
+    the suite's `$PH_HOME` — and so the scratch — is `tmp_path`.
     """
     ctx = await mount({"id": "sandbox-local", "disabled": False}, *ROWS)
     if not ctx.require(SANDBOX).available:
         pytest.skip(f"no enforcing sandbox backend: {report_section(ctx, 'Local confinement')}")
-    repo = await git_repo(ctx, shared_tree(tmp_path))
+    repo = await git_repo(ctx, shared_tree(tmp_path / "repo"))
     await git(ctx, repo, "add", "-A")
     await git(ctx, repo, "commit", "-qm", "base")
     agent = new_agent(ctx)
-    await ctx.require(WORKSPACE).acquire(session_id=agent.session.id, agent_id=agent.id, base=repo)
+    await ctx.require(WORKSPACE).acquire(
+        session_id=session_of(agent).id, agent_id=agent.id, base=repo
+    )
 
     first = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
     again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
@@ -234,7 +249,9 @@ async def test_a_confined_agent_that_may_not_write_its_tree_still_indexes_it(
     assert first.value["indexed"] == 3
     assert again.value["unchanged"] == 3
     assert len(asked.value["edges"]) == 2
-    assert (resolve_roots().cache / "code-graph" / digest(str(repo)) / "graph.db").exists()
+    assert _index(ctx, agent).exists()
+    _, changed, _ = await git(ctx, repo, "status", "--porcelain")
+    assert changed == "", "the tree was written"
 
 
 def test_the_sessions_process_never_loads_the_parser(tmp_path: Path) -> None:
@@ -330,8 +347,8 @@ async def test_a_profile_points_the_row_at_a_package_and_the_command_indexes_it(
     }
 
 
-def test_a_default_row_sets_no_variable_and_a_configured_one_sets_its_own() -> None:
-    assert manual(Config()).env == {}
+def test_the_row_is_named_to_the_command_with_what_differs_from_its_defaults() -> None:
+    assert json.loads(manual(Config()).env[CONFIG_ENV]) == {"code-graph": {}}
 
     configured = manual(Config(languages=["python"], max_files=7))
 
@@ -343,17 +360,17 @@ def test_a_default_row_sets_no_variable_and_a_configured_one_sets_its_own() -> N
 def test_the_manual_grants_what_the_command_writes_outside_the_workspace(
     tmp_path: Path,
 ) -> None:
-    """The index, the grammar cache and the log — all under `$PH_CACHE`, none in
-    the tree. Without the grant a confined command can build nothing."""
-    granted = set(manual(Config()).writable)
+    """What agents share is granted — the grammar cache and the log, both under
+    `$PH_CACHE`. The index is not: it is named as state, so it goes in the calling
+    agent's own scratch and needs no grant."""
+    own = manual(Config())
+    granted = set(own.writable)
     cache = resolve_roots().cache
 
-    assert str(cache / "code-graph") in granted
+    assert own.state == "code-graph"
     assert str(cache / "logs") in granted
     assert any("tree-sitter" in path for path in granted)
-
-    database = tmp_path / "elsewhere" / "graph.db"
-    assert str(database.parent) in manual(Config(path=str(database))).writable
+    assert str(cache / "code-graph") not in granted
 
 
 async def test_the_command_answers_through_the_packages_own_program(
@@ -375,10 +392,90 @@ async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: P
 
     rows = report_section(ctx, "Code graph")
     assert rows["tools"] == "code_graph, code_index (through UTCP)"
-    assert rows["state"] == "not built — run code_index"
+    assert "scratch" in rows["index"]
+    assert rows["details"] == "/code-graph status"
 
-    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
-    rows = report_section(ctx, "Code graph")
-    assert rows["state"] == "built"
-    assert Path(rows["index"]).exists()
+async def test_status_counts_the_index_of_the_agent_that_asked(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Each agent has its own index, so "is it built" has an answer per agent: the
+    command is told the asking agent's state directory, as its tools are."""
+    shared_tree(tmp_path)
+    ctx = await mount(*ROWS)
+    builder, other = new_agent(ctx), new_agent(ctx)
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=builder)
+
+    commands = ctx.require(COMMANDS)
+    built = await commands.dispatch("/code-graph status", agent=builder, scope=builder.ctx)
+    unbuilt = await commands.dispatch("/code-graph status", agent=other, scope=other.ctx)
+
+    assert built is not None and unbuilt is not None
+    assert "files: 3" in built
+    assert str(_index(ctx, builder)) in built
+    assert "not built" in unbuilt
+
+
+# -------------------------------------------------------------------- the host --
+
+
+async def test_a_session_keeps_one_host_for_a_tree_and_its_calls_go_through_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The command that answers the tools stays up between calls, one for each
+    tree: started at the first call, by `ctx.shell`, for the agent that made it."""
+    shared_tree(tmp_path)
+    ctx = await mount(*ROWS)
+    agent = new_agent(ctx)
+    utcp = ctx.require(UTCP)
+
+    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
+    [first] = utcp.hosts.values()
+    asked = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
+    [again] = utcp.hosts.values()
+
+    assert len(asked.value["edges"]) == 2
+    assert again is first and first.running
+    assert first.owner is agent and first.socket.exists()
+    assert first.host.label == "code graph"
+
+
+async def test_a_root_agents_first_step_builds_the_graph_and_it_is_told_when_it_ends(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """**The gate.** No tool is called: the row's `agent/pre-step` listener starts
+    the host with `code_index` to run, the graph is built in the background, and
+    the agent is told with a note that waits for its next step."""
+    shared_tree(tmp_path, callers=4)
+    ctx = await mount(*ROWS)
+    agent = new_agent(ctx)
+
+    async def entered() -> PreStepDecision:
+        return PreStepDecision(kind="enter")
+
+    request = PreStepRequest(agent=agent, session=session_of(agent), messages=(), turn=1, step=1)
+    await ctx.require(UTCP).eager(request, entered)
+    await settled(lambda: bool(agent.inbox.next_step), "the completion note", seconds=60)
+
+    [note] = agent.inbox.next_step
+    assert "The code graph is finished: 5 files" in text_of(note.content)
+    asked = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
+    assert len(asked.value["edges"]) == 4
+    assert asked.value["indexing"] is None
+
+
+async def test_on_mount_false_starts_nothing_until_a_tool_is_called(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    shared_tree(tmp_path)
+    ctx = await mount(ROWS[0], {**ROWS[1], "config": {"index": {"onMount": False}}})
+    agent = new_agent(ctx)
+
+    async def entered() -> PreStepDecision:
+        return PreStepDecision(kind="enter")
+
+    request = PreStepRequest(agent=agent, session=session_of(agent), messages=(), turn=1, step=1)
+    await ctx.require(UTCP).eager(request, entered)
+
+    assert not ctx.require(UTCP).hosts
+    assert manual(Config.model_validate({"index": {"onMount": False}})).host is not None

@@ -104,6 +104,39 @@ async def test_the_command_answers_with_the_values_the_row_answers_with(
     assert again.value["unchanged"] == 4
 
 
+async def test_the_index_goes_where_the_caller_says_and_is_found_there_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--state`, and `$PH_TOOL_STATE` under it: the directory a session names for
+    each agent, and a person names to try one. Three processes share nothing but
+    that directory, so the second parsing nothing is the index being reused —
+    which is what a restarted agent gets, because its directory is the same one.
+
+    And with neither, the index is where it has always been: under `$PH_CACHE`,
+    keyed by the workspace.
+    """
+    from ph.paths import resolve_roots
+    from ph.toolcli import STATE_ENV
+
+    shared_tree(tmp_path, callers=3)
+    state = tmp_path.parent / f"{tmp_path.name}-state"
+
+    def call(*argv: str) -> dict[str, Any]:
+        return _call(tmp_path, "code_index", "--paths", ".", *argv)
+
+    first = await anyio.to_thread.run_sync(lambda: call("--state", str(state)))
+    monkeypatch.setenv(STATE_ENV, str(state))
+    again = await anyio.to_thread.run_sync(call)
+    monkeypatch.delenv(STATE_ENV)
+    apart = await anyio.to_thread.run_sync(call)
+
+    assert first["value"]["indexed"] == 4
+    assert (state / "graph.db").exists()
+    assert (again["value"]["indexed"], again["value"]["unchanged"]) == (0, 4)
+    assert apart["value"]["indexed"] == 4, "with no state named, it is a different index"
+    assert (resolve_roots().cache / "code-graph" / digest(str(tmp_path)) / "graph.db").exists()
+
+
 async def test_a_failure_from_the_tool_keeps_its_routable_code(tmp_path: Path) -> None:
     answer = await anyio.to_thread.run_sync(
         lambda: _call(

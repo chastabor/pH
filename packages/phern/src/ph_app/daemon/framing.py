@@ -1,57 +1,27 @@
-"""JSONL framing over a byte stream — the daemon's wire (P5-01).
+"""The daemon's wire limits, over `ph.framing`'s JSONL (P5-01).
 
-One JSON object per line, `\\n`-terminated, UTF-8. The same framing the session
-log uses and the same framing `--mode rpc` speaks over stdio, so a client, a log
-reader and a daemon peer all parse one format (I-7) and the daemon is a
-*transport* change rather than a second protocol.
-
-**Bounded on purpose.** A stream socket hands you bytes, not messages, so a peer
-that never sends a newline is a peer that grows your buffer until the process
-dies — and the daemon is the one process in pH that outlives the thing that
-talked to it. `MAX_LINE` turns that into a refused connection with a reason.
+The framing itself — one JSON object per line, bounded by `MAX_LINE` — is
+`ph.framing`, in core, because the session's tool commands speak it too. What is
+here is what only the daemon's wire needs: how large an attachment one frame may
+carry, derived from that bound.
 
 @module ph_app.daemon.framing
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncIterator, Mapping
-from typing import Any
-
-import anyio
-from anyio.abc import ByteStream
-from anyio.streams.buffered import BufferedByteReceiveStream
-
-from ph.json import dumps
-
-__all__ = [
-    "MAX_ATTACHMENT_BYTES",
-    "MAX_ATTACHMENT_SIZE",
-    "MAX_LINE",
-    "FramingError",
-    "read_frames",
-    "write_frame",
-]
-
-MAX_LINE = 8 * 1024 * 1024
-"""How long one frame may be — one *frame*, checked by `receive_until`.
-
-Generous, because a frame can carry a session event and an event can carry a
-tool result the spill store has not yet taken. Bounded, because the alternative
-is not "large frames work" but "one peer can exhaust the daemon".
-"""
+__all__ = ["MAX_ATTACHMENT_BYTES", "MAX_ATTACHMENT_SIZE"]
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 """The largest attachment one frame may carry.
 
-Under `MAX_LINE` (8 MiB) with room to spare, because the frame also carries the
+Under `ph.framing.MAX_LINE` (8 MiB) with room to spare, because the frame also carries the
 method, the session id and base64's own 4/3 expansion — a limit set at the frame
 size would refuse *after* the client had already sent it, as a framing error with
 no name.
 
 Here rather than in `server.py` because it is a property of the **wire**: it is
-derived from `MAX_LINE` above it, and both ends of that wire need it — the daemon
+derived from that bound, and both ends of that wire need it — the daemon
 to refuse a frame, and a front end to refuse an upload before it builds one. A
 front end importing it from the server module would name the supervisor's home to
 read an integer."""
@@ -62,73 +32,3 @@ MAX_ATTACHMENT_SIZE = f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MiB"
 The division floors, so a limit that stops being a whole number of MiB would
 otherwise have two doors quietly rounding it down in two sentences.
 """
-
-
-class FramingError(Exception):
-    """The peer sent something this transport cannot read.
-
-    Distinct from a *protocol* error — a request whose method is unknown is the
-    server's to answer, and a frame that is not a frame ends the connection,
-    because after it there is no way to know where the next one starts.
-    """
-
-
-async def write_frame(stream: ByteStream, payload: Mapping[str, object]) -> None:
-    """Send one object.
-
-    `Mapping[str, object]` rather than a `protocol.Frame`, so this stays the
-    transport and not the vocabulary: every `TypedDict` is a `Mapping`, and a
-    module that framed only the four shapes it knew about would have to be
-    told about a fifth.
-
-    `ph.json.dumps` rather than `json.dumps`: it is the canonical encoder,
-    and a daemon that framed events differently from the log they came out of
-    would make the two formats one claim short of true.
-    """
-    await stream.send(f"{dumps(payload)}\n".encode())
-
-
-async def read_frames(stream: ByteStream) -> AsyncIterator[dict[str, Any]]:
-    """Yield each object the peer sends, until it closes.
-
-    `BufferedByteReceiveStream.receive_until` rather than a hand-rolled buffer: anyio
-    ships the delimiter scan with the cap built in. The hand-rolled version was
-    quadratic twice over — it re-scanned the whole buffer per chunk and recopied the
-    tail per frame — and it bounded the *accumulated buffer* rather than one frame, so
-    many small frames in one chunk tripped a limit documented as per-frame.
-
-    A peer that closes mid-frame **ends the iteration rather than raising**: it did not
-    send that frame, and acting on half of one is how a supervisor executes a command
-    nobody completed.
-
-    **The cap is checked twice, and the second check is the one that makes it a cap.**
-    `receive_until` looks for the delimiter *before* it tests the buffer against
-    `max_bytes`, so an over-length frame is refused only when its newline has not yet
-    arrived — which depends on how much the socket hands over per read.
-    `net.local.stream.recvspace` is 64 KiB on Linux and 8 KiB on macOS, so the same
-    oversized frame was refused on one and accepted on the other (measured 2026-09-07,
-    on a 6 MiB attachment that Linux let through and macOS closed the connection over).
-    A wire limit that holds on one kernel is not a limit, and both ends of this wire
-    derive `MAX_ATTACHMENT_BYTES` from it.
-    """
-    buffered = BufferedByteReceiveStream(stream)
-    while True:
-        try:
-            line = await buffered.receive_until(b"\n", MAX_LINE)
-        except (anyio.EndOfStream, anyio.IncompleteRead):
-            return
-        except anyio.DelimiterNotFound as error:
-            raise FramingError(f"frame exceeds {MAX_LINE} bytes") from error
-        if len(line) >= MAX_LINE:
-            # The delimiter arrived inside a chunk that took the buffer past the
-            # cap. Same refusal, same sentence, on every platform.
-            raise FramingError(f"frame exceeds {MAX_LINE} bytes")
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise FramingError(f"not JSON: {error}") from error
-        if not isinstance(payload, dict):
-            raise FramingError("a frame must be a JSON object")
-        yield payload

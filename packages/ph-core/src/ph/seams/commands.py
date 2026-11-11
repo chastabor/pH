@@ -188,18 +188,24 @@ Provisioning: TypeAlias = Literal["install", "status"]
 
 
 def install_or_status(
-    name: str, summary: str, answer: Callable[[Provisioning], Awaitable[str]]
+    name: str,
+    summary: str,
+    answer: Callable[[Provisioning, CommandContext], Awaitable[str]],
 ) -> CommandDefinition:
     """The command a plugin that provisions something offers: `install` acts, and
     `status` — the bare command too — only asks.
+
+    `answer` is handed the invocation as well as the verb, because "is this
+    ready" is asked by someone: a plugin whose state is per agent — an index in
+    the agent's scratch — answers for the agent and session that typed it.
 
     One shape for every such plugin, because "is this ready" should be asked the same
     way of each, and its verbs sorted into asking and acting the same way too. The
     whole definition, so the hint naming the verbs comes from the table that owns
     them.
     """
-    status = CommandVerb(lambda _rest, _invocation: answer("status"), record="after")
-    install = CommandVerb(lambda _rest, _invocation: answer("install"))
+    status = CommandVerb(lambda _rest, invocation: answer("status", invocation), record="after")
+    install = CommandVerb(lambda _rest, invocation: answer("install", invocation))
     return CommandDefinition(
         name=name,
         summary=summary,

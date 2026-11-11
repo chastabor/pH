@@ -398,6 +398,8 @@ class ToolRunContext:
     """
     _deferred: list[Message] = field(default_factory=list)
     _concluded: bool = False
+    _presented: tuple[object, tuple[ContentBlock, ...]] | None = None
+    """A value, and the content the body says it renders as (`present`)."""
     _cut_off: bool = False
     """Whether the body was entered and left by a cancellation rather than by returning
     or raising: its budget ran out, or a cancel reached it. Its effect may have
@@ -461,6 +463,30 @@ class ToolRunContext:
     def conclude_turn(self) -> None:
         """Mark a successful result as terminal for this turn."""
         self._concluded = True
+
+    def present(self, value: object, content: Sequence[ContentBlock]) -> None:
+        """Say what `value` — the one this body is about to return — renders as.
+
+        **For a tool whose rendering was made where it ran**: a UTCP command that
+        printed its own `text` beside its value, a remote tool that answered in
+        prose. That text is a pure projection of the arguments and the value, made
+        by the tool's own `render` in another process, and this process cannot make
+        it again: the information is not in the value.
+
+        The registry takes it wherever it would have rendered *this* value — the
+        dispatch, a post-execute row's `projected` measurement, the re-render after
+        a row passes the value through — so every policy row sees and edits the
+        same content the model will. A row that **replaces** the value gets the
+        definition's own rendering of the replacement, because the text no longer
+        describes it: the match is by identity, not equality. The value is still
+        validated against the declared output either way.
+        """
+        self._presented = (value, tuple(content))
+
+    def presented_for(self, value: object) -> tuple[ContentBlock, ...] | None:
+        """The content `present` gave for this very value, or `None`."""
+        presented = self._presented
+        return presented[1] if presented is not None and presented[0] is value else None
 
     def raise_if_canceled(self) -> None:
         """Bail out of a long body when the call was canceled."""
@@ -774,7 +800,13 @@ class ToolDefinition:
         """The model-facing schema. Nothing else about the tool reaches the wire."""
         return ToolSchema(name=self.name, description=self.description, parameters=self.parameters)
 
-    def render(self, args: JsonValue, value: object) -> tuple[ContentBlock, ...]:
+    def render(
+        self,
+        args: JsonValue,
+        value: object,
+        *,
+        presented: Sequence[ContentBlock] | None = None,
+    ) -> tuple[ContentBlock, ...]:
         """Project a validated value into model-facing content.
 
         `args` arrives as whatever `parse_arguments` made of the model's JSON —
@@ -788,6 +820,10 @@ class ToolDefinition:
         violations = validate_json_schema_value(self.output.schema, value)
         if violations:
             raise ToolOutputError(self.name, violations)
+        if presented is not None:
+            # Rendered where the tool ran (`ToolRunContext.present`); the value
+            # above is still held to the declared output.
+            return tuple(presented)
         try:
             rendered = self.output.render(as_obj(args), value)
         except Exception as error:

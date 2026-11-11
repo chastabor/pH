@@ -31,6 +31,7 @@ from ph.llm.adapter import LlmError
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
     FILE_EXPIRED,
+    MISSING_CREDENTIAL,
     Finish,
     FinishReason,
     LlmFailure,
@@ -58,7 +59,7 @@ def resolve_secret(ctx: Context, env_name: str, provider: str) -> str:
     if secret is None:
         raise LlmError(
             f'{env_name} is not set, so provider "{provider}" cannot be called',
-            "MISSING_CREDENTIAL",
+            MISSING_CREDENTIAL,
         )
     value: str = secret.reveal()
     return value

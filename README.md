@@ -634,7 +634,7 @@ there:
 |---|---|---|
 | [`ph-utcp`](packages/ph-utcp/) | `utcp` | Tools published as [UTCP](https://utcp.io) manuals become tools an agent can call. A `cli` tool's command runs in the calling agent's workspace, under its sandbox. |
 | [`ph-code-graph`](packages/ph-code-graph/) | `code-graph` | `code_index` / `code_graph` — a tree-sitter code graph: search by prose, find definitions, callers, callees, transitive impact, biggest symbols. Every answer is a `path:start-end`. Reached through `ph-utcp`; also a command, `ph-code-graph`, and a manual any UTCP harness can register. |
-| [`ph-text-index`](packages/ph-text-index/) | `text-index`, `text-index-local` | `text_index` / `text_search` — semantic retrieval over documents on a local turbovec index, answering with the passage **and** its `path:start-end`. |
+| [`ph-text-index`](packages/ph-text-index/) | `text-index`, `text-index-local` | `text_index` / `text_search` — semantic retrieval over documents on a local turbovec index, answering with the passage **and** its `path:start-end`. Reached through `ph-utcp`; also a command, `ph-text-index`, and a manual any UTCP harness can register. |
 | [`ph-clm`](packages/ph-clm/) | `clm-context`, `clm-mirror` | `context_sections` / `context_tombstone` / `context_replace` / `context_rewrite` / `context_recall` / `context_diff` — the model edits its own context, section by section, with these tools or by editing a file of its context with the tools it already has. Every edit is a surface replace, so the log keeps the originals. |
 
 Each registers a **bundle**, so `--profile rlm-indexed` is `rlm-stable` plus

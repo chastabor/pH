@@ -25,6 +25,16 @@ directory unless you pass `glob`, and `exclude` leaves files out
 document replaces its passages, so running it again after an edit is correct and
 cheap. `forget: true` removes documents instead.
 
+A large corpus is indexed **in the background**: `text_index` then answers
+`state: indexing` with how far it has got, and you are told when it finishes.
+Do not wait or poll — `text_search` works meanwhile, over what is indexed so
+far, and says "Not finished indexing" when that is the case. Search again after
+the note if the first answer was thin.
+
+Passages are cut to what the embedding model reads, so the result may say they
+are smaller than configured, or name documents that needed smaller ones. That is
+the index working; nothing of a document is dropped.
+
 A file too large to index is **skipped and reported** in `skipped`, not an
 error — read that list, because a thin corpus and a corpus that quietly refused
 half its files look the same in the results.

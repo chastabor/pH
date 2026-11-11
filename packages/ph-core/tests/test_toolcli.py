@@ -25,18 +25,38 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import socket
+import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
+from pydantic import BaseModel
 
+from ph import toolcli
+from ph.locks import try_file_lock
 from ph.toolcli import (
     CONFIG_ENV,
+    HOST_ENV,
     INHERITED_ENV,
+    STATE_ENV,
+    BackgroundRuns,
+    Progress,
+    RunProgress,
     ToolCli,
+    ToolHost,
+    config_env,
     decode_argument,
     manual_call_template,
+    read_progress,
     run,
+    state_dir,
+    write_progress,
 )
 
 CLI = ToolCli(
@@ -218,6 +238,38 @@ def test_a_call_leaves_the_process_logging_as_it_found_it(tmp_path: Path) -> Non
     assert (list(root.handlers), root.level) == before
 
 
+def test_a_call_whose_stdout_is_data_writes_nothing_to_stderr_whoever_tries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A UTCP client merges stderr into the result, so one line from a dependency
+    — a model library's progress bar, a native library's warning — is in front of
+    the answer and it no longer parses. The descriptor is closed to them for the
+    length of the run, which covers what `sys.stderr` does not, and put back
+    after. A person asking for prose, or for `--verbose`, keeps the stream."""
+    real = toolcli._answered
+
+    def noisy(*args: Any, **kwargs: Any) -> int:  # noqa: ANN401
+        os.write(2, b"Loading weights: 100%\n")
+        print("a warning", file=sys.stderr)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(toolcli, "_answered", noisy)
+    (tmp_path / "note.txt").write_text("x", encoding="utf-8")
+
+    _called(tmp_path, "read", "--path", "note.txt")
+    silent = capfd.readouterr().err
+    _run(tmp_path, "call", "read", "--path", "note.txt", "--format", "text")
+    prose = capfd.readouterr().err
+    _called(tmp_path, "read", "--path", "note.txt", "--verbose")
+    verbose = capfd.readouterr().err
+    os.write(2, b"after\n")
+
+    assert silent == ""
+    assert "Loading weights" in prose and "a warning" in prose
+    assert "Loading weights" in verbose
+    assert capfd.readouterr().err == "after\n", "stderr was not put back"
+
+
 # ------------------------------------------------------------------- config ----
 
 
@@ -236,11 +288,253 @@ def test_row_config_arrives_through_the_environment(
     assert "tool-fs" in answer["error"]["message"]
 
 
+def test_the_state_directory_is_the_flag_then_the_variable_then_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where a tool keeps what it builds, when its caller says. A session's row
+    sets the variable per call; a person types the flag, which wins; and with
+    neither a row gets `None` and uses its own default. The flag is the variable
+    for the length of the run and no longer."""
+    seen: list[Path | None] = []
+    real = toolcli._answered
+
+    def spying(*args: Any, **kwargs: Any) -> int:  # noqa: ANN401
+        seen.append(state_dir())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(toolcli, "_answered", spying)
+    (tmp_path / "note.txt").write_text("x", encoding="utf-8")
+
+    monkeypatch.delenv(STATE_ENV, raising=False)
+    _called(tmp_path, "read", "--path", "note.txt")
+    monkeypatch.setenv(STATE_ENV, str(tmp_path / "from-env"))
+    _called(tmp_path, "read", "--path", "note.txt")
+    _called(tmp_path, "read", "--path", "note.txt", "--state", str(tmp_path / "from-flag"))
+
+    assert seen == [None, tmp_path / "from-env", tmp_path / "from-flag"]
+    assert state_dir() == tmp_path / "from-env", "the flag outlived its run"
+
+
 def test_a_config_file_is_read_and_an_unreadable_one_is_said(tmp_path: Path) -> None:
     _, answer = _called(tmp_path, "read", "--path", "x", "--config", str(tmp_path / "absent.yaml"))
 
     assert answer["error"]["code"] == "BAD_CONFIG"
     assert "absent.yaml" in answer["error"]["message"]
+
+
+# --------------------------------------------------------------------- host ----
+
+
+@contextmanager
+def _answering(
+    tmp_path: Path, reply: dict[str, Any]
+) -> Iterator[tuple[Path, list[dict[str, Any]]]]:
+    """A socket that answers every request with `reply`, as a host would, and
+    the requests it was sent."""
+    path = tmp_path.parent / f"{tmp_path.name}.sock"
+    asked: list[dict[str, Any]] = []
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen()
+    # Polled, so the thread sees the listener close: closing a socket another
+    # thread is blocked in `accept` on does not wake it.
+    listener.settimeout(0.05)
+    closing = threading.Event()
+
+    def serve() -> None:
+        while not closing.is_set():
+            try:
+                link, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            link.settimeout(None)
+            with link, link.makefile("rwb") as stream:
+                asked.append(json.loads(stream.readline()))
+                stream.write(json.dumps(reply).encode() + b"\n")
+                stream.flush()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield path, asked
+    finally:
+        closing.set()
+        thread.join(timeout=5)
+        listener.close()
+        path.unlink(missing_ok=True)
+
+
+def test_a_call_is_answered_by_the_host_it_is_told_of_and_alone_when_there_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$PH_TOOL_HOST` is a hint and never a requirement. With a host there, the
+    call is its to answer and nothing is mounted here; with nobody listening, or
+    a host that says the call is not its own — another tree, another index — the
+    call runs by itself, because it could have been answered without one."""
+    (tmp_path / "note.txt").write_text("from the file", encoding="utf-8")
+    hosted = {"ok": True, "value": {"text": "from the host"}, "text": "from the host"}
+
+    with _answering(tmp_path, hosted) as (path, asked):
+        monkeypatch.setenv(HOST_ENV, str(path))
+        _, served = _called(tmp_path, "read", "--path", "note.txt", "--limit", "3")
+    with _answering(tmp_path, {"served": False}) as (path, _):
+        monkeypatch.setenv(HOST_ENV, str(path))
+        _, declined = _called(tmp_path, "read", "--path", "note.txt")
+    monkeypatch.setenv(HOST_ENV, str(tmp_path / "nobody.sock"))
+    _, alone = _called(tmp_path, "read", "--path", "note.txt")
+
+    assert served == hosted
+    assert asked == [
+        {
+            "root": str(tmp_path),
+            "state": "",
+            "tool": "read",
+            "args_json": None,
+            "rest": ["--path", "note.txt", "--limit", "3"],
+        }
+    ]
+    assert "from the file" in declined["text"]
+    assert "from the file" in alone["text"]
+
+
+@pytest.mark.anyio
+async def test_a_hosts_run_goes_on_past_the_call_and_the_same_request_joins_it(
+    tmp_path: Path,
+) -> None:
+    """What a host adds to a long piece of work. The call that asked waits a
+    moment and is answered "still going"; the same request asked again joins the
+    run rather than starting it twice; and the run's last report says its end is
+    owed to somebody, which is how whoever started the host knows to pass it on.
+    A run that ends while its caller waits hands its value back and owes nothing,
+    and one that fails says how far it got. The work says only how much there is
+    and how far it is; its start, its end and its failure are written for it.
+    """
+    runs = BackgroundRuns(grace=0.05)
+    release = anyio.Event()
+    starts = 0
+
+    async def slow(progress: RunProgress) -> str:
+        nonlocal starts
+        starts += 1
+        progress.begin(3)
+        progress.tick(1)
+        await release.wait()
+        return "counts"
+
+    async def quick(progress: RunProgress) -> str:
+        progress.begin(3)
+        return "counts"
+
+    async def broken(progress: RunProgress) -> str:
+        progress.begin(4)
+        progress.tick(2)
+        raise ValueError("no")
+
+    async with anyio.create_task_group() as tasks:
+        host = ToolHost(tasks=tasks)
+        first = await runs.run(host, tmp_path, {"paths": ["a"]}, slow, what="files")
+        again = await runs.run(host, tmp_path, {"paths": ["a"]}, slow, what="files")
+        during = runs.working(tmp_path, tmp_path / "lock", what="the index")
+        release.set()
+        while host.working:
+            await anyio.sleep(0.01)
+        ended = read_progress(tmp_path)
+
+        answered = await runs.run(host, tmp_path, {"paths": ["a"]}, quick, what="files")
+        unowed = read_progress(tmp_path)
+        with pytest.raises(ValueError, match="no"):
+            await runs.run(host, tmp_path, {"paths": ["b"]}, broken, what="files")
+        failed = read_progress(tmp_path)
+        alone = await runs.run(None, tmp_path, {"paths": ["c"]}, quick, what="files")
+
+    assert (first, again, starts) == (None, None, 1)
+    assert during is not None and during.said() == "1/3 files"
+    assert ended is not None and (ended.state, ended.done, ended.owed) == ("done", 3, True)
+    assert ended.started > 0
+    assert answered == "counts"
+    assert unowed is not None and unowed.owed is False
+    assert unowed.started > ended.started, "a second run of one request is a new run"
+    assert failed is not None and (failed.state, failed.done, failed.failure) == ("failed", 2, "no")
+    assert alone == "counts", "with no host the work runs to its end"
+
+
+def test_a_working_report_with_nobody_holding_the_lock_is_one_a_stopped_run_left(
+    tmp_path: Path,
+) -> None:
+    """A run holds its lock for as long as it works, so "is it still going" is
+    asked of the lock and not of a file a killed process cannot correct."""
+    runs = BackgroundRuns()
+    lock = tmp_path / "writer.lock"
+    write_progress(tmp_path, Progress(state="working", done=2, total=9, what="documents"))
+
+    assert BackgroundRuns().working(tmp_path, lock, what="the index") is None
+    held = try_file_lock(lock, what="the test")
+    assert held is not None
+    try:
+        found = runs.working(tmp_path, lock, what="the index")
+    finally:
+        held()
+
+    assert found is not None and found.said() == "2/9 documents"
+    assert read_progress(tmp_path / "absent") is None
+
+
+# ---------------------------------------------------------------- providers ----
+
+PICKING = ToolCli(
+    program="ph-pick",
+    manual="ph_pick",
+    summary="One of two rows, for a test.",
+    version="1.0.0",
+    rows=(),
+    providers=(
+        {"id": "tool-fs", "name": "tool-fs"},
+        # Mounts, and registers nothing without a session: all this needs.
+        {"id": "tool-ask-user", "name": "tool-ask-user"},
+    ),
+)
+
+
+def _picked(tmp_path: Path) -> tuple[int, dict[str, Any]]:
+    out = io.StringIO()
+    code = run(PICKING, ["manual", "--root", str(tmp_path)], stdout=out)
+    answer: dict[str, Any] = json.loads(out.getvalue())
+    return code, answer
+
+
+def test_one_provider_row_is_mounted_the_first_unless_a_config_names_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A package whose tools need something one of several rows supplies — an
+    embedder that is a local model here and an endpoint there. Which is the
+    deployment's choice, made the way every other is: by configuring that row.
+    Being named is enough, which is why `config_env` names a row whose config is
+    all defaults; and naming two is refused rather than resolved by order."""
+    monkeypatch.delenv(CONFIG_ENV, raising=False)
+    _, default = _picked(tmp_path)
+    monkeypatch.setenv(CONFIG_ENV, json.dumps({"tool-ask-user": {}}))
+    _, other = _picked(tmp_path)
+    monkeypatch.setenv(CONFIG_ENV, json.dumps({"tool-fs": {}, "tool-ask-user": {}}))
+    code, both = _picked(tmp_path)
+
+    assert "read" in {one["name"] for one in default["tools"]}
+    assert other["tools"] == []
+    assert code == 1
+    assert both["error"]["code"] == "BAD_CONFIG"
+    assert "tool-fs, tool-ask-user" in both["error"]["message"]
+
+
+def test_a_row_with_default_config_is_still_named_to_the_command() -> None:
+    class Settings(BaseModel):
+        depth: int = 2
+
+    assert config_env({}) == {}
+    assert json.loads(config_env({"a": Settings(), "b": Settings(depth=3)})[CONFIG_ENV]) == {
+        "a": {},
+        "b": {"depth": 3},
+    }
 
 
 # ------------------------------------------------------------------- manual ----
@@ -265,9 +559,9 @@ def test_the_manual_names_every_tool_with_a_command_that_calls_it(tmp_path: Path
     assert command.startswith("ph-fs call read --format json ")
     # One word per field, so a value that starts with `-` is still an argument.
     assert "--path=UTCP_ARG_path_UTCP_END" in command
-    # stderr is merged into the result by the client; a dependency's warning
-    # must not be.
-    assert command.endswith(" 2>/dev/null")
+    # No redirection: the client appends its own `2>&1` after it, so one would
+    # do nothing. The command keeps its stderr quiet itself.
+    assert ">" not in command
 
 
 def test_every_template_names_the_roots_or_a_call_builds_a_second_index(tmp_path: Path) -> None:
@@ -275,7 +569,7 @@ def test_every_template_names_the_roots_or_a_call_builds_a_second_index(tmp_path
     to be said again beside the pH roots."""
     manual = _manual(tmp_path)
 
-    for name in ("PATH", "HOME", "PH_HOME", "PH_CACHE", "PH_RUNTIME", CONFIG_ENV):
+    for name in ("PATH", "HOME", "PH_HOME", "PH_CACHE", "PH_RUNTIME", CONFIG_ENV, STATE_ENV):
         assert name in INHERITED_ENV
     for tool in manual["tools"]:
         assert tool["tool_call_template"]["inherit_env_vars"] == list(INHERITED_ENV)

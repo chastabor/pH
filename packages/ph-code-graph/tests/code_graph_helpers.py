@@ -8,19 +8,17 @@ adding one here broke ten of their modules at collection.
 
 from __future__ import annotations
 
-import itertools
+import shutil
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from ph.cordis import Context
-from ph.keys import AGENTS, SESSIONS
-from ph.testing import FAKE_OPTIONS
+from ph.testing import new_agent
 from ph_code_graph._config import GRAMMAR_CACHE_ENV
 
-__all__ = ["SHARED", "grammar_cache", "new_agent", "shared_tree"]
+__all__ = ["SHARED", "cache_beside_the_tree", "grammar_cache", "new_agent", "shared_tree"]
 
 SHARED = '''\
 def shared(value):
@@ -60,6 +58,32 @@ def grammar_cache(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
         yield directory
 
 
+@pytest.fixture(autouse=True)
+def cache_beside_the_tree(tmp_path: Path) -> Iterator[Path]:
+    """`$PH_CACHE` outside the test's workspace, where a deployment's is.
+
+    The suite's `_isolated_home` puts it at `tmp_path/cache`, and `tmp_path` is
+    also the workspace a mounted profile gets — so every directory the session's
+    row grants under the cache would overlap the tree, and a grant that overlaps
+    the workspace is refused (`ph.seams.sandbox.grants_apart`). That is the rule
+    working, on a layout no deployment has. Autouse in each module that imports
+    it, after `_isolated_home`, so this spelling wins.
+
+    And a `$PH_RUNTIME` of the test's own, and short: a host listens on a socket
+    under it, the suite otherwise shares the developer's real runtime directory,
+    and a socket's address is at most 108 bytes.
+    """
+    directory = tmp_path.parent / f"{tmp_path.name}-cache"
+    runtime = Path(tempfile.mkdtemp(prefix="ph-run-", dir="/tmp"))
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("PH_CACHE", str(directory))
+            patch.setenv("PH_RUNTIME", str(runtime))
+            yield directory
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
 def shared_tree(root: Path, callers: int = 2) -> Path:
     """`root/pkg`: `helpers.py` defining `shared`, and `callers` modules calling it."""
     package = root / "pkg"
@@ -71,18 +95,3 @@ def shared_tree(root: Path, callers: int = 2) -> Path:
             encoding="utf-8",
         )
     return root
-
-
-_SEQ = itertools.count()
-
-
-def new_agent(ctx: Context) -> Any:  # noqa: ANN401
-    """A fresh agent, on a session id nothing else has taken.
-
-    Counted rather than fixed: a test that needs two agents (an index call and a
-    query call) would otherwise collide on the session id, which fails as
-    `SESSION_ALREADY_EXISTS` several frames from the cause.
-    """
-    return ctx.require(AGENTS).create(
-        ctx.require(SESSIONS).create(f"cg-{next(_SEQ)}"), FAKE_OPTIONS
-    )

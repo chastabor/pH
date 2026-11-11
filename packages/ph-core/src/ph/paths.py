@@ -56,6 +56,7 @@ __all__ = [
     "canonical",
     "default_cache_path",
     "default_home_path",
+    "file_stamp",
     "filesystem_of",
     "free_sibling",
     "is_under",
@@ -379,6 +380,17 @@ def default_cache_path(configured: str | None, fallback: str) -> Path:
     if configured:
         return canonical(Path(configured).expanduser())
     return resolve_roots().cache / fallback
+
+
+def file_stamp(path: Path) -> tuple[int, int, int] | None:
+    """A file's `(inode, mtime, size)`, or `None` when it is absent: whether it
+    changed, asked without reading it. The inode catches a file `write_atomic`
+    replaced; the mtime and size catch one appended to in place."""
+    try:
+        found = path.stat()
+    except OSError:
+        return None
+    return found.st_ino, found.st_mtime_ns, found.st_size
 
 
 def is_under(candidate: Path, root: Path) -> bool:

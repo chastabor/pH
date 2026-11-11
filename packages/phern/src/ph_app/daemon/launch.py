@@ -37,12 +37,13 @@ from pathlib import Path
 
 import anyio
 
+from ph.framing import listening
 from ph.locks import LockBusy, acquire_file_lock
 from ph.paths import PathRoots, resolve_roots
 
 from ..protocol import Refusal
 
-__all__ = ["DaemonAbsent", "Started", "ensure_daemon", "listening", "phern_argv"]
+__all__ = ["DaemonAbsent", "Started", "ensure_daemon", "phern_argv"]
 
 log = logging.getLogger("ph_app.daemon.launch")
 
@@ -102,22 +103,6 @@ class Started:
 
     path: Path
     spawned: bool
-
-
-async def listening(path: Path) -> bool:
-    """Whether something answers on this path right now.
-
-    A connect and an immediate close — the only test that distinguishes "a socket
-    file exists" from "a daemon is behind it", which is the distinction this
-    module and `_clear_stale` are both built on. One copy, so a change here (a
-    connect timeout on a hung listener, say) reaches both.
-    """
-    try:
-        stream = await anyio.connect_unix(str(path))
-    except OSError:
-        return False
-    await stream.aclose()
-    return True
 
 
 async def ensure_daemon(

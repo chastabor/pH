@@ -82,10 +82,22 @@ def host_journal() -> OrphanJournal | None:
     `subprocess` diagnostic says out loud.
     """
     try:
-        return OrphanJournal(path=resolve_roots().ensure_runtime().runtime / JOURNAL_NAME)
+        runtime = resolve_roots().ensure_runtime().runtime
     except (RuntimeDirError, OSError):
+        runtime = None
+    if runtime is None:
         log.warning("ph.orphans: no usable $PH_RUNTIME; spawns will not be journaled")
         return None
+    # Asked, because a directory that is there and cannot be written passes
+    # `ensure_runtime` — a command run inside an agent's sandbox sees the host's
+    # `$PH_RUNTIME` bound read-only — and a journal on it then failed at every
+    # append, with a traceback for each spawn. Not a warning: inside a sandbox it
+    # is the expected state, and a command that is started once a call would log
+    # it once a call. Outside one the `subprocess` diagnostic says it.
+    if not os.access(runtime, os.W_OK):
+        log.debug("ph.orphans: $PH_RUNTIME %s is read-only; spawns will not be journaled", runtime)
+        return None
+    return OrphanJournal(path=runtime / JOURNAL_NAME)
 
 
 def argv_digest(argv: Sequence[str]) -> str:

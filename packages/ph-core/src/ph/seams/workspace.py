@@ -106,6 +106,7 @@ __all__ = [
     "checkout_site",
     "checkpoint_policy",
     "checkpoints",
+    "confined_env",
     "discards_writes",
     "discover_provisioning",
     "family_survivors",
@@ -284,6 +285,20 @@ def workspace_policy(workspace: Workspace) -> SandboxPolicy:
         workspace_root=str(first),
         writable_extra=[str(path) for path in extra],
     )
+
+
+def confined_env(workspace: Workspace) -> dict[str, str]:
+    """The redirection a confined process gets: the workspace's own, and a
+    `TMPDIR` in the scratch whatever the tier.
+
+    **A confined process has no `/tmp` of its own.** The sandbox writes only the
+    workspace — under `workspace-write` — and the scratch, and a workspace that
+    is the person's own checkout carries no redirection, so the first `tempfile`
+    call failed: a model library under a read-only sandbox, measured. The
+    scratch is the one directory every mode lets the agent write, and it exists.
+    One rule for everything that confines by `workspace_policy` — a command
+    `ctx.shell` runs and a code kernel — so neither is left without it."""
+    return {"TMPDIR": str(workspace.scratch), **workspace.env}
 
 
 def scratch_of(ctx: Context, session_id: str, agent: AgentHandle | str) -> Path:

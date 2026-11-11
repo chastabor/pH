@@ -12,6 +12,7 @@ the fake-provider options. Each was being re-declared per test module.
 from __future__ import annotations
 
 import errno
+import itertools
 import os
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -21,12 +22,12 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
 
-from ..agent.types import AgentHandle, AgentOptions, AgentStatus
+from ..agent.types import AgentDriver, AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..host import host_config_path, load_host_config
 from ..json import JsonValue, as_str, dumps
-from ..keys import JOBS, SESSION_PERSISTENCE, SESSIONS, SKILLS, TOOLS
+from ..keys import AGENTS, JOBS, SESSION_PERSISTENCE, SESSIONS, SKILLS, TOOLS
 from ..llm.types import (
     ContentBlock,
     ContextForm,
@@ -112,6 +113,7 @@ __all__ = [
     "live_settles",
     "logged_events",
     "models_overlay",
+    "new_agent",
     "parked_gate",
     "plugin_payload",
     "raising",
@@ -872,6 +874,19 @@ def block_text(block: object) -> str:
         f"expected a block carrying text, got {type(block).__name__}"
     )
     return block.text
+
+
+_AGENT_IDS = itertools.count()
+
+
+def new_agent(ctx: Context, prefix: str = "agent") -> AgentDriver:
+    """A fresh agent on the fake adapter, on a session id nothing else has taken.
+
+    Counted rather than fixed: a test that needs two agents — an index call and a
+    query call — would otherwise collide on the session id, which fails as
+    `SESSION_ALREADY_EXISTS` several frames from the cause."""
+    session = ctx.require(SESSIONS).create(f"{prefix}-{next(_AGENT_IDS)}")
+    return ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
 
 def session_of(agent: AgentHandle) -> Session:

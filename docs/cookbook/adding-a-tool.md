@@ -133,6 +133,13 @@ reported as a failure lets a program route around a policy veto.
   where the media rides a context message because both provider wires flatten a
   tool result to text.
 * `run.conclude_turn()` — mark a successful result as terminal.
+* `run.present(value, content)` — say what the value this body returns renders
+  as, **only for a tool whose rendering was made where it ran**: a UTCP command
+  that printed its own text, a remote tool that answered in prose. The registry
+  uses it wherever it would render that value, so every `tools/post-execute`
+  row sees and edits that content; a row that replaces the value gets `render`'s
+  output for the replacement. The value is still validated. A tool that runs
+  here keeps the rule above: return the value, let `render` make the prose.
 
 ## Presentation
 
@@ -186,10 +193,16 @@ and a tool's author should know:
 * **The environment is cut down.** A variable the tool reads has to be named in
   `ToolCli.inherit_env`, or the manual's commands will not see it.
 
+A tool that builds something about the workspace — an index, a database — keeps
+it where its caller says: `ph.toolcli.state_dir()` is the directory, from
+`--state` or `$PH_TOOL_STATE`, and `None` means the tool's own default under
+`$PH_CACHE`. In a pH session that directory is in the calling agent's scratch,
+which is writable under a read-only sandbox where the workspace is not.
+
 To reach the same tool from a pH session, the session's row registers the manual
 with [`ph-utcp`](../../packages/ph-utcp/README.md) instead of registering the
 tool: `await ctx.require(UTCP).add(Manual(template=manual_call_template(CLI),
-envelope=True, names="bare", …))`. The tool then runs in the command's process,
+envelope=True, names="bare", state="notes", …))`. The tool then runs in the command's process,
 in the calling agent's workspace and under its sandbox. `ph-code-graph` is the
 worked example: `ph_code_graph/row.py` is the session's row,
 `ph_code_graph/engine.py` is the row the command mounts, and `_config.py` holds
@@ -201,6 +214,58 @@ printed it, and hand the row's config across with `ph.toolcli.config_env`.
 What a manual cannot say — that two calls may overlap, that a call has no
 effect, how a front end draws the card — goes in the `Manual`'s `tools` table.
 Every default there is the careful one.
+
+### A tool that is slow to start, or slow to finish
+
+`ph-notes serve --socket PATH` mounts the same rows once and answers `call`s on
+a socket, so what a row loaded — a model, a parser — is loaded once. Name it as
+the manual's `host` and `ph-utcp` keeps one running for each tree an agent works
+in; a `call` told of it in `$PH_TOOL_HOST` uses it, and runs by itself when
+nobody is there.
+
+A row can tell which it is in. `ctx.get(TOOL_HOST)` is `None` in a command run
+for one call, where the work has to finish before the answer. In a host the
+process outlives the call, so a long piece of work can go on after it:
+
+```python
+from ph.toolcli import TOOL_HOST, BackgroundRuns, RunProgress
+
+runs = BackgroundRuns(grace=config.wait_s)
+
+
+async def index_run(args: IndexArgs, run: ToolRunContext, progress: RunProgress) -> dict:
+    documents = await collect(args)
+    async with writing(home):  # whatever makes the run this one's
+        progress.begin(len(documents))
+        for count, path in enumerate(documents):
+            progress.tick(count)
+            ...
+    return counts
+
+
+async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
+    value = await runs.run(
+        ctx.get(TOOL_HOST),
+        home,
+        args,
+        partial(index_run, args, run),
+        what="documents",
+        raise_if_canceled=run.raise_if_canceled,
+    )
+    if value is not None:
+        return value  # it ended — with no host, or while we waited
+    return {"state": "indexing", **so_far(home)}  # it goes on; say how far
+```
+
+`runs.run` is the one door. With no host the work runs to its end; in a host it
+goes on past the call, and the same request asked again joins it. The work says
+how much there is (`begin`) and how far it has got (`tick`); its end, its
+failure and whether anybody is owed word of them are written for it, to
+`progress.json` in `home` — the tool's state directory. That file is what moves
+the footer and what tells the agent when the run ends. The call's cancellation
+is asked at each `tick`, and only with no host: a run in a host outlives the
+call, so the work never reads `run.raise_if_canceled` itself. Save as you go, so
+a host that is ended keeps what it finished.
 
 ## Checklist
 

@@ -496,7 +496,7 @@ async def test_a_knock_on_the_socket_does_not_end_the_daemon_it_was_checking_for
 ) -> None:
     """The window between the spawn and the UI's first connect, closed.
 
-    `launch.listening()` is a connect and an immediate close — the only test that
+    `ph.framing.listening()` is a connect and an immediate close — the only test that
     tells "a socket file exists" from "a daemon is behind it", and every spawn
     runs it in a poll until the door opens. Reading that close as "the last
     client left" stopped the daemon the poll had just declared ready, so the UI

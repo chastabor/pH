@@ -958,7 +958,9 @@ class ToolRuntime:
         last — a stranger's row, chosen by the mounted profile.
         """
         with running(run.by, run.execution.scope):
-            return run.definition.render(run.execution.arguments, value)
+            return run.definition.render(
+                run.execution.arguments, value, presented=run.presented_for(value)
+            )
 
     def projected(self, execution: ToolExecution, value: object) -> tuple[ContentBlock, ...] | None:
         """What `value` would render to for this call, or `None` if nothing can say.
@@ -1371,7 +1373,9 @@ class ToolRuntime:
                     except BaseException as left:
                         run._cut_off = not isinstance(left, Exception)
                         raise
-                    content = definition.render(dispatch_exec.arguments, value)
+                    content = definition.render(
+                        dispatch_exec.arguments, value, presented=run.presented_for(value)
+                    )
                     meta = (
                         None
                         if dispatch_exec.parent is not None

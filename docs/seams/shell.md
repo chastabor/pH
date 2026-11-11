@@ -52,9 +52,11 @@ Three settings `run` has no use for, each of which can only narrow or add:
   environment, so naming a credential does not fetch one.
 * `extra_env` is set over the result: the call's own values.
 * `writable_extra` adds writable paths to the workspace policy, for a command
-  that keeps state outside the workspace — an index under `$PH_CACHE`. The
-  sandbox grants them under either mode, so a read-only session can still build
-  that index. Each path has to exist; a backend grants a path by binding it.
+  that keeps something outside the workspace and the agent's scratch — a grammar
+  cache under `$PH_CACHE`. The sandbox grants them under either mode: read-only
+  bars the workspace, not what a tool builds about it. A grant that overlaps the
+  workspace is dropped (`ph.seams.sandbox.grants_apart`), so none reopens the
+  tree. Each path has to exist; a backend grants a path by binding it.
 
 ## What a caller gets
 

@@ -46,9 +46,17 @@ from typing import Any, assert_never
 import anyio
 
 from ph.cordis import Context, plugin
-from ph.json import as_int, as_str
+from ph.json import as_int, as_seq, as_str
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
-from ph.llm.adapter import LlmError, ResolvedModel, resolved
+from ph.llm.adapter import (
+    EmbeddingRequest,
+    Embeddings,
+    LlmError,
+    ResolvedModel,
+    input_too_long,
+    resolved,
+    vectors_of,
+)
 from ph.llm.types import (
     AttachmentRef,
     BlockEnd,
@@ -522,6 +530,30 @@ class GoogleAdapter:
             ) from error
         for chunk in state.finish():
             yield chunk
+
+    async def embed(self, request: EmbeddingRequest) -> Embeddings:
+        """`models/<model>:batchEmbedContents`, this API's embeddings call
+        (`ph.llm.adapter.EmbeddingAdapter`).
+
+        One request for the whole batch: each input is a `content` of one text
+        part, and the vectors come back in the inputs' order. The API reports no
+        token count for it, so none is claimed."""
+        model = request.model.removeprefix("models/")
+        each: dict[str, Any] = {"model": f"models/{model}"}
+        if request.dimensions is not None:
+            each["outputDimensionality"] = request.dimensions
+        reply, _ = await self.http.post_raw(
+            f"{self.config.base_url.rstrip('/')}/models/{model}:batchEmbedContents",
+            headers=self._headers(),
+            json={
+                "requests": [
+                    {**each, "content": {"parts": [{"text": text}]}} for text in request.inputs
+                ]
+            },
+            is_overflow=input_too_long,
+        )
+        embeddings = as_seq(reply.get("embeddings"))
+        return Embeddings(vectors=vectors_of(embeddings, len(request.inputs), "values"))
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         # See `_body`: this route is asked for JSON and not held to a schema, so

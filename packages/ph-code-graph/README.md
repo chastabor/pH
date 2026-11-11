@@ -60,10 +60,15 @@ and the harness process never loads tree-sitter.
 
 **`permissions-fs` does not screen these tools' reads.** Its rules govern calls
 through a session's `ctx.fs`, and a command is not one. What bounds the command
-is the sandbox, as it bounds `bash`. The index, the grammar cache and the
-command's log are all under `$PH_CACHE`, outside the tree; the row grants those
-paths to the command, and the grant holds in a read-only session, so an agent
-that may not write a tree can still index it.
+is the sandbox, as it bounds `bash`.
+
+**Read-only bars the repository, not the index.** These tools change no file of
+the tree; they build data to probe it. So the index is kept in the calling
+agent's scratch — `$PH_HOME/scratch/<session>/<agent>/code-graph/` — which is
+writable under every sandbox mode, while the tree is writable only under
+`workspace-write`. An agent that may not write a tree can still index it, and
+cannot write it by doing so. The grammar cache and the command's log are shared
+by every agent, under `$PH_CACHE`, and the row grants those two paths.
 
 ## The two tools
 
@@ -80,8 +85,26 @@ What it looks at when a call does not say is the row's `index` block:
       paths: [packages/ph-core]        # directories or files; default ["."]
       include: ["**/*.py"]             # default ["**/*"] — the language filter is the real one
       exclude: ["**/tests/**", "**/vendor/**"]
+      on_mount: true                   # index this when a root session starts; default true
     languages: [python]
+    wait_s: 15                         # how long code_index waits before answering "indexing"
 ```
+
+**It starts unasked, and does not hold a call up.** In a session one
+`ph-code-graph serve` stays up for each tree, kept by `ph-utcp` for the agent
+whose tree it is. When a root session's agent takes its first step it is started
+and indexes the `index` scope in the background; the footer shows the count
+moving and the agent is told when it ends. A `code_index` call waits `wait_s`
+for its run and then answers `state: indexing` with how far it has got, and
+`code_graph` answers meanwhile from what is indexed so far and says so.
+`on_mount: false` leaves indexing to `code_index` calls.
+
+**A child builds its own graph only when it has a tree it writes for keeps.** A
+child in its parent's checkout, or one granted only to read the project — every
+child of a read-only fan-out — asks its parent's graph through its parent's
+host, and its results say which tree their paths belong to. A child with a
+worktree or an overlay of its own has files that diverge, so it gets its own, at
+its first call.
 
 `paths` is how the row is pointed at one package of a monorepo, so a bare
 `code_index` stays under `max_files` instead of walking everything. `exclude` is
@@ -254,12 +277,20 @@ would make `callers` return every place that merely *mentions* a type.
 
 ## Where things live
 
-- **the index**: `$PH_CACHE/code-graph/<digest of the workspace root>/graph.db` —
-  the cache root because it is rebuildable from the source, and keyed by root so
-  two checkouts do not answer each other's questions. The directory records its
-  workspace, and one whose workspace has been gone a week is removed on the next
-  index, so a profile that runs children in worktrees does not leave a database
-  per tree forever. `path:` in the row's config names one database instead.
+- **the index, in a session**: `graph.db` in the scratch of the agent whose tree
+  it is, `$PH_HOME/scratch/<session>/<agent>/code-graph/`: the calling agent, or
+  the ancestor whose tree it shares. A child in a worktree of its own indexes its
+  own tree, so two agents on different trees never answer from each other's line
+  numbers. A resumed session has the same session and agent ids, so
+  the same index: `code_index` then re-parses only what changed. The cost is that
+  a new session builds its own rather than finding the last one's.
+- **the index, from a shell**: `--state DIR` puts it in `DIR`, and so does
+  `$PH_TOOL_STATE` — the variable `ph-utcp` sets per call, and another harness
+  can set. With neither it is
+  `$PH_CACHE/code-graph/<digest of the workspace root>/graph.db`: the cache root
+  because it is rebuildable from the source, and keyed by root so two checkouts
+  do not answer each other's questions. That directory records its workspace,
+  and one whose workspace has been gone a week is removed on the next index.
 - **the grammars**: `$PH_CACHE/tree-sitter`, set by the engine row when the
   command mounts it.
 - **the writer lock**: `graph.db.lock` beside the database. One indexing run at a

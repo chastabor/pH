@@ -21,8 +21,8 @@ from typing import Any, cast
 import anyio
 import pytest
 
+from ph.framing import MAX_LINE, FramingError, read_frames
 from ph_app.daemon.duplex import Peer
-from ph_app.daemon.framing import MAX_LINE, FramingError, read_frames
 
 pytestmark = pytest.mark.anyio
 

@@ -225,6 +225,7 @@ def _sample(model: type[BaseModel]) -> BaseModel | None:
             ],
         },
         "PresetSchema": {"name": "read-only", "summary": "Reads freely.", "active": True},
+        "Progress": {"state": "working", "done": 2, "total": 9, "what": "documents"},
         "ModelRoute": {"provider": "fake", "model": "fake-1", "reasoningEffort": "medium"},
         "ModelEntry": {"key": "main", "route": {"provider": "fake", "model": "fake-1"}},
         "ModelApplied": {"sessionId": "s1", "key": "", "route": {"provider": "p", "model": "m"}},
