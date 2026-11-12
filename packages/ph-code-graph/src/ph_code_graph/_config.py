@@ -80,7 +80,8 @@ class Config(WireModel):
     vendored or generated code is left out without a glob that has to describe
     the same intent negatively."""
     languages: list[str] = Field(default_factory=list)
-    """Restrict indexing to these languages. Empty means every bundled one.
+    """Restrict indexing to these languages. Empty means every language with a
+    grammar to be had; `/code-graph install` then fetches `engine.DEFAULT_LANGUAGES`.
 
     A monorepo with a `node_modules` of vendored JavaScript and one Python
     package wants `[python]`, and saying so is cheaper than a glob that has to

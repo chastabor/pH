@@ -34,6 +34,7 @@ from pydantic.alias_generators import to_camel
 from .json import JsonValue, thaw_json
 
 __all__ = [
+    "EnvName",
     "WireDataclass",
     "WireForm",
     "WireModel",
@@ -46,6 +47,18 @@ __all__ = [
 ]
 
 _Member = typing.TypeVar("_Member", bound=str)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class EnvName:
+    """Marks a config field whose value is the **name** of an environment
+    variable a row's command reads: `api_key_env: Annotated[str, EnvName()]`.
+
+    Said once, on the field, and read wherever the command is described
+    (`ph.toolcli.env_names`): a tool command's manual lists the variable, because
+    a UTCP client hands a command only the variables its template names, and a
+    session's row hands it across by name. A name, never what the variable holds.
+    Here beside the models it marks, so a config module needs nothing else."""
 
 
 def wire_alias(field_name: str) -> str:

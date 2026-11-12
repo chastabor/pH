@@ -41,7 +41,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .json import dumps
 from .paths import RuntimeDirError, resolve_roots, write_atomic
@@ -55,6 +55,7 @@ __all__ = [
     "host_journal",
     "process_alive",
     "process_start_token",
+    "signal_child",
     "signal_group",
 ]
 
@@ -478,7 +479,7 @@ def _owner_alive(record: dict[str, Any]) -> bool:
     return recorded is None or token is None or recorded == token
 
 
-def signal_group(pid: int | None, *, kill: bool, group: int | None = None) -> bool:
+def signal_group(pid: int | None, *, kill: bool, reaped: bool = False) -> bool:
     """Signal a child's whole process group. `False` if there was none to signal.
 
     **The group, because making a child a session leader creates the need.**
@@ -496,23 +497,25 @@ def signal_group(pid: int | None, *, kill: bool, group: int | None = None) -> bo
     killing the leader alone left the group on the one path the journal exists
     to cover.
 
-    `group` is for a caller that already knows the id and needs the answer to
-    outlive the child. `getpgid` stops answering once the child is reaped, which
-    is exactly when a *sweep* matters — the leader is gone and whatever it
-    started is not — and a session leader's group is its own pid. Pass it only
-    then: while the child is alive `getpgid` is the better answer, because a
-    child that called `setpgid` on itself is no longer in the group its pid
-    names.
+    `reaped` is for a caller whose child, spawned as a session leader, has been
+    waited on: its group is then named by `pid` itself, because `getpgid` stops
+    answering once the child is reaped — exactly when a stop or a sweep still
+    matters, the leader gone and whatever it started not. A pid is not reused
+    while it is still the id of a live group, so the kill reaches that group or
+    fails `ESRCH`. Only then: while the child is alive `getpgid` is the better
+    answer, because a child that called `setpgid` on itself is no longer in the
+    group its pid names.
 
     `False` rather than an exception on the paths where there is nothing to do:
     `killpg` is POSIX-only, and a group with no members left is not an error to
     report. Both leave the direct child as the caller's honest best effort.
     """
-    if not hasattr(os, "killpg"):
+    if not hasattr(os, "killpg") or pid is None or pid <= 0:
+        # Not a pid of a child: `killpg(0)` is this process's own group.
         return False
-    if group is None:
-        if pid is None:
-            return False
+    if reaped:
+        group = pid
+    else:
         try:
             group = os.getpgid(pid)
         except OSError:
@@ -543,6 +546,32 @@ def process_alive(pid: int) -> bool:
     return True
 
 
+class _Child(Protocol):
+    """What `signal_child` needs of a process: an `anyio` one, or a test's."""
+
+    @property
+    def pid(self) -> int | None: ...
+    @property
+    def returncode(self) -> int | None: ...
+    def kill(self) -> None: ...
+    def terminate(self) -> None: ...
+
+
+def signal_child(child: _Child, *, kill: bool) -> None:
+    """Signal a child pH spawned as a session leader, and all it started: its
+    group, named by its pid once it has been reaped (`signal_group`), or the child
+    alone where there is no group to signal. Nothing is left to signal alone once
+    it is reaped."""
+    reaped = child.returncode is not None
+    if signal_group(child.pid, kill=kill, reaped=reaped) or reaped:
+        return
+    with suppress(ProcessLookupError):
+        if kill:
+            child.kill()
+        else:
+            child.terminate()
+
+
 def _kill(pid: int) -> bool:
     """Kill one stray **and whatever it started**.
 
@@ -557,7 +586,7 @@ def _kill(pid: int) -> bool:
     # leader, so the check costs nothing and turns an assumption into a
     # verified fact — the same restraint the start token applies to identity.
     with suppress(OSError):
-        if os.getpgid(pid) == pid and signal_group(pid, kill=True, group=pid):
+        if os.getpgid(pid) == pid and signal_group(pid, kill=True):
             return True
     try:
         os.kill(pid, signal.SIGKILL)

@@ -23,6 +23,7 @@ it always did.
 from __future__ import annotations
 
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -30,7 +31,8 @@ import anyio
 import pytest
 
 from ph.cancel import CancelToken
-from ph.cordis import Context
+from ph.cordis import Context, maybe_await
+from ph.orphans import process_alive, signal_child
 from ph.seams.subprocess import SubprocessHandle, SubprocessService, SubprocessSpawnSpec
 from ph.session import Session
 from ph.testing import StubAgent, run_tool, settled, tool_runtime
@@ -48,13 +50,10 @@ def _service() -> tuple[Context, SubprocessService]:
     return root, SubprocessService(ctx=root)
 
 
-def _alive(pid: int) -> bool:
-    """Whether this pid is still there, without reaping anything."""
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+async def _pid_written(marker: Path, what: str) -> int:
+    """The pid a test's command wrote to `marker`, once it has."""
+    await settled(lambda: marker.exists() and marker.read_text().strip(), what)
+    return int(marker.read_text().strip())
 
 
 async def test_a_pipeline_does_not_survive_the_command_that_started_it(
@@ -77,13 +76,104 @@ async def test_a_pipeline_does_not_survive_the_command_that_started_it(
         ),
         scope=root,
     )
-    await settled(lambda: marker.exists() and marker.read_text().strip(), "the pipeline to start")
-    inner = int(marker.read_text().strip())
-    assert _alive(inner), "the inner process never ran"
+    inner = await _pid_written(marker, "the pipeline to start")
+    assert process_alive(inner), "the inner process never ran"
 
     await child.terminate()
 
-    await settled(lambda: not _alive(inner), "the inner process to be signalled")
+    await settled(lambda: not process_alive(inner), "the inner process to be signalled")
+
+
+async def test_a_member_that_ignores_the_asking_does_not_outlive_its_leader(
+    tmp_path: Path,
+) -> None:
+    """The kill is of the group, whether or not the child is still there.
+
+    The shell heeds `SIGTERM` and exits; the process it started ignores it. The
+    kill was sent only while the shell lived, so the inner one ran on with no
+    parent and nothing that knew of it — the same gap a sandbox wrapper fell
+    through. Named by the pid it writes, as the pipeline above is.
+    """
+    root, service = _service()
+    marker = tmp_path / "inner.pid"
+    # A file, so `$$` is the inner shell's own pid and not the one that quoted it.
+    script = tmp_path / "inner.sh"
+    script.write_text(f"trap '' TERM\necho $$ > {marker}\nwhile true; do sleep 0.05; done\n")
+    child = await service.spawn(
+        SubprocessSpawnSpec(argv=("sh", "-c", f"sh {script} & wait"), cwd=tmp_path, grace_ms=5_000),
+        scope=root,
+    )
+    inner = await _pid_written(marker, "the inner one to start")
+    assert process_alive(inner), "the inner process never ran"
+    assert inner != child.pid, "the pid written is the leader's own"
+
+    await child.terminate()
+
+    await settled(
+        lambda: not process_alive(inner), "the member that ignored the asking to be killed"
+    )
+
+
+async def test_a_command_stopped_after_its_leader_exited_takes_its_job_with_it(
+    tmp_path: Path,
+) -> None:
+    """Whether a child was stopped is what its caller meant, not whether its leader
+    had exited. Here the shell exits at once and the job it started holds stdout,
+    so the run is canceled with its leader gone: that is a stop, and the job goes
+    with it — where reading the leader's exit as "ended by itself" left it
+    running, and forgotten by the journal a restart sweeps by."""
+    root, service = _service()
+    marker = tmp_path / "job.pid"
+    signal = CancelToken()
+    job: list[int] = []
+
+    async def stop_once_started() -> None:
+        job.append(await _pid_written(marker, "the job to start"))
+        signal.cancel("user")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(stop_once_started)
+        with anyio.fail_after(10):
+            result = await service.run(
+                SubprocessSpawnSpec(
+                    argv=("sh", "-c", f"sleep 30 & echo $! > {marker}; echo started"),
+                    cwd=tmp_path,
+                ),
+                scope=root,
+                signal=signal,
+            )
+
+    assert result.canceled
+    await settled(lambda: not process_alive(job[0]), "the job a stopped command left to be killed")
+
+
+@pytest.mark.parametrize("through", ["run", "spawn"])
+async def test_a_command_seen_through_keeps_what_it_left_running(
+    tmp_path: Path, through: str
+) -> None:
+    """The other half: only a child that is *stopped* has its group killed. Every
+    child is released through `terminate`, and one seen through — its output read
+    to the end, its exit awaited — may have left a process running on purpose, a
+    server it started. By `run`, and by a caller that drives `spawn` itself."""
+    root, service = _service()
+    marker = tmp_path / "left.pid"
+    spec = SubprocessSpawnSpec(
+        argv=("sh", "-c", f"sleep 30 >/dev/null 2>&1 & echo $! > {marker}"), cwd=tmp_path
+    )
+    if through == "run":
+        exit_code = (await service.run(spec, scope=root)).exit_code
+    else:
+        child = await service.spawn(spec, scope=root)
+        await child.pump()
+        exit_code = await child.wait()
+        assert child.finished and child.dispose is not None
+        await maybe_await(child.dispose())
+    left = int(marker.read_text().strip())
+    try:
+        assert exit_code == 0
+        assert process_alive(left), "a process the command left running was killed with it"
+    finally:
+        os.kill(left, signal.SIGKILL)
 
 
 async def _stubborn(tmp_path: Path, grace_ms: int) -> tuple[Context, SubprocessHandle, int]:
@@ -125,7 +215,7 @@ async def test_a_child_that_ignores_term_is_killed_within_the_grace(tmp_path: Pa
         await child.terminate()
 
     assert child.returncode is not None, "the child outlived the ladder"
-    assert not _alive(pid)
+    assert not process_alive(pid)
 
 
 async def test_the_kill_still_happens_when_the_caller_is_canceled(tmp_path: Path) -> None:
@@ -155,7 +245,7 @@ async def test_the_kill_still_happens_when_the_caller_is_canceled(tmp_path: Path
         await anyio.sleep(0.1)
         tasks.cancel_scope.cancel()
 
-    assert not _alive(pid), "the cancel skipped the kill"
+    assert not process_alive(pid), "the cancel skipped the kill"
 
 
 async def test_a_child_is_a_group_leader_so_a_group_can_be_signalled(
@@ -264,7 +354,7 @@ def test_the_handle_signals_the_group_before_the_process(tmp_path: Path) -> None
     """
     process = _Recorded()
 
-    _handle(tmp_path, process)._signal(kill=False)
+    signal_child(process, kill=False)
 
     assert process.sent == ["terminate"], "no group, and the child was not signalled either"
 

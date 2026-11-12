@@ -192,9 +192,11 @@ and a tool's author should know:
   would in a session; it arrives as `error.code`.
 * **The environment is cut down.** A variable the tool reads has to be named in
   `ToolCli.inherit_env`, or the manual's commands will not see it. One that only
-  a row's config names — the variable a key is in — is registered by the row
-  at mount, `contribute_item(ctx, TOOL_ENV, config.api_key_env, label=…)`, and
-  the manual lists it: the name, never the value.
+  a row's config names — the variable a key is in — is marked on the config
+  field, `api_key_env: Annotated[str, ph.wire.EnvName()]`, and the manual lists
+  it: the name, never the value. The session's row hands it across from the same
+  call that hands the configs: `env, pass_env = config_env(configs)`, then
+  `Manual(env=env, pass_env=pass_env, …)`.
 
 A tool that builds something about the workspace — an index, a database — keeps
 it where its caller says: `ph.toolcli.state_dir()` is the directory, from

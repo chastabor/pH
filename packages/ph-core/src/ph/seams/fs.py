@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -61,6 +61,7 @@ from ..keys import FS, PROJECT_ROOT
 from ..paths import write_atomic
 from ..session import Session
 from ..session.writers import log_writer
+from ..text import first_lines
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
 from ._registry import claim_entry, claim_slot
@@ -87,6 +88,7 @@ __all__ = [
     "literal_head",
     "matches_glob",
     "read_before_edit",
+    "skipped_lines",
 ]
 
 log = logging.getLogger("ph.seams.fs")
@@ -1494,3 +1496,11 @@ async def read_before_edit(ctx: Context, config: None) -> None:
         return await next_()
 
     ctx.on("fs/edit-intent", gate)
+
+
+def skipped_lines(skipped: Sequence[Mapping[str, Any]], shown: int) -> list[str]:
+    """What a bulk reader passed over (`FsService.skip_reason`), one line each up
+    to `shown`, then how many more: the words both indexers' results use."""
+    return first_lines(
+        skipped, shown, lambda one: f"skipped {one['path']}: {one['reason']}", rest="more skipped"
+    )

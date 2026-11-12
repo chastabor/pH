@@ -96,11 +96,10 @@ from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.fs import FsService
-from ph.text import count_of, one_line
+from ph.seams.fs import FsService, skipped_lines
+from ph.text import BRIEFLY, count_of, first_lines, one_line
 from ph.toolcli import (
     AGENT_ENV,
-    TOOL_ENV,
     TOOL_HOST,
     BackgroundRuns,
     Progress,
@@ -165,9 +164,6 @@ MIN_PASSAGE_TOKENS = 16
 """The fewest tokens of its own text a passage is held to in order to fit an
 embedder. Under this a "passage" is a phrase, and a document the embedder still
 refuses is skipped and said."""
-
-BRIEFLY = 8
-"""How many of a list a sentence names before it says how many more there are."""
 
 ECHOED_CHARS = 200
 """How much of a question a search result repeats back."""
@@ -733,15 +729,9 @@ def _index_lines(forget: bool, value: Any, *, brief: bool = False) -> list[str]:
             f"{', '.join(cut[:BRIEFLY])}{' …' if len(cut) > BRIEFLY else ''}"
         )
     if not brief:
-        for path in value["documents"][:40]:
-            lines.append(f"  {path}")
-        if len(value["documents"]) > 40:
-            lines.append(f"  [and {len(value['documents']) - 40} more]")
+        lines += first_lines(value["documents"], 40, str)
     skipped = value["skipped"]
-    for one in skipped[:BRIEFLY] if brief else skipped:
-        lines.append(f"  skipped {one['path']}: {one['reason']}")
-    if brief and len(skipped) > BRIEFLY:
-        lines.append(f"  [and {len(skipped) - BRIEFLY} more skipped]")
+    lines += skipped_lines(skipped, BRIEFLY if brief else len(skipped))
     lines.append(
         f"The index now holds {count_of(value['total_chunks'], 'passage')} "
         f"from {count_of(value['total_documents'], 'document')}."
@@ -1400,10 +1390,7 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
 
     Nothing is asked of the endpoint at mount: a server that is down, or a key
     that is not set, is a sentence on the call that needed a vector, and not a
-    command that will not print its manual. The key's variable is named for the
-    manual (`ph.toolcli.ToolEnv`); in a session the row's `pass_env` hands it."""
-    if config.api_key_env:
-        contribute_item(ctx, TOOL_ENV, config.api_key_env, label="endpoint key variable")
+    command that will not print its manual."""
     contribute_item(
         ctx,
         TEXT_INDEX,

@@ -71,7 +71,7 @@ from .cordis import (
     Row,
     compose_rows,
 )
-from .cordis.loader import Mount, entry_ids, resolve_row
+from .cordis.loader import Mount, entry_ids, new_declarations, resolve_row
 from .json import JsonObject, JsonValue, as_bool, as_int, as_obj, as_seq, as_str, thaw_json
 from .keys import MOUNT
 from .session import Session, SessionEvent
@@ -251,10 +251,32 @@ def rebuilt(
     the host's deployment and presentation rows are this daemon's, which a session's
     base never held (decision 23). Each override is a profile entry, so rebuilding is
     composing and nothing else.
+
+    **A row `then` declares that is already held is not declared again**
+    (`new_declarations`): a start option is given at every start, and the first
+    logged it. Held is everything before `then` — the host's rows too, which
+    `host` was composed with `then` over.
     """
     kept = [row.to_entry() for row in host.rows_of({"deployment", "presentation"})]
-    documents = [ProfileDocument("host", list(kept)), *_documents(base, overrides), *then]
-    return Profile.from_documents(documents, name=base.name)
+    before = [ProfileDocument("host", list(kept)), *_documents(base, overrides)]
+    held = {row.id for row in compose_rows(before)} if then else set()
+    return Profile.from_documents([*before, *_beyond(held, then)], name=base.name)
+
+
+def _beyond(held: Collection[str], start: Sequence[ProfileDocument]) -> list[ProfileDocument]:
+    """`start`'s documents less each row they declare that `held` names
+    (`new_declarations`), an emptied document left out. Each has composed once
+    already, in the profile it came from."""
+    documents: list[ProfileDocument] = []
+    for document in start:
+        entries = [
+            new
+            for entry in as_seq(document.entries)
+            if (new := new_declarations(as_obj(entry), held)) is not None
+        ]
+        if entries:
+            documents.append(replace(document, entries=cast(JsonValue, entries)))
+    return documents
 
 
 def _documents(base: ProfileBase, overrides: Sequence[Override]) -> list[ProfileDocument]:
@@ -439,7 +461,8 @@ async def opened(ctx: Context, session: Session) -> None:
     2. **This start's options** (S4): each `--patch` (`ProfileDocument.override`) that
        differs from the base and the overrides already logged is logged as one,
        source `cli` — and one given again at the next start records nothing, since it
-       is already the session's (decision 3). **Refused when the log cannot hold
+       is already the session's (decision 3): a row it declares that the log holds
+       is not declared again (`rebuilt`). **Refused when the log cannot hold
        them** (`OverrideNotRecorded`), for `override`'s rule: a change the log does
        not hold is not made, and the start runs on nothing it did not record.
     3. **The mount brought to what the log says**: each row an override names is set,
@@ -475,10 +498,14 @@ async def opened(ctx: Context, session: Session) -> None:
         return
     logged = list(env.overrides)
     current = _environment(base, logged)
-    started = [
-        as_obj(entry)
+    options = [
+        document
         for document in mount.profile.documents
         if document.override and document.sets == "environment"
+    ]
+    started = [
+        as_obj(entry)
+        for document in _beyond({row.id for row in current}, options)
         for entry in as_seq(document.entries)
     ]
     records: list[SessionEvent] = []

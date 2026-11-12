@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field
 
 from ph.paths import default_cache_path, resolve_roots
 from ph.seams.fs import IndexScope
-from ph.wire import WireModel
+from ph.wire import EnvName, WireModel
 
 __all__ = [
     "ADAPTER_ROW",
@@ -266,7 +266,7 @@ class EndpointConfig(WireModel):
     """The API root; `/embeddings` is asked beneath it."""
     model: str = ""
     """The model the endpoint is asked for. Empty for a server that serves one."""
-    api_key_env: str = ""
+    api_key_env: Annotated[str, EnvName()] = ""
     """The **name** of the environment variable that holds the key, or empty for
     a server that wants none.
 

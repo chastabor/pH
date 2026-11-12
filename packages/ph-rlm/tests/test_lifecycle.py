@@ -14,7 +14,6 @@ which no unit test of that module can show.
 
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import sys
@@ -23,6 +22,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from ph.orphans import process_alive
 
 HOST = """
 import anyio, sys
@@ -60,14 +61,6 @@ time.sleep(3600)
 """
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
-
-
 def _await(path: Path, *, seconds: float = 30.0) -> None:
     deadline = time.monotonic() + seconds
     while not path.exists():
@@ -99,7 +92,7 @@ def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path, b
         line = host.stdout.readline().strip()
         assert line.isdigit(), f"the host did not report a child pid: {host.stderr!r}"
         child = int(line)
-        assert _alive(child)
+        assert process_alive(child)
         if busy:
             _await(marker)
 
@@ -109,9 +102,9 @@ def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path, b
         host.wait(timeout=10)
 
         deadline = time.monotonic() + 10
-        while _alive(child) and time.monotonic() < deadline:
+        while process_alive(child) and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert not _alive(child), f"the runtime child {child} outlived its host"
+        assert not process_alive(child), f"the runtime child {child} outlived its host"
     finally:
         if host.poll() is None:  # pragma: no cover
             host.kill()

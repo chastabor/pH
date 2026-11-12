@@ -11,21 +11,28 @@ a half, in the one place among four that had inlined the ternary by hand.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from types import MappingProxyType
 
 from .json import JsonValue
 
 __all__ = [
+    "BRIEFLY",
     "NO_OUTPUT",
     "block_marker",
     "brief_value",
     "count_of",
     "duration",
+    "first_lines",
     "one_line",
     "redacted_marker",
     "thousands",
     "truncation_marker",
 ]
+
+BRIEFLY = 8
+"""How many of a list a sentence or a note names before it says how many more
+there are. One number, so two tools' notes about the same kind of run agree."""
 
 NO_OUTPUT = "(no output)"
 """What stands in for a command that printed nothing.
@@ -36,6 +43,18 @@ find two sentences for one event (D4). The TUI's shell card is a third answer
 and deliberately a different one — an empty card body already reads as "it
 said nothing", and a card need not say in words what its own emptiness says.
 """
+
+
+def first_lines[T](
+    items: Sequence[T], shown: int, line: Callable[[T], str], *, rest: str = "more"
+) -> list[str]:
+    """`line` of each of the first `shown` of `items`, then one counting the rest:
+    `[and 12 more skipped]`. Each indented two spaces, as a list under a sentence
+    is; only the lines shown are made, so a list of thousands costs `shown`."""
+    kept = [f"  {line(item)}" for item in items[:shown]]
+    if len(items) > shown:
+        kept.append(f"  [and {len(items) - shown} {rest}]")
+    return kept
 
 
 def block_marker(kind: str) -> str:

@@ -638,8 +638,6 @@ NOT_EXERCISED: frozenset[str] = frozenset(
         "SubagentService.register_provider",
         "SubprocessService.spawn",
         "SystemPromptService.context",
-        # Provided only by a `ph.toolcli` command's own mount, never a session's.
-        "ToolEnv.register",
         "ToolRuntime.present_as",
         "ToolRuntime.present_transport",
         "ToolRuntime.register_code_namespace",

@@ -57,7 +57,7 @@ from ph.cancel import CancelToken, first_of, is_canceled
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
-from ph.orphans import OrphanJournal, host_journal
+from ph.orphans import OrphanJournal, host_journal, signal_child
 from ph.paths import resolve_roots
 from ph.seams.code_runtime import (
     CodeBinding,
@@ -67,7 +67,7 @@ from ph.seams.code_runtime import (
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy, SandboxSeam
-from ph.seams.subprocess import first_line, scrub_env, signal_group
+from ph.seams.subprocess import first_line, scrub_env
 from ph.seams.workspace import Workspace, confined_env, workspace_of, workspace_policy
 from ph.text import count_of
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
@@ -436,11 +436,6 @@ class Kernel:
     _scanned: int = 0
     """How much of `_buffer` has already been searched for a frame boundary, so
     a large frame is scanned once rather than once per chunk."""
-    _guest_pgid: int | None = None
-    """The guest's process group, read at spawn while it is provably alive.
-
-    `getpgid` stops answering once the child is reaped, and the teardown sweep
-    runs after that — so the id has to be captured rather than asked for."""
     _boot_noise: bytearray = field(default_factory=bytearray)
     """Whatever the child wrote to fd 1/2 before it acked (F7). Read while boot
     waits, so a guest cannot block on a full pipe — and quoted by `_boot_said`
@@ -527,14 +522,6 @@ class Kernel:
         host_end.setblocking(False)
         self._sock = host_end
         self._alive = True
-        # **Recorded now, because later is too late.** The sweep in `_teardown`
-        # runs after `await process.wait()`, where `getpgid` no longer answers;
-        # the pid is the group only because `start_new_session` made this child
-        # a session leader, and reading it here — while it is provably alive —
-        # is what keeps that true rather than assumed. A pid is not reused while
-        # it is still the pgid of a live group, so a later `killpg` on this
-        # number either reaches our group or fails `ESRCH`.
-        self._guest_pgid = self._process.pid
         pid = self._process.pid
         if pid is not None and self.journal is not None:
             # What is actually running, wrapper included: the journal verifies an
@@ -984,22 +971,12 @@ class Kernel:
             with suppress(ProcessLookupError, OSError):
                 process.send_signal(signal.SIGINT)
 
-    def _kill_group(self, process: anyio.abc.Process, *, reaped: bool = False) -> None:
-        """Kill the guest **and whatever it started** (J9).
-
-        `signal_group` is where the pairing is argued: `start_new_session` alone
-        leaves a cell's subprocess in a session nothing signals.
-
-        `reaped` picks which group id to use, and the default is the better one.
-        While the guest is alive `getpgid` is authoritative — a child that called
-        `setpgid` on itself is no longer in the group its pid names. Once it has
-        been waited on, `getpgid` stops answering and the only id left is the pid
-        it was spawned with, which is its group because a session leader's is.
-        """
-        if signal_group(process.pid, kill=True, group=self._guest_pgid if reaped else None):
-            return
-        with suppress(ProcessLookupError, OSError):
-            process.kill()
+    def _kill_group(self, process: anyio.abc.Process) -> None:
+        """Kill the guest **and whatever it started** (J9), before its reap or
+        after it (`ph.orphans.signal_child`): `start_new_session` alone leaves a
+        cell's subprocess in a session nothing signals."""
+        with suppress(OSError):
+            signal_child(process, kill=True)
 
     async def _kill_unresponsive(self, active: _ActiveRun) -> None:
         process = self._process
@@ -1331,10 +1308,9 @@ class Kernel:
             # **And whatever the guest started, on this path too** (J9). A clean
             # shutdown orphans a cell's subprocess exactly as thoroughly as a
             # kill does — the guest exits, its session outlives it, and nothing
-            # else is looking. Swept after the reap because the group id used
-            # here is the one captured at spawn, since the reap above has taken
-            # `getpgid`'s answer away.
-            self._kill_group(process, reaped=True)
+            # else is looking. After the reap the group is named by the guest's
+            # pid, since the reap has taken `getpgid`'s answer away.
+            self._kill_group(process)
             if process.pid is not None and self.journal is not None:
                 self.journal.forget(process.pid)
         if self._sock is not None:

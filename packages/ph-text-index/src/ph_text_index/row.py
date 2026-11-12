@@ -164,9 +164,6 @@ class Provider:
     """What `phern doctor` calls it: the model."""
     writable: tuple[str, ...] = ()
     """Shared paths it writes outside the workspace: a model's weights."""
-    pass_env: tuple[str, ...] = ()
-    """Variables the command is handed from the harness's own environment, by
-    name: an endpoint's key."""
     env: Mapping[str, str] = field(default_factory=dict)
     """Variables set on the command: where to ask a session for vectors."""
     max_tokens: int | None = None
@@ -262,6 +259,7 @@ class TextIndexRow:
 def manual(config: Config, provider: Provider) -> Manual:
     """This package's manual for one embedder, and what `ph-utcp` needs to run it."""
     cli = provider.cli
+    handed, passed = config_env({ROW: config, provider.row: provider.config})
     return Manual(
         template=manual_call_template(cli),
         # The only source of these two names, so they keep them: the skill, the
@@ -278,9 +276,9 @@ def manual(config: Config, provider: Provider) -> Manual:
         ],
         # Both rows' configs, each under its row id — which is also how the
         # command learns which embedder row to mount — and the embedder's own
-        # variables.
-        env={**config_env({ROW: config, provider.row: provider.config}), **provider.env},
-        pass_env=list(provider.pass_env),
+        # variables; and by name, what the configs mark (an endpoint's key).
+        env={**handed, **provider.env},
+        pass_env=passed,
         # One process that stays up for each tree: the model is loaded once, and
         # an indexing run goes on past the call that started it.
         host=Host(
@@ -432,7 +430,6 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
             cli=CLI,
             label=f"{config.model} at {where}" if config.model else where,
             max_tokens=config.max_tokens,
-            pass_env=(config.api_key_env,) if config.api_key_env else (),
         ),
         scope=ctx,
     )

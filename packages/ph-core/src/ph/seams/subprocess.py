@@ -47,7 +47,7 @@ from pydantic import Field
 from ..cancel import Cancellation, raced
 from ..cordis import Context, Disposer, maybe_await, plugin
 from ..keys import SUBPROCESS
-from ..orphans import OrphanJournal, host_journal, signal_group
+from ..orphans import OrphanJournal, host_journal, signal_child
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 
@@ -65,7 +65,6 @@ __all__ = [
     "apply",
     "first_line",
     "scrub_env",
-    "signal_group",
 ]
 
 log = logging.getLogger("ph.seams.subprocess")
@@ -301,6 +300,18 @@ class SubprocessHandle:
     Set by `spawn`, which used to discard what `ctx.effect` returned — so a
     caller finished with a child had no way to say so, and the effect lived as
     long as its scope did. `run` is the caller that always is finished."""
+    _drained: bool = False
+    _waited: bool = False
+
+    @property
+    def finished(self) -> bool:
+        """Whether the child was seen through: its output read to the end
+        (`pump`) and its exit awaited (`wait`). Its release then leaves its group
+        alone, since what it left running it left on purpose; any other release is
+        a stop (`terminate`). Not the exit alone: a leader that exited while a job
+        it started holds the pipe was not seen through, and a timeout or a cancel
+        that stops it then is a stop."""
+        return self._drained and self._waited
 
     @property
     def pid(self) -> int | None:
@@ -357,24 +368,21 @@ class SubprocessHandle:
         async with anyio.create_task_group() as scope:
             scope.start_soon(drain, "stdout")
             scope.start_soon(drain, "stderr")
+        self._drained = True
 
     async def wait(self) -> int:
         """Await exit and reap. Idempotent."""
-        return int(await self.process.wait())
-
-    def _signal(self, *, kill: bool) -> None:
-        """Signal the child's whole process group, or the child alone (J4)."""
-        if signal_group(self.pid, kill=kill):
-            return
-        if kill:
-            self.process.kill()
-        else:
-            self.process.terminate()
+        code = int(await self.process.wait())
+        self._waited = True
+        return code
 
     async def terminate(self) -> None:
         """Ask, wait out the grace, then insist — and always reap. A child whose
         wrapper passes no signal on is not asked: it is killed
         (`SubprocessSpawnSpec.forwards_signals`).
+
+        A stop kills the whole group (J4), the child itself gone or not; a child
+        seen through (`finished`) is only reaped.
 
         The `wait()` in the finally is what keeps a zombie from accumulating
         (F4): a child that exited but was never awaited stays in the table for
@@ -391,11 +399,11 @@ class SubprocessHandle:
         with anyio.CancelScope(shield=True):
             try:
                 if self.process.returncode is None and self.spec.forwards_signals:
-                    self._signal(kill=False)
+                    signal_child(self.process, kill=False)
                     with anyio.move_on_after(self.spec.grace_ms / 1000):
                         await self.process.wait()
-                if self.process.returncode is None:
-                    self._signal(kill=True)
+                if not self.finished:
+                    signal_child(self.process, kill=True)
             except ProcessLookupError:  # pragma: no cover - already gone
                 pass
             finally:

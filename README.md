@@ -442,12 +442,27 @@ another harness. What that changes for a 0.10 setup:
   five seconds. `bwrap` passes no signal on, so the command never heard it, and one
   stopped in its first milliseconds was left running with nobody to end it. It is
   sent `SIGKILL` now. An unconfined command is still asked first.
+- **A stopped command takes its whole process group with it.** The kill after
+  the grace was sent only while the command's own process lived, so a pipeline
+  stage or a child that ignored `SIGTERM` outlived a shell that heeded it. The
+  group is killed either way now, a timed-out or canceled command whose shell
+  had already exited included. A command that ran to its end — exited, its
+  output read to the last byte — is left as it was: a process it started on
+  purpose, with its output sent elsewhere, keeps running.
+- **A start option that declares a row can be given at every start.**
+  `phern daemon --patch '{insert: [...]}'` restarted with the same flag refused
+  to resume its own roots, as a row declared twice. A row the root's log already
+  holds is not declared again; change its config by id.
 - **For code built on pH:**
   - `SubprocessSpawnSpec.forwards_signals` says whether a signal reaches the
     command. Spawn a confined argv with `ConfinedArgv.spawn_spec(cwd, …)`, which
     carries it, rather than building the spec from `confined.argv`.
   - `BackgroundRuns.run` requires `said=`, what the run's end tells whoever was
     not waiting for it.
+  - A config field that names an environment variable a tool's command reads is
+    marked `Annotated[str, EnvName()]` (`ph.wire`): the command's manual lists
+    it, and `ph.toolcli.config_env(configs)` returns it beside the config, as the
+    `pass_env` a session's row hands its `Manual`.
   - `ctx.code_graph` and `ctx.text_index` are no longer provided to a session's
     mount. A deployment that registered its own embedder on `ctx.text_index` mounts
     `text-index-endpoint`, or writes an embedder row the command mounts.

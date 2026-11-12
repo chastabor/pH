@@ -38,10 +38,11 @@ from ph.cordis.loader import (
     entry_ids,
     evaluate_predicate,
     interpolate,
+    new_declarations,
     safe_yaml_load,
     sparse_entries,
 )
-from ph.json import JsonValue, as_obj
+from ph.json import JsonObject, JsonValue, as_obj
 from ph.keys import MOUNT, SANDBOX, TOOLS
 from ph.testing import MountProfile, not_none
 from ph.wire import WireModel
@@ -822,6 +823,28 @@ def test_two_plain_rows_cannot_share_an_id() -> None:
     # And within one document, which is the typo rather than the layering.
     with pytest.raises(LoaderError, match='row id "a" is already declared'):
         compose_rows([_doc("base", "- id: a\n  name: mod.a\n- id: a\n  name: mod.b\n")])
+
+
+def test_an_entry_given_again_declares_only_what_is_not_held() -> None:
+    """A start option composed over a log that already holds it
+    (`ph.session_profile.rebuilt`): a row declared twice is refused, so the rows
+    already held are left out of the entry, and an entry that addresses a row by
+    id — which declares none — is as it was."""
+    held = {"a", "b"}
+    both: JsonObject = {"insert": [{"id": "a", "name": "mod.a"}, {"name": "c", "config": {"n": 1}}]}
+    untouched: list[JsonObject] = [
+        {"insert": [{"id": "z", "name": "mod.z"}]},
+        {"id": "a", "config": {"n": 2}},
+        {"id": "a", "remove": True},
+        {"id": "z", "name": "mod.z"},
+    ]
+
+    assert new_declarations(both, held) == {"insert": [{"name": "c", "config": {"n": 1}}]}
+    assert new_declarations({"insert": [{"id": "a", "name": "mod.a"}]}, held) is None
+    assert new_declarations({"insert": [{"name": "b"}]}, held) is None, "an id defaults to the name"
+    assert new_declarations({"id": "b", "name": "mod.b"}, held) is None, "a plain row declares"
+    for entry in untouched:
+        assert new_declarations(entry, held) == entry
 
 
 def test_a_layer_that_names_its_kind_is_refused_every_other_kind() -> None:

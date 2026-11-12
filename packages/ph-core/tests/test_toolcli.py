@@ -32,7 +32,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 import pytest
@@ -52,12 +52,14 @@ from ph.toolcli import (
     ToolHost,
     config_env,
     decode_argument,
+    env_names,
     manual_call_template,
     read_progress,
     run,
     state_dir,
     write_progress,
 )
+from ph.wire import EnvName, WireModel
 
 CLI = ToolCli(
     program="ph-fs",
@@ -533,15 +535,35 @@ def test_one_provider_row_is_mounted_the_first_unless_a_config_names_another(
     assert "tool-fs, tool-ask-user" in both["error"]["message"]
 
 
+def test_a_config_says_once_which_of_its_fields_name_a_variable() -> None:
+    """`EnvName` on the field is the one declaration: the command lists the
+    variable in its manual and a session's row hands it across, both by reading
+    this — in a nested model too. A name that is not set is not one to pass, and
+    one named twice is passed once."""
+
+    class Upstream(WireModel):
+        token_env: Annotated[str, EnvName()] = ""
+
+    class Keyed(WireModel):
+        api_key_env: Annotated[str, EnvName()] = ""
+        proxy_env: Annotated[str, EnvName()] = "PROXY"
+        model: str = "KEY_SHAPED_BUT_NOT_MARKED"
+        upstream: Upstream = Upstream()
+
+    assert env_names(Keyed()) == ["PROXY"]
+    assert env_names(Keyed(api_key_env="FX_KEY", proxy_env="")) == ["FX_KEY"]
+    nested = Keyed(upstream=Upstream(token_env="UP_TOKEN"))
+    assert env_names(nested, Keyed()) == ["PROXY", "UP_TOKEN"]
+
+
 def test_a_row_with_default_config_is_still_named_to_the_command() -> None:
     class Settings(BaseModel):
         depth: int = 2
 
-    assert config_env({}) == {}
-    assert json.loads(config_env({"a": Settings(), "b": Settings(depth=3)})[CONFIG_ENV]) == {
-        "a": {},
-        "b": {"depth": 3},
-    }
+    assert config_env({}) == ({}, [])
+    env, passed = config_env({"a": Settings(), "b": Settings(depth=3)})
+    assert json.loads(env[CONFIG_ENV]) == {"a": {}, "b": {"depth": 3}}
+    assert passed == []
 
 
 # ------------------------------------------------------------------- manual ----

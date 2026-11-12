@@ -951,6 +951,51 @@ async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_pa
     assert installed is not None and "grammars ready" in installed
 
 
+async def test_a_fetch_that_fails_is_the_last_the_process_tries(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confined command cannot reach GitHub. Asked once for each language it
+    had no grammar for, it made a refused connection apiece — each a
+    `sandbox/denied` in the agent's log — on every call a host answered. The
+    first fetch that fails is now the last the process tries, across calls; every
+    such file is still skipped, with the reason that names the command. A
+    grammar on disk that will not load is not a refused fetch, and stops
+    nothing."""
+    from ph_code_graph import _extract
+
+    _tree(tmp_path)
+    (tmp_path / "pkg" / "web.js").write_text("function go() { return 1 }\n", encoding="utf-8")
+    (tmp_path / "pkg" / "main.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    on_disk = {"javascript"}
+    asked: list[str] = []
+
+    def unloadable(language: str) -> bool:
+        asked.append(language)
+        return False
+
+    monkeypatch.setattr(_extract, "local", lambda language: language in on_disk)
+    monkeypatch.setattr(_extract, "parseable", unloadable)
+    monkeypatch.setattr(_extract, "_fetch_refused", False)
+    ctx = await _indexed(mount, tmp_path)
+    agent = new_agent(ctx)
+
+    built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
+    again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
+
+    assert not built.is_error and not again.is_error, text_of(built.content)
+    fetched = [one for one in asked if one not in on_disk]
+    assert len(fetched) == 1, f"asked GitHub for {fetched}"
+    assert asked.count("javascript") == 2, "what is on disk is loaded at every call"
+    assert built.value["indexed"] == 0
+    assert sorted(one["path"] for one in built.value["skipped"]) == [
+        "pkg/helpers.py",
+        "pkg/main.go",
+        "pkg/mod.py",
+        "pkg/web.js",
+    ]
+    assert all("/code-graph install" in one["reason"] for one in built.value["skipped"])
+
+
 async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
     mount: MountProfile, tmp_path: Path
 ) -> None:
@@ -1061,7 +1106,8 @@ def test_a_note_about_a_run_nobody_waited_for_says_what_it_skipped_and_why() -> 
     """A background run's end is told with what its result would have said. For
     a graph that means the skips: a grammar that could not be fetched leaves
     every file skipped, and "finished: 34 files" alone reads as a built graph."""
-    from ph_code_graph.engine import BRIEFLY, SHOWN, _index_summary
+    from ph.text import BRIEFLY
+    from ph_code_graph.engine import SHOWN, _index_summary
 
     reason = "no python parser available — /code-graph install"
     value = {

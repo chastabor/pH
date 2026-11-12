@@ -82,8 +82,8 @@ from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.fs import FsService
-from ph.text import count_of
+from ph.seams.fs import FsService, skipped_lines
+from ph.text import BRIEFLY, count_of
 from ph.toolcli import TOOL_HOST, BackgroundRuns, Progress, RunProgress, claim_home
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
@@ -104,7 +104,7 @@ from ._extract import (
     ensure,
     extract,
     indexable,
-    parseable,
+    obtained,
     readiness,
 )
 from ._store import CodeGraphStore, Hit, SymbolRow, digest_of
@@ -402,9 +402,6 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
 SHOWN = 20
 """How many skipped files a result names before it counts the rest."""
 
-BRIEFLY = 8
-"""How many the note about a run nobody waited for names (`Progress.note`)."""
-
 
 def _index_summary(value: Mapping[str, Any], *, shown: int = SHOWN) -> str:
     """What a finished run did: its counts, and each file it skipped and why, up
@@ -415,10 +412,7 @@ def _index_summary(value: Mapping[str, Any], *, shown: int = SHOWN) -> str:
         f"Indexed {count_of(value['indexed'], 'file')} "
         f"({value['unchanged']} already current), {count_of(value['symbols'], 'symbol')}."
     ]
-    for skipped in value["skipped"][:shown]:
-        lines.append(f"  skipped {skipped['path']}: {skipped['reason']}")
-    if len(value["skipped"]) > shown:
-        lines.append(f"  [and {len(value['skipped']) - shown} more skipped]")
+    lines += skipped_lines(value["skipped"], shown)
     lines.append(
         f"The graph holds {count_of(value['total_symbols'], 'symbol')} and "
         f"{count_of(value['total_refs'], 'reference')} across "
@@ -695,17 +689,17 @@ async def apply(ctx: Context, config: Config) -> None:
                     continue
                 if language not in parsers:
                     # **One hop per language, not per file.** The first file of a
-                    # language is worth a worker thread — `parseable`
-                    # materializes a grammar out of the wheel, 6.4 s the first
-                    # time — and every later file of it is a cached boolean, so
-                    # the 60.6 µs hop was the entire cost: 1.2 s across a
-                    # 20 000-file tree, which is the whole saving the change
-                    # filter exists to deliver, handed back.
+                    # language is worth a worker thread — `obtained` loads a
+                    # grammar, and fetches one that is not on disk, seconds the
+                    # first time — and every later file of it is a cached
+                    # boolean, so the 60.6 µs hop was the entire cost: 1.2 s
+                    # across a 20 000-file tree, which is the whole saving the
+                    # change filter exists to deliver, handed back.
                     #
                     # Keyed per call rather than `@cache`d for the process: a
                     # person who runs `/code-graph install` between two calls has
                     # to see the grammar that appeared.
-                    parsers[language] = await anyio.to_thread.run_sync(parseable, language)
+                    parsers[language] = await anyio.to_thread.run_sync(obtained, language)
                 if not parsers[language]:
                     skipped.append(
                         {

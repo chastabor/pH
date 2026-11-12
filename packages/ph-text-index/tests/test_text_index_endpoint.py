@@ -347,7 +347,8 @@ async def test_a_utcp_client_of_another_harness_hands_the_key_to_the_command(
     passes a command what its template names. So the manual names the variable
     the endpoint's config names — after the ones the package always reads, and
     by name alone — and the library's own client, with no pH around it, embeds
-    with the key.
+    with the key. Indexing is the proof; a search through such a client is
+    `test_text_index_cli`'s.
     """
     docs_tree(tmp_path, documents=3)
     # A UTCP call runs in the client's working directory, which is the workspace.
@@ -359,7 +360,6 @@ async def test_a_utcp_client_of_another_harness_hands_the_key_to_the_command(
 
     tools = await client.config.tool_repository.get_tools()
     indexed = await client.call_tool("ph_text_index.text_index", {"paths": ["docs"]})
-    found = await client.call_tool("ph_text_index.text_search", {"query": "containment tier"})
 
     assert [one.name for one in tools] == ["ph_text_index.text_index", "ph_text_index.text_search"]
     for tool in tools:
@@ -367,7 +367,6 @@ async def test_a_utcp_client_of_another_harness_hands_the_key_to_the_command(
     # Reading the manual embeds nothing, so its own template names no key.
     assert KEY_ENV not in str(manual_call_template(CLI))
     assert indexed["ok"] is True, indexed
-    assert found["ok"] is True, found
-    assert found["value"]["hits"][0]["path"] == "docs/w.md"
+    assert indexed["value"]["total_documents"] == 3
     assert set(endpoint.keys) == {"Bearer sekrit"}
     assert "sekrit" not in json.dumps([tool.model_dump() for tool in tools])

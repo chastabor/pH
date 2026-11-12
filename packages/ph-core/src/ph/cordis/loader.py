@@ -53,6 +53,7 @@ __all__ = [
     "import_plugin_modules",
     "interpolate",
     "load_profile_documents",
+    "new_declarations",
     "resolve_entry_point",
     "resolve_plugin",
     "resolve_row",
@@ -298,7 +299,7 @@ def _as_rows(entries: Iterable[JsonValue], layer: str) -> list[Row]:
             raise LoaderError(f"{layer}: row {entry!r} has unknown keys {sorted(unknown)}")
         rows.append(
             Row(
-                id=str(entry.get("id") or entry["name"]),
+                id=_id_of(entry),
                 name=str(entry["name"]),
                 config=entry.get("config"),
                 disabled=evaluate_predicate(entry.get("disabled")),
@@ -307,6 +308,11 @@ def _as_rows(entries: Iterable[JsonValue], layer: str) -> list[Row]:
             )
         )
     return rows
+
+
+def _id_of(entry: Mapping[str, JsonValue]) -> str:
+    """The id a row entry declares: its `id`, or its `name` when it gives none."""
+    return str(entry.get("id") or entry.get("name") or "")
 
 
 def _as_isolate(value: object, layer: str) -> dict[str, JsonValue] | None:
@@ -586,6 +592,29 @@ def resolve_row(row: Row) -> dict[str, JsonValue]:
 def _is_patch(entry: JsonObject) -> bool:
     """Whether an entry addresses rows already composed, rather than declaring one."""
     return bool({"insert", "remove"} & set(entry)) or ("id" in entry and "name" not in entry)
+
+
+def new_declarations(entry: JsonObject, held: Collection[str]) -> JsonObject | None:
+    """`entry` less each row it declares whose id is in `held`; `None` when that
+    leaves nothing of it.
+
+    For an entry that may be given again to what already holds it — a start
+    option at a session's second start (`ph.session_profile`). An entry that
+    patches a row by id declares none and comes back as it is: composed twice it
+    says what it said once. A declaration composed twice is a row declared twice,
+    which `_check_unique_ids` refuses, so the rows `held` names are left out —
+    config and all: a row held keeps the config it is held with, and one given
+    differently here is not applied (a setting is changed by id). A malformed
+    entry comes back as it is, for `compose_rows` to refuse."""
+    if "insert" in entry:
+        inserted = entry["insert"]
+        if not isinstance(inserted, list):
+            return entry
+        new = [row for row in inserted if not (isinstance(row, dict) and _id_of(row) in held)]
+        return {**entry, "insert": new} if new else None
+    if _is_patch(entry) or _id_of(entry) not in held:
+        return entry
+    return None
 
 
 def entry_ids(entry: JsonObject) -> list[str]:

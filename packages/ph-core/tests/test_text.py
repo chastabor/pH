@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from ph.json import JsonObject
 from ph.session.json import freeze_json_value
-from ph.text import brief_value, count_of
+from ph.text import brief_value, count_of, first_lines
 
 
 def test_a_container_is_named_rather_than_dumped() -> None:
@@ -66,6 +66,24 @@ def test_no_python_literal_ever_reaches_a_reader() -> None:
         line = brief_value(value)
         assert "{'" not in line and "[{" not in line and "': " not in line, line
         assert "mappingproxy" not in line and "(" not in line, line
+
+
+def test_a_list_names_its_first_few_and_counts_the_rest() -> None:
+    """One spelling of "and N more" for the tools whose results list files: the
+    line appears only when something was left out, and says how many."""
+    items = ["a", "b", "c"]
+    made: list[str] = []
+
+    def line(item: str) -> str:
+        made.append(item)
+        return item
+
+    assert first_lines(items, 3, str.upper) == ["  A", "  B", "  C"]
+    assert first_lines(items, 2, str) == ["  a", "  b", "  [and 1 more]"]
+    assert first_lines(items, 1, str, rest="more skipped") == ["  a", "  [and 2 more skipped]"]
+    assert first_lines([], 2, str) == []
+    first_lines(items, 1, line)
+    assert made == ["a"], "a line nobody is shown is not made"
 
 
 def test_count_of_agrees_with_itself() -> None:

@@ -46,7 +46,7 @@ Read from `utcp_cli` 1.1.5; every item below is a constraint, not a taste.
   client's default list, so the template names the defaults again beside the pH
   roots — without them a UTCP call would build a different index from the one a
   session uses for the same checkout. A variable only a row's config names is
-  listed too (`ToolEnv`).
+  listed too (`EnvName`).
 
 @module ph.toolcli
 """
@@ -75,30 +75,21 @@ import anyio
 from anyio.abc import SocketStream, TaskGroup
 from pydantic import BaseModel
 
-from .cordis import (
-    DEPLOYMENT,
-    Context,
-    CordisError,
-    Disposer,
-    Profile,
-    ServiceKey,
-    maybe_await,
-)
+from .cordis import DEPLOYMENT, Context, CordisError, Profile, ServiceKey, maybe_await
 from .cordis.loader import ProfileDocument
 from .documents import DOCUMENT_FAULTS, decode_document
 from .framing import FramingError, answer_one, ask, listening
 from .json import JsonObject, JsonValue, as_obj, as_seq, as_str, dumps, loads
-from .keys import COMMANDS, DIAGNOSTICS, TOOLS
+from .keys import COMMANDS, DIAGNOSTICS, MOUNT, TOOLS
 from .llm.types import text_of
 from .locks import try_file_lock
 from .paths import resolve_roots, write_atomic
 from .resources import run_until_signaled
-from .seams._registry import claim_entry
 from .seams.commands import CommandContext
 from .tools.definition import ToolDefinition, ToolExecutionInput, ToolExecutionResult
 from .tools.errors import HarnessError
 from .tools.json_schema import schema_of
-from .wire import WireModel
+from .wire import EnvName, WireModel
 from .workspace_caches import digest, use
 
 __all__ = [
@@ -110,18 +101,17 @@ __all__ = [
     "PROGRESS_FILE",
     "REPORT_EVERY_S",
     "STATE_ENV",
-    "TOOL_ENV",
     "TOOL_HOST",
     "UTCP_VERSION",
     "BackgroundRuns",
     "Progress",
     "RunProgress",
     "ToolCli",
-    "ToolEnv",
     "ToolHost",
     "claim_home",
     "config_env",
     "decode_argument",
+    "env_names",
     "envelope",
     "failure_envelope",
     "main",
@@ -279,8 +269,10 @@ class ToolCli:
         return resolve_roots().cache / "logs" / f"{self.program}.log"
 
 
-def config_env(configs: Mapping[str, BaseModel]) -> dict[str, str]:
-    """The `$PH_TOOL_CONFIG` that hands these rows' configs, by row id, to a command.
+def config_env(configs: Mapping[str, BaseModel]) -> tuple[dict[str, str], list[str]]:
+    """What a session hands a command for these rows' configs: the
+    `$PH_TOOL_CONFIG` that carries them, by row id, and the variables they mark
+    (`env_names`) to pass across by name — a `Manual`'s `env` and `pass_env`.
 
     Each row is named, with only what differs from its model's defaults — so a
     default row travels as `{}`. Named even then, because being named is how a
@@ -290,7 +282,8 @@ def config_env(configs: Mapping[str, BaseModel]) -> dict[str, str]:
         row: config.model_dump(by_alias=True, exclude_defaults=True)
         for row, config in configs.items()
     }
-    return {CONFIG_ENV: dumps(settings)} if settings else {}
+    env = {CONFIG_ENV: dumps(settings)} if settings else {}
+    return env, env_names(*configs.values())
 
 
 def state_dir() -> Path | None:
@@ -394,28 +387,25 @@ TOOL_HOST: ServiceKey[ToolHost] = ServiceKey("tool_host")
 """The host a row is mounted in, when it is mounted in one (`ToolHost`)."""
 
 
-@dataclass(slots=True)
-class ToolEnv:
-    """The variables this command's rows read that only their configs name.
+def env_names(*configs: BaseModel) -> list[str]:
+    """The variables `configs` name: each set `EnvName` field's value, a nested
+    model's included, once each, in order. `ToolCli.inherit_env` is what a
+    package always reads; these are what one deployment's settings add."""
 
-    `ToolCli.inherit_env` is what a package always reads. This is what one
-    deployment's settings add: the variable an endpoint's key is in, named in a
-    row's config and so known only once that row is mounted. A row registers the
-    name (`contribute_item(ctx, TOOL_ENV, name, …)`), and `manual` lists it in
-    each tool's template, because a UTCP client hands a command only the
-    variables its template names. A name, and never what the variable holds.
+    def named(config: BaseModel) -> Iterator[str]:
+        for name, field_ in type(config).model_fields.items():
+            value = getattr(config, name)
+            if isinstance(value, BaseModel):
+                yield from named(value)
+            elif (
+                isinstance(value, str)
+                and value
+                and any(isinstance(mark, EnvName) for mark in field_.metadata)
+            ):
+                yield value
 
-    Provided by this command to the rows it mounts, and absent where a row is
-    mounted any other way, so a contribution there waits for nothing."""
+    return list(dict.fromkeys(name for config in configs for name in named(config)))
 
-    ctx: Context
-    names: list[str] = field(default_factory=list)
-
-    def register(self, name: str, /, *, scope: Context | None = None) -> Disposer:
-        return claim_entry(self.ctx.owner_for(scope), self.names, name, label=f"tool-env({name})")
-
-
-TOOL_ENV: ServiceKey[ToolEnv] = ServiceKey("tool_env")
 
 REPORT_EVERY_S = 0.5
 """How often a run's progress is written, at most."""
@@ -790,9 +780,9 @@ def utcp_manual(
     """The UTCP manual for `definitions`: what `manual` prints.
 
     Names are the tools' own. A client prefixes each with the manual's name when
-    it registers them (`ph_code_graph.code_index`). `named` is what the mounted
-    rows registered (`ToolEnv`)."""
-    inherit = [*_inherited(cli), *dict.fromkeys(named)]
+    it registers them (`ph_code_graph.code_index`). `named` is the variables the
+    mounted rows' configs name (`EnvName`)."""
+    inherit = [*_inherited(cli), *named]
     return {
         "utcp_version": UTCP_VERSION,
         "manual_version": cli.version,
@@ -961,7 +951,6 @@ async def _mounted(
         rows.append({**row, "config": {**as_obj(row.get("config")), **config}} if config else row)
     ctx = Context()
     try:
-        ctx.provide(TOOL_ENV, ToolEnv(ctx))
         if host is not None:
             ctx.provide(TOOL_HOST, host)
         await Profile.from_documents([ProfileDocument(cli.program, rows)]).mount(ctx, project=root)
@@ -985,6 +974,14 @@ def _provider(cli: ToolCli, configs: Mapping[str, JsonObject]) -> tuple[JsonObje
             "configure one",
         )
     return (named[0] if named else cli.providers[0],)
+
+
+def _named(ctx: Context) -> list[str]:
+    """The variables the mounted rows' configs name (`env_names`): each as it
+    runs, read off its fork, so a private copy (`isolate`) is read too."""
+    forks = ctx.require(MOUNT).forks.values()
+    configs = (fork.spec.resolve_config(fork.config) for fork in forks)
+    return env_names(*(config for config in configs if config is not None))
 
 
 def _definitions(ctx: Context) -> list[ToolDefinition]:
@@ -1442,7 +1439,7 @@ def _answered(
             if verb == "call":
                 return await _call(cli, ctx, known.tool, known.args_json, rest)
             if verb == "manual":
-                return utcp_manual(cli, _definitions(ctx), ctx.require(TOOL_ENV).names)
+                return utcp_manual(cli, _definitions(ctx), _named(ctx))
             if verb == "tools":
                 return _tools(cli, ctx)
             return await _provision(cli, ctx, verb)

@@ -61,7 +61,13 @@ given before the impolite one. A child whose wrapper passes no signal on
 (`forwards_signals: false`, which `ConfinedArgv.spawn_spec` sets for a command
 under `bwrap`)
 gets the impolite one at once: asked first, a command stopped in its first
-milliseconds was left running with no parent. A lint fails the build on a raw
+milliseconds was left running with no parent. The impolite one goes to the whole
+group a stopped child was spawned as leader of, whether or not the child itself
+is still there, so a member that ignored the asking does not outlive a leader
+that heeded it. A child seen through — its output read to the end (`pump`) and
+its exit awaited (`wait`), as `run` does (`SubprocessHandle.finished`) — is reaped
+and its group left alone; a timeout or a cancel is a stop even when the leader had
+exited. A lint fails the build on a raw
 `subprocess.Popen` outside the seams, because the fiftieth plugin author will not
 have read §4.9.
 

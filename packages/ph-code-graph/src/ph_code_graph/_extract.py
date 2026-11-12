@@ -60,6 +60,7 @@ __all__ = [
     "extract",
     "indexable",
     "local",
+    "obtained",
     "owners",
     "parseable",
     "readiness",
@@ -76,6 +77,10 @@ resolved leaf it derives, which cannot be fed back in. Module state because the
 thing it mirrors is a module-level global in somebody else's library — recording
 it anywhere narrower would be a second answer to a process-wide question.
 """
+
+_fetch_refused = False
+"""Whether a grammar fetch has failed in this process: the last `obtained`
+tries. Process-wide for `_configured`'s reason; `_reset` clears it."""
 
 INHERITS: dict[str, tuple[str, ...]] = {
     "typescript": ("javascript",),
@@ -214,11 +219,12 @@ def use_cache(directory: Path) -> Path:
 
 def _reset() -> None:
     """Hand the pack back its own default. The `previous is None` restore."""
-    global _configured
+    global _configured, _fetch_refused
 
     pack = _pack()
     pack.configure()
     _configured = None
+    _fetch_refused = False
 
 
 def detect_language(path: str) -> str | None:
@@ -265,7 +271,7 @@ def local(language: str) -> bool:
     makes it the right question for `/code-graph status`: a person asking "is
     this ready" must not be answered by an action that makes it ready.
 
-    **Deliberately not the indexer's question.** The indexer asks `parseable`,
+    **Deliberately not the indexer's question.** The indexer asks `obtained`,
     which fetches a missing grammar where the network allows, so an unconfined
     run on a fresh cache still indexes. Where it cannot — a confined command, no
     network — the file is skipped with a reason that names `/code-graph install`.
@@ -292,6 +298,23 @@ def parseable(language: str) -> bool:
     except Exception:
         return False
     return True
+
+
+def obtained(language: str) -> bool:
+    """Whether a parser for `language` is had: the indexer's question. What is on
+    disk is loaded, and what is not is fetched until a fetch fails in this
+    process — a confined command cannot reach GitHub, and asking for each missing
+    language was a `sandbox/denied` apiece. A grammar on disk that will not load
+    stops nothing."""
+    global _fetch_refused
+
+    if local(language):
+        return parseable(language)
+    if _fetch_refused:
+        return False
+    found = parseable(language)
+    _fetch_refused = not found
+    return found
 
 
 def readiness(languages: Sequence[str]) -> tuple[list[str], list[str]]:

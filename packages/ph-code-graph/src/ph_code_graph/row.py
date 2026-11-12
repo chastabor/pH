@@ -77,6 +77,7 @@ this is a download's budget and not a query's."""
 
 def manual(config: Config) -> Manual:
     """This package's manual, and what `ph-utcp` needs to know to run it."""
+    env, pass_env = config_env({ROW: config})
     return Manual(
         template=manual_call_template(CLI),
         # The only source of these two names, so they keep them: the skill, the
@@ -87,8 +88,8 @@ def manual(config: Config) -> Manual:
         # own, in its scratch.
         state=STATE,
         writable=[
-            # The pack materializes even its bundled grammars into a writable
-            # directory on first use, and fails hard without one. Shared:
+            # The pack keeps every grammar it uses in a writable directory,
+            # fetched there the first time, and fails hard without one. Shared:
             # grammars are the package's content, keyed by its version, and say
             # nothing of a repository.
             str(grammar_cache()),
@@ -96,7 +97,8 @@ def manual(config: Config) -> Manual:
             # discarded.
             str(CLI.log_file().parent),
         ],
-        env=config_env({ROW: config}),
+        env=env,
+        pass_env=pass_env,
         # One process that stays up for each tree: a call does not pay to start
         # an interpreter, and a long indexing run goes on past the call that
         # started it.

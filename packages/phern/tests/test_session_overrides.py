@@ -150,6 +150,38 @@ def test_a_start_option_is_logged_where_it_differs_and_once() -> None:
     assert _logged("plain") == []
 
 
+def test_a_start_option_that_declares_a_row_is_not_declared_again_at_the_next_start() -> None:
+    """A start option is given at every start: a daemon restarted with the flags it
+    had, a `-p` typed again. One that declares a row is logged at the first, and
+    the second finds the row in the session's log — where declaring it once more
+    was refused as a row declared twice, so a root could not be resumed under the
+    options it was started with.
+
+    Sabotage: have `ph.session_profile._beyond` answer its `start` unchanged, and
+    the second start exits 2 with "already declared by profile/override".
+    """
+    patch = "{insert: [{id: utcp, name: utcp}]}"
+    for _ in range(2):
+        result = runner.invoke(app, ["-p", "hi", "--session", "declared", "--patch", patch])
+        assert result.exit_code == 0, result.output
+
+    (change,) = _logged("declared")
+    assert change.source == "cli" and change.row == "utcp"
+    assert change.entry == {"insert": [{"id": "utcp", "name": "utcp"}]}
+
+    # Changed by id, as the refusal always said to: the row is the log's, and the
+    # declaration beside it is still skipped.
+    by_id = "{id: utcp, config: {timeoutMs: 5000}}"
+    again = runner.invoke(
+        app, ["-p", "hi", "--session", "declared", "--patch", patch, "--patch", by_id]
+    )
+    assert again.exit_code == 0, again.output
+    assert [one.entry for one in _logged("declared")] == [
+        {"insert": [{"id": "utcp", "name": "utcp"}]},
+        {"id": "utcp", "config": {"timeoutMs": 5000}},
+    ]
+
+
 def test_a_start_option_the_log_cannot_hold_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A change the log does not hold is not made — `override`'s rule, which a start's
     own options skipped: their records were appended and, written or not, the start

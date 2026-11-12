@@ -81,7 +81,7 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         # JSON-RPC says an id is "a String or a Number".
         ("ph_app/daemon/duplex.py", 'str(frame.get("id"))'),
         # A row's `id:` is YAML, where `id: 3` is an int and `"3"` is the answer.
-        ("ph/cordis/loader.py", 'str(entry.get("id") or entry["name"])'),
+        ("ph/cordis/loader.py", 'str(entry.get("id") or entry.get("name") or "")'),
         # Tool arguments come from the model and are *rendered*: a numeric
         # argument should show as the number, and `arguments` is often a whole
         # object whose repr is the thing being shown. `simple_views` is the

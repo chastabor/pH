@@ -39,8 +39,8 @@ See "Before publishing".
 
 - **The manual names the variable an endpoint's key is in.** A UTCP client hands a
   command only the variables its template names, and `api_key_env` is known only once
-  the endpoint's row has its config. A mounted row now names such a variable to the
-  command (`ph.toolcli.ToolEnv`, `contribute_item(ctx, TOOL_ENV, name, …)`), and `manual` lists
+  the endpoint's row has its config. The config field is marked
+  (`Annotated[str, ph.wire.EnvName()]`; a `ToolEnv` registration came first), and `manual` lists
   it in each tool's `inherit_env_vars` after the package's own: the name, never the
   value. The registration that reads the manual names no key. Inside pH nothing
   changes: a session's row hands the variable across by `pass_env`, and the scrubbed
@@ -145,14 +145,18 @@ See "Before publishing".
     a real `bwrap`, and the same test with the child asked first leaves three; a
     handle sends `kill` alone to such a child. Eight `phern -p` runs left no host.
 
-**Found, and not fixed.**
-
-- **A daemon restarted with the `--patch '{insert: …}'` it was started with refuses
+- **A daemon restarted with the `--patch '{insert: …}'` it was started with refused
   its own roots.** The root's log holds the insert as a `profile/override`, the
-  daemon's patch declares the rows again, and `phern agents send` answers "row id
-  "utcp" is already declared by profile/override". Started without the patch, the
-  root resumes with the rows its log holds. Rows a deployment always wants belong in
-  a profile document.
+  daemon's patch declared the rows again, and `phern agents send` answered "row id
+  "utcp" is already declared by profile/override".
+  - **Fixed: a row a start option declares that the log already holds is not declared
+    again** (`ph.cordis.loader.new_declarations`, used by `ph.session_profile.rebuilt`
+    where a root is mounted from its log and by `opened` where its start options are
+    logged). The log's row stands as the log has it; its config is changed by id, as
+    the refusal always said.
+  - Gate: `-p` twice with the same insert exits 0 both times and logs one override,
+    and a third with a patch by id beside it logs that one; with the skip switched
+    off the second start exits with the old refusal.
 
 **Still not verified.** Other languages' UTCP clients; a model with remote code under
 a sandbox (`einops` and nomic's weights are not installed here); a hosted embeddings
@@ -184,23 +188,110 @@ Fixed:
 
 Left as they were, with the reason:
 
-- **The endpoint's key variable is still named twice**, as the session row's
-  `pass_env` and as the command's `ToolEnv` registration. Declaring it once, as a
-  marked config field both of `ph.toolcli`'s doors read, means `config_env` returning
-  names and the command resolving each row's config model: a design change, not a
-  cleanup.
-- **A process that ignores SIGTERM after its group's leader exits still outlives an
-  unconfined stop.** `terminate` sends SIGKILL only while its own child lives. Killing
-  the spawn-time group on the stop path even after the leader has gone, as the RLM
-  kernel's teardown does, would change every unconfined command's stop; it is a
-  decision, recorded here.
-- **A confined indexer still asks GitHub for each missing grammar on every call.**
-  Gating it on `local` would make `ensure` the only fetch; it changes what an
-  unconfined run on a fresh cache does.
-- **`BRIEFLY` and the "[and N more]" line are still per package.** One constant in
-  core for two callers is not worth the import.
-- **The UTCP-client test still searches after it indexes** (0.3 s): the search hit is
-  half of what it proves.
+- Nothing. The five left here at first were built at the user's word; see below.
+
+**Built after the pass, at the user's word.**
+
+- **The endpoint's key variable is said once.** `api_key_env` is marked
+  `Annotated[str, EnvName()]` (`ph.wire`). The command's `manual` reads the mark off
+  each mounted fork's config, and `config_env` returns it beside the config for the
+  session's row to pass as `pass_env` (the final form; see the sixth and seventh
+  passes). `ToolEnv`, `TOOL_ENV`, `Provider.pass_env` and the engine row's registration
+  are gone.
+- **A stopped command's whole group is killed, whether or not its leader is still
+  there.** `terminate` sent SIGKILL only while its own child lived, so a member that
+  ignored SIGTERM outlived a leader that heeded it. Once the child is reaped the group
+  is named by the pid it was spawned with. Only on the stop path: a command that
+  exited by itself is reaped and its group left alone, since `run` releases every
+  child this way and a `&` job may be on purpose.
+  - Gates: a shell that heeds SIGTERM over a child that traps it — the child is gone
+    after `terminate`, and with the old condition the test times out; a command that
+    exits leaving a `sleep` running still finds it running.
+- **A fetch that fails is the last an indexing run tries** (`_extract.obtained`). A
+  confined command asked GitHub once for each language it had no grammar for, a
+  `sandbox/denied` apiece on every call. What is on disk still loads, and an
+  unconfined run on a fresh cache still fetches.
+- **`BRIEFLY` and the "[and N more]" line are `ph.text`'s** (`first_lines`), used by
+  both packages.
+- **The UTCP-client test indexes and stops.** The key reaching the server is its proof;
+  a search through a stock client is `test_text_index_cli`'s.
+
+## A sixth `/simplify` pass
+
+Fixed:
+
+- **A stop is what the caller meant, not whether the leader had exited.**
+  `SubprocessHandle.finished` is set by `run` only when its drain ended — the child
+  exited and its output reached the end — and every other release kills the group.
+  Reading the leader's exit instead left a timed-out `sh -c 'sleep 30 & echo hi'`'s
+  `sleep` running and forgotten by the journal. Gate: that run, `timeout_ms=500`; with
+  the old rule the test times out waiting for the job to die.
+- **`signal_group(pid, kill=, reaped=)`** names the group by the pid once the child is
+  reaped, for the seam and the RLM kernel alike, and refuses a pid of 0 or less
+  (`killpg(0)` is the caller's own group). The kernel's `_guest_pgid`, always equal to
+  `process.pid`, is gone; the sweep's `_kill` passes nothing extra.
+- **Start options are filtered against everything before them** — the host's rows
+  too, which the host profile was composed with the options over — not only the log.
+  `new_declarations`' docstring says a held row keeps its config.
+- **The manual reads the mounted forks** (`fork.spec.resolve_config(fork.config)`, as
+  `ph.seams.subagent_profiles` does), so a private copy and a live reconfigure are read;
+  `resolved_config` is back inside `resolve_row`. `env_names(*configs)` de-duplicates,
+  and both packages' session rows pass what every config they hand the command marks.
+- **A refused grammar fetch is remembered for the process** (`_extract._fetch_refused`,
+  first on the seam), so a host answers its next call without asking GitHub again, and
+  only a fetch that was tried and failed sets it — a grammar on disk that will not load
+  does not.
+- **`first_lines(items, shown, line)`** formats only the lines it shows.
+- Smaller: `_beyond` reads its documents as `opened` does; `new_declarations` returns
+  a copy; `utcp_manual` takes `named` without a default.
+
+Left as they were, with the reason:
+
+- **`EnvName` and phern's credential picker (`apiKeyEnv`) stay two rules.** They name
+  different facts: a variable a tool's command must be handed, and a key the harness
+  holds. An adapter's key must not carry the mark — it never leaves the harness.
+- **A start option's dropped declaration is not noted to the person.** The log's row
+  stands, as the user chose; saying so at each start would be a new message.
+- **Other "and N more" spellings** (attachments, the RLM harness, stabilize) keep their
+  own words.
+- *`test_subprocess`'s `_alive` was listed here at first; done since, at the user's
+  word: it and `ph-rlm`'s `test_lifecycle` copy were the two suites left over when
+  `ph.orphans.process_alive` was made public for them, and both now call it. Their
+  other reading of `PermissionError` is unreachable there: every pid they ask about
+  is a child the test started, under its own user.*
+
+## A seventh `/simplify` pass
+
+Fixed:
+
+- **`SubprocessHandle.finished` is the handle's own fact**: true once `pump` read the
+  output to the end and `wait` returned. `run` no longer sets it, so a caller that
+  drives `spawn` → `pump` → `wait` itself also keeps what its command left running, and
+  a caller cannot set it to skip the kill. Gate: the "seen through" test, by `run` and
+  by `spawn`.
+- **`ph.orphans.signal_child(process, kill=)`** — the group, or the child alone, with
+  `reaped` worked out from the process — is the one call for the seam and the RLM
+  kernel, whose `_kill_group` lost its `reaped` argument. A stale comment about the
+  group id "captured at spawn" is gone.
+- **`config_env` returns the variables to pass beside the config**, so a session row
+  cannot hand one and forget the other; `env_names` reads nested models too. `EnvName`
+  lives in `ph.wire`, beside the models it marks.
+- **The refused-fetch flag is `_extract`'s**, process-wide beside `_configured`, and
+  `obtained(language) -> bool` again; `_reset` clears it.
+- **`opened` filters start options through `_beyond`**, as `rebuilt` does.
+- **`ph.seams.fs.skipped_lines`** is the one spelling of a skipped file, beside
+  `skip_reason`, for both index engines.
+- **The stopped-job test cancels once the job has started** instead of waiting out a
+  500 ms timeout.
+- Smaller: `MOUNT` from `ph.keys`; docstrings that told history or repeated a
+  neighbor's are cut to the rule.
+
+Left as they were, with the reason:
+
+- **The two `SkippedValue` models stay per package.** Each is part of its tool's output
+  schema; moving one into core renames a `$defs` entry in both manuals.
+- **`test_session_overrides`' third CLI run stays.** It is the only check that a patch by
+  id beside a skipped declaration is logged through the real start path.
 
 ## Decided with the user after U8
 
