@@ -17,7 +17,14 @@ import pathlib
 import pytest
 from workspace_layout import workspace_modules
 
-from ph.locks import LockBusy, LockUnsupported, acquire_file_lock, describe_lock, file_lock
+from ph.locks import (
+    LockBusy,
+    LockUnsupported,
+    acquire_file_lock,
+    describe_lock,
+    file_lock,
+    file_lock_held,
+)
 
 _ALLOWED = {"ph/locks.py"}
 """The one shipped module that may reach for `filelock`.
@@ -135,3 +142,29 @@ def test_doctor_describes_the_lease_mechanism_by_probing_it(tmp_path: pathlib.Pa
     assert rows["probe"] == "a lock was taken and released"
     # The probe left the directory a lease would make, and nothing held in it.
     acquire_file_lock(tmp_path / "leases" / "any.lock", timeout=0, what="a lease")()
+
+
+def test_asking_whether_a_lock_is_held_neither_takes_it_nor_makes_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A reader that says "a run is building this" must not become the reason
+    another reader says it: the question is asked with a shared lock, which only
+    a holder refuses, so two askers never see each other — and asking after a
+    lock nobody has made leaves it unmade."""
+    path = tmp_path / "run.lock"
+    assert file_lock_held(path) is False
+    assert not path.exists()
+
+    release = acquire_file_lock(path, timeout=0, what="a run")
+    try:
+        assert file_lock_held(path) is True
+    finally:
+        release()
+
+    assert file_lock_held(path) is False
+    asker = open(path, "rb")  # noqa: SIM115 - held open across the assertions
+    try:
+        fcntl.flock(asker, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        assert file_lock_held(path) is False, "one asker was taken for a holder by another"
+    finally:
+        asker.close()

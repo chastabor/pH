@@ -9,7 +9,7 @@ Two properties matter more than convenience.
 ## The spec is fully explicit
 
 ```text
-SubprocessSpawnSpec = argv | cwd | stdio | env | grace_ms | timeout_ms | max_output | forwards_signals
+SubprocessSpawnSpec = argv | cwd | stdio | env | grace_ms | timeout_ms | max_output | on_stderr_line | forwards_signals
 ```
 
 **No hidden defaults.** A caller that did not think about the working directory
@@ -37,6 +37,11 @@ process down.
   [`ctx.spill_store`](spill_store.md) rather than into the model's context, and
   `SubprocessResult.dropped` says how much did not survive.
 * **`timeout_ms`** — with `timed_out` on the result.
+
+A child whose stderr is a report of how far it has got — a tool run with
+`--progress` — names a listener (`on_stderr_line`). That stream is then handed
+over a line at a time and not kept: `max_output` keeps the head of a stream, and
+the line that matters most of a progress stream is its last.
 
 The result is `stdout`, `stderr`, `exit_code`, `dropped`, `timed_out`. **A
 non-zero exit is not a tool error**: `is_error` is about the tool raising, and a

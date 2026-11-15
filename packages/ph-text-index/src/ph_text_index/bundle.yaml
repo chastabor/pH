@@ -18,8 +18,8 @@
 - id: text-index
   name: text-index
 
-# The `sentence-transformers` provider. Its model loads in the command, on first
-# use and not at mount, so layering this bundle costs nothing until something
-# indexes.
+# The `sentence-transformers` provider. Its model loads in the command and not
+# at mount. With `index.on_mount` at its default a run is started before a root
+# agent's first step, so layering this bundle costs an indexing run a session.
 - id: text-index-local
   name: text-index-local

@@ -35,7 +35,7 @@ import os
 import re
 import subprocess as _sp
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -259,6 +259,16 @@ class SubprocessSpawnSpec:
     """How much of each stream to keep, or `None` for the deployment's own.
 
     See `MAX_OUTPUT` — a spec that says nothing still caps, which is the point."""
+    on_stderr_line: Callable[[str], None] | None = None
+    """Called with each line the child writes to stderr, as it is written.
+
+    For a child whose stderr is a report of how far it has got — a tool run with
+    `--progress` (`ph.toolcli`). Such a stream is **delivered and not kept**:
+    `pump` keeps the head of a stream up to `max_output`, and the line that
+    matters most of a progress stream is its last. So with a listener the
+    handle's `stderr` stays empty and every line reaches the listener, however
+    many there are. What a listener raises is logged and the drain goes on: a
+    reader's mistake must not leave the child blocked on a full pipe."""
     forwards_signals: bool = True
     """Whether a signal sent to this argv reaches the command it runs
     (`ConfinedArgv.forwards_signals`). `False` for a wrapper that keeps the
@@ -349,6 +359,10 @@ class SubprocessHandle:
                 return
             sink = self.stdout if stream == "stdout" else self.stderr
             dropped = 0
+            listener = self.spec.on_stderr_line if stream == "stderr" else None
+            if listener is not None:
+                self.dropped += await _delivered(source, listener, cap)
+                return
             try:
                 async for chunk in source:
                     room = cap - len(sink)
@@ -644,6 +658,35 @@ class SubprocessService:
             timed_out=bound.cancelled_caught,
             canceled=canceled,
         )
+
+
+async def _delivered(
+    source: anyio.abc.ByteReceiveStream, listener: Callable[[str], None], cap: int
+) -> int:
+    """Hand `source` to `listener` a line at a time until the child closes it.
+    Returns how many bytes were dropped: only those of a line longer than `cap`,
+    which is cut there — one line must not be how a child fills this process."""
+
+    def deliver(line: bytes) -> None:
+        try:
+            listener(line.decode("utf-8", errors="replace"))
+        except Exception:
+            log.warning("ph.seams.subprocess: a stderr listener failed", exc_info=True)
+
+    pending = bytearray()
+    dropped = 0
+    async for chunk in source:
+        *lines, rest = chunk.split(b"\n")
+        for line in lines:
+            deliver(bytes(pending) + line)
+            pending.clear()
+        kept = rest[: max(cap - len(pending), 0)]
+        pending.extend(kept)
+        dropped += len(rest) - len(kept)
+    if pending:
+        # A last line the child did not end: a crash's final word.
+        deliver(bytes(pending))
+    return dropped
 
 
 def _stdio(mode: Stdio) -> int | None:

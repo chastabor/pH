@@ -57,7 +57,7 @@ doctor` section, as when the tools were registered here.
 
 ## Its own module
 
-Not the package's `__init__`, which `python -m ph_text_index` imports before it
+Not the package's `__init__`, which `python -P -m ph_text_index` imports before it
 runs a single call: these rows import `ph-utcp` and with it the UTCP library, and
 every tool call would pay to load what only the session uses.
 
@@ -66,50 +66,28 @@ every tool call would pay to load what only the session uses.
 
 from __future__ import annotations
 
-import base64
 import importlib.util
-import logging
-import secrets
 import shlex
-from array import array
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from functools import partial
-from itertools import chain
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import anyio
 from pydantic import BaseModel
 
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
-from ph.framing import answer_one
-from ph.json import as_seq, as_str
-from ph.keys import AGENTS, COMMANDS, FS, LLM, SHELL
-from ph.llm.adapter import EmbeddingRequest, LlmError
+from ph.keys import COMMANDS, FS, SHELL
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.skills import offer_skills as offer_package_skills
-from ph.session import Session
-from ph.toolcli import (
-    ToolCli,
-    config_env,
-    failure_envelope,
-    manual_call_template,
-    value_envelope,
-)
-from ph_utcp import UTCP, Host, Manual, ManualState, ToolTraits, ToolView, command_said
+from ph.toolcli import ToolCli, config_env, manual_call_template
+from ph_utcp import UTCP, Background, Manual, ManualState, ToolTraits, ToolView, command_said
 
 from ._config import (
-    ADAPTER_ROW,
-    EMBEDDER_ENV,
     ENDPOINT_ROW,
     LOCAL_ROW,
     MISSING_MODEL,
     ROW,
     STATE,
-    AdapterConfig,
     Config,
     EndpointConfig,
     Limit,
@@ -120,32 +98,28 @@ from .cli import CLI
 
 __all__ = [
     "TEXT_INDEX",
-    "AdapterConfig",
     "Config",
     "EndpointConfig",
     "LocalConfig",
     "Provider",
     "TextIndexRow",
-    "adapter",
     "apply",
     "endpoint",
     "local",
 ]
 
-log = logging.getLogger("ph_text_index")
-
 PROVISION_TIMEOUT_MS = 30 * 60 * 1000
 """How long `/text-index install` may run: a model's download, and its first load."""
 
 INDEX_TIMEOUT_MS = 30 * 60 * 1000
-"""How long one `text_index` call may run. Through the host it answers within
-seconds and the run goes on in the background; this is for the call that finds
-no host and does the work itself — this repository's `docs/` is 20 seconds
-under MiniLM and three minutes under nomic."""
+"""How long one `text_index` call may run. In a session it answers within
+`wait_s` and the run goes on in the background; this is for the call that does
+the work itself — this repository's `docs/` is 20 seconds under MiniLM and three
+minutes under nomic."""
 
 SEARCH_TIMEOUT_MS = 5 * 60 * 1000
-"""How long one `text_search` call may run: the first one a host answers waits
-for the model to load, and a cold load is tens of seconds."""
+"""How long one `text_search` call may run: with a local model each one loads
+it, and a cold load is tens of seconds."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,21 +138,15 @@ class Provider:
     """What `phern doctor` calls it: the model."""
     writable: tuple[str, ...] = ()
     """Shared paths it writes outside the workspace: a model's weights."""
-    env: Mapping[str, str] = field(default_factory=dict)
-    """Variables set on the command: where to ask a session for vectors."""
     max_tokens: int | None = None
     """The limit a profile set on the embedder: how long an input it reads."""
-    reads: Callable[[], Limit | None] | None = None
-    """How long an input the embedder reads with no setting, where a session can
-    say without starting the command: a route's window."""
-    report: Callable[[], list[tuple[str, str]]] | None = None
-    """More rows for `phern doctor`, read live: what the session has embedded."""
 
     def limit(self) -> Limit | None:
-        """How long an input the embedder reads, as far as a session knows."""
-        if self.max_tokens is not None:
-            return Limit(self.max_tokens, "configured")
-        return None if self.reads is None else self.reads()
+        """How long an input the embedder reads, as far as a session knows: the
+        setting. With none, only the command can say."""
+        return (
+            None if self.max_tokens is None else Limit(tokens=self.max_tokens, source="configured")
+        )
 
 
 TEXT_INDEX: ServiceKey[TextIndexRow] = ServiceKey("text_index")
@@ -250,8 +218,6 @@ class TextIndexRow:
             ("index", f"each agent's own, in its scratch ({STATE}/)"),
         ]
         rows.extend(("shared", path) for path in provider.writable)
-        if provider.report is not None:
-            rows.extend(provider.report())
         rows.append(("details", f"/{ROW} status"))
         return rows
 
@@ -275,17 +241,18 @@ def manual(config: Config, provider: Provider) -> Manual:
             str(cli.log_file().parent),
         ],
         # Both rows' configs, each under its row id — which is also how the
-        # command learns which embedder row to mount — and the embedder's own
-        # variables; and by name, what the configs mark (an endpoint's key).
-        env={**handed, **provider.env},
+        # command learns which embedder row to mount; and by name, what the
+        # configs mark (an endpoint's key).
+        env=handed,
         pass_env=passed,
-        # One process that stays up for each tree: the model is loaded once, and
-        # an indexing run goes on past the call that started it.
-        host=Host(
-            command=[*cli.invocation(), "serve"],
+        # An indexing run goes on past the call that started it, reported on the
+        # command's stderr, and one is started before a root agent's first step.
+        background=Background(
+            command=[*cli.invocation(), "call"],
             label="text index",
-            warm=["text_index"],
+            tools=["text_index"],
             eager=config.index.on_mount,
+            wait_s=config.wait_s,
         ),
         tools={
             "text_index": ToolTraits(
@@ -421,7 +388,9 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
     `ph-utcp` reads that one variable from the harness's environment each time
     it starts the command. For a confined agent the endpoint's host has to be
     among the hosts the deployment allows (`sandbox-allow`); the command says so
-    when it cannot reach it."""
+    when it cannot reach it. Whether the key's name is one the deployment's
+    scrub drops is `ph-utcp`'s to say, as it is for every variable a manual
+    passes (`UtcpSeam.add`)."""
     where = config.base_url.rstrip("/")
     await ctx.require(TEXT_INDEX).register(
         Provider(
@@ -430,164 +399,6 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
             cli=CLI,
             label=f"{config.model} at {where}" if config.model else where,
             max_tokens=config.max_tokens,
-        ),
-        scope=ctx,
-    )
-
-
-@dataclass(slots=True)
-class _Embedding:
-    """The session's side of `text-index-adapter`: a socket a command sends its
-    texts to, and the model route that turns them into vectors.
-
-    **This is where the credential is, and the only place.** The command runs in
-    an agent's sandbox, so nothing it holds is out of that agent's reach. The
-    route's key is resolved by the adapter, in this process, for the length of
-    one request; what crosses the socket is text in and numbers out.
-
-    Anything that can reach the socket can spend the route: it is granted to the
-    commands this session's rows start, as the hosts' sockets are.
-
-    **What it spends is in the log of the agent it was spent for.** A request
-    names the agent its command works for (`ph.toolcli.AGENT_ENV`) — whose index
-    it is, which for a child that shares its parent's is the parent — and the
-    route's door records the spend there (`LlmRuntime.embed`), where a budget
-    and a child's account read it. The name comes from inside a sandbox, so it
-    decides which log of this session's family a record lands in and nothing
-    else; a request that names nobody here is embedded and counted on this row
-    alone.
-    """
-
-    ctx: Context
-    config: AdapterConfig
-    path: Path
-    requests: int = 0
-    texts: int = 0
-    tokens: int = 0
-    failed: str = ""
-    """The last failure, for `phern doctor`: a key that is not set says so here
-    as well as on the call that met it."""
-    _serving: anyio.CancelScope = field(default_factory=anyio.CancelScope)
-    """What `close` cancels. The row's own stop, because a listener never ends by
-    itself and a teardown that waited for it would wait out its whole drain."""
-
-    async def serve(self) -> None:
-        with self._serving:
-            async with await anyio.create_unix_listener(self.path) as listener:
-                await listener.serve(partial(answer_one, respond=self._embedded))
-
-    def close(self) -> None:
-        self._serving.cancel()
-        self.path.unlink(missing_ok=True)
-
-    async def _embedded(self, asked: dict[str, Any]) -> dict[str, object]:
-        """One request's answer, in `ph.toolcli`'s envelope."""
-        config = self.config
-        if asked.get("limit"):
-            # How long an input the route reads, as far as the route says: its
-            # window. The command holds a passage to it.
-            window = self.window()
-            return value_envelope({"limit": None if window is None else window.tokens})
-        inputs = tuple(as_str(one) for one in as_seq(asked.get("inputs")))
-        try:
-            result = await self.ctx.require(LLM).embed(
-                EmbeddingRequest(
-                    provider=config.provider,
-                    model=config.model,
-                    inputs=inputs,
-                    dimensions=config.dimensions,
-                ),
-                session=self._session_of(asked.get("agent")),
-            )
-        except LlmError as error:
-            # The adapter's own sentence and code: a key that is not set is said
-            # by the variable's name, as it is on a model call.
-            self.failed = f"{error.code}: {error}"
-            return failure_envelope(error.code, str(error))
-        except Exception as error:
-            log.warning("ph_text_index: the session could not embed", exc_info=True)
-            self.failed = f"{type(error).__name__}: {error}"
-            return failure_envelope("EMBEDDING_FAILED", self.failed)
-        self.requests += 1
-        self.texts += len(inputs)
-        self.tokens += result.input_tokens or 0
-        self.failed = ""
-        # The bytes of a float32 array, base64: a quarter the size of a JSON list
-        # of the same numbers, and nothing for either end to parse. Packed here and
-        # read by `SessionEmbedder._ask`, which this process never imports.
-        packed = array("f", chain.from_iterable(result.vectors)).tobytes()
-        width = len(result.vectors[0]) if result.vectors else 0
-        return value_envelope({"vectors": base64.b64encode(packed).decode("ascii"), "dim": width})
-
-    def window(self) -> Limit | None:
-        """The route's window, when the route says one."""
-        config = self.config
-        window = self.ctx.require(LLM).resolve_model(config.provider, config.model).context_window
-        return None if window is None or window <= 0 else Limit(window, "route")
-
-    def _session_of(self, agent_id: object) -> Session | None:
-        """The log an embedding for `agent_id` is recorded in: that agent's, when
-        it is one of this session's."""
-        registry = self.ctx.get(AGENTS)
-        if registry is None or not isinstance(agent_id, str):
-            return None
-        driver = registry.get(agent_id)
-        return None if driver is None else driver.session
-
-    def report(self) -> list[tuple[str, str]]:
-        spent = f", {self.tokens} tokens" if self.tokens else ""
-        rows = [("embedded", f"{self.texts} texts in {self.requests} requests{spent}")]
-        if self.failed:
-            rows.append(("last failure", self.failed))
-        return rows
-
-
-@plugin(
-    ADAPTER_ROW,
-    affects="environment",
-    inject=[TEXT_INDEX, UTCP, FS, SHELL, LLM],
-    config=AdapterConfig,
-)
-async def adapter(ctx: Context, config: AdapterConfig) -> None:
-    """Name one of the session's own model routes as the embedder.
-
-    The command asks this row for vectors over a socket and this row asks the
-    route's adapter, so the route's credential never leaves the harness
-    (`_Embedding`). A route whose adapter cannot embed is refused here, by name:
-    a profile that names one is corrected by whoever wrote it, now, and not by an
-    agent meeting a failed call."""
-    llm = ctx.require(LLM)
-    if config.provider in llm.list_providers() and not llm.embeds(config.provider):
-        raise MountRefusal(
-            f'{ADAPTER_ROW} names provider "{config.provider}", whose adapter does not '
-            "embed. Name a provider whose adapter does — the OpenAI-compatible and Google "
-            f"adapters do — or use `{ENDPOINT_ROW}` or `{LOCAL_ROW}`."
-        )
-    directory = ctx.require(UTCP).socket_dir
-    if directory is None:
-        raise MountRefusal(
-            f"{ADAPTER_ROW} needs $PH_RUNTIME for the socket its command asks on, and "
-            "there is no usable runtime directory"
-        )
-    service = _Embedding(
-        ctx=ctx, config=config, path=directory / f"embed-{secrets.token_hex(6)}.sock"
-    )
-    # `leave`, with the stop registered beside it: the listener serves until it
-    # is told to stop, so it is not work a teardown should wait to see finish.
-    ctx.detach(service.serve(), label="text-index embeddings", at_dispose="leave")
-    ctx.add_disposer(service.close, label="text-index embeddings")
-    await ctx.require(TEXT_INDEX).register(
-        Provider(
-            row=ADAPTER_ROW,
-            config=config,
-            cli=CLI,
-            label=f"{config.model} through {config.provider}",
-            max_tokens=config.max_tokens,
-            reads=service.window,
-            # The socket the command asks on: a confined command connects there.
-            writable=(str(directory),),
-            env={EMBEDDER_ENV: str(service.path)},
-            report=service.report,
         ),
         scope=ctx,
     )

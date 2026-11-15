@@ -30,28 +30,33 @@ refused (`ph.seams.sandbox.grants_apart`), so no manual reopens the tree. A
 confined command's temporary files go in the scratch too (`TMPDIR`, set by the
 shell seam), for the same reason.
 
-## A host, for a manual whose tools are slow to start
+## A run in the background, for a tool whose work is long
 
-A manual can name a **host** (`Manual.host`): a command that stays up and answers
-the manual's tools on a socket, so what they load — an embedding model — is
-loaded once, and a long piece of work can go on past the call that asked for it.
-The row keeps one running for each tree an agent works in, started as every
-command is: by `ctx.shell`, for that agent, in its workspace and under its
-sandbox. It is a job of that agent's (`ctx.jobs`), so it ends when the agent
-does and when the manual's row unmounts; it leaves by itself when idle, and the
-next call starts another. Each call is told the socket in `$PH_TOOL_HOST`, and a
-command that finds nobody there runs by itself — a host is never required.
+Every call is one command; nothing stays up. A manual can name tools whose work
+is long (`Manual.background`) — an indexing run — and the row then starts such a
+tool itself, as every command is started: by `ctx.shell`, for the agent whose
+tree it is about, in its workspace and under its sandbox. It is a job of that
+agent's (`ctx.jobs`), so it ends when the agent does and when the manual's row
+unmounts.
 
-While a host works in the background the footer says how far it has got, and
-when it finishes the agent it works for is told, with a note that waits for that
-agent's next step and starts no turn.
+The command is run with `--progress` (`ph.toolcli`), and reports on its stderr:
+JSONL, a line as it goes and one last line. That stream is everything the row
+knows of the run. The footer says how far it has got; when it ends the agent it
+works for is told, with a note that waits for that agent's next step and starts
+no turn; and a stream that ends with no last line is a run that died, and is
+said as that.
 
-**One host a tree, not one an agent.** A child builds its own only when it has a
-tree it writes for keeps — a worktree, an overlay. One that works in its
-parent's checkout, or was granted only to read the project, uses its parent's
-host and its parent's state (`UtcpSeam.owner_of`): the index is of the tree, and
-a copy for every child of a read-only fan-out would be the same documents
-embedded again and a model held in memory for each.
+A run is started unasked before a root agent's first step, so an index is being
+built before anything asks for it, and by a call of the tool. That call waits
+`wait_s` for the run it started and answers with the run's own result; past
+that it answers what the command says while another run holds its work —
+`state: indexing` — and the run goes on.
+
+**One run a tree at a time, not one an agent.** A child builds its own only when
+it has a tree it writes for keeps — a worktree, an overlay. One that works in
+its parent's checkout, or was granted only to read the project, shares its
+parent's state (`UtcpSeam.owner_of`): the index is of the tree, and a copy for
+every child of a read-only fan-out would be the same documents embedded again.
 
 ## What UTCP cannot say, the row's config says
 
@@ -81,9 +86,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-import secrets
-import time
-from collections.abc import Awaitable, Sequence
+from collections import deque
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -95,42 +99,34 @@ from pydantic import Field
 from ph.agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ph.cancel import Canceled, Cancellation
 from ph.cordis import Context, Disposer, Next, ServiceKey, plugin
-from ph.json import as_obj, as_str, dumps
-from ph.keys import AGENTS, FS, JOBS, SHELL, SYSTEM_PROMPT, TOOLS, TUI_STATUS
+from ph.json import JsonObject, as_obj, as_str, dumps, loads
+from ph.keys import AGENTS, FS, JOBS, SHELL, SUBPROCESS, SYSTEM_PROMPT, TOOLS, TUI_STATUS
 from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message
-from ph.paths import RuntimeDirError, file_stamp, resolve_roots
 from ph.seams._registry import contribute_item
 from ph.seams.diagnostics import Diagnostic, contribute
-from ph.seams.jobs import UNSETTLED, Job
+from ph.seams.jobs import Job
 from ph.seams.sandbox import allowance_path, grants_apart
 from ph.seams.shell import ShellResult
+from ph.seams.subprocess import SubprocessService
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.seams.workspace import project_access, scratch_of, workspace_of
 from ph.session import Session
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ph.text import count_of
-from ph.toolcli import (
-    AGENT_ENV,
-    HOST_ENV,
-    PROGRESS_FILE,
-    STATE_ENV,
-    Progress,
-    read_envelope,
-    read_progress,
-    value_schema,
-)
+from ph.toolcli import STATE_ENV, Progress, read_envelope, value_schema
 from ph.tools.definition import (
     ToolDefinition,
     ToolRunContext,
     define_tool,
     text_content,
 )
-from ph.tools.errors import HarnessError
+from ph.tools.errors import HarnessError, error_message
 from ph.tools.json_schema import validate_json_schema_value
 from ph.tools.presentation import CardKind, simple_views
 from ph.wire import WireModel
 
 from ._library import (
+    UTCP_TIMEOUT,
     Call,
     CallTemplateSerializer,
     Tool,
@@ -143,8 +139,8 @@ from ._library import (
 __all__ = [
     "BUNDLE",
     "UTCP",
+    "Background",
     "Config",
-    "Host",
     "Manual",
     "ManualState",
     "ToolTraits",
@@ -166,15 +162,9 @@ _NOT_A_WORD = re.compile(r"\W")
 _CLIP = 600
 """How much of an answer that was not what the tool declared is quoted back."""
 
-_HOST_STARTS_S = 15.0
-"""How long a call waits for a host it started to listen, before running alone."""
-
-_WATCH_EVERY_S = 0.5
-"""How often a running host's progress is looked at while a run works. Kept
-here, in memory, so the footer — drawn far more often — never reads a file."""
-
-_WATCH_IDLE_S = 2.0
-"""How often it is looked at between runs: a new one is noticed this late."""
+_STRAY_LINES = 5
+"""How many lines of a run's stderr that were not progress are kept: the last
+words of a command that died."""
 
 
 # ------------------------------------------------------------------- config ----
@@ -205,27 +195,28 @@ class ToolTraits(WireModel):
     view: ToolView | None = None
 
 
-class Host(WireModel):
-    """A command that stays up and answers a manual's tools: `ph.toolcli`'s `serve`.
+class Background(WireModel):
+    """A manual's tools whose work is long, run where the session can watch:
+    `ph.toolcli`'s `call --progress`.
 
-    The row adds `--socket`, `--root` and `--idle` to `command`, and `--warm` for
-    each of `warm` when it starts the host ahead of any call; the state directory
-    it is told as each call is, in `$PH_TOOL_STATE`."""
+    The row adds a tool's name, `--progress` and `--args-json` to `command` and
+    reads the run's progress from its stderr; the state directory it is told as
+    each call is, in `$PH_TOOL_STATE`."""
 
     command: list[str]
-    """The command, up to and including `serve`."""
+    """The command, up to and including `call`."""
     label: str
-    """What the footer and the completion note call it: `text index`."""
-    warm: list[str] = Field(default_factory=list)
-    """Tools the host calls once when it is started `eager`ly: an index tool,
-    which in a host answers at once and works in the background."""
+    """What the footer and the completion note call a run: `text index`."""
+    tools: list[str]
+    """The tools that run this way, by their own names: an index tool."""
     eager: bool = True
-    """Start it for a root agent at that agent's first step, and not at its first
-    call — so an index is being built before anything asks for it. A child that
-    works in a tree of its own gets its host at its first call either way: a
+    """Run each of `tools` once for a root agent before that agent's first step,
+    with no arguments — so an index is being built before anything asks for it.
+    A child that works in a tree of its own gets a run at its first call: a
     throwaway worktree may never ask."""
-    idle_s: float = 900.0
-    """How long the host stays up with nothing to do."""
+    wait_s: float = 5.0
+    """How long a call waits for the run it started before answering that the
+    run goes on."""
 
 
 class Manual(WireModel):
@@ -266,8 +257,8 @@ class Manual(WireModel):
     every variable whose name looks like a credential, and a template cannot
     name its way past that. This is how a deployment says one may pass: named in
     a profile, read each time a command is started, and held nowhere."""
-    host: Host | None = None
-    """A command that stays up and answers this manual's tools, or none."""
+    background: Background | None = None
+    """The tools of this manual that run in the background, or none."""
     tools: dict[str, ToolTraits] = Field(default_factory=dict)
     """Per tool, by the tool's own name."""
 
@@ -328,31 +319,38 @@ def command_said(program: str, verb: str, result: ShellResult) -> str:
 
 
 @dataclass(slots=True)
-class _Hosted:
-    """One running host: whose tree it serves, where it listens, how far it is."""
+class _Run:
+    """One background run: whose tree it works on, what it was asked, how far
+    it has got and how it ended."""
 
     name: str
-    """The manual it answers for."""
-    host: Host
+    """The manual whose tool it runs."""
+    background: Background
     owner: AgentHandle
-    socket: Path
-    home: Path | None
-    """Its state directory, where it reports progress."""
+    tool: str
+    arguments: JsonObject
     job: Job | None = None
     progress: Progress | None = None
-    """What it last reported, as `_watch` read it: nothing until it reports,
-    since a report an earlier host left in the directory is not its own."""
-    since: float = field(default_factory=time.time)
-    """When it was started: a report of a run that began before is one an
-    earlier host left in the directory."""
-    told: set[float] = field(default_factory=set)
-    """The runs, by when each began, whose end its agent has been told of."""
-    listening: bool = False
-    """Its socket has been seen. Asked once, and a field after."""
+    """The last line of its report (`ph.toolcli.Progress`)."""
+    stray: deque[str] = field(default_factory=lambda: deque(maxlen=_STRAY_LINES))
+    """The last lines of its stderr that were not progress."""
+    result: ShellResult | None = None
+    error: Exception | None = None
+    """Why its command could not be started, when it could not: no result, and
+    no line on its stderr, to say so. The error itself, so a refusal keeps its
+    own code."""
+    ended: anyio.Event = field(default_factory=anyio.Event)
+    waiting: int = 0
+    """Calls waiting to answer with this run's result. One that is still waiting
+    when it ends takes the result, and nobody is told more."""
+    owed: bool = False
+    """A call was answered "still going": its agent is owed word of the end."""
 
     @property
-    def running(self) -> bool:
-        return self.job is not None and self.job.state in UNSETTLED
+    def last(self) -> Progress | None:
+        """The run's last line, when it wrote one."""
+        progress = self.progress
+        return progress if progress is not None and progress.state != "working" else None
 
 
 @dataclass(slots=True)
@@ -365,17 +363,12 @@ class UtcpSeam:
     """The UTCP client. `Any` because the library ships no types."""
     states: dict[str, ManualState] = field(default_factory=dict)
     manuals: dict[str, Manual] = field(default_factory=dict)
-    """The manuals that gave tools, by name — what a host is started from."""
-    hosts: dict[tuple[str, str], _Hosted] = field(default_factory=dict)
-    """Running hosts, by manual and the id of the agent whose tree each serves."""
-    socket_dir: Path | None = None
-    """Where hosts — and anything else a manual's command asks over a socket —
-    listen: `$PH_RUNTIME/utcp`, made once at mount. `None` on a deployment with no
-    usable runtime directory, which then runs every call alone."""
+    """The manuals that gave tools, by name — what a run is started from."""
+    runs: dict[tuple[str, str], _Run] = field(default_factory=dict)
+    """The run going for each tree, by manual and the id of the tree's owner."""
     warmed: set[tuple[str, str]] = field(default_factory=set)
-    """The trees, by manual and owner, whose host has been started unasked once.
-    Once: a host that leaves when idle is started again by the next call, and
-    not by the next step, which would index the tree again for nobody."""
+    """The trees, by manual and owner, whose tools have been run unasked once.
+    Once: the next step would only index the tree again for nobody."""
 
     # ----------------------------------------------------------- registering --
 
@@ -402,8 +395,9 @@ class UtcpSeam:
         )
         manual = manual.model_copy(update={"writable": made})
         state = await self._discovered(name, manual, scope)
-        if unmade:
-            state = ManualState(tools=state.tools, problems=(*state.problems, *unmade))
+        said = (*unmade, *_unscrubbed(manual.pass_env, self.ctx.get(SUBPROCESS)))
+        if said:
+            state = ManualState(tools=state.tools, problems=(*state.problems, *said))
         self.states[name] = state
         if state.available:
             self.manuals[name] = manual
@@ -412,13 +406,13 @@ class UtcpSeam:
 
         async def forget() -> None:
             """What the owning scope's unwinding takes back: the state, so the name
-            can be added again, the hosts it started, and the client's own record
+            can be added again, the runs it started, and the client's own record
             of the manual."""
             if self.states.get(name) is state:
                 del self.states[name]
                 self.manuals.pop(name, None)
-                for key in [key for key in self.hosts if key[0] == name]:
-                    job = self.hosts.pop(key).job
+                for key in [key for key in self.runs if key[0] == name]:
+                    job = self.runs.pop(key).job
                     if job is not None:
                         job.cancel()
             try:
@@ -477,13 +471,10 @@ class UtcpSeam:
         agent: AgentHandle | None = None,
         owner: AgentHandle | None = None,
         signal: Cancellation | None = None,
-        host: Path | None = None,
     ) -> Call:
         """How one of `manual`'s commands runs for `agent`, whose tree's owner is
         `owner`: asked once by the caller, because each of these needs it."""
         env, writable = self._surroundings(manual, agent, owner)
-        if host is not None:
-            env = {**env, HOST_ENV: str(host)}
         return Call(
             shell=self.ctx.require(SHELL),
             root=self._tree(manual, agent, owner),
@@ -499,7 +490,7 @@ class UtcpSeam:
     ) -> tuple[dict[str, str], tuple[str, ...]]:
         """What a command of this manual run for `agent` is given: its variables,
         and the paths outside the workspace it may write. One derivation, for a
-        tool call, the host that answers it and a person's provisioning command."""
+        tool call, a run in the background and a person's provisioning command."""
         env = dict(manual.env)
         for name in manual.pass_env:
             # From the harness's own environment and not the scrubbed one, which
@@ -508,20 +499,13 @@ class UtcpSeam:
             if value:
                 env[name] = value
         writable = list(manual.writable)
-        if owner is not None:
-            env[AGENT_ENV] = owner.id
         state = self._state(manual, owner)
         if state is not None:
             env[STATE_ENV] = str(state)
             held = workspace_of(self.ctx, agent)
             if held is not None and not state.is_relative_to(held.scratch):
-                # Its tree's owner's state, and not in its own scratch: granted,
-                # for the call that finds no host and does the work itself.
+                # Its tree's owner's state, and not in its own scratch: granted.
                 writable.append(str(state))
-        if manual.host is not None and self.socket_dir is not None:
-            # Where a host listens. A caller connects there and a host binds
-            # there, and both are confined.
-            writable.append(str(self.socket_dir))
         return env, tuple(writable)
 
     def _tree(self, manual: Manual, agent: AgentHandle | None, owner: AgentHandle | None) -> Path:
@@ -535,6 +519,34 @@ class UtcpSeam:
         index and sweeping every document out as gone."""
         fs = self.ctx.require(FS)
         return fs.root_for(owner if manual.state else agent)
+
+    def _command(
+        self,
+        manual: Manual,
+        argv: Sequence[str],
+        *,
+        agent: AgentHandle,
+        owner: AgentHandle,
+        timeout_ms: int | None,
+        signal: Cancellation | None,
+        on_stderr_line: Callable[[str], None] | None = None,
+    ) -> Awaitable[ShellResult]:
+        """Run one of `manual`'s `ph.toolcli` commands for `agent` this row starts
+        itself, rather than through the UTCP client: in the tree, under the
+        sandbox, with the variables and grants a call of its tools is given."""
+        env, writable = self._surroundings(manual, agent, owner)
+        inherited = manual.template.get("inherit_env_vars")
+        return self.ctx.require(SHELL).run_argv(
+            tuple(argv),
+            cwd=self._tree(manual, agent, owner),
+            agent=agent,
+            timeout_ms=timeout_ms,
+            signal=signal,
+            keep_env=inherited if isinstance(inherited, list) else None,
+            extra_env=env,
+            writable_extra=writable,
+            on_stderr_line=on_stderr_line,
+        )
 
     def run_command(
         self, manual: Manual, argv: Sequence[str], agent: AgentHandle | None, *, timeout_ms: int
@@ -562,7 +574,7 @@ class UtcpSeam:
         whether a child has a tree of its own to build about:
 
         * **It works in its parent's checkout** (`shared`, the same root). One
-          tree, so one index and one host.
+          tree, so one index and one run at a time.
         * **It was granted only to read the project** — `readonly-scratch`, whose
           root is an empty directory beside a repository it cannot write, and the
           two ephemeral kinds, whose writes reach nobody. It has nothing of its
@@ -610,170 +622,164 @@ class UtcpSeam:
         held = workspace_of(self.ctx, owner)
         return None if held is None else held.scratch / manual.state
 
-    # ---------------------------------------------------------------- hosts --
+    # ----------------------------------------------------------------- runs --
 
-    async def _host_for(
-        self, name: str, owner: AgentHandle | None, *, warm: bool = False, wait: bool = True
-    ) -> Path | None:
-        """The socket of the host answering manual `name` for `owner`'s tree,
-        started if there is none. `None` when there is no host to be had — the
-        manual names none, there is no agent, no job runner or no runtime
-        directory, or the host did not come up — and the call then runs alone.
-        `wait=False` starts it and answers at once, for a caller that will not
-        use it.
+    async def _start(
+        self,
+        name: str,
+        manual: Manual,
+        owner: AgentHandle,
+        asked: Sequence[tuple[str, JsonObject]],
+    ) -> _Run | None:
+        """Start `asked` — tools of `manual` and their arguments — one after the
+        other in the background, for `owner`'s tree. The first run, or `None`
+        when there is nothing to start one with: no job runner, or the manual
+        names no background.
 
-        Never raises: a host is how a call is made faster, and a call that could
-        have been answered without one must not fail for want of it.
+        Never raises: a run in the background is how a long call is made
+        bearable, and a call that could have been made in the ordinary way must
+        not fail for want of it.
         """
-        manual = self.manuals.get(name)
+        background = manual.background
         jobs = self.ctx.get(JOBS)
-        if manual is None or manual.host is None or owner is None:
-            return None
-        if jobs is None or self.socket_dir is None:
+        if background is None or jobs is None or not asked:
             return None
         key = (name, owner.id)
-        hosted = self.hosts.get(key)
-        if hosted is None or not hosted.running:
-            hosted = self.hosts[key] = _Hosted(
+        runs = [
+            _Run(
                 name=name,
-                host=manual.host,
+                background=background,
                 owner=owner,
-                # Short, because a socket's address is at most 108 bytes, and
-                # random, because two roots of one daemon share this directory.
-                socket=self.socket_dir / f"{secrets.token_hex(6)}.sock",
-                home=self._state(manual, owner),
+                tool=tool,
+                arguments=arguments,
             )
-            try:
-                hosted.job = await jobs.start(
-                    kind="utcp-host",
-                    label=f"{manual.host.label} for {owner.id}",
-                    run=partial(self._hosting, hosted, manual, warm),
-                    # The owner's: the host ends when the agent whose tree it
-                    # serves does. Stopped as well when the manual's row unmounts.
-                    scope=owner.ctx,
-                )
-            except Exception:
-                log.warning("ph_utcp: no host for %s was started", name, exc_info=True)
-                self.hosts.pop(key, None)
-                return None
-        if not wait:
-            return None
-        return hosted.socket if await self._listening(hosted) else None
-
-    async def _listening(self, hosted: _Hosted) -> bool:
-        """Wait, briefly, for `hosted` to listen. A host is mounting its rows for
-        its first fraction of a second; a call that did not wait would run alone
-        beside it and load what the host is about to."""
-        if hosted.listening:
-            return hosted.running
-        with anyio.move_on_after(_HOST_STARTS_S):
-            while hosted.running:
-                if await anyio.to_thread.run_sync(hosted.socket.exists):
-                    hosted.listening = True
-                    return True
-                await anyio.sleep(0.02)
-        return False
-
-    async def _hosting(self, hosted: _Hosted, manual: Manual, warm: bool, job: Job) -> None:
-        """One host's life: the command, run for its tree's owner until it leaves
-        or its job is canceled, and its progress read while it runs."""
-        host, owner = hosted.host, hosted.owner
-        root = self._tree(manual, owner, owner)
-        env, writable = self._surroundings(manual, owner, owner)
-        argv = [*host.command, "--socket", str(hosted.socket), "--root", str(root)]
-        argv += ["--idle", f"{host.idle_s:g}"]
-        if warm:
-            for tool in host.warm:
-                argv += ["--warm", tool]
-        inherited = manual.template.get("inherit_env_vars")
+            for tool, arguments in asked
+        ]
+        # Before the job starts, so a call that arrives meanwhile joins this run
+        # rather than starting a second.
+        self.runs[key] = runs[0]
         try:
-            async with anyio.create_task_group() as tasks:
-                tasks.start_soon(self._watch, hosted)
-                result = await self.ctx.require(SHELL).run_argv(
-                    tuple(argv),
-                    cwd=root,
+            job = await jobs.start(
+                kind="utcp-run",
+                label=f"{background.label} for {owner.id}",
+                run=partial(self._running, manual, runs),
+                # The owner's: the run ends when the agent whose tree it works
+                # on does. Stopped as well when the manual's row unmounts.
+                scope=owner.ctx,
+            )
+        except Exception:
+            log.warning("ph_utcp: no %s run was started", name, exc_info=True)
+            if self.runs.get(key) is runs[0]:
+                del self.runs[key]
+            return None
+        for run in runs:
+            run.job = job
+        return runs[0]
+
+    async def _running(self, manual: Manual, runs: Sequence[_Run], job: Job) -> None:
+        """One job's life: each run's command in turn, for its tree's owner, with
+        its progress read from stderr as it is written."""
+        for run in runs:
+            owner = run.owner
+            key = (run.name, owner.id)
+            self.runs[key] = run
+            argv = [*run.background.command, run.tool, "--progress"]
+            try:
+                run.result = await self._command(
+                    manual,
+                    [*argv, "--args-json", dumps(run.arguments)],
                     agent=owner,
-                    # No limit: it leaves when it is idle, and its job ends it.
+                    owner=owner,
+                    # No limit: a run is as long as its work, and its job ends it.
                     timeout_ms=None,
                     signal=job.token,
-                    keep_env=inherited if isinstance(inherited, list) else None,
-                    extra_env=env,
-                    writable_extra=writable,
+                    on_stderr_line=partial(_read_line, run),
                 )
-                tasks.cancel_scope.cancel()
-            if result.exit_code != 0 and not result.canceled:
-                said = command_said(f"the {hosted.name} host", "serve", result)
-                log.warning("ph_utcp: %s", said[:_CLIP])
-        finally:
-            if self.hosts.get((hosted.name, owner.id)) is hosted:
-                del self.hosts[(hosted.name, owner.id)]
-            # The host removes its socket when it leaves by itself. One that was
-            # ended under a sandbox is killed with it and removes nothing.
-            with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(partial(hosted.socket.unlink, missing_ok=True))
+            except Exception as error:
+                # Its command never ran — a sandbox that refused it, a program
+                # that is not there — so nothing on its stderr will say so.
+                run.error = error
+                log.warning("ph_utcp: the %s could not be run", run.background.label, exc_info=True)
+                raise
+            finally:
+                if self.runs.get(key) is run:
+                    del self.runs[key]
+                run.ended.set()
+                # In the same step as `ended`: a call still waiting has not
+                # resumed, so `waiting` says truly whether one takes the result.
+                self._ended(run)
+            if job.token.canceled:
+                return
 
-    async def _watch(self, hosted: _Hosted) -> None:
-        """Read `hosted`'s progress as it changes, and tell its agent when a piece
-        of background work ends.
+    def _ended(self, run: _Run) -> None:
+        """Tell `run`'s agent how it ended, unless a call is taking its result or
+        there is nothing to tell.
 
-        Polled rather than watched: one small file, read when its stat says it
-        changed — twice a second while a run works, and less often between runs —
-        and the reading is kept here, so the footer never reads it. The note is
-        `inject`ed: it waits for the agent's next step, starts no turn, and is in
-        that agent's log.
-        """
-        home = hosted.home
-        if home is None:
+        Five endings. A command that could not be started at all — no result,
+        and nothing on its stderr — is said with why. A last line that says
+        `done`: news when a call was answered "still going", or when a run
+        nobody asked for changed something. One that says `busy` — another run
+        held what it builds, and it did nothing — news only to a call answered
+        "still going". A last line that says `failed`: the tool's own sentence.
+        And no last line at all — the command was killed, ran out of memory, or
+        crashed below Python — which is said as that, with what it last wrote
+        and how far it had got."""
+        result, job = run.result, run.job
+        if run.waiting or (result is not None and result.canceled):
             return
-        seen: object = None
-        while True:
-            stamp = await anyio.to_thread.run_sync(file_stamp, home / PROGRESS_FILE)
-            if stamp == seen:
-                # Quickly while a run works, and before the first report: a host
-                # just started is about to begin one.
-                last = hosted.progress
-                working = last is None or last.state == "working"
-                await anyio.sleep(_WATCH_EVERY_S if working else _WATCH_IDLE_S)
-                continue
-            seen = stamp
-            found = await anyio.to_thread.run_sync(read_progress, home)
-            if found is not None and found.started < hosted.since:
-                # An earlier host's last report: this one has said nothing yet.
-                found = None
-            hosted.progress = found
-            if (
-                found is not None
-                and found.state != "working"
-                # The run says whether its end is news: a call was answered
-                # "still going", or the host began it unasked. One whose caller
-                # got its counts back has been told already.
-                and found.owed
-                and found.started not in hosted.told
-            ):
-                hosted.told.add(found.started)
-                self._tell(hosted, found)
-
-    def _tell(self, hosted: _Hosted, progress: Progress) -> None:
-        label = hosted.host.label
-        if progress.state == "failed":
-            summary = f"The {label} stopped: {progress.failure}"
-            text = (
-                f"{summary}. It got through {progress.done} of {progress.total} "
-                f"{progress.what}; what it finished is kept, and running its index "
-                "tool again goes on from there."
-            )
-        else:
-            summary = f"The {label} is finished: {progress.said()}"
+        if job is not None and job.token.canceled:
+            # Stopped by its owner going, or by its manual's row unmounting.
+            return
+        label = run.background.label
+        if result is None:
+            if run.error is None:
+                return
+            summary = f"The {label} could not be started: {error_message(run.error)}"
+            text = f"{summary}. Nothing was built; calling its tool tries again."
+            self._tell(run.owner, summary, text)
+            return
+        last, progress = run.last, run.progress
+        if last is not None and last.state == "busy":
+            if not run.owed:
+                return
+            summary = f"The {label} did not run: another run holds what it builds"
+            text = f"{summary}. Call its tool again once that run has finished."
+        elif last is not None and last.state == "done":
+            if not run.owed and last.changed is not True:
+                return
+            summary = f"The {label} is finished: {last.said()}"
             text = f"{summary}. Searches now cover all of it."
-            if progress.note:
+            if last.note:
                 # What its result would have said to a caller that waited.
-                text = f"{text}\n{progress.note}"
+                text = f"{text}\n{last.note}"
+        else:
+            if last is not None:
+                why = last.failure or "it gave no reason"
+            else:
+                said = "; ".join(run.stray) or "it wrote nothing more"
+                why = f"its command ended (exit {result.exit_code}) without finishing: {said}"
+            summary = f"The {label} stopped: {why}"
+            got = (
+                ""
+                if progress is None
+                else f" It got through {progress.done} of {progress.total} {progress.what}."
+            )
+            text = (
+                f"{summary}.{got} What it finished is kept, and running its tool "
+                "again goes on from there."
+            )
+            log.warning("ph_utcp: %s", summary[:_CLIP])
+        self._tell(run.owner, summary, text)
+
+    def _tell(self, owner: AgentHandle, summary: str, text: str) -> None:
+        """A note for `owner`, `inject`ed: it waits for the agent's next step,
+        starts no turn, and is in that agent's log."""
         registry = self.ctx.get(AGENTS)
         # Asked of the roster, which holds the driver: a handle is what a reader
         # is given, and has no inbox to put a message in.
-        driver = None if registry is None else registry.get(hosted.owner.id)
+        driver = None if registry is None else registry.get(owner.id)
         if driver is None:
-            # An agent that has gone. The reading and the tool both still say it.
+            # An agent that has gone. The tool still says it.
             return
         try:
             driver.inject(
@@ -787,41 +793,113 @@ class UtcpSeam:
                 )
             )
         except Exception:
-            log.debug("ph_utcp: %s was not told its %s ended", driver.id, label, exc_info=True)
+            log.debug("ph_utcp: %s was not told: %s", driver.id, summary, exc_info=True)
+
+    async def _in_background(
+        self,
+        name: str,
+        manual: Manual,
+        tool: str,
+        arguments: JsonObject,
+        run: ToolRunContext,
+        owner: AgentHandle,
+        *,
+        timeout_ms: int,
+    ) -> object:
+        """A call of a background tool: its answer, the command's own envelope.
+
+        The call starts a run — or joins the one going for its tree — and waits
+        `wait_s` for it. A run that was this call's and ended in time answers
+        with its own result. Otherwise the command is asked directly with
+        `--wait 0`, and says what it says while another run holds its work:
+        `state: indexing`, in the tool's own shape. The run goes on, and its
+        agent is told when it ends. The same request asked again joins its run
+        rather than starting another; a different one is not queued."""
+        background = manual.background
+        assert background is not None
+        key = (name, owner.id)
+        with anyio.move_on_after(background.wait_s):
+            while True:
+                current = self.runs.get(key)
+                if current is None:
+                    current = await self._start(name, manual, owner, [(tool, arguments)])
+                    if current is None:
+                        break
+                mine = current.tool == tool and current.arguments == arguments
+                current.waiting += mine
+                try:
+                    await current.ended.wait()
+                finally:
+                    current.waiting -= mine
+                    if not current.ended.is_set():
+                        # Answered "still going" below: owed word of the end.
+                        current.owed = True
+                if not mine:
+                    # Another request's run ended within the wait: now this one's.
+                    continue
+                if isinstance(current.error, HarnessError):
+                    # A refusal with a code of its own: the sandbox's, say.
+                    raise current.error
+                if current.error is not None:
+                    raise HarnessError(
+                        f"{name}.{tool} could not be started: {error_message(current.error)}",
+                        UTCP_FAILED,
+                    )
+                if current.result is not None and not current.result.canceled:
+                    return _answer_of(current.result, f"{name}.{tool}")
+                break
+        assert run.agent is not None
+        result = await self._command(
+            manual,
+            [*background.command, tool, "--wait", "0", "--args-json", dumps(arguments)],
+            agent=run.agent,
+            owner=owner,
+            timeout_ms=timeout_ms,
+            signal=run.signal,
+        )
+        return _answer_of(result, f"{name}.{tool}")
+
+    def working(self, name: str, owner: AgentHandle | None) -> str | None:
+        """What to add to an answer of manual `name`'s tools while a run for
+        `owner`'s tree is going: how far it has got. The command knows only that
+        a run holds its work; this row has been reading the count."""
+        run = None if owner is None else self.runs.get((name, owner.id))
+        if run is None or run.progress is None or run.progress.state != "working":
+            return None
+        return f"[The {run.background.label} is still working: {run.progress.said()}.]"
 
     def reading(self, session: Session) -> StatusReading | None:
-        """The footer's phrase for this session: what its hosts are building.
-        From memory — `_watch` reads the files."""
+        """The footer's phrase for this session: what its runs are building.
+        From memory — each run's stderr is read as it is written."""
         said: list[str] = []
-        failed = False
-        for hosted in self.hosts.values():
-            owned = hosted.owner.session
-            progress = hosted.progress
+        for run in self.runs.values():
+            owned = run.owner.session
+            progress = run.progress
             if owned is None or owned.id != session.id or progress is None:
                 continue
-            if progress.state == "done" or not hosted.running:
-                continue
-            failed = failed or progress.state == "failed"
-            said.append(f"{hosted.host.label} {progress.said()}")
-        if not said:
-            return None
-        return StatusReading(text=", ".join(said), level="warning" if failed else "normal")
+            if progress.state == "working":
+                said.append(f"{run.background.label} {progress.said()}")
+        return StatusReading(text=", ".join(said), level="normal") if said else None
 
     async def eager(self, request: PreStepRequest, next_: Next[PreStepDecision]) -> PreStepDecision:
-        """`agent/pre-step`: before a root agent's step, see that each manual
-        whose host is `eager` has one — so its index is being built before the
+        """`agent/pre-step`: before a root agent's step, start each manual's
+        `eager` background tools once — so its index is being built before the
         model asks for it. After the workspace row's listener, which is what
-        gives the agent the tree the host is started in."""
+        gives the agent the tree the run works on. Started, not waited for: the
+        step is not the run's to hold up."""
         if not request.session.header.is_subagent:
             agent = request.agent
             for name, manual in list(self.manuals.items()):
-                if manual.host is None or not manual.host.eager:
+                background = manual.background
+                if background is None or not background.eager:
                     continue
                 if (name, agent.id) in self.warmed:
                     continue
                 self.warmed.add((name, agent.id))
-                # Started, not waited for: the step is not the host's to hold up.
-                await self._host_for(name, agent, warm=True, wait=False)
+                if (name, agent.id) not in self.runs:
+                    await self._start(
+                        name, manual, agent, [(tool, {}) for tool in background.tools]
+                    )
         return await next_()
 
     # ------------------------------------------------------------- the tool --
@@ -837,6 +915,10 @@ class UtcpSeam:
         outputs: dict[str, Any] = tool.outputs.model_dump(by_alias=True, exclude_none=True)
         declared = value_schema(outputs) if manual.envelope else outputs
         confined = tool.tool_call_template.call_template_type == "cli"
+        background = manual.background
+        # A background tool answers in `ph.toolcli`'s envelope: the row runs its
+        # command itself and reads what a `call` prints.
+        in_background = background is not None and own in background.tools and manual.envelope
 
         async def execute(args: object, run: ToolRunContext) -> object:
             arguments = dict(as_obj(args))
@@ -846,13 +928,13 @@ class UtcpSeam:
             if violations:
                 raise HarnessError("; ".join(violations), UTCP_BAD_ARGUMENTS)
             owner = None if run.agent is None else self.owner_of(run.agent)
+            if in_background and owner is not None:
+                answer = await self._in_background(
+                    name, manual, own, arguments, run, owner, timeout_ms=budget
+                )
+                return self._unwrapped(utcp_name, name, manual, answer, run, owner)
             call = self._call(
-                manual,
-                timeout_ms=budget,
-                agent=run.agent,
-                owner=owner,
-                signal=run.signal,
-                host=await self._host_for(name, owner),
+                manual, timeout_ms=budget, agent=run.agent, owner=owner, signal=run.signal
             )
             try:
                 with calling(call):
@@ -864,7 +946,7 @@ class UtcpSeam:
             except Exception as error:
                 raise HarnessError(f"{utcp_name} failed: {error}", UTCP_FAILED) from error
             if manual.envelope:
-                return self._unwrapped(utcp_name, answer, run, elsewhere=call.root)
+                return self._unwrapped(utcp_name, name, manual, answer, run, owner)
             mismatches = validate_json_schema_value(declared, answer)
             if mismatches:
                 # The usual cause is a failure: the `cli` protocol ignores exit
@@ -895,7 +977,13 @@ class UtcpSeam:
         )
 
     def _unwrapped(
-        self, name: str, answer: object, run: ToolRunContext, *, elsewhere: Path
+        self,
+        name: str,
+        manual_name: str,
+        manual: Manual,
+        answer: object,
+        run: ToolRunContext,
+        owner: AgentHandle | None,
     ) -> object:
         """An envelope's `value`, presented with its `text` as the content.
 
@@ -906,9 +994,10 @@ class UtcpSeam:
         edits. A failure is raised with the tool's own code
         (`ph.toolcli.read_envelope`).
 
-        `elsewhere` is where the command ran. When that is not the asking agent's
+        The command ran in `owner`'s tree. When that is not the asking agent's
         own root — a child asking the index of the tree it shares — the text says
-        so, because the paths in it start there."""
+        so, because the paths in it start there. And while a run for that tree is
+        going, the text says how far it has got (`working`)."""
         try:
             value, text = read_envelope(answer)
         except ValueError as error:
@@ -916,8 +1005,12 @@ class UtcpSeam:
                 f"{name} did not answer with an envelope: {_clip(answer)}", UTCP_BAD_ANSWER
             ) from error
         if text is not None:
+            elsewhere = self._tree(manual, run.agent, owner)
             if elsewhere != self.ctx.require(FS).root_for(run.agent):
                 text += f"\n[Paths here are relative to {elsewhere}, the tree this was built from.]"
+            working = self.working(manual_name, owner)
+            if working is not None:
+                text += f"\n{working}"
             run.present(value, text_content(text))
         return value
 
@@ -962,17 +1055,55 @@ def _object_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return {"type": "object", "properties": {}, **schema}
 
 
-def _sockets() -> Path | None:
-    """Where hosts listen: a directory of `$PH_RUNTIME`, made owner-only — or
-    `None` on a deployment with no usable runtime directory, which then runs
-    every call alone. Under the runtime root because a socket's address is short
-    and this path is, and because what is there does not outlive a reboot."""
+def _read_line(run: _Run, line: str) -> None:
+    """One line of a run's stderr: its progress, or — anything else — words kept
+    in case they are its last."""
     try:
-        directory = resolve_roots().ensure_runtime().runtime / "utcp"
-        directory.mkdir(mode=0o700, exist_ok=True)
-    except (RuntimeDirError, OSError):
-        return None
-    return directory
+        run.progress = Progress.model_validate_json(line)
+    except ValueError:
+        if line.strip():
+            run.stray.append(line.strip()[:_CLIP])
+            log.debug("ph_utcp: %s wrote: %s", run.name, line.strip()[:_CLIP])
+
+
+def _answer_of(result: ShellResult, what: str) -> object:
+    """The one object a `ph.toolcli` command printed, for a command this row ran
+    itself. One that printed anything else failed before it could answer."""
+    if result.canceled:
+        raise Canceled("the UTCP command was canceled")
+    if result.timed_out:
+        raise HarnessError("the UTCP command ran past its time and was stopped", UTCP_TIMEOUT)
+    try:
+        answer: object = loads(result.stdout)
+    except ValueError as error:
+        raise HarnessError(
+            f"{what} did not answer (exit {result.exit_code}): "
+            f"{_clip(result.stdout.strip() or result.stderr.strip() or 'it printed nothing')}",
+            UTCP_BAD_ANSWER,
+        ) from error
+    return answer
+
+
+def _unscrubbed(names: Sequence[str], subprocess: SubprocessService | None) -> list[str]:
+    """What to say of each variable a manual passes by name whose name the
+    deployment's environment scrub does not drop.
+
+    `pass_env` is how a credential reaches a manual's commands and no other:
+    every other command — an agent's `bash` — starts from the scrubbed
+    environment. But the scrub goes by a variable's name, and one it does not
+    match is in every command's environment already; passing it protects
+    nothing, and a person should know."""
+    if subprocess is None:
+        return []
+    marks = ", ".join(subprocess.scrub.marks)
+    return [
+        f"${name} is passed to its commands by name, and the deployment's environment "
+        "scrub does not drop that name — so every command an agent runs has it already. "
+        f"Name it so the scrub matches it ({marks}), or add a mark for it to "
+        "`subprocess-local`'s `scrub`"
+        for name in names
+        if not subprocess.scrub.drops(name)
+    ]
 
 
 def _made(paths: Sequence[str], root: str) -> tuple[list[str], list[str]]:
@@ -1033,7 +1164,7 @@ async def apply(ctx: Context, config: Config) -> None:
         return close
 
     await ctx.effect(client, label="utcp-client")
-    seam = UtcpSeam(ctx=ctx, config=config, client=held[0], socket_dir=_sockets())
+    seam = UtcpSeam(ctx=ctx, config=config, client=held[0])
     ctx.provide(UTCP, seam)
     for manual in config.manuals:
         await seam.add(manual)
@@ -1050,5 +1181,5 @@ async def apply(ctx: Context, config: Config) -> None:
     contribute(ctx, Diagnostic(id="utcp", title="UTCP tools", order=62, read=seam.report))
     ctx.on("agent/pre-step", seam.eager)
     contribute_item(
-        ctx, TUI_STATUS, StatusField(id="utcp-hosts", read=seam.reading, order=70), label="utcp"
+        ctx, TUI_STATUS, StatusField(id="utcp-runs", read=seam.reading, order=70), label="utcp"
     )

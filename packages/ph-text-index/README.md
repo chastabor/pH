@@ -26,10 +26,9 @@ choice, and it decides what you install:**
 |---|---|---|
 | a model on this machine (`text-index-local`, the default) | `ph-text-index[local]` | `sentence-transformers` and torch, about 4.2 GB with the default CUDA wheels, and the model's weights (90 MB for the default) |
 | an embeddings server or API (`text-index-endpoint`) | `ph-text-index` | turbovec and numpy; nothing is loaded here |
-| one of a phern session's model routes (`text-index-adapter`) | `ph-text-index`, inside phern | the same; only a session can use it |
 
 **With phern**, `uv tool install 'phern[local]'` is the first row and
-`uv tool install phern` the other two. The `rlm-indexed` profile mounts the
+`uv tool install phern` the second. The `rlm-indexed` profile mounts the
 tools with the local model.
 
 **By itself**, for a shell or for another harness:
@@ -93,12 +92,13 @@ phern --profile llama --provider llama --model <model> \
    -p "index docs/ then tell me how the workspace seam decides a containment tier"
 ```
 
-The index is built for you: a host is started at the agent's first step and
-indexes the row's `index` scope in the background (see "Where the tools run").
+The index is built for you: before the agent's first step an indexing run is
+started over the row's `index` scope, in the background (see "Where the tools
+run").
 `/text-index status` and `/text-index install` ask the command about its model,
 and `phern doctor` reports the embedder, its limit and where the index is.
 Another embedder is another row in place of `text-index-local`: see "An endpoint
-instead of a local model" and "One of the session's own model routes".
+instead of a local model".
 
 ### From a command line
 
@@ -119,7 +119,6 @@ ph-text-index status     # is the model downloaded? what is indexed?
 | `status` | the embedder, whether its model is downloaded, its limit, and what the index holds |
 | `install` | fetch and load the model now; an endpoint has nothing to fetch |
 | `manual` | the UTCP manual; `manual --registration` is what a harness registers |
-| `serve --socket PATH` | stay up and answer `call`s on a unix socket, with the model loaded once |
 
 **A call prints one JSON object** and nothing else: `{"ok": true, "value": ...,
 "text": ...}`, or `{"ok": false, "error": {"code": ..., "message": ...}}`.
@@ -127,18 +126,32 @@ ph-text-index status     # is the model downloaded? what is indexed?
 model to read; `--format text` prints only that. The exit code is 0, or 1 for a
 failure, and the failure is in the object either way.
 
-**Each call by itself loads the model first**: four to six seconds with MiniLM
-on disk, measured here, against 0.3 for a search a host answers. For more than
-a query or two, keep one up:
+**Every call is one command.** Nothing stays up between calls and nothing
+listens on a socket. Two flags of `call` are for a run that takes a while:
 
-```bash
-ph-text-index serve --socket /tmp/text-index.sock &
-export PH_TOOL_HOST=/tmp/text-index.sock
-ph-text-index call text_search --query "how a worktree is cleaned up" --format text
-```
+- **`--progress`** reports how far the run has got on stderr, as JSONL — one
+  JSON object a line.
+  `{"state":"working","done":120,"total":539,"what":"documents"}` at most every
+  0.5 s, then exactly one last line: `"state":"done"` with `changed` and a
+  `note`, `"state":"busy"` when another run held the index and this one did
+  nothing, or `"state":"failed"` with a `code` and a `failure`. A stream that
+  ends with no last line is a command that was killed or died. stdout is
+  unchanged: one object.
+  - **Every line says what the run has spent so far**, the last line the whole
+    of it: `"spent":{"requests":40,"texts":242,"tokens":66774}`. `requests`
+    and `texts` are what the embedder was sent; `tokens` is what the server's
+    `usage` reported, and is absent where it reports none — a local model
+    costs nothing and counts no tokens. A run that failed says what it spent
+    before it did. `text_index`'s result says it too: `spent`, and a line
+    ("Spent embedding: 40 requests, 242 texts, 66,774 tokens.").
+- **`--wait SECONDS`** is how long the call waits for another run that holds
+  the index, over the row's `wait_s`. `--wait 0` answers at once.
 
-It leaves by itself after fifteen idle minutes (`--idle SECONDS`), and a call
-that finds nobody on the socket runs by itself.
+**With the local model, every call loads it first**: about 3.9 s for a search
+with MiniLM on disk, and 6 s under `bwrap`. No process holds a model between
+calls. For more than a query or two, serve the model from a local llama.cpp
+and name it with `text-index-endpoint`: the command then loads nothing, and
+that is the fast local path (see "An endpoint instead of a local model").
 
 **Settings** are the session rows' own, by row id, read from three places with
 the later winning: `$PH_HOME/tools/ph-text-index.yaml`, then `$PH_TOOL_CONFIG`
@@ -155,7 +168,7 @@ text-index-endpoint:                 # leave this out for the local model
   model: nomic-embed-text-v1.5
 ```
 
-**Where things go** is said by five variables, none of which has to be set:
+**Where things go** is said by four variables, none of which has to be set:
 
 | variable | default | what the command keeps there |
 |---|---|---|
@@ -163,7 +176,6 @@ text-index-endpoint:                 # leave this out for the local model
 | `PH_CACHE` | `$XDG_CACHE_HOME/ph`, so `~/.cache/ph` | the model's weights, the log, and the index when nothing else says where |
 | `PH_TOOL_STATE` | unset | the directory for the index; `--state DIR` is the same |
 | `PH_TOOL_CONFIG` | unset | row settings as one JSON object, for a caller that writes no file |
-| `PH_TOOL_HOST` | unset | the socket of a `serve` to ask instead of running the call here |
 
 `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`, `OMP_NUM_THREADS` and
 `CUDA_VISIBLE_DEVICES` reach the local model as you set them. See "On disk" for
@@ -181,8 +193,8 @@ ph-text-index manual --registration
 ```json
 {"name": "ph_text_index",
  "call_template_type": "cli",
- "commands": [{"command": "/path/to/python -m ph_text_index manual"}],
- "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_TOOL_STATE", "PH_TOOL_HOST"]}
+ "commands": [{"command": "/path/to/python -P -m ph_text_index manual"}],
+ "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_TOOL_STATE"]}
 ```
 
 The harness runs that command once to read the manual, and from then on runs the
@@ -218,7 +230,8 @@ What a harness needs to know:
   A client prefixes each tool with the manual's name.
 - **The registration names this install.** Its command is the absolute path of
   the interpreter the package is installed in, so it needs no `PATH`, and it is
-  printed again after the package moves.
+  printed again after the package moves. `-P` keeps the working directory off
+  the module path, so no file of the tree is imported by the command.
 - **The workspace is the directory the command is started in.** Start the
   harness in the tree, or have it run its commands there. A `working_dir` on
   the registered template covers reading the manual and not the tool calls, so
@@ -235,13 +248,20 @@ What a harness needs to know:
   under `$PH_CACHE`, keyed by the workspace. A harness whose agents work in
   separate trees needs nothing more; one that wants an index per agent sets
   `PH_TOOL_STATE` for each.
-- **Start a host if the model is local.** A call by itself loads the model
-  every time. Start `ph-text-index serve --socket PATH --warm text_index` in
-  the tree and set `PH_TOOL_HOST=PATH` on the calls: the model is loaded once,
-  the tree is indexed in the background, `text_index` answers
-  `state: indexing` after `wait_s` while the run goes on, and `text_search`
-  answers meanwhile from what is indexed so far. Keep the path short; a unix
-  socket's is limited to about a hundred characters.
+- **A local model is loaded by every call.** Each call is one command and
+  nothing holds the model between them: about 3.9 s a search with MiniLM. A
+  harness that searches often names `text-index-endpoint` and a local
+  llama.cpp, and the command loads nothing.
+- **One indexing run at a time.** A `text_index` call is one command and
+  finishes before it answers. One made while another run holds the index waits
+  `wait_s` for it and then answers `state: indexing`: another run is building
+  the index and this call did nothing. `text_search` never waits. It answers
+  from what the run has saved so far, with `indexing: true` in its value.
+- **Progress is for a harness that starts the command itself.** A stock UTCP
+  client merges stderr into stdout, so no template of the manual carries
+  `--progress`. A harness that wants indexing to go on in the background runs
+  `ph-text-index call text_index --progress` in the tree, reads stdout and
+  stderr apart, and lets its model call `text_search` meanwhile.
 - **In a sandbox, three places are written**: the index's directory, the
   weights under `$PH_CACHE/models` and `$PH_CACHE/logs`. Nothing in the tree
   is. A local model needs the network only to download, so run
@@ -253,8 +273,6 @@ What a harness needs to know:
   tool's template: set the variable where the harness runs and the client hands
   it across. The manual holds the name and never the key. Settings a harness
   changes after it read the manual need the manual read again.
-- **`text-index-adapter` is phern's.** It asks a running phern session to embed
-  and refuses anywhere else; use the local model or an endpoint.
 - **The model's instructions ship with the package**, as
   `ph_text_index/skills/text-search/SKILL.md`: how to scope a search, and that a
   score is not a confidence.
@@ -269,39 +287,53 @@ In the `ph-text-index` command's own process — started, in a pH session, by
 that agent's sandbox. So a child agent in its own worktree indexes that worktree,
 and the harness process never loads the model, torch or turbovec.
 
-**One process stays up for each tree**, and holds the model once it has loaded
-it. Run for one call the command loads the model before it embeds the question —
-six seconds with MiniLM cached, measured here; answered by the host a search
-takes 0.3. `ph-utcp` keeps the host (`ph-text-index serve`) running for the
-agent whose tree it is, starts it as it starts every command — in that agent's
-workspace, under its sandbox — and ends it with the agent. It leaves by itself
-after fifteen idle minutes, and the next call starts another.
+**Every call is one command, and nothing stays up.** With `text-index-local`
+that means every call loads the model before it embeds: about 3.9 s for a
+search by itself with MiniLM on disk, and 6 s under `bwrap`. A deployment that
+searches often serves the model from a local llama.cpp and mounts
+`text-index-endpoint`, which loads nothing in the command.
 
 **A child builds its own index only when it has a tree it writes for keeps.** A
 child in its parent's checkout, or one granted only to read the project — every
 child of a read-only fan-out, which is what `rlm-indexed` runs — asks its
-parent's index through its parent's host: it embeds nothing and holds no model,
-and its results say which tree their paths belong to. A child with a worktree or
-an overlay of its own has files that diverge, so it gets its own index and host,
-at its first call.
+parent's index: it embeds no document, and its results say which tree their
+paths belong to. A child with a worktree or an overlay of its own has files
+that diverge, so it gets its own index, at its first call.
 
-**Indexing does not hold a call up.** In a host `text_index` waits `wait_s` (five
-seconds) for its run and then answers `state: indexing` with how far it has got,
-while the run goes on in the background. `text_search` answers meanwhile from
-what is indexed so far and says so: "Not finished indexing: 120 of 539
-documents". The footer shows the count moving, and when the run ends the agent
-is told, with a note that waits for its next step and starts no turn.
+**Indexing does not hold a call up.** A `text_index` call starts a run in the
+background, or joins the same request already going: a job of the agent whose
+tree it is, under that agent's sandbox. The call waits `wait_s` (five seconds)
+for it. A run that ends in time is the call's answer. Past that the call
+answers `state: indexing` with a line saying how far the run has got ("[The
+text index is still working: 120/539 documents.]"), and the run goes on. The
+footer shows the count moving, and when the run ends the agent is told, with a
+note that waits for its next step and starts no turn.
 
-**It starts unasked.** When a root session's agent takes its first step the host
-is started and indexes the row's `index` scope in the background, so the index
-is being built before anything asks for it. `index.on_mount: false` leaves
-indexing to `text_index` calls.
+**One run at a time for each index.** A run holds the index's writer lock while
+it works. `state: indexing` means another run holds the index and this call did
+nothing: the totals beside it are what the index holds so far. A different
+request made during a run is not queued, so call `text_index` again once the
+run has ended.
+
+**A search never waits.** `text_search` opens the index as a reader: it takes
+no lock and writes neither the vectors nor the sidecar. During a run it answers
+from what the run has saved so far, a save every `save_every_s`, and says so:
+its value's `indexing` is `true` and its text says "Not finished indexing".
+
+**It starts unasked.** Before a root session's agent takes its first step, one
+`text_index` run is started over the row's `index` scope, so the index is being
+built before anything asks for it. The agent is told of its end only if the run
+changed the index. `index.on_mount: false` leaves indexing to `text_index`
+calls.
 
 **A run that is stopped keeps what it embedded.** It saves every `save_every_s`
 (thirty seconds) and on the way out, and each document carries a digest of its
-text — so the next run, in the next host or after a restart, embeds only what the
-last one had not saved. The digest is also what says "unchanged" in a tree with
-no git and no jj, where every call used to embed every document again.
+text — so the next run, in the same session or after a restart, embeds only what
+the last one had not saved. The digest is also what says "unchanged" in a tree
+with no git and no jj, where every call used to embed every document again. A
+run that fails or is killed is told to the agent as stopped: with the tool's
+own sentence, or, when the command ended with no last line, with its exit code
+and its last words.
 
 **`permissions-fs` does not screen these tools' reads.** Its rules govern calls
 through a session's `ctx.fs`, and a command is not one. What bounds the command
@@ -422,7 +454,9 @@ concession to a paragraph whose meaning depends on the one before it.
 
 `index.tvim` is turbovec's own format, written with `sync()` — incremental, one
 fsync per call, crash-safe at any byte. `chunks.json` is the sidecar: path, line
-span and the passage text.
+span and the passage text, and the embedder log — what the embedder said of
+itself each time an index run found the answer changed; see "What the embedder
+said".
 
 **The sidecar holds the text on purpose.** Storing only pointers would keep the
 file small and make every hit a second tool call before the model learns whether
@@ -455,10 +489,59 @@ that drops what that tree no longer has.
   workspace has been gone a week is removed on the next change
   (`ph.workspace_caches`).
 
-**One writer at a time.** Processes that share a directory share its lock. A change is made under `writer.lock` in it, starting from what is on
-disk: a copy another writer has changed since it was loaded is loaded again. A
-second writer waits for the first. A search loads a changed copy again only when
-the lock is free, and otherwise answers from the copy it has.
+**One writer at a time.** Processes that share a directory share its lock. A
+change is made under `writer.lock` in it, starting from what is on disk: a copy
+another writer has changed since it was loaded is loaded again. A second writer
+waits `wait_s` for the first and then answers `state: indexing`. A search takes
+no lock: it reads what is saved, and every file a writer saves is replaced
+whole.
+
+### What the embedder said
+
+The sidecar keeps an embedder log, `embedder`, oldest first. It is written in
+the same save as the passages, under the same writer lock, so the log and what
+it was used to cut never part:
+
+```json
+"embedder": [
+  {"askedOf": "http://127.0.0.1:8080", "askedAtMs": 1762905600000,
+   "reported": {"n_ctx": 2048, "total_slots": 4},
+   "limit": {"tokens": 2048, "source": "server"},
+   "learned": {"tokens": 512, "density": 2.7}},
+  {"askedOf": "http://127.0.0.1:8080", "askedAtMs": 1763510400000,
+   "reported": {"n_ctx": 8192, "total_slots": 4},
+   "limit": {"tokens": 8192, "source": "server"},
+   "learned": {}}
+]
+```
+
+| field | what it holds |
+|---|---|
+| `askedOf` | the address that was asked; absent for a model in the command's own process |
+| `askedAtMs` | when this answer was first given, in milliseconds since the epoch |
+| `reported` | what a server said, as it said it: `n_ctx`, `total_slots`, `model_path` and `model_alias` of a llama.cpp's `/props`, where present |
+| `limit` | how long an input it reads, and who said so: `configured`, `model` or `server` |
+| `learned` | what refusals taught: `tokens`, a limit lower than the one reported, and `density`, the bytes of this corpus that make a token |
+
+- **The newest entry is the one used.** The ones before it say what changed,
+  and when. Which embedder the index belongs to is the sidecar's `model`, as
+  it always was, and an index of another model is refused.
+- **An index run that embeds asks.** `text-index-endpoint` asks the server's
+  `/props` unless `max_tokens` is set; `text-index-local` reads the length of
+  the model the run has loaded. A run that embeds nothing asks nothing. An
+  answer that says what the newest entry says is not added again.
+- **A changed answer is a new entry, and `learned` starts over.** A server can
+  be moved or given another window, and what its refusals taught was learned
+  under the old answer. The run's result says so in `embedder_changed`: "The
+  embedder now reads 8192 tokens (the server's); when last asked it read 2048
+  tokens (the server's)." An entry of another address is not used.
+- **A search reads the newest entry and asks nothing.** Each search is a
+  command of its own, and would otherwise put a question to the server every
+  time. A search writes nothing: the log is an index run's to write, under
+  its lock, so what a refused question teaches is that search's alone. A search
+  of an index that holds nothing embeds nothing: it answers at once.
+- **`status` reads it.** `ph-text-index status` and `/text-index status` say
+  the limit from the newest entry, without loading a model or asking a server.
 
 ### Calibration
 
@@ -566,7 +649,7 @@ pip install 'ph-text-index[nomic]'   # einops, which its remote code imports
 
 **`trustRemoteCode` is a trust decision, not a compatibility flag.** It
 downloads Python from the model's repository — here from a *second* repository
-via `auto_map` — and executes it in the harness process. It is off by default
+via `auto_map` — and executes it in the command's process. It is off by default
 and nothing infers it from a load failure, because "retry with arbitrary code
 execution enabled" is not a fallback. It is deliberately *not* part of the index
 identity: it governs what may load, not where a vector lands, so granting or
@@ -604,7 +687,6 @@ and each is as long as both allow:
 |---|---|---|
 | `text-index-local` | the model's own length; `max_tokens` can lower it | the model's tokenizer, exactly |
 | `text-index-endpoint` | `max_tokens`, else a llama.cpp's `/props` | its bytes, three to a token |
-| `text-index-adapter` | `max_tokens`, else the route's window | the same |
 
 - **Packed in the embedder's unit.** `max_chars` says how big a passage should
   be; the limit says how much the embedder reads, in its tokens, and a
@@ -629,7 +711,9 @@ and each is as long as both allow:
   too long is packed with less room and sent again. Where the refusal says in
   numbers what it takes and how long the input was — a llama.cpp and OpenAI
   both do — the first is the limit for the rest of the run and the second is
-  the corpus's own density, so one refusal settles it. One that names no number
+  the corpus's own density, so one refusal settles it. Both are kept in the
+  index (`learned`, in the embedder log), so the next run does not spend a
+  refusal to learn them again. One that names no number
   halves the document's passages and teaches nothing about the next. A document
   that will not fit even at 16 tokens is skipped, with the embedder's words, and
   listed.
@@ -644,26 +728,26 @@ and each is as long as both allow:
   and the answer says how many of its characters were searched. A local model
   did that without a word, and a server refused the search.
 - **`phern doctor` and `/text-index status` say the limit.** `phern doctor`
-  shows a setting, or the route's window for `text-index-adapter`; a model's own
-  length or a server's is learned by asking, which of a local model means
-  loading it, so `/text-index status` shows what the last run to embed found.
+  shows a setting; a model's own length or a server's is learned by asking,
+  which of a local model means loading it, so `/text-index status` shows what
+  the last run to embed found and kept in the embedder log.
 
 What a server reports is not always what it takes. A llama.cpp's `/props` gives
 its window per slot — `-c 8192` with four slots reports 2,048 — and it refuses
 an embedding longer than its *batch* (`-b`, 512 by default), which `/props` does
-not mention. The index learns the real number from the first refusal; to use a
-model's whole length, start the server with `-b` and `-ub` as large as the
-window. A hosted API has nothing to ask, so write `max_tokens` there (8191 for
-OpenAI's embedding models): the route's window is its chat model's.
+not mention. The index learns the real number from the first refusal and keeps
+it; to use a model's whole length, start the server with `-b` and `-ub` as
+large as the window. A hosted API has nothing to ask, so write `max_tokens` there (8191 for
+OpenAI's embedding models).
 
 Changing `max_tokens` cuts every document again. Passages already in an index
 stay as they were cut until their document changes.
 
 ## An endpoint instead of a local model
 
-`text-index-endpoint` is an embedder that is somebody else's process: the
-OpenAI-compatible `/v1/embeddings` request, so one row covers a local server —
-llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place of
+`text-index-endpoint` is the remote embedder, one that is somebody else's
+process: the OpenAI-compatible `/v1/embeddings` request, so one row covers a
+local server — llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place of
 `text-index-local`:
 
 ```yaml
@@ -682,6 +766,9 @@ llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place of
 
 - **No torch.** Nothing is loaded on this machine, so a deployment that embeds
   this way installs `ph-text-index` without the `[local]` extra.
+- **The fast local path.** Every call is one command, and with
+  `text-index-local` each one loads the model. A local llama.cpp behind this
+  row holds the model instead, and a search loads nothing.
 - **A remote endpoint is sent the text of every document indexed and of every
   question asked.** Writing this row is how a deployment says it means that.
 - **No key is stored.** `api_key_env` names a variable. A command's environment
@@ -691,12 +778,31 @@ llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place of
   which lists it among the variables each tool inherits. A command that finds
   it empty fails with `MISSING_CREDENTIAL` — an adapter's code for the same
   thing — names the variable, and sends nothing.
+- **The key is the tool's alone.** Its value is handed only to this manual's
+  own commands. An agent's `bash` starts from the scrubbed environment and does
+  not have it. Three cases where that does not hold:
+  - **A name the scrub does not match.** The scrub drops a variable whose name
+    contains `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `CREDENTIAL`.
+    One named otherwise is in every command's environment already. `ph-utcp`
+    warns at mount, and says so in `phern doctor`, of any manual that passes
+    such a variable — `api_key_env` among them.
+  - **No sandbox backend.** Nothing holds then: `bash` runs as the same user
+    as the harness and can read the harness's own environment.
+  - **A key kept in a readable file.** A shell profile or a `.env` that the
+    agent's commands can read is readable by `bash`.
 - **A confined agent needs the host allowed.** A sandboxed command has the
   network its deployment allows: name the endpoint's host and port in
   `sandbox-allow` (`hosts: ["127.0.0.1:8080"]`). One that is not allowed, or is
   down, fails with `TEXT_INDEX_ENDPOINT_UNREACHABLE`; a server that answers with
   an error fails with `TEXT_INDEX_ENDPOINT_FAILED` and the server's own words, or
   `CONTEXT_WINDOW_EXCEEDED` when the words say an input was too long.
+- **An allowed host is allowed to every confined command.** `sandbox-allow` is
+  the deployment's, not this tool's: an agent's `bash` reaches the same host.
+  A hosted API refuses it for want of the key. A server that needs no key
+  answers `bash` too.
+- **What it spends is not recorded.** The request is the command's own, so
+  nothing an embedding costs is in a session's log or charged to a goal's
+  budget.
 - **The index is keyed by the model, the prefixes and an asked-for
   `dimensions`** — not by the address, so moving a server keeps the index. A
   hosted model that changes under an unchanged name cannot be told apart beyond
@@ -705,6 +811,20 @@ llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place of
   one vector space, and a search quietly answered from another would be a
   different index answering. An endpoint that cannot be reached is the answer.
 
+A provider's embeddings API is the same row with its address, the name of its
+key, and its host in `sandbox-allow` (`hosts: ["api.openai.com:443"]`):
+
+```yaml
+- id: text-index-endpoint
+  name: text-index-endpoint
+  config:
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    api_key_env: OPENAI_API_KEY        # the NAME of the variable that holds the key
+    dimensions: 512                    # optional, where the model can shorten its vectors
+    max_tokens: 8191                   # what the embedding model reads; an API has nothing to ask
+```
+
 From a shell, `$PH_HOME/tools/ph-text-index.yaml` names the same row:
 
 ```yaml
@@ -712,57 +832,6 @@ text-index-endpoint:
   base_url: http://127.0.0.1:8080/v1
   model: nomic-embed-text-v1.5
 ```
-
-## One of the session's own model routes
-
-`text-index-adapter` embeds through a provider the session already has a route
-to, named the way a session names a model:
-
-```yaml
-- id: text-index-local
-  disabled: true
-- id: text-index-adapter
-  name: text-index-adapter
-  config:
-    provider: openai                   # a provider one of this profile's adapter rows registers
-    model: text-embedding-3-small
-    dimensions: 512                    # optional, where the model can shorten its vectors
-    max_tokens: 8191                   # what the embedding model reads; the route's window is its chat model's
-```
-
-- **The key stays in the harness.** The tools run in a command inside the
-  calling agent's sandbox, and everything that command holds is in reach of the
-  agent's own tools. So the route's credential is not handed to it: the command
-  sends its passages to the session over a unix socket, the session's adapter
-  embeds them — resolving the credential at its own edge, through
-  `ctx.credentials`, as it does for a model call — and vectors come back.
-  Nothing an agent can read, print or put in a model's context ever held the key.
-- **A confined agent needs no network for it.** The session asks the provider;
-  the command asks only the session, on a socket under `$PH_RUNTIME/utcp` that
-  the rows grant. No host goes in `sandbox-allow`.
-- **A route whose adapter cannot embed is refused at mount**, by name. phern's
-  OpenAI-compatible and Google adapters embed (`ph.llm.adapter.EmbeddingAdapter`,
-  `ctx.llm.embed`); the Anthropic API has no embeddings call.
-- **A failure is the adapter's own.** A key that is not set fails the tool with
-  `MISSING_CREDENTIAL` and the variable's name, as a model call would; a server that will not embed with its own words. `phern doctor` shows
-  the last one, and how much the session has embedded.
-- **What it spends is in the log.** An embedding is not a turn's request, so
-  each one is its own record, `llm/embedded`, in the log of the agent whose
-  index it is: the route, how many texts, and the tokens the provider counted. A
-  request that failed is `llm/embedding-failed`, with its code and reason. A
-  sub-agent's account includes them, and a goal's budget charges them when its
-  `tokenSources` names `embedding`; by default it charges the agent's own
-  replies and nothing else. A child that shares its parent's index spends on
-  its parent's account, since the index and the host that embeds are the
-  parent's.
-- **The provider is sent the text of every document indexed and every question
-  asked**, as it is sent the conversation.
-- **Only from a session.** `ph-text-index` typed at a shell has no session to
-  ask and says so; from a shell use `text-index-local` or `text-index-endpoint`.
-
-`text-index-endpoint` reaches the same servers without a route, with the key in
-the command. Use the adapter when the key matters; use the endpoint when the
-embeddings server is local and wants none.
 
 ## Where the weights live, and installing on purpose
 

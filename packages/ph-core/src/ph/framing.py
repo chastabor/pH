@@ -1,10 +1,8 @@
 """JSONL framing over a byte stream: one JSON object a line, `\\n`-terminated, UTF-8.
 
-The daemon's wire, the session log's format, what `--mode rpc` speaks over stdio
-— and the wire between a pH session and the tool commands it runs: a `call`
-asking a running host (`ph.toolcli`), a confined command asking its session for
-vectors (`ph_text_index`). One format, parsed one way, so a client, a log reader
-and a peer agree about where a message ends (I-7).
+The daemon's wire, the session log's format, and what `--mode rpc` speaks over
+stdio. One format, parsed one way, so a client, a log reader and a peer agree
+about where a message ends (I-7).
 
 **Bounded on purpose.** A stream socket hands you bytes, not messages, so a peer
 that never sends a newline is a peer that grows your buffer until the process
@@ -16,8 +14,7 @@ dies. `MAX_LINE` turns that into a refused connection with a reason.
 from __future__ import annotations
 
 import json
-import socket
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +27,6 @@ from .json import dumps
 __all__ = [
     "MAX_LINE",
     "FramingError",
-    "answer_one",
-    "ask",
     "listening",
     "read_frames",
     "write_frame",
@@ -109,30 +104,12 @@ async def read_frames(stream: ByteStream) -> AsyncIterator[dict[str, Any]]:
         yield _parsed(line)
 
 
-async def answer_one(
-    stream: ByteStream, respond: Callable[[dict[str, Any]], Awaitable[Mapping[str, object]]]
-) -> None:
-    """Read one request from `stream`, send what `respond` makes of it, and close.
-
-    For a server that answers one request a connection — a tool host, a session
-    embedding for a command. A peer that goes away, or sends something that is
-    not a frame, ends its own connection and nothing else: there is nobody left
-    to answer, and the server goes on serving the next."""
-    try:
-        async with stream:
-            async for frame in read_frames(stream):
-                await write_frame(stream, await respond(frame))
-                return
-    except (FramingError, anyio.BrokenResourceError, anyio.ClosedResourceError):
-        pass
-
-
 async def listening(path: str | Path, *, timeout: float | None = None) -> bool:
     """Whether something answers at `path` right now.
 
     A connect and an immediate close — the only test that tells "a socket file
-    exists" from "a server is behind it", which the daemon's launcher and a tool
-    host both decide on. One copy, so a change here reaches both. `timeout`
+    exists" from "a server is behind it", which the daemon's launcher and its
+    server both decide on. One copy, so a change here reaches both. `timeout`
     bounds the connect, for a listener that is hung."""
     try:
         with anyio.fail_after(timeout):
@@ -143,37 +120,13 @@ async def listening(path: str | Path, *, timeout: float | None = None) -> bool:
     return True
 
 
-def ask(
-    path: str | Path, payload: Mapping[str, object], *, connect_timeout: float | None = None
-) -> dict[str, Any]:
-    """Send one request over the unix socket at `path` and return its one answer.
-
-    Blocking, for a caller with no event loop of its own — a command deciding
-    whether a host can answer it before it mounts anything — or on a worker
-    thread. `connect_timeout` bounds reaching the server and nothing after: how
-    long the answer may take is the caller's to say, by ending the process.
-
-    :raises OSError: when nothing answers at `path`, or the connection drops.
-    :raises FramingError: when the answer is not one frame.
-    """
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as link:
-        link.settimeout(connect_timeout)
-        link.connect(str(path))
-        link.settimeout(None)
-        link.sendall(f"{dumps(payload)}\n".encode())
-        with link.makefile("rb") as answers:
-            line = answers.readline(MAX_LINE + 1)
-    if len(line) > MAX_LINE:
-        raise FramingError(f"frame exceeds {MAX_LINE} bytes")
-    if not line.strip():
-        raise FramingError("the peer closed without answering")
-    return _parsed(line)
-
-
 def _parsed(line: bytes) -> dict[str, Any]:
     try:
         payload = json.loads(line)
-    except json.JSONDecodeError as error:
+    except (ValueError, RecursionError) as error:
+        # `ValueError` is both of a line's ways not to be JSON: bytes that are not
+        # UTF-8, and text that does not parse. Nesting deep enough to exhaust the
+        # parser is a third, and all three are the peer's to answer for.
         raise FramingError(f"not JSON: {error}") from error
     if not isinstance(payload, dict):
         raise FramingError("a frame must be a JSON object")

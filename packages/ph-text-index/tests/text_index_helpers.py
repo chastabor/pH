@@ -115,15 +115,19 @@ class Endpoint:
     llama.cpp's own sentence."""
     took: list[int] = field(default_factory=list)
     """The longest input, in words, of each embeddings request it answered."""
+    props: int = 0
+    """How many times it was asked what it reads."""
+    refused: int = 0
+    """How many embeddings requests it refused as too long."""
 
 
 @pytest.fixture(name="endpoint")
 def embeddings_server() -> Iterator[Endpoint]:
-    """`endpoint`, to a test: a server that speaks the OpenAI-compatible and the
-    Google embeddings requests, with the suite's hashing embedder behind it. It
-    doubles every vector on the way out — not every server normalizes — and
-    keeps what it was asked, which is how a test sees the key a request carried
-    without the key ever being printed."""
+    """`endpoint`, to a test: a server that speaks the OpenAI-compatible
+    embeddings request, with the suite's hashing embedder behind it. It doubles
+    every vector on the way out — not every server normalizes — and keeps what
+    it was asked, which is how a test sees the key a request carried without the
+    key ever being printed."""
     embedder = HashingEmbedder(dim=96)
     state = Endpoint(url="")
 
@@ -131,25 +135,17 @@ def embeddings_server() -> Iterator[Endpoint]:
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.asked.append({"path": self.path, **body})
-            state.keys.append(
-                self.headers.get("Authorization") or self.headers.get("x-goog-api-key")
-            )
+            state.keys.append(self.headers.get("Authorization"))
             if state.status != 200:
                 self._answer(state.status, {"error": {"message": "the model is loading"}})
                 return
-            if "input" in body:
-                longest = max((len(text.split()) for text in body["input"]), default=0)
-                if state.reads is not None and longest > state.reads:
-                    said = llama_refusal(longest, state.reads)
-                    self._answer(500, {"error": {"code": 500, "message": said}})
-                    return
-                state.took.append(longest)
-            if self.path.endswith(":batchEmbedContents"):
-                # Google's shape: one `content` a request, vectors in order.
-                texts = [one["content"]["parts"][0]["text"] for one in body["requests"]]
-                rows = embedder.encode(texts, query=False) * 2.0
-                self._answer(200, {"embeddings": [{"values": row.tolist()} for row in rows]})
+            longest = max((len(text.split()) for text in body["input"]), default=0)
+            if state.reads is not None and longest > state.reads:
+                state.refused += 1
+                said = llama_refusal(longest, state.reads)
+                self._answer(500, {"error": {"code": 500, "message": said}})
                 return
+            state.took.append(longest)
             vectors = embedder.encode(body["input"], query=False) * 2.0
             # Out of order, as the API allows: `index` is what places a vector.
             data = [
@@ -161,7 +157,9 @@ def embeddings_server() -> Iterator[Endpoint]:
 
         def do_GET(self) -> None:
             if self.path == "/props" and state.window is not None:
-                self._answer(200, {"default_generation_settings": {"n_ctx": state.window}})
+                state.props += 1
+                said = {"default_generation_settings": {"n_ctx": state.window}, "total_slots": 4}
+                self._answer(200, said)
             else:
                 self._answer(404, {"error": {"message": "not found"}})
 

@@ -61,9 +61,7 @@ class Scope(IndexScope):
     for it. The footer says how far it has got and the agent is told when it
     finishes.
 
-    `false` leaves indexing to `code_index` calls. Either way the command that
-    answers the tools stays up between calls: `on_mount` decides only whether it
-    starts unasked."""
+    `false` leaves indexing to `code_index` calls."""
 
 
 class Config(WireModel):
@@ -94,9 +92,9 @@ class Config(WireModel):
     max_files: int = 20_000
     """How many files one `code_index` call will consider."""
     wait_s: float = 15.0
-    """How long `code_index` waits for its run before it answers "indexing" and
-    lets the run go on in the background. Where the tools are answered by a host,
-    which is in a session; a call that runs by itself always waits to the end.
+    """How long a `code_index` call waits on a run before it answers "indexing":
+    on the run a session started for it in the background, and, in the command,
+    on another run that holds the index.
 
     Long enough that an ordinary run — a package, a second run over a tree —
     answers with its counts. What it bounds is the run nobody should sit through:

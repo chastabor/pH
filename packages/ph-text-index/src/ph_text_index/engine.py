@@ -18,7 +18,7 @@ directory the calling agent's sandbox gave it — and `run.agent` is always `Non
 ## The seam and the embedder
 
 `text-index-engine` publishes the seam and the tools; one embedder row claims
-it — `text-index-local-engine`, `-endpoint-engine` or `-adapter-engine`. The
+it — `text-index-local-engine` or `text-index-endpoint-engine`. The
 command always mounts exactly one (`ph.toolcli.ToolCli.providers`), and one that
 cannot mount refuses the command's mount, so here there is no seam without an
 embedder. The rule that a profile with no embedder offers no tools is the
@@ -32,16 +32,18 @@ command's `ctx.fs` is not the session's — `permissions-fs` governs calls throu
 a session's `ctx.fs`, and a command is not one — so what bounds these reads
 there is the calling agent's sandbox, as it bounds `bash`.
 
-## One call, or a host
+## One run at a time, and a search never waits
 
-Run for one call, `text_index` finishes before it answers. Mounted in a host
-(`ph-text-index serve`, `ph.toolcli.TOOL_HOST`) the process outlives the call, so
-the tool answers at once — `state: indexing`, with how far it has got — and the
-run goes on in the background; `text_search` answers meanwhile from what is
-indexed so far, and says the index is still being built. Either way the run
-reports to `progress.json` beside the index, keeps a digest of each document so
-an unchanged one is never embedded twice, and saves as it goes, so a run that is
-stopped keeps what it embedded.
+`text_index` is one command and finishes before it answers. A run holds the
+writer lock while it works, and a second waits its turn for `wait_s`; past that
+it answers `state: indexing` — another run is building this — instead of
+standing behind it. `text_search` takes no lock: it reads what is saved, and
+says while a run is still building the index. A run keeps a digest of each
+document so an unchanged one is never embedded twice, and saves as it goes, so a
+run that is stopped keeps what it embedded and a search during one finds what it
+has saved. Called with `--progress` the command reports how far it has got on
+stderr (`ph.toolcli.reported`), which is how a session shows a run it started in
+the background.
 
 ## A passage fits its embedder
 
@@ -74,8 +76,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import logging
-import os
-from collections.abc import AsyncIterator, Sequence
+from collections import Counter
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -87,26 +89,19 @@ from pydantic import Field
 
 from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plugin
 from ph.indexable import Paragraph, triage
-from ph.json import JsonObject, as_bool
+from ph.json import JsonObject, as_bool, as_int
 from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.adapter import too_long_facts
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, ContentBlock
-from ph.locks import try_file_lock, wait_for_file_lock, waited_file_lock
+from ph.locks import file_lock_held
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService, skipped_lines
+from ph.session import now_ms
 from ph.text import BRIEFLY, count_of, first_lines, one_line
-from ph.toolcli import (
-    AGENT_ENV,
-    TOOL_HOST,
-    BackgroundRuns,
-    Progress,
-    RunProgress,
-    claim_home,
-    state_home,
-)
+from ph.toolcli import RunProgress, claim_home, reported, run_lock, state_home
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
@@ -114,15 +109,14 @@ from ph.workspace_caches import digest
 
 from ._chunk import Chunk, Weight, chunk_paragraphs, head_of
 from ._config import (
-    ADAPTER_ROW,
-    EMBEDDER_ENV,
     ENDPOINT_ROW,
     LOCAL_ROW,
     MISSING_MODEL,
     ROW,
-    AdapterConfig,
     Config,
+    EmbedderRecord,
     EndpointConfig,
+    Learned,
     Limit,
     LocalConfig,
     index_base,
@@ -133,8 +127,9 @@ from ._embed import (
     Embedder,
     EndpointEmbedder,
     LocalWeights,
+    Metered,
     SentenceTransformerEmbedder,
-    SessionEmbedder,
+    Served,
     TokenBounded,
     Vectors,
     weigh_by_bytes,
@@ -147,7 +142,6 @@ __all__ = [
     "Embedder",
     "LocalConfig",
     "TextIndexSeam",
-    "adapter",
     "apply",
     "endpoint",
     "local",
@@ -268,12 +262,11 @@ class TextIndexSeam:
     _guards: dict[Path, anyio.Lock] = field(default_factory=dict)
     """Per index directory, what keeps one use of the copy from another's.
 
-    In a host a run and a search share one copy: the run adds a document's
-    passages in a worker thread while a search scores against the same index in
-    another. Held around each such step and never across an embedding, so a
-    search waits for one document's bookkeeping and not for a model."""
-    runs: BackgroundRuns = field(default_factory=BackgroundRuns)
-    """The indexing runs, by index home, and how far each has got."""
+    Where one mount both indexes and searches, a run and a search share one
+    copy: the run adds a document's passages in a worker thread while a search
+    scores against the same index in another. Held around each such step and
+    never across an embedding, so a search waits for one document's bookkeeping
+    and not for a model."""
     density: float = BYTES_PER_TOKEN
     """How many bytes of this corpus make a token, as far as is known: the
     careful guess, lowered by any refusal that said how many tokens its input
@@ -282,9 +275,11 @@ class TextIndexSeam:
     """The embedder's limit, once known: asked of it, or learned from a refusal.
     Read as it is by whoever must not ask — a run reporting the limit it ended
     with."""
-    _limit_asked: bool = False
-    """Whether the embedder has been asked. Asked late — of a local model that
-    means loading it — and so only by a run that has something to embed."""
+    _kept: EmbedderRecord | None = None
+    """What the embedder said of itself, as last asked or as the index's log
+    says (`TextIndex.embedder`). Set once the limit is settled for this process
+    — late, because asking a local model means loading it, and so only by a
+    call that embeds."""
 
     def register(self, provider: Embedder, *, scope: Context | None = None) -> Disposer:
         """Claim the embedder slot. One embedder: one index is one vector space."""
@@ -325,31 +320,24 @@ class TextIndexSeam:
         return self.home(workspace) / digest(self.embedder.name)
 
     async def index(self, workspace: Path) -> TextIndex:
-        """One workspace's index, for a search.
+        """One workspace's index, for a search: read, and never waited for.
 
-        Loaded again when its files changed since this copy read or wrote them,
-        but only if the writer lock is free this instant. A writer holding it is
-        part-way through a change, and its files may be part-way through a save,
-        so the search answers from the copy there is. Only a seam with no copy
-        at all waits for the lock."""
+        No lock is taken. A reader's open changes no file (`TextIndex.open`),
+        and every file a writer saves is replaced whole, so a search during an
+        indexing run answers from what the run has saved rather than standing
+        behind it for as long as it embeds. Loaded again when the files changed
+        since this copy read or wrote them."""
         root = self.root(workspace)
         store = self._indexes.get(root)
-        if store is not None and not store.stale():
-            return store
-        release = try_file_lock(root / WRITER_LOCK, what=_LOCKED)
-        if release is None:
-            if store is not None:
-                return store
-            release = await wait_for_file_lock(root / WRITER_LOCK, what=_LOCKED)
-        try:
-            return await self._fresh(root)
-        finally:
-            release()
+        if store is None or store.stale():
+            store = self._store(root)
+            await anyio.to_thread.run_sync(partial(store.open, readonly=True))
+            self._indexes[root] = store
+        return store
 
     def home(self, workspace: Path) -> Path:
         """The directory this workspace's indexes are under, one per embedder
-        (`ph.toolcli.state_home`). Where a run's `progress.json` goes, since a
-        home has one run at a time."""
+        (`ph.toolcli.state_home`)."""
         return state_home(index_base(), workspace)
 
     def _store(self, root: Path) -> TextIndex:
@@ -365,16 +353,16 @@ class TextIndexSeam:
         """The lock around each use of this workspace's copy. See `_guards`."""
         return self._guards.setdefault(self.root(workspace), anyio.Lock())
 
-    def indexing(self, workspace: Path) -> Progress | None:
-        """The run building this workspace's index right now, or `None`
-        (`BackgroundRuns.working`): a run holds the writer lock while it works."""
-        return self.runs.working(
-            self.home(workspace), self.root(workspace) / WRITER_LOCK, what=_LOCKED
-        )
+    def indexing(self, workspace: Path) -> bool:
+        """Whether a run is building this workspace's index right now: one holds
+        the writer lock for as long as it works, and only a writer takes it."""
+        return file_lock_held(self.root(workspace) / WRITER_LOCK)
 
     @asynccontextmanager
-    async def writing(self, workspace: Path) -> AsyncIterator[TextIndex]:
-        """One workspace's index, held for one change against every other writer.
+    async def writing(self, workspace: Path) -> AsyncIterator[TextIndex | None]:
+        """One workspace's index, held for one change against every other writer
+        — or `None`, when another writer still had it after `wait_s`
+        (`ph.toolcli.run_lock`).
 
         The lock is a file in the index directory, so it orders every writer of
         it: another root in the same daemon, a `phern -p`, a second daemon, and
@@ -385,20 +373,24 @@ class TextIndexSeam:
         another writer has changed is loaded again, so every change starts from
         what is on disk.
 
-        Waited for, because indexing is slow and a second writer is expected to
-        queue behind the first.
+        Waited for, because a second writer is expected to queue behind the
+        first; and not for ever, because the caller is a call.
         """
-        # Before the lock: the record and the sweep touch nothing a writer holds.
-        await anyio.to_thread.run_sync(claim_home, index_base(), workspace)
         root = self.root(workspace)
-        async with waited_file_lock(root / WRITER_LOCK, what=_LOCKED):
+        async with run_lock(root / WRITER_LOCK, what=_LOCKED, wait_s=self.config.wait_s) as held:
+            if not held:
+                yield None
+                return
+            # Once the lock is held: a call that answers "indexing" sweeps nothing.
+            await anyio.to_thread.run_sync(claim_home, index_base(), workspace)
             yield await self._fresh(root)
 
     async def _fresh(self, root: Path) -> TextIndex:
         """The copy of the index at `root`, loaded again if its files changed.
         Called holding the writer lock, so no writer is part-way through them."""
         store = self._indexes.get(root)
-        if store is None or store.stale():
+        # A reader's copy is not one to write from: its open reconciled nothing.
+        if store is None or store.stale() or store.readonly:
             store = self._store(root)
             await anyio.to_thread.run_sync(store.open)
             self._indexes[root] = store
@@ -410,10 +402,23 @@ class TextIndexSeam:
         embedder = self.embedder
         return embedder.max_tokens if isinstance(embedder, TokenBounded) else None
 
-    async def limit(self) -> Limit | None:
-        """How long an input the embedder reads, or `None` when nothing says."""
+    async def limit(self, store: TextIndex, *, ask: bool = False) -> Limit | None:
+        """How long an input the embedder reads, or `None` when nothing says.
+
+        Settled once a process. The newest entry of `store`'s embedder log
+        (`TextIndex.embedder`) is the answer for a caller that does not `ask` —
+        a search, which is one command and would otherwise put a question to
+        the server every time. An index run asks, and so does any caller when
+        the entry was asked of another address: an answer that differs from the
+        entry is the run's to add to the log (`record`), and what refusals had
+        taught under the old one does not carry over."""
         embedder = self.embedder
-        if self._limit_asked or not isinstance(embedder, TokenBounded):
+        if self._kept is not None or not isinstance(embedder, TokenBounded):
+            return self.known
+        address = embedder.asked_of() if isinstance(embedder, Served) else None
+        kept = store.embedder()
+        if kept is not None and kept.asked_of == address and not ask:
+            self._take(kept)
             return self.known
         try:
             found = await anyio.to_thread.run_sync(embedder.limit)
@@ -422,10 +427,42 @@ class TextIndexSeam:
             # the embedding that follows.
             log.debug("ph_text_index: the embedder's limit was not learned", exc_info=True)
             return self.known
-        self._limit_asked = True
-        if found is not None:
-            self.learn(found)
+        reported = embedder.reported() if isinstance(embedder, Served) else {}
+        if kept is not None and (kept.asked_of, kept.limit, kept.reported) == (
+            address,
+            found,
+            reported,
+        ):
+            self._take(kept)
+        else:
+            self._take(
+                EmbedderRecord(
+                    asked_of=address, asked_at_ms=now_ms(), reported=reported, limit=found
+                )
+            )
         return self.known
+
+    def _take(self, record: EmbedderRecord) -> None:
+        """Make `record` the answer, with what refusals had taught under it."""
+        self._kept = record
+        self.known = record.effective()
+        if record.learned.density is not None:
+            self.density = min(self.density, record.learned.density)
+
+    def record(self) -> EmbedderRecord | None:
+        """What is known of the embedder now, for the index's log: what it said
+        when asked, and what its refusals have taught since — so the next
+        command starts from it instead of spending a request, or a refusal, to
+        learn it again. `None` before the limit is settled."""
+        if self._kept is None:
+            return None
+        known = self.known
+        refused = known is not None and known.source == "refused"
+        learned = Learned(
+            tokens=known.tokens if known is not None and refused else None,
+            density=self.density if self.density < BYTES_PER_TOKEN else None,
+        )
+        return self._kept.model_copy(update={"learned": learned})
 
     def learn(self, limit: Limit) -> None:
         """Take `limit` as the limit — what the embedder says when asked, or
@@ -533,18 +570,19 @@ class TextIndexSeam:
                 rows.append(("state", "not built — run text_index"))
                 return rows
             # A command asked for its status has opened nothing yet. Read without
-            # the writer lock: these are counts for a person, and a writer
-            # part-way through a save is a reason to say so, not to wait.
+            # the writer lock, and so as a reader, changing no file: these are
+            # counts for a person, and a writer part-way through a save is a
+            # reason to say so, not to wait.
             store = self._store(root)
             try:
-                store.open()
+                store.open(readonly=True)
             except Exception as error:
                 rows.append(("state", f"could not be read: {error}"))
                 return rows
         stats = store.stats()
         rows.extend(
             [
-                ("limit", self._limit_said(store.limit)),
+                ("limit", self._limit_said(store)),
                 ("documents", str(stats["documents"])),
                 ("chunks", str(stats["chunks"])),
                 ("vectors", f"{stats['dim']} dim at {stats['bit_width']} bit"),
@@ -553,18 +591,21 @@ class TextIndexSeam:
         )
         return rows
 
-    def _limit_said(self, stored: str | None) -> str:
+    def _limit_said(self, store: TextIndex | None) -> str:
         """How long an input the embedder reads, as far as can be said without
-        asking it: what this process learned, else what the last run to embed
-        into the index wrote beside it (`stored`), else the setting. Asking
+        asking it: what this process settled, else the newest entry of the
+        index's embedder log (`TextIndex.embedder`), else the setting. Asking
         would load a local model to answer a question about status."""
         if self.known is not None:
             return self.known.said()
-        if stored is not None:
-            return f"{stored}, as the last run to embed found it"
+        kept = None if store is None else store.embedder()
+        limit = None if kept is None else kept.effective()
+        if kept is not None and limit is not None:
+            where = "" if kept.asked_of is None else f" of {kept.asked_of}"
+            return f"{limit.said()}, as the last run to embed asked{where}"
         configured = self.configured_limit()
         if configured is not None:
-            return Limit(configured, "configured").said()
+            return Limit(tokens=configured, source="configured").said()
         return "not known until a run embeds"
 
 
@@ -600,12 +641,9 @@ class SkippedValue(ToolModel):
 
 class IndexValue(ToolModel):
     state: Literal["done", "indexing"] = "done"
-    """`indexing`: the run goes on in the background, and the counts below are
-    how far it has got. Only a host answers that; a call that ran by itself
-    answers `done`."""
-    done: int = 0
-    total: int = 0
-    """Documents this run has been through, and how many it will go through."""
+    """`indexing`: another run holds the index and was still working after this
+    call had waited `wait_s`. Nothing below was done by this call; the totals
+    are what the index holds so far."""
     documents: list[str] = Field(default_factory=list)
     chunks_added: int = 0
     chunks_removed: int = 0
@@ -615,6 +653,15 @@ class IndexValue(ToolModel):
     limit: str = ""
     """The embedder's limit, as a phrase, when it ended a passage of this run
     sooner than the row's `max_chars` would have; empty when it did not."""
+    embedder_changed: str | None = None
+    """A sentence, when what the embedder said of itself differs from what it
+    said the last time an index run asked: a server moved, or given another
+    window. What had been learned from its refusals is dropped with the old
+    answer."""
+    spent: dict[str, int] | None = None
+    """What this run spent embedding, by unit (`Metered`): the `requests` and
+    `texts` the embedder was sent, and the `tokens` its server reported. Absent
+    when it spent nothing it counts."""
     passage_tokens: int | None = None
     """How many tokens of its own text a passage was held to, when `limit` is
     said: the limit, less the prefix and the markers the embedder adds."""
@@ -665,19 +712,14 @@ class HitValue(ToolModel):
     text: str
 
 
-class IndexingValue(ToolModel):
-    done: int
-    total: int
-
-
 class SearchValue(ToolModel):
     query: str
     hits: list[HitValue]
     searched: int
     """Chunks the query was scored against — the whole index, or the filtered subset."""
-    indexing: IndexingValue | None = None
-    """Set while a run is still building the index: the hits are from what it has
-    indexed so far."""
+    indexing: bool = False
+    """A run is still building the index: the hits are from what it has saved
+    so far."""
     query_chars: int | None = None
     """How many characters of the question were searched, when it is longer than
     the embedder reads and only its head was; `None` when all of it was."""
@@ -689,15 +731,69 @@ class SearchValue(ToolModel):
 def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     if value.get("state") == "indexing":
         return text_content(
-            f"Indexing in the background: {value['done']} of "
-            f"{count_of(value['total'], 'document')} so far. `text_search` answers now, "
-            "from what is indexed already, and says while the index is still being "
-            "built. You will be told when it finishes; call `text_index` again to see "
-            "how far it has got.\n"
+            "An indexing run is already building this index, so this call started "
+            "none. `text_search` answers now, from what is indexed already, and "
+            "says while the index is still being built. Call `text_index` again once "
+            "that run has finished.\n"
             f"The index holds {count_of(value['total_chunks'], 'passage')} "
             f"from {count_of(value['total_documents'], 'document')} so far."
         )
     return text_content("\n".join(_index_lines(as_bool(args.get("forget")), value)))
+
+
+def _changed(value: Mapping[str, Any]) -> bool:
+    """Whether a run changed the index: a passage added, or one removed."""
+    return as_int(value["chunks_added"]) + as_int(value["chunks_removed"]) > 0
+
+
+def _busy(value: Mapping[str, Any]) -> bool:
+    """Whether another run held the index, so this one did nothing."""
+    return value.get("state") == "indexing"
+
+
+def _noted(seam: TextIndexSeam, store: TextIndex) -> bool:
+    """Add what is known of the embedder to `store`'s log (`TextIndex.note_embedder`).
+    Whether it was added, so the caller saves."""
+    record = seam.record()
+    return record is not None and store.note_embedder(record)
+
+
+def _counts(embedder: Embedder) -> Counter[str]:
+    """What `embedder` has spent in this process (`Metered`); nothing for one
+    that does not count."""
+    return Counter(embedder.spent()) if isinstance(embedder, Metered) else Counter()
+
+
+def _spent_since(embedder: Embedder, before: Counter[str]) -> Counter[str]:
+    """What `embedder` has spent since `before`: a run's own share. A unit it
+    spent none of is left out."""
+    return _counts(embedder) - before
+
+
+def _spend_said(spent: Mapping[str, int]) -> str:
+    """`{"requests": 1, "tokens": 66774}` as "1 request, 66,774 tokens"."""
+    return ", ".join(
+        f"{count:,} {unit.removesuffix('s') if count == 1 else unit}"
+        for unit, count in spent.items()
+    )
+
+
+def _changed_said(before: EmbedderRecord | None, after: EmbedderRecord | None) -> str | None:
+    """A sentence, when the embedder says it reads another length than it did
+    when last asked, or is asked at another address; `None` when it says the
+    same, or there was nothing to compare."""
+    if before is None or after is None:
+        return None
+    if (before.asked_of, before.limit) == (after.asked_of, after.limit):
+        return None
+    was = "no limit" if before.limit is None else before.limit.said()
+    now = "no limit" if after.limit is None else after.limit.said()
+    if before.asked_of != after.asked_of:
+        return (
+            f"The embedder is now asked at {after.asked_of} and reads {now}; it was "
+            f"asked at {before.asked_of} and read {was}."
+        )
+    return f"The embedder now reads {now}; when last asked it read {was}."
 
 
 def _index_lines(forget: bool, value: Any, *, brief: bool = False) -> list[str]:  # noqa: ANN401
@@ -717,6 +813,10 @@ def _index_lines(forget: bool, value: Any, *, brief: bool = False) -> list[str]:
             else "."
         )
     ]
+    if value.get("embedder_changed"):
+        lines.append(value["embedder_changed"])
+    if value.get("spent"):
+        lines.append(f"Spent embedding: {_spend_said(value['spent'])}.")
     if value.get("limit"):
         lines.append(
             f"Passages are held to {value['passage_tokens']} tokens of text, to fit "
@@ -741,13 +841,11 @@ def _index_lines(forget: bool, value: Any, *, brief: bool = False) -> list[str]:
 
 def _unfinished(value: Any) -> str:  # noqa: ANN401
     """The warning a search carries while its index is still being built."""
-    indexing = value.get("indexing")
-    if not indexing:
+    if not value.get("indexing"):
         return ""
     return (
-        f"Not finished indexing: {indexing['done']} of "
-        f"{count_of(indexing['total'], 'document')}. These results cover what is "
-        "indexed so far; search again once it finishes."
+        "Not finished indexing. These results cover what is indexed so far; "
+        "search again once it finishes."
     )
 
 
@@ -801,7 +899,7 @@ async def apply(ctx: Context, config: Config) -> None:
     if importlib.util.find_spec("turbovec") is None:
         raise MountRefusal(MISSING_TURBOVEC)
 
-    seam = TextIndexSeam(ctx=ctx, config=config, runs=BackgroundRuns(grace=config.wait_s))
+    seam = TextIndexSeam(ctx=ctx, config=config)
     ctx.provide(TEXT_INDEX, seam)
 
     def _forget_missing(store: TextIndex, run: ToolRunContext) -> int:
@@ -816,17 +914,8 @@ async def apply(ctx: Context, config: Config) -> None:
     async def index_run(
         args: IndexArgs, run: ToolRunContext, progress: RunProgress
     ) -> dict[str, Any]:
-        """One indexing run, to its end. Its caller's cancellation is asked at
-        each `progress.tick`, for as long as the run is that caller's own."""
-        wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
-        documents = await ctx.require(FS).collect(
-            wanted.paths,
-            wanted.include,
-            scope=run.scope,
-            limit=config.max_files,
-            agent=run.agent,
-            exclude=wanted.exclude,
-        )
+        """One indexing run, to its end — or the answer that another run holds
+        the index. Its caller's cancellation is asked at each document."""
         added = removed = unchanged = 0
         indexed: list[str] = []
         skipped: list[dict[str, str]] = []
@@ -835,9 +924,35 @@ async def apply(ctx: Context, config: Config) -> None:
         workspace = ctx.require(FS).root_for(run.agent)
         guard = seam.guard(workspace)
         saved = anyio.current_time()
-        dirty = False
+        dirty = moved = False
 
         async with seam.writing(workspace) as store:
+            if store is None:
+                stats = (await seam.index(workspace)).stats()
+                return IndexValue(
+                    state="indexing",
+                    total_documents=stats["documents"],
+                    total_chunks=stats["chunks"],
+                ).model_dump()
+            # What the embedder said when last asked, to say at the end whether
+            # it says something else now.
+            before = store.embedder()
+            # The embedder counts for its process; the run reports its own share,
+            # asked when a line is written. Of the embedder and not of the seam:
+            # a failed run's last line is written after the mount has gone.
+            embedder = seam.embedder
+            spent_before = _counts(embedder)
+            progress.spent = partial(_spent_since, embedder, spent_before)
+            # Under the lock: a call that will answer "indexing" walks nothing.
+            wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
+            documents = await ctx.require(FS).collect(
+                wanted.paths,
+                wanted.include,
+                scope=run.scope,
+                limit=config.max_files,
+                agent=run.agent,
+                exclude=wanted.exclude,
+            )
 
             async def drop(path: str) -> None:
                 """Take `path`'s passages out, under the guard a search shares."""
@@ -862,6 +977,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 if not args.forget:
                     state = await tree_state(ctx, workspace, since=store.token)
                 for count, path in enumerate(documents):
+                    run.raise_if_canceled()
                     progress.tick(count)
                     if dirty and anyio.current_time() - saved >= config.save_every_s:
                         async with guard:
@@ -907,15 +1023,13 @@ async def apply(ctx: Context, config: Config) -> None:
                         # long an input it reads: of a local model that means
                         # loading it, and a run that finds every document
                         # unchanged has no use for one. Outside the guard: this
-                        # is the slow part, and a search in the same host must
+                        # is the slow part, and a search in the same mount must
                         # not wait for a model.
-                        cut = await _embedded(seam, paragraphs)
+                        cut = await _embedded(seam, paragraphs, store)
                         if isinstance(cut, _Cut):
                             held = held or cut.held
                             if cut.again:
                                 cut_smaller.append(path)
-                            if seam.known is not None:
-                                store.limit = seam.known.said()
                             async with guard:
                                 removed += await anyio.to_thread.run_sync(store.forget, path)
                                 added += await anyio.to_thread.run_sync(
@@ -955,25 +1069,21 @@ async def apply(ctx: Context, config: Config) -> None:
                 moved = bool(state.token) and state.token != store.token
                 if state.token:
                     store.remember(state.token)
-                # Nothing written, nothing to persist. `save` serializes every
-                # record — 7.1 MB and 16 ms at 6 000 chunks — plus a turbovec
-                # fsync, and a call that proved the whole corpus unchanged is
-                # the case this filter exists to make free.
-                if dirty or moved:
-                    async with guard:
-                        await anyio.to_thread.run_sync(store.save)
-                    dirty = False
-            except BaseException:
-                # Stopped or failed part-way. What it embedded is whole — each
+            finally:
+                # Done, stopped or failed: what it embedded is whole — each
                 # document's passages and vectors went in together — so it is
-                # kept, without the token: the next run finds these documents by
-                # their digests and starts where this one ended. The failure is
-                # written by `BackgroundRuns`.
-                if dirty:
-                    with anyio.CancelScope(shield=True):
+                # kept. A run stopped part-way keeps it without the token: the
+                # next run finds these documents by their digests and starts
+                # where this one ended. With it, in the same save under this
+                # run's lock, what the embedder said of itself and what its
+                # refusals taught. Nothing written, nothing to persist: `save`
+                # serializes every record — 7.1 MB and 16 ms at 6 000 chunks —
+                # plus a turbovec fsync, and a call that proved the whole corpus
+                # unchanged is the case this filter exists to make free.
+                with anyio.CancelScope(shield=True):
+                    if _noted(seam, store) or dirty or moved:
                         async with guard:
                             await anyio.to_thread.run_sync(store.save)
-                raise
         stats = store.stats()
         # As the run left it: a limit learned from a refusal is lower than the
         # one it began with. Said when it shaped a passage, and not otherwise.
@@ -981,12 +1091,12 @@ async def apply(ctx: Context, config: Config) -> None:
         limit = known.said() if known is not None and (held or cut_smaller) else ""
         value = IndexValue(
             documents=indexed,
-            done=len(documents),
-            total=len(documents),
             chunks_added=added,
             chunks_removed=removed,
             unchanged=unchanged,
             limit=limit,
+            embedder_changed=_changed_said(before, seam.record()),
+            spent=dict(_spent_since(embedder, spent_before)) or None,
             passage_tokens=await seam.room(known) if limit else None,
             cut_smaller=cut_smaller,
             skipped=[SkippedValue(**one) for one in skipped],
@@ -996,46 +1106,44 @@ async def apply(ctx: Context, config: Config) -> None:
         return value
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
-        # In a host the run outlives this call, which answers with the run's
-        # counts if it ends within the grace and with how far it has got if not.
-        workspace = ctx.require(FS).root_for(run.agent)
-        value = await seam.runs.run(
-            ctx.get(TOOL_HOST),
-            seam.home(workspace),
-            args,
+        return await reported(
             partial(index_run, args, run),
             what="documents",
             # For whoever is told of a run nobody waited for: what the value
             # says to a caller that did.
             said=lambda value: "\n".join(_index_lines(args.forget, value, brief=True)),
-            raise_if_canceled=run.raise_if_canceled,
+            changed=_changed,
+            busy=_busy,
         )
-        if value is not None:
-            return value
-        progress = seam.indexing(workspace)
-        stats = (await seam.index(workspace)).stats()
-        return IndexValue(
-            state="indexing",
-            done=0 if progress is None else progress.done,
-            total=0 if progress is None else progress.total,
-            total_documents=stats["documents"],
-            total_chunks=stats["chunks"],
-        ).model_dump()
 
     async def search_tool(args: SearchArgs, run: ToolRunContext) -> dict[str, Any]:
         workspace = ctx.require(FS).root_for(run.agent)
         store = await seam.index(workspace)
-        vector, searched_chars = await _asked(seam, args.query)
-        run.raise_if_canceled()
-        progress = seam.indexing(workspace)
+        indexing = await anyio.to_thread.run_sync(seam.indexing, workspace)
         guard = seam.guard(workspace)
+        async with guard:
+            empty = not store.stats()["chunks"]
+        if empty:
+            # Nothing to score against: answered without loading a model to
+            # embed the question, which for a local one is seconds and its memory.
+            return {
+                "query": args.query,
+                "searched": 0,
+                "indexing": indexing,
+                "query_chars": None,
+                "hits": [],
+            }
+        # What a refusal of the question teaches is this search's alone: the
+        # embedder log is an index run's to write, under its lock.
+        vector, searched_chars = await _asked(seam, args.query, store)
+        run.raise_if_canceled()
         # The id set is built **once** and handed to `search`, which used to
         # rebuild it internally while this computed it for the count — two
         # O(chunks) passes per filtered query (7.5 ms against a 0.22 ms
         # unfiltered search on a 10 000-chunk index).
         allowed: list[int] | None = None
         scope = _scoped(ctx.require(FS), args.paths, run)
-        # Under the guard: in a host a run adds to this same copy as it goes.
+        # Under the guard: a run in this mount adds to this same copy as it goes.
         async with guard:
             if scope is not None:
                 allowed = await anyio.to_thread.run_sync(store.ids_under, scope)
@@ -1048,9 +1156,7 @@ async def apply(ctx: Context, config: Config) -> None:
         return {
             "query": args.query,
             "searched": searched,
-            "indexing": (
-                None if progress is None else {"done": progress.done, "total": progress.total}
-            ),
+            "indexing": indexing,
             "query_chars": searched_chars,
             "hits": [
                 HitValue(
@@ -1215,7 +1321,7 @@ async def _refused(
     sent, reads = too_long_facts(str(error))
     density = seam.density
     if reads is not None:
-        seam.learn(Limit(reads, "refused"))
+        seam.learn(Limit(tokens=reads, source="refused"))
     if sent is not None:
         seam.calibrate(max(len(text.encode("utf-8")) for text in texts), sent)
     if room is not None and room <= MIN_PASSAGE_TOKENS:
@@ -1234,7 +1340,9 @@ async def _refused(
     return _lighter(heaviest, room, share)
 
 
-async def _embedded(seam: TextIndexSeam, paragraphs: Sequence[Paragraph]) -> _Cut | str:
+async def _embedded(
+    seam: TextIndexSeam, paragraphs: Sequence[Paragraph], store: TextIndex
+) -> _Cut | str:
     """Cut one document into passages its embedder reads whole, and embed them.
 
     Packed by what the embedder counts (`_packed`), so a passage is as long as
@@ -1252,7 +1360,9 @@ async def _embedded(seam: TextIndexSeam, paragraphs: Sequence[Paragraph]) -> _Cu
     with the embedder's own words — what comes back in place of a cut is why —
     and the run goes on to the next.
     """
-    room = await seam.room(await seam.limit())
+    # Asked, and not only read: an index run is where a server that was moved
+    # or given another window is noticed.
+    room = await seam.room(await seam.limit(store, ask=True))
     again = False
     while True:
         chunks, held = await _packed(seam, paragraphs, room)
@@ -1284,7 +1394,7 @@ async def _embedded(seam: TextIndexSeam, paragraphs: Sequence[Paragraph]) -> _Cu
         return _Cut(chunks, vectors, held, again)
 
 
-async def _asked(seam: TextIndexSeam, query: str) -> tuple[Vectors, int | None]:
+async def _asked(seam: TextIndexSeam, query: str, store: TextIndex) -> tuple[Vectors, int | None]:
     """The question's vector, and how many of its characters were embedded when
     that is not all of them.
 
@@ -1299,7 +1409,7 @@ async def _asked(seam: TextIndexSeam, query: str) -> tuple[Vectors, int | None]:
 
     Sent as it was typed when it fits, which is nearly always.
     """
-    limit = await seam.limit()
+    limit = await seam.limit(store)
     room: int | None = None
     if limit is not None:
         longest = max(await seam.measure([query], query=True), default=0)
@@ -1406,34 +1516,4 @@ async def endpoint(ctx: Context, config: EndpointConfig) -> None:
             max_tokens=config.max_tokens,
         ),
         label=f"embedder({config.model or config.base_url})",
-    )
-
-
-@plugin(f"{ADAPTER_ROW}-engine", affects="environment", inject=[TEXT_INDEX], config=AdapterConfig)
-async def adapter(ctx: Context, config: AdapterConfig) -> None:
-    """Register the session this command is run for as the embedder.
-
-    Refused where there is no session to ask: this embedder is a model route of
-    a running pH session, and a command typed at a shell has none."""
-    where = os.environ.get(EMBEDDER_ENV, "").strip()
-    if not where:
-        raise MountRefusal(
-            f"the {ADAPTER_ROW} row embeds through a running pH session's model routes, "
-            f"and no session told this command where to ask (${EMBEDDER_ENV} is not set). "
-            f"From a shell, configure `{LOCAL_ROW}` or `{ENDPOINT_ROW}` instead."
-        )
-    contribute_item(
-        ctx,
-        TEXT_INDEX,
-        SessionEmbedder(
-            where=where,
-            route=f"{config.provider}/{config.model}",
-            agent=os.environ.get(AGENT_ENV, "").strip() or None,
-            query_prefix=config.query_prefix,
-            document_prefix=config.document_prefix,
-            dimensions=config.dimensions,
-            batch_size=config.batch_size,
-            max_tokens=config.max_tokens,
-        ),
-        label=f"embedder({config.provider}/{config.model})",
     )

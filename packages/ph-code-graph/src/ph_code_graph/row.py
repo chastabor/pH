@@ -44,7 +44,7 @@ mount: no tools, no skill, and a `phern doctor` line saying why.
 
 ## Its own module
 
-Not the package's `__init__`, which `python -m ph_code_graph` imports before it
+Not the package's `__init__`, which `python -P -m ph_code_graph` imports before it
 runs a single call: this row imports `ph-utcp` and with it the UTCP library, and
 every tool call would pay to load what only the session uses.
 
@@ -63,7 +63,7 @@ from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.skills import offer_skills as offer_package_skills
 from ph.toolcli import config_env, manual_call_template
-from ph_utcp import UTCP, Host, Manual, ToolTraits, ToolView, command_said
+from ph_utcp import UTCP, Background, Manual, ToolTraits, ToolView, command_said
 
 from ._config import ROW, STATE, Config, grammar_cache
 from .cli import CLI
@@ -99,14 +99,14 @@ def manual(config: Config) -> Manual:
         ],
         env=env,
         pass_env=pass_env,
-        # One process that stays up for each tree: a call does not pay to start
-        # an interpreter, and a long indexing run goes on past the call that
-        # started it.
-        host=Host(
-            command=[*CLI.invocation(), "serve"],
+        # An indexing run goes on past the call that started it, reported on the
+        # command's stderr, and one is started before a root agent's first step.
+        background=Background(
+            command=[*CLI.invocation(), "call"],
             label="code graph",
-            warm=["code_index"],
+            tools=["code_index"],
             eager=config.index.on_mount,
+            wait_s=config.wait_s,
         ),
         tools={
             "code_index": ToolTraits(

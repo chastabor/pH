@@ -17,7 +17,7 @@ and filled by `ph_app.shell`, its one producer.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -214,6 +214,7 @@ class ShellService:
         keep_env: Collection[str] | None = None,
         extra_env: Mapping[str, str] | None = None,
         writable_extra: Sequence[str] = (),
+        on_stderr_line: Callable[[str], None] | None = None,
     ) -> ShellResult:
         """Run one argv for an agent: `run`'s placement and confinement, for a caller
         that has its own interpreter line.
@@ -246,6 +247,11 @@ class ShellService:
         is dropped (`ph.seams.sandbox.grants_apart`): read-only bars writing the
         tree, and no grant reopens it. It widens nothing a `policy` passed in
         already says, and means nothing where no backend confines the command.
+
+        `on_stderr_line` is handed each line of the command's stderr as it is
+        written, and that stream is then not in the result
+        (`SubprocessSpawnSpec.on_stderr_line`): for a command that reports how far
+        it has got while it runs.
         """
         subprocess_service = self.ctx.require(SUBPROCESS)
         workspace = workspace_of(self.ctx, agent)
@@ -312,9 +318,13 @@ class ShellService:
             if extra_env:
                 env.update(extra_env)
         spec = (
-            SubprocessSpawnSpec(argv=argv, cwd=cwd, timeout_ms=timeout_ms, env=env)
+            SubprocessSpawnSpec(
+                argv=argv, cwd=cwd, timeout_ms=timeout_ms, env=env, on_stderr_line=on_stderr_line
+            )
             if confined is None
-            else confined.spawn_spec(cwd, timeout_ms=timeout_ms, env=env)
+            else confined.spawn_spec(
+                cwd, timeout_ms=timeout_ms, env=env, on_stderr_line=on_stderr_line
+            )
         )
         outcome = await subprocess_service.run(spec, scope=scope, signal=signal)
         if confined is not None and outcome.exit_code != 0:

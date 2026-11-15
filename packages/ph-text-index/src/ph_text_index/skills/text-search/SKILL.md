@@ -26,10 +26,17 @@ document replaces its passages, so running it again after an edit is correct and
 cheap. `forget: true` removes documents instead.
 
 A large corpus is indexed **in the background**: `text_index` then answers
-`state: indexing` with how far it has got, and you are told when it finishes.
-Do not wait or poll — `text_search` works meanwhile, over what is indexed so
-far, and says "Not finished indexing" when that is the case. Search again after
-the note if the first answer was thin.
+`state: indexing`. That means an indexing run is still building the index: the
+answer carries only what the index holds so far, and a line says how far the
+run has got. You are told when it finishes. Do not wait or poll — `text_search`
+works meanwhile, over what the run has saved so far, and says "Not finished
+indexing" when that is the case. Search again after the note if the first
+answer was thin.
+
+Once you are told the run finished, call `text_index` again if you had asked
+for particular `paths`. A request made while another run is going is not
+queued, so that run may not have covered yours; the second call embeds only
+what is new.
 
 Passages are cut to what the embedding model reads, so the result may say how
 many tokens they were held to, or name documents that needed smaller ones. That

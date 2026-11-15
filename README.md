@@ -98,10 +98,10 @@ reports which ones actually activated.
 that *computes* vectors on this machine refuses to mount, with a message naming
 the extra, and `text_index` and `text_search` appear only once some embedder is
 mounted. A deployment that embeds through an endpoint instead — llama.cpp's
-`/v1/embeddings`, a provider's API — mounts `text-index-endpoint`, or
-`text-index-adapter` for one of the session's own model routes, and never wants
-torch at all. That is why it is not a dependency: a gigabyte for one provider of
-one seam is not a cost this package gets to impose on everyone who installs it.
+`/v1/embeddings`, a provider's API — mounts `text-index-endpoint` and never
+wants torch at all. That is why it is not a dependency: a gigabyte for one
+provider of one seam is not a cost this package gets to impose on everyone who
+installs it.
 
 If you do want it and have no GPU, the CPU wheels are a third of the size:
 
@@ -371,6 +371,80 @@ attachments, your profile overlays, `daemon.yaml`), `PH_CACHE` (`~/.cache/ph` �
 wholesale) and `PH_RUNTIME` (the daemon socket). `phern doctor` prints where all
 three resolved, and which tier `PH_RUNTIME` landed in.
 
+## Upgrading from 0.11
+
+0.12 takes the last standing process out of the two index tools. `ph-code-graph`
+and `ph-text-index` keep nothing up between calls and nothing listens on a
+socket: every call is one command, a long run reports on its own stderr, and the
+text index reaches an embeddings API itself, with a key the profile names. What
+that changes for a 0.11 setup:
+
+- **Sessions from 0.11 carry over.** A log that holds `llm/embedded` or
+  `llm/embedding-failed` records still opens: both were written as ignorable,
+  and 0.12 skips them.
+- **`text-index-adapter` is removed.** A profile that names it moves to
+  `text-index-endpoint` with `base_url`, `model` and `api_key_env`, and names the
+  endpoint's host in `sandbox-allow`. An index built through the adapter is not
+  reused: the endpoint is another embedder, so the first run embeds the corpus
+  again.
+- **`tokenSources: [embedding]` no longer validates.** Take `embedding` out of a
+  profile's `tokenSources`. What an embedding costs is no longer in a session's
+  log, so no budget charges it.
+- **An allowed embeddings host is allowed to every confined command.** The key
+  is handed by value only to the text index's own commands, and an agent's
+  `bash` does not have it. A host in `sandbox-allow` is reachable by `bash` all
+  the same, so a server that needs no key answers it too. Name the key so the
+  environment scrub drops it: `ph-utcp` warns at mount when a manual passes a
+  variable the scrub does not match, `api_key_env` among them.
+- **`text-index-local` loads its model on every call.** Nothing holds it between
+  calls: about 3.9 s for a search by itself and 6 s under `bwrap`, where a host
+  answered in 0.26 to 0.3 s. A local llama.cpp behind `text-index-endpoint` is
+  the fast local path.
+- **`serve`, `$PH_TOOL_HOST`, `$PH_TOOL_AGENT` and `progress.json` are removed.**
+  Another harness can no longer start a host. `call <tool> --progress` reports
+  a run on stderr instead, as JSONL: `working` lines as it goes and exactly one
+  last line, `done` or `failed`. A stream that ends with no last line is a
+  command that was killed or died. `call <tool> --wait SECONDS` says how long a
+  call waits for another run that holds the index.
+- **`state: indexing` means another run holds the index.** One run at a time
+  for each index: a second `code_index` or `text_index` waits `wait_s` and then
+  answers `state: indexing`, having done nothing, with the totals the index
+  holds so far. `done` and `total` are removed from both tools' values. On
+  `code_graph` and `text_search`, `indexing` is a boolean, `true` while a run
+  holds the index. In a session the count is a line in the tool's text.
+- **A call during a run is not queued.** In 0.11 a different request took its
+  turn behind the running one. It now answers `state: indexing`, and the agent
+  calls the index tool again once it is told the run ended.
+- **`text_index` gains `embedder_changed`, and the sidecar gains an embedder
+  log.** An index run that embeds asks the embedder what it reads and adds the
+  answer to the log in `chunks.json`, with what refusals taught, when it
+  differs from the newest entry; it is saved with the passages, under the same
+  lock. A search reads the newest entry and asks nothing. When the answer
+  changed, the result says so in `embedder_changed`. The sidecar's `limit`
+  phrase is gone. An index built by 0.11 has no log, and its next run starts
+  one.
+- **Progress lines say what a run spent.** `--progress` lines carry `spent`:
+  the requests and texts an embedder was sent, and the tokens its server's
+  `usage` reported. `text_index`'s result says the same, as `spent` and a line
+  of text, so a call that waited for its run sees it, and so does the note
+  that tells an agent a run nobody waited for has ended.
+- **A manual's commands are `python -P -m <module>`.** A module in the
+  workspace is never imported by one. `PH_TOOL_HOST` is gone from the variables
+  a registration inherits.
+- **For code built on pH:**
+  - `Manual.host` and `Host` are `Manual.background` and `Background` in
+    `ph_utcp`: `command` up to and including `call`, `label`, `tools`, `eager`
+    and `wait_s`.
+  - `ph.toolcli` gains `reported`, `reporting_to` and `run_lock`, and loses
+    `BackgroundRuns`, `ToolHost` and `TOOL_HOST`; see
+    [`docs/cookbook/adding-a-tool.md`](docs/cookbook/adding-a-tool.md).
+  - `ph.framing.ask` and `answer_one` are gone.
+  - `EmbeddingAdapter`, `LlmRuntime.embed` and the embeddings helpers in
+    `ph.llm.adapter` (`EmbeddingRequest`, `Embeddings`, `openai_embeddings_body`,
+    `openai_vectors`, `vectors_of`, `vector_of`) are gone. `input_too_long` and
+    `too_long_facts` stay.
+  - `TokenSource` loses `embedding`.
+
 ## Upgrading from 0.10
 
 0.11 moves the two index tools out of the session's process. `code_index` and
@@ -384,8 +458,7 @@ another harness. What that changes for a 0.10 setup:
   readings with two new slots, `model` and `context`, and a 0.10 client refuses
   them. `phern agents shutdown`, and the next command that needs one starts the
   new one.
-- **Sessions from 0.10 carry over.** The session log is still format 4. Two record
-  types are new, `llm/embedded` and `llm/embedding-failed`.
+- **Sessions from 0.10 carry over.** The session log is still format 4.
 - **A profile that names `code-graph` or `text-index` names `utcp` before it.**
   Both rows wait for the row that runs their command, and without it their tools
   never appear: `phern doctor` shows the row as "waiting on utcp". `rlm-indexed`
@@ -395,31 +468,32 @@ another harness. What that changes for a 0.10 setup:
   `permissions-fs` no longer screens their reads and `fs/read-intent` no longer
   fires for them; the sandbox bounds them, as it bounds `bash`. A child in a
   worktree of its own indexes that worktree.
-- **Indexes are rebuilt, once.** An index is now kept in the scratch of the agent
-  whose tree it is, `$PH_HOME/scratch/<session>/<agent>/`, so one a 0.10 session
-  built under `$PH_CACHE` is not found. That is what lets a read-only session
-  index a tree it may not write. A child shares its parent's index unless it has a
-  tree of its own to write. Both rows' `path` setting is removed.
+- **Indexes are rebuilt, once per session.** An index is now kept in the scratch
+  of the agent whose tree it is, `$PH_HOME/scratch/<session>/<agent>/`, so one a
+  0.10 session built under `$PH_CACHE` is not found, and a new session builds its
+  own. A resumed session has the same scratch and reuses the index it built.
+  That is what lets a read-only session index a tree it may not write. A child
+  shares its parent's index unless it has a tree of its own to write. Both rows'
+  `path` setting is removed.
 - **Run `/code-graph install` once.** The grammars come from GitHub the first
   time. In 0.10 the tools ran in the session's process and fetched one when a
   file needed it; a confined agent's command cannot, and skips each file with a
   reason naming the command. `ph-code-graph install` is the same from a shell.
 - **`glob` on both rows is `index.include`**, a list, in a new `index` block with
   `paths`, `exclude` and `on_mount`. The old key is refused, not aliased.
-- **Indexing starts unasked, and a call may answer before it ends.** One host for
-  each package and tree is started at a root agent's first step and indexes the
-  row's `index` scope in the background. `code_index` and `text_index` wait
-  `wait_s`, then answer `state: indexing` with a count, and the agent is told when
-  the run ends. `index.on_mount: false` leaves indexing to the calls.
+- **Indexing starts unasked, and a call may answer before it ends.** Before a
+  root agent's first step one run of each package's index tool is started over
+  the row's `index` scope, in the background. `code_index` and `text_index` wait
+  `wait_s` for a run, then answer `state: indexing` with a line saying how far it
+  has got, and the agent is told when the run ends. `index.on_mount: false`
+  leaves indexing to the calls.
 - **Passages fit the embedder.** `text_index` packs each passage to what its
   embedder reads, in the embedder's tokens, so its result says `passage_tokens`
   where it said `passage_chars`. `max_tokens` on an embedder's row lowers the
   limit. Each document is embedded once more by the first run.
-- **New: two more embedders.** `text-index-endpoint` embeds through an
-  OpenAI-compatible `/v1/embeddings` server, and `text-index-adapter` through one
-  of the session's own model routes, with the key kept in the harness. What a
-  route spends is recorded as `llm/embedded`, and a goal's budget charges it when
-  its `tokenSources` names `embedding`. Neither needs `phern[local]`.
+- **New: a remote embedder.** `text-index-endpoint` embeds through an
+  OpenAI-compatible `/v1/embeddings` server — a local one, or a provider's API
+  with its key named by `api_key_env`. It does not need `phern[local]`.
 - **New: `ph-code-graph` and `ph-text-index` are commands.** `call` runs a tool,
   `status` and `install` provision it, and `manual --registration` prints what
   another UTCP harness registers. `uv tool install ph-code-graph` is that package
@@ -457,8 +531,6 @@ another harness. What that changes for a 0.10 setup:
   - `SubprocessSpawnSpec.forwards_signals` says whether a signal reaches the
     command. Spawn a confined argv with `ConfinedArgv.spawn_spec(cwd, …)`, which
     carries it, rather than building the spec from `confined.argv`.
-  - `BackgroundRuns.run` requires `said=`, what the run's end tells whoever was
-    not waiting for it.
   - A config field that names an environment variable a tool's command reads is
     marked `Annotated[str, EnvName()]` (`ph.wire`): the command's manual lists
     it, and `ph.toolcli.config_env(configs)` returns it beside the config, as the
@@ -468,10 +540,7 @@ another harness. What that changes for a 0.10 setup:
     `text-index-endpoint`, or writes an embedder row the command mounts.
   - `ph.toolcli` turns a package's rows into a command and a UTCP manual; see
     [`docs/cookbook/adding-a-tool.md`](docs/cookbook/adding-a-tool.md).
-  - An adapter that can embed is a `ph.llm.adapter.EmbeddingAdapter`, reached
-    through `ctx.llm.embed`.
-  - `TokenSource` has a fourth value, `embedding`, and `StatusReading.slot` has
-    `model` and `context`.
+  - `StatusReading.slot` has `model` and `context`.
 
 ## Upgrading from 0.9
 
@@ -778,15 +847,18 @@ fetch either: with an empty grammar cache the code graph skips every file and sa
 why, and a model that is not downloaded fails the call with a code that names the
 command. Run both once before the first session.
 
-`ph-text-index` additionally takes `preload: true`, which loads the model at
-mount and refuses the mount if it cannot — for a daemon or a scheduled run,
-where nobody is present to type either command. Both plugins also install a
+`ph-text-index` additionally takes `preload: true`, which loads the model once
+at mount, to prove it loads, and refuses the mount if it cannot — for a daemon
+or a scheduled run, where nobody is present to type either command. Each call
+still loads the model itself. Both plugins also install a
 `SKILL.md`, so an RLM sees one catalog line and reads the page only when it
 needs it.
 
-Anything either plugin caches lives under `$PH_CACHE` — grammars, the model
-weights, the indexes — so `phern doctor` can name it and deleting that root
-reclaims it.
+What both plugins share between agents lives under `$PH_CACHE` — grammars, the
+model weights — so `phern doctor` can name it and deleting that root reclaims
+it. An index a session builds is in the scratch of the agent whose tree it is,
+`$PH_HOME/scratch/<session>/<agent>/`; one built from a shell is under
+`$PH_CACHE` too.
 
 **Neither plugin watches the filesystem.** An index changes when its tool runs,
 and at no other moment. Re-running is cheap because both ask **git or jj** what

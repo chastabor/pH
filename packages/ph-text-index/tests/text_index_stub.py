@@ -144,8 +144,8 @@ class BoundedEmbedder(HashingEmbedder):
     def limit(self) -> Limit | None:
         self.asked += 1
         if self.max_tokens is not None:
-            return Limit(self.max_tokens, "configured")
-        return None if self.reads is None else Limit(self.reads, "model")
+            return Limit(tokens=self.max_tokens, source="configured")
+        return None if self.reads is None else Limit(tokens=self.reads, source="model")
 
     def measure(
         self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False

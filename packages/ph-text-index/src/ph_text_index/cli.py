@@ -29,7 +29,7 @@ from typing import NoReturn
 from ph.toolcli import ToolCli
 from ph.toolcli import main as run_cli
 
-from ._config import ADAPTER_ROW, ENDPOINT_ROW, LOCAL_ROW, ROW
+from ._config import ENDPOINT_ROW, LOCAL_ROW, ROW
 
 __all__ = ["CLI", "MODEL_ENV", "main"]
 
@@ -56,7 +56,6 @@ CLI = ToolCli(
     providers=(
         {"id": LOCAL_ROW, "name": "text-index-local-engine"},
         {"id": ENDPOINT_ROW, "name": "text-index-endpoint-engine"},
-        {"id": ADAPTER_ROW, "name": "text-index-adapter-engine"},
     ),
     command=ROW,
     inherit_env=MODEL_ENV,

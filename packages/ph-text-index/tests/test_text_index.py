@@ -34,6 +34,7 @@ an expected number.
 
 from __future__ import annotations
 
+import io
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ from ph.llm.types import text_of
 from ph.testing import MountProfile, raising, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
-from ph.toolcli import STATE_ENV, read_progress
+from ph.toolcli import STATE_ENV, reporting_to
 from ph.workspace_caches import WORKSPACE_FILE, digest
 from ph_text_index._chunk import Weight, chunk_paragraphs, chunk_text, head_of
 from ph_text_index._config import index_base
@@ -488,6 +489,7 @@ def _seam(embedder: HashingEmbedder) -> TextIndexSeam:
 
 async def _index_one(seam: TextIndexSeam, workspace: Path, path: str, text: str) -> None:
     async with seam.writing(workspace) as store:
+        assert store is not None
         _indexed(store, HashingEmbedder(), path, text)
         store.save()
 
@@ -537,26 +539,41 @@ async def test_a_second_writer_waits_for_the_first(tmp_path: Path) -> None:
             await entered.wait()
 
 
-async def test_a_search_does_not_load_what_a_writer_is_part_way_through(
+async def test_a_search_reads_what_a_writer_has_saved_and_changes_no_file(
     tmp_path: Path,
 ) -> None:
-    """A writer's files are only whole once it lets go: between its two writes the
-    vectors are ahead of the sidecar. So a search that finds its copy stale while
-    the lock is held answers from that copy, and loads once the writer is done.
+    """A search never waits for a run, so it reads while a writer holds the lock
+    — and what it reads is what that writer has saved. Between a save's two
+    writes the vectors are ahead of the sidecar: a reader then answers for the
+    documents the sidecar names and leaves the file as it is, because the
+    vectors it cannot name are the writer's, about to be named.
 
-    Sabotage: reload in `index` without asking for the lock, and the search sees
-    the writer's change before the writer has let go.
+    Sabotage: open as a writer does (`readonly=False`), and the reader removes
+    the vectors the writer synced; the writer's sidecar then names passages the
+    index no longer holds.
     """
     embedder, tree = HashingEmbedder(), tmp_path / "tree"
     reader, writer = _seam(embedder), _seam(embedder)
-    await reader.index(tree)
 
     async with writer.writing(tree) as store:
-        _indexed(store, embedder, "docs/w.md", DOCUMENT)
+        assert store is not None
+        _indexed(store, embedder, "docs/a.md", DOCUMENT)
         store.save()
-        assert (await reader.index(tree)).documents() == []
+        assert (await reader.index(tree)).documents() == ["docs/a.md"]
 
-    assert (await reader.index(tree)).documents() == ["docs/w.md"]
+        _indexed(store, embedder, "docs/w.md", DOCUMENT)
+        assert store._index is not None
+        store._index.sync(str(store.index_path))
+        synced = store.index_path.read_bytes()
+        assert (await reader.index(tree)).documents() == ["docs/a.md"]
+        assert store.index_path.read_bytes() == synced, "a reader changed the writer's file"
+
+        store.save()
+        assert (await reader.index(tree)).documents() == ["docs/a.md", "docs/w.md"]
+
+    again = writer._store(writer.root(tree))
+    again.open()
+    assert sorted(again.documents()) == ["docs/a.md", "docs/w.md"]
 
 
 async def test_each_workspace_has_its_own_index(tmp_path: Path) -> None:
@@ -1643,7 +1660,9 @@ async def test_passages_are_packed_to_what_the_embedder_reads(
     ctx, embedder = await _bounded(mount, reads=50)
     agent = _agent(ctx)
 
-    indexed = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
+    report = io.StringIO()
+    with reporting_to(report):
+        indexed = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
     found = await run_tool(ctx, "text_search", {"query": "w7l1n3", "k": 1}, agent=agent)
 
     assert not indexed.is_error, text_of(indexed.content)
@@ -1655,9 +1674,8 @@ async def test_passages_are_packed_to_what_the_embedder_reads(
     assert embedder.took[0] == 36, "a passage was not as long as the model reads"
     assert "Passages are held to 50 tokens of text" in text_of(indexed.content)
     # And whoever is told of a run nobody waited for is told the same.
-    seam = ctx.require(TEXT_INDEX)
-    report = read_progress(seam.home(ctx.require(FS).root_for(agent)))
-    assert report is not None and report.note.splitlines() == [
+    last = json.loads(report.getvalue().splitlines()[-1])
+    assert last["state"] == "done" and last["note"].splitlines() == [
         "Indexed 1 document: 6 passages added, 0 removed.",
         "Passages are held to 50 tokens of text, to fit the embedder's limit of "
         "50 tokens (the model's).",
@@ -1902,7 +1920,7 @@ async def test_a_limit_a_profile_sets_recuts_and_an_unchanged_run_asks_for_none(
 
     embedder.max_tokens = 30
     seam = ctx.require(TEXT_INDEX)
-    seam.known, seam._limit_asked = None, False
+    seam.known, seam._kept = None, None
     recut = await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=agent)
     assert recut.value["documents"] == ["long.md"]
     assert recut.value["limit"] == "30 tokens (configured)"
@@ -1925,14 +1943,14 @@ async def test_doctor_says_how_long_an_input_the_embedder_reads(
     await run_tool(ctx, "text_index", {"paths": ["long.md"]}, agent=_agent(ctx))
     learned = report_section(ctx, "Text index")["limit"]
     # As a command asked for its status is: nothing open, nobody asked.
-    seam.known, seam._limit_asked = None, False
+    seam.known, seam._kept = None, None
     seam._indexes.clear()
     asked = embedder.asked
     stored = report_section(ctx, "Text index")["limit"]
 
     assert before == "not known until a run embeds"
     assert learned == "50 tokens (the model's)"
-    assert stored == "50 tokens (the model's), as the last run to embed found it"
+    assert stored == "50 tokens (the model's), as the last run to embed asked"
     assert embedder.asked == asked, "status asked the embedder what it reads"
 
 
@@ -2048,11 +2066,13 @@ def test_the_local_model_says_what_it_reads_and_counts_with_its_own_tokenizer() 
     embedder._model = Model()
 
     assert isinstance(embedder, TokenBounded)
-    assert embedder.limit() == Limit(8, "model")
+    assert embedder.limit() == Limit(tokens=8, source="model")
     assert embedder.measure(["one two three"], 3) == [6], "the prefix and both markers count"
     assert embedder.measure(["one two three"], 3, query=True) == [5], "a question has no prefix"
     assert embedder.weigh(["one two three"], 3) == [3], "a part of a passage is its own tokens"
     embedder.max_tokens = 5
-    assert embedder.limit() == Limit(5, "configured")
+    assert embedder.limit() == Limit(tokens=5, source="configured")
     embedder.max_tokens = 500
-    assert embedder.limit() == Limit(8, "model"), "a setting above the model's put the silence back"
+    assert embedder.limit() == Limit(tokens=8, source="model"), (
+        "a setting above the model's put the silence back"
+    )

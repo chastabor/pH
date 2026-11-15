@@ -175,7 +175,8 @@ Point a `[project.scripts]` entry at `run` and the package has:
 * `ph-notes call <tool> --field value …` — mounts the rows in its own process
   and runs the tool **through the registry**, so the body, the validation and
   the `render` are the ones the row declared. It prints one JSON object,
-  `{ok, value, text}` or `{ok, error: {code, message}}`, and nothing on stderr.
+  `{ok, value, text}` or `{ok, error: {code, message}}`, and nothing on stderr
+  unless `--progress` asks for a run's report there.
 * `ph-notes manual` — the UTCP manual, generated from the tools' schemas.
   `ph-notes manual --registration` prints what another harness registers.
 * `ph-notes tools`, and `status`/`install` when the package has a provisioning
@@ -212,68 +213,114 @@ in the calling agent's workspace and under its sandbox. `ph-code-graph` is the
 worked example: `ph_code_graph/row.py` is the session's row,
 `ph_code_graph/engine.py` is the row the command mounts, and `_config.py` holds
 what both need — the row id and where the engine writes. Keep the session's row
-out of the package's `__init__`: `python -m <package>` imports it before every
-call. Set `module=` on the `ToolCli` so the manual runs the interpreter that
+out of the package's `__init__`: `python -P -m <package>` imports it before
+every call. Set `module=` on the `ToolCli` so the manual runs the interpreter that
 printed it, and hand the row's config across with `ph.toolcli.config_env`.
 
 What a manual cannot say — that two calls may overlap, that a call has no
 effect, how a front end draws the card — goes in the `Manual`'s `tools` table.
 Every default there is the careful one.
 
-### A tool that is slow to start, or slow to finish
+### A tool whose work is long
 
-`ph-notes serve --socket PATH` mounts the same rows once and answers `call`s on
-a socket, so what a row loaded — a model, a parser — is loaded once. Name it as
-the manual's `host` and `ph-utcp` keeps one running for each tree an agent works
-in; a `call` told of it in `$PH_TOOL_HOST` uses it, and runs by itself when
-nobody is there.
-
-A row can tell which it is in. `ctx.get(TOOL_HOST)` is `None` in a command run
-for one call, where the work has to finish before the answer. In a host the
-process outlives the call, so a long piece of work can go on after it:
+Every call is one command: nothing stays up between calls, and a row keeps
+nothing in memory from one to the next. So a tool that takes a while — an
+indexing run — does three things, and `ph.toolcli` has a door for each:
 
 ```python
-from ph.toolcli import TOOL_HOST, BackgroundRuns, RunProgress
+from functools import partial
 
-runs = BackgroundRuns(grace=config.wait_s)
-
-
-async def index_run(args: IndexArgs, run: ToolRunContext, progress: RunProgress) -> dict:
-    documents = await collect(args)
-    async with writing(home):  # whatever makes the run this one's
-        progress.begin(len(documents))
-        for count, path in enumerate(documents):
-            progress.tick(count)
-            ...
-    return counts
+from ph.locks import file_lock_held
+from ph.toolcli import RunProgress, reported, run_lock
 
 
 async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
-    value = await runs.run(
-        ctx.get(TOOL_HOST),
-        home,
-        args,
+    return await reported(
         partial(index_run, args, run),
         what="documents",
         said=summary,  # the value in a few lines, for a run nobody waited for
-        raise_if_canceled=run.raise_if_canceled,
+        changed=lambda value: bool(value["added"] or value["removed"]),
+        busy=lambda value: value["state"] == "indexing",
     )
-    if value is not None:
-        return value  # it ended — with no host, or while we waited
-    return {"state": "indexing", **so_far(home)}  # it goes on; say how far
+
+
+async def index_run(args: IndexArgs, run: ToolRunContext, progress: RunProgress) -> dict[str, Any]:
+    lock = home / "writer.lock"
+    async with run_lock(lock, what="the notes index", wait_s=config.wait_s) as held:
+        if not held:
+            # Another run holds the index: this call did nothing. Say what is there.
+            return {"state": "indexing", **totals(home)}
+        documents = await collect(args)  # under the lock: a busy call walks nothing
+        progress.begin(len(documents))
+        for count, path in enumerate(documents):
+            run.raise_if_canceled()
+            progress.tick(count)
+            ...
+    return {"state": "done", **counts}
+
+
+async def search_tool(args: SearchArgs, run: ToolRunContext) -> dict[str, Any]:
+    # Never waits and takes no lock: answers from what is saved so far.
+    return {"indexing": file_lock_held(home / "writer.lock"), **found(home, args)}
 ```
 
-`runs.run` is the one door. With no host the work runs to its end; in a host it
-goes on past the call, and the same request asked again joins it. The work says
-how much there is (`begin`) and how far it has got (`tick`); its end, its
-failure and whether anybody is owed word of them are written for it, to
-`progress.json` in `home` — the tool's state directory. That file is what moves
-the footer and what tells the agent when the run ends; `said` is what that
-telling says beyond the count — what the value the work returned says to a
-caller that waited, in a few lines. The call's cancellation
-is asked at each `tick`, and only with no host: a run in a host outlives the
-call, so the work never reads `run.raise_if_canceled` itself. Save as you go, so
-a host that is ended keeps what it finished.
+* **`reported(work, what=, said=, changed=, busy=)`** runs the work and reports it.
+  The work is handed a `RunProgress` and says only what it alone knows: how
+  much there is (`begin`) and how far it has got (`tick`). When the command was
+  called with `--progress`, each becomes a line of JSONL on stderr,
+  `{"state":"working","done":4,"total":8,"what":"documents"}`, at most every
+  0.5 s. The end is written for it: exactly one last line, `done` with
+  `changed` and a `note`, `busy` when another run held the index and this one
+  did nothing, or `failed` with the envelope's `code` and sentence. Without the
+  flag nothing is written and the body is the same. `said` is what the value
+  says beyond its count, in a few lines; `changed` is whether the run changed
+  what it builds, so a run over a tree that had not moved is not news; `busy`
+  is whether the value is the "another run holds it" answer. A tool that spends
+  something worth tracking — requests to a paid API, tokens — sets
+  `progress.spent` (`{"requests": 3, "tokens": 900}`) as it goes, and every
+  line after carries it, a failed run's last line included.
+* **`run_lock(lock, what=, wait_s=)`** holds a lock file for one run against
+  every other, in any process. It yields whether the lock is held. A second run
+  waits `wait_s` — or the caller's `call --wait SECONDS` — and past that the
+  body runs with `False` and answers `state: indexing`: another run holds the
+  index and this call did nothing.
+* **A reader takes no lock.** A tool that only reads asks `file_lock_held` and
+  marks its answer while a run is going. Save as you go, so a reader finds what
+  the run has finished and a run that is stopped keeps it.
+
+stdout is unchanged by `--progress`: one envelope. A stock UTCP client merges
+stderr into stdout, so the manual's templates never carry the flag. It is for a
+caller that reads the two streams apart, and `ph-utcp` is one. Name the tool in
+the manual's `background` and the session's row starts the run itself, shows
+the count in the footer, and tells the agent when the run ends:
+
+```python
+from ph_utcp import Background, Manual
+
+Manual(
+    template=manual_call_template(CLI),
+    envelope=True,
+    names="bare",
+    state="notes",
+    background=Background(
+        command=[*CLI.invocation(), "call"],
+        label="notes index",
+        tools=["notes_index"],
+        eager=True,  # run it once before a root agent's first step
+        wait_s=config.wait_s,
+    ),
+)
+```
+
+A call of `notes_index` then starts the run and waits `wait_s` for it. A run
+that ends in time is the call's answer; past that the call answers
+`state: indexing`, the run goes on, and the note that tells the agent of its
+end carries `said`. A run whose stream ends with no last line was killed or
+died, and the agent is told that. See
+[`ph-utcp`'s README](../../packages/ph-utcp/README.md) for the rest.
+
+`reporting_to(stream)` sends the same report to a stream of your choosing, for
+a caller that runs a tool in its own process — a test.
 
 ## Checklist
 

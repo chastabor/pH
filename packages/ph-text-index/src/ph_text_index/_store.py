@@ -59,10 +59,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
 
-from ph.json import as_int, as_str
+from ph.json import as_int, as_seq, as_str
 from ph.paths import file_stamp, write_atomic
 
 from ._chunk import Chunk
+from ._config import EmbedderRecord
 
 if TYPE_CHECKING:
     from ._embed import Vectors
@@ -152,13 +153,15 @@ class TextIndex:
     that was stopped before it could store its token: the next run reads the
     document, finds the digest it has, and embeds nothing. Per document, beside
     `_vcs_ids`, for that field's reason."""
-    limit: str | None = None
-    """The embedder's limit, as a phrase, when a document was last embedded into
-    this index, where one was known. For a person asking its status: a command asked for one has
-    embedded nothing, and asking a local model what it reads means loading it.
-    Never read back as the limit — a server can be given a longer window."""
     _seen: _Signature = (None, None)
     """The files as this copy last read or wrote them. See `stale`."""
+    readonly: bool = False
+    """Whether this copy was opened by a reader (`open`). Such a copy may hold
+    vectors no record names, so it is one to search and never one to add to."""
+    _embedder: list[EmbedderRecord] = field(default_factory=list)
+    """The embedder log, oldest first: what the embedder said of itself each
+    time an index run found its answer changed (`EmbedderRecord`). Saved with
+    the passages, so the log and what it was used to cut never part."""
 
     # ------------------------------------------------------------- paths ----
 
@@ -183,12 +186,21 @@ class TextIndex:
 
     # -------------------------------------------------------------- open ----
 
-    def open(self) -> None:
+    def open(self, *, readonly: bool = False) -> None:
         """Load what is on disk, or start empty. Idempotent.
+
+        `readonly` is a reader's open, made without the writer lock: a search, a
+        status. It changes no file. A writer may be part-way through a save —
+        the vectors synced, the sidecar naming them not yet written — and those
+        vectors are then left where they are, since `search` answers only for a
+        vector the sidecar names. Removing them (`_remove_strays`) is a writer's,
+        under the lock: done by a reader it took out of the file what the writer
+        was about to name.
 
         :raises IndexMismatch: when the sidecar names a different embedder.
         """
         self._seen = self._signature()
+        self.readonly = readonly
         if not self.sidecar_path.exists():
             return
         raw = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
@@ -211,8 +223,7 @@ class TextIndex:
         # Absent from an index written before documents had one: each then reads
         # as changed once, and is embedded again.
         self._digests = {str(path): str(one) for path, one in (raw.get("digests") or {}).items()}
-        limit = raw.get("limit")
-        self.limit = limit if isinstance(limit, str) else None
+        self._embedder = _embedder_log(raw.get("embedder"), self.sidecar_path)
         if self.index_path.exists():
             self._index = _turbovec().IdMapIndex.load(str(self.index_path))
         held = {
@@ -239,7 +250,8 @@ class TextIndex:
                 dropped,
                 self.root,
             )
-        self._remove_strays()
+        if not readonly:
+            self._remove_strays()
         self._reindex_paths()
 
     def _remove_strays(self) -> None:
@@ -255,8 +267,8 @@ class TextIndex:
         whole index. That is one full scan, and only when the count says there is
         something to find: every id the sidecar kept is in the index, so the
         difference in size is exactly the number of strays. Synced at once, so
-        the scan is made once and not on every open until somebody saves; the
-        service opens under the writer lock, so nobody else is writing.
+        the scan is made once and not on every open until somebody saves. Only
+        for an open under the writer lock, where nobody else is writing.
         """
         if self._index is None:
             return
@@ -314,7 +326,7 @@ class TextIndex:
             "vcs": self._token,
             "vcs_ids": self._vcs_ids,
             "digests": self._digests,
-            "limit": self.limit,
+            "embedder": [entry.to_wire() for entry in self._embedder],
             "model": self.model,
             "dim": self._dim,
             "bit_width": self.bit_width,
@@ -325,6 +337,26 @@ class TextIndex:
         # the vectors mean, and a partial write of it loses the corpus.
         write_atomic(self.sidecar_path, json.dumps(payload))
         self._seen = self._signature()
+
+    # ---------------------------------------------------------- embedder ----
+
+    def embedder(self) -> EmbedderRecord | None:
+        """What the embedder last said of itself, as an index run asked it: the
+        newest entry of the log, or `None` before any run has embedded."""
+        return self._embedder[-1] if self._embedder else None
+
+    def note_embedder(self, record: EmbedderRecord) -> bool:
+        """Add `record` to the log when it says something the newest entry does
+        not. Whether it was added; it is saved with the next `save`, which the
+        caller then owes."""
+        newest = self.embedder()
+        # When it was asked is not something it said.
+        if newest is not None and newest.model_dump(exclude={"asked_at_ms"}) == record.model_dump(
+            exclude={"asked_at_ms"}
+        ):
+            return False
+        self._embedder.append(record)
+        return True
 
     # ------------------------------------------------------------ mutate ----
 
@@ -522,6 +554,16 @@ class TextIndex:
                 else "empty"
             ),
         }
+
+
+def _embedder_log(raw: object, where: Path) -> list[EmbedderRecord]:
+    """The sidecar's embedder log, oldest first. One that will not read is no
+    log: the next run that embeds asks again and starts another."""
+    try:
+        return [EmbedderRecord.model_validate(entry) for entry in as_seq(raw)]
+    except ValueError:
+        log.warning("ph_text_index: the embedder log in %s will not read", where, exc_info=True)
+        return []
 
 
 def _turbovec() -> Any:  # noqa: ANN401

@@ -154,6 +154,25 @@ async def test_a_failure_from_the_tool_keeps_its_routable_code(tmp_path: Path) -
 # ------------------------------------------------------------------- the lock --
 
 
+@pytest.mark.parametrize("verb", [("manual",), ("status",), ("call", "code_index")])
+def test_a_module_in_the_tree_is_not_imported_by_the_command(
+    tmp_path: Path, verb: tuple[str, ...]
+) -> None:
+    """The command runs in the tree it is about, and imports nothing from it.
+
+    `python -m` puts the working directory first on `sys.path`, so a `shlex.py`
+    at a repository's root ran in place of the standard library's — in discovery
+    and `status`, which no sandbox confines. `-P` is what `invocation()` adds;
+    spelled without it, this prints the marker."""
+    marker = "IMPORTED FROM THE TREE"
+    (tmp_path / "shlex.py").write_text(f"raise SystemExit({marker!r})\n", encoding="utf-8")
+    done = subprocess.run(
+        _command(*verb), cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False
+    )
+    assert marker not in done.stdout + done.stderr
+    assert "-P" in CLI.invocation()
+
+
 async def test_two_processes_indexing_one_tree_report_counts_that_add_up(tmp_path: Path) -> None:
     """Each file is parsed by exactly one of them, and the other finds it current.
 
@@ -213,6 +232,35 @@ async def test_an_indexing_run_waits_for_the_writer_that_holds_the_index(
         release()
         with anyio.fail_after(60):
             await finished.wait()
+
+
+async def test_a_call_that_will_not_wait_says_another_run_holds_the_index(
+    tmp_path: Path,
+) -> None:
+    """Past its wait a second run answers, instead of standing behind the first:
+    `state: indexing`, with what the graph holds so far, and it parses nothing.
+    `code_graph` never waits — it answers from what is indexed and says the
+    index is still being built. `--wait 0` is the caller's word for "at once",
+    which is how a session asks while its own run works."""
+    shared_tree(tmp_path, callers=3)
+    state = tmp_path.parent / f"{tmp_path.name}-state"
+    built = _call(tmp_path, "code_index", "--state", str(state))
+    assert built["value"]["state"] == "done" and built["value"]["indexed"] == 4
+
+    release = acquire_file_lock(state / "graph.db.lock", timeout=0, what="the test")
+    try:
+        again = _call(tmp_path, "code_index", "--state", str(state), "--wait", "0")
+        asked = _call(
+            tmp_path, "code_graph", "--mode", "callers", "--query", "shared", "--state", str(state)
+        )
+    finally:
+        release()
+
+    assert again["ok"] is True and again["value"]["state"] == "indexing"
+    assert again["value"]["indexed"] == 0 and again["value"]["total_files"] == 4
+    assert "already building this graph" in again["text"]
+    assert asked["value"]["indexing"] is True and len(asked["value"]["edges"]) == 3
+    assert "[Not finished indexing." in asked["text"]
 
 
 # ----------------------------------------------------------------- UTCP, real --

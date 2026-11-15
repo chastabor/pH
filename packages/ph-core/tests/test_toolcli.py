@@ -26,11 +26,7 @@ import io
 import json
 import logging
 import os
-import socket
 import sys
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -39,25 +35,22 @@ import pytest
 from pydantic import BaseModel
 
 from ph import toolcli
-from ph.locks import try_file_lock
+from ph.locks import file_lock_held, try_file_lock
 from ph.toolcli import (
     CONFIG_ENV,
-    HOST_ENV,
     INHERITED_ENV,
     STATE_ENV,
-    BackgroundRuns,
-    Progress,
     RunProgress,
     ToolCli,
-    ToolHost,
     config_env,
     decode_argument,
     env_names,
     manual_call_template,
-    read_progress,
+    reported,
+    reporting_to,
     run,
+    run_lock,
     state_dir,
-    write_progress,
 )
 from ph.wire import EnvName, WireModel
 
@@ -324,170 +317,193 @@ def test_a_config_file_is_read_and_an_unreadable_one_is_said(tmp_path: Path) -> 
     assert "absent.yaml" in answer["error"]["message"]
 
 
-# --------------------------------------------------------------------- host ----
+# ----------------------------------------------------------------- progress ----
 
 
-@contextmanager
-def _answering(
-    tmp_path: Path, reply: dict[str, Any]
-) -> Iterator[tuple[Path, list[dict[str, Any]]]]:
-    """A socket that answers every request with `reply`, as a host would, and
-    the requests it was sent."""
-    path = tmp_path.parent / f"{tmp_path.name}.sock"
-    asked: list[dict[str, Any]] = []
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(path))
-    listener.listen()
-    # Polled, so the thread sees the listener close: closing a socket another
-    # thread is blocked in `accept` on does not wake it.
-    listener.settimeout(0.05)
-    closing = threading.Event()
-
-    def serve() -> None:
-        while not closing.is_set():
-            try:
-                link, _ = listener.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                return
-            link.settimeout(None)
-            with link, link.makefile("rwb") as stream:
-                asked.append(json.loads(stream.readline()))
-                stream.write(json.dumps(reply).encode() + b"\n")
-                stream.flush()
-
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
-    try:
-        yield path, asked
-    finally:
-        closing.set()
-        thread.join(timeout=5)
-        listener.close()
-        path.unlink(missing_ok=True)
+def _lines(text: str) -> list[dict[str, Any]]:
+    """A progress stream as its records: JSONL, one whole object a line."""
+    return [json.loads(line) for line in text.splitlines()]
 
 
-def test_a_call_is_answered_by_the_host_it_is_told_of_and_alone_when_there_is_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_call_with_progress_ends_its_stderr_with_exactly_one_last_line(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """`$PH_TOOL_HOST` is a hint and never a requirement. With a host there, the
-    call is its to answer and nothing is mounted here; with nobody listening, or
-    a host that says the call is not its own — another tree, another index — the
-    call runs by itself, because it could have been answered without one."""
-    (tmp_path / "note.txt").write_text("from the file", encoding="utf-8")
-    hosted = {"ok": True, "value": {"text": "from the host"}, "text": "from the host"}
+    """`--progress` keeps stderr for the report, and every call ends it: a tool
+    that reports nothing still says `done`, and a failure says `failed` with the
+    envelope's own code and sentence — so whoever reads the stream knows a run
+    stopped, and why, without reading stdout. Without the flag stderr is silent,
+    which is what a UTCP client needs."""
+    (tmp_path / "note.txt").write_text("x", encoding="utf-8")
 
-    with _answering(tmp_path, hosted) as (path, asked):
-        monkeypatch.setenv(HOST_ENV, str(path))
-        _, served = _called(tmp_path, "read", "--path", "note.txt", "--limit", "3")
-    with _answering(tmp_path, {"served": False}) as (path, _):
-        monkeypatch.setenv(HOST_ENV, str(path))
-        _, declined = _called(tmp_path, "read", "--path", "note.txt")
-    monkeypatch.setenv(HOST_ENV, str(tmp_path / "nobody.sock"))
-    _, alone = _called(tmp_path, "read", "--path", "note.txt")
+    code, answer = _called(tmp_path, "read", "--path", "note.txt", "--progress")
+    done = _lines(capfd.readouterr().err)
+    assert code == 0 and answer["ok"] is True
+    assert [line["state"] for line in done] == ["done"]
 
-    assert served == hosted
-    assert asked == [
-        {
-            "root": str(tmp_path),
-            "state": "",
-            "tool": "read",
-            "args_json": None,
-            "rest": ["--path", "note.txt", "--limit", "3"],
-        }
-    ]
-    assert "from the file" in declined["text"]
-    assert "from the file" in alone["text"]
+    code, answer = _called(tmp_path, "read", "--path", "absent.txt", "--progress")
+    failed = _lines(capfd.readouterr().err)
+    assert code == 1
+    assert [line["state"] for line in failed] == ["failed"]
+    assert failed[0]["code"] == answer["error"]["code"]
+    assert failed[0]["failure"] == answer["error"]["message"]
+
+    code, _answer = _called(tmp_path, "nope", "--progress")
+    assert [line["code"] for line in _lines(capfd.readouterr().err)] == ["UNKNOWN_TOOL"]
+
+    _called(tmp_path, "read", "--path", "note.txt")
+    assert capfd.readouterr().err == ""
+
+
+def test_progress_is_the_only_thing_on_the_kept_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The descriptor is still closed to everything else for the length of the
+    run: a dependency's progress bar would otherwise be a line a reader has to
+    tell from a record."""
+    real = toolcli._answered
+
+    def noisy(*args: Any, **kwargs: Any) -> int:  # noqa: ANN401
+        os.write(2, b"Loading weights: 100%\n")
+        print("a warning", file=sys.stderr)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(toolcli, "_answered", noisy)
+    (tmp_path / "note.txt").write_text("x", encoding="utf-8")
+
+    _called(tmp_path, "read", "--path", "note.txt", "--progress")
+
+    assert [line["state"] for line in _lines(capfd.readouterr().err)] == ["done"]
 
 
 @pytest.mark.anyio
-async def test_a_hosts_run_goes_on_past_the_call_and_the_same_request_joins_it(
+async def test_a_run_reports_as_it_goes_and_its_end_says_what_it_did() -> None:
+    """`reported` is the one door for a long piece of work: the work says how
+    much there is and how far it has got, and the door writes the end — with
+    what the value says and whether it changed anything, since a run nobody
+    waited for is told about from that line alone. Lines in between are held to
+    one every `REPORT_EVERY_S`."""
+    out = io.StringIO()
+
+    async def work(progress: RunProgress) -> dict[str, int]:
+        progress.begin(3)
+        progress.tick(1)  # within the interval of `begin`: not written
+        progress._written -= toolcli.REPORT_EVERY_S
+        progress.tick(2)
+        return {"added": 2}
+
+    with reporting_to(out):
+        value = await reported(
+            work,
+            what="documents",
+            said=lambda value: f"{value['added']} added",
+            changed=lambda value: bool(value["added"]),
+            busy=lambda _: False,
+        )
+
+    assert value == {"added": 2}
+    assert _lines(out.getvalue()) == [
+        {"state": "working", "done": 0, "total": 3, "what": "documents"},
+        {"state": "working", "done": 2, "total": 3, "what": "documents"},
+        {
+            "state": "done",
+            "done": 3,
+            "total": 3,
+            "what": "documents",
+            "changed": True,
+            "note": "2 added",
+        },
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_run_that_found_its_work_held_by_another_ends_busy_and_not_done() -> None:
+    """A run that waited out `wait_s` behind another and did nothing has not
+    finished anything: its last line says `busy`, with no note, so whoever is
+    told of its end is not told that a run of nothing covered everything."""
+    out = io.StringIO()
+
+    async def work(progress: RunProgress) -> dict[str, str]:
+        return {"state": "indexing"}
+
+    with reporting_to(out):
+        await reported(
+            work,
+            what="files",
+            said=lambda _: "Indexed 0 files.",
+            changed=lambda _: False,
+            busy=lambda value: value["state"] == "indexing",
+        )
+
+    assert _lines(out.getvalue()) == [{"state": "busy", "done": 0, "total": 0, "what": "files"}]
+
+
+@pytest.mark.anyio
+async def test_a_failed_runs_last_line_is_the_commands_and_carries_how_far_it_got() -> None:
+    """The work's failure becomes an envelope further out, and that is where its
+    last line is written from — the code and sentence a caller reads — with the
+    counts, and the spend, the run last reported. Nothing is written after a
+    last line."""
+    out = io.StringIO()
+    reports = toolcli._Reports(out)
+
+    async def work(progress: RunProgress) -> None:
+        progress.begin(5)
+        progress.spent = lambda: {"requests": 2}
+        raise ValueError("the disk is full")
+
+    with toolcli._set(toolcli._REPORTS, reports), pytest.raises(ValueError):
+        await reported(
+            work, what="files", said=lambda _: "", changed=lambda _: False, busy=lambda _: False
+        )
+    reports.end(code="INTERNAL_ERROR", failure="ValueError: the disk is full")
+    reports.end()
+
+    assert _lines(out.getvalue())[1:] == [
+        {
+            "state": "failed",
+            "done": 0,
+            "total": 5,
+            "what": "files",
+            "code": "INTERNAL_ERROR",
+            "failure": "ValueError: the disk is full",
+            # What it spent before it failed: a run that cost something and
+            # built nothing is the one most worth tracking.
+            "spent": {"requests": 2},
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_run_waits_its_turn_and_past_the_wait_is_told_another_holds_the_lock(
     tmp_path: Path,
 ) -> None:
-    """What a host adds to a long piece of work. The call that asked waits a
-    moment and is answered "still going"; the same request asked again joins the
-    run rather than starting it twice; and the run's last report says its end is
-    owed to somebody, which is how whoever started the host knows to pass it on.
-    A run that ends while its caller waits hands its value back and owes nothing,
-    and one that fails says how far it got. The work says only how much there is
-    and how far it is; its start, its end and its failure are written for it.
-    """
-    runs = BackgroundRuns(grace=0.05)
-    release = anyio.Event()
-    starts = 0
+    """One run at a time on what a tool writes. A second waits `wait_s` for the
+    first and is then given the lock, or told it is still held — it is a call,
+    with a limit of its own, and answers that a run is working rather than
+    stand behind it. `call --wait` is the caller's own word for how long."""
+    lock = tmp_path / "index.lock"
 
-    async def slow(progress: RunProgress) -> str:
-        nonlocal starts
-        starts += 1
-        progress.begin(3)
-        progress.tick(1)
-        await release.wait()
-        return "counts"
+    async with run_lock(lock, what="the index", wait_s=0.0) as first:
+        assert first is True
+        assert file_lock_held(lock)
+        async with run_lock(lock, what="the index", wait_s=0.05) as second:
+            assert second is False
+        with toolcli._set(toolcli._WAIT, 0.0):
+            async with run_lock(lock, what="the index", wait_s=60.0) as at_once:
+                assert at_once is False
 
-    async def quick(progress: RunProgress) -> str:
-        progress.begin(3)
-        return "counts"
+    release = try_file_lock(lock, what="the index")
+    assert release is not None
 
-    async def broken(progress: RunProgress) -> str:
-        progress.begin(4)
-        progress.tick(2)
-        raise ValueError("no")
-
-    def said(value: str) -> str:
-        return f"Three files, and one of them was skipped: {value}."
+    async def later() -> None:
+        await anyio.sleep(0.15)
+        release()
 
     async with anyio.create_task_group() as tasks:
-        host = ToolHost(tasks=tasks)
-        first = await runs.run(host, tmp_path, {"paths": ["a"]}, slow, what="files", said=said)
-        again = await runs.run(host, tmp_path, {"paths": ["a"]}, slow, what="files", said=said)
-        during = runs.working(tmp_path, tmp_path / "lock", what="the index")
-        release.set()
-        while host.working:
-            await anyio.sleep(0.01)
-        ended = read_progress(tmp_path)
-
-        answered = await runs.run(host, tmp_path, {"paths": ["a"]}, quick, what="files", said=said)
-        unowed = read_progress(tmp_path)
-        with pytest.raises(ValueError, match="no"):
-            await runs.run(host, tmp_path, {"paths": ["b"]}, broken, what="files", said=said)
-        failed = read_progress(tmp_path)
-        alone = await runs.run(None, tmp_path, {"paths": ["c"]}, quick, what="files", said=said)
-
-    assert (first, again, starts) == (None, None, 1)
-    assert during is not None and during.said() == "1/3 files"
-    assert ended is not None and (ended.state, ended.done, ended.owed) == ("done", 3, True)
-    assert ended.started > 0
-    assert answered == "counts"
-    assert unowed is not None and unowed.owed is False
-    # What the value says goes with the report of the end, owed or not; a run
-    # that failed has no value to say anything of.
-    assert unowed.note == ended.note == "Three files, and one of them was skipped: counts."
-    assert failed is not None and failed.note == ""
-    assert unowed.started > ended.started, "a second run of one request is a new run"
-    assert failed is not None and (failed.state, failed.done, failed.failure) == ("failed", 2, "no")
-    assert alone == "counts", "with no host the work runs to its end"
-
-
-def test_a_working_report_with_nobody_holding_the_lock_is_one_a_stopped_run_left(
-    tmp_path: Path,
-) -> None:
-    """A run holds its lock for as long as it works, so "is it still going" is
-    asked of the lock and not of a file a killed process cannot correct."""
-    runs = BackgroundRuns()
-    lock = tmp_path / "writer.lock"
-    write_progress(tmp_path, Progress(state="working", done=2, total=9, what="documents"))
-
-    assert BackgroundRuns().working(tmp_path, lock, what="the index") is None
-    held = try_file_lock(lock, what="the test")
-    assert held is not None
-    try:
-        found = runs.working(tmp_path, lock, what="the index")
-    finally:
-        held()
-
-    assert found is not None and found.said() == "2/9 documents"
-    assert read_progress(tmp_path / "absent") is None
+        tasks.start_soon(later)
+        async with run_lock(lock, what="the index", wait_s=5.0) as waited:
+            assert waited is True
+    assert not file_lock_held(lock)
 
 
 # ---------------------------------------------------------------- providers ----

@@ -25,37 +25,34 @@ a space nothing shares.
 
 from __future__ import annotations
 
-import base64
 import logging
 import math
 import os
 import urllib.error
 import urllib.request
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
 
-from ph.framing import FramingError, ask
-from ph.json import JsonValue, as_int, as_obj, as_str, dumps, loads
-from ph.llm.adapter import LlmError, input_too_long, openai_embeddings_body, openai_vectors
+from ph.json import JsonValue, as_int, as_obj, as_seq, dumps, loads
+from ph.llm.adapter import input_too_long
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, MISSING_CREDENTIAL
-from ph.toolcli import read_envelope
 from ph.tools.errors import HarnessError
 
-from ._config import Limit
+from ._config import Facts, Limit
 
 __all__ = [
     "BYTES_PER_TOKEN",
     "ENDPOINT_FAILED",
     "ENDPOINT_UNREACHABLE",
-    "SESSION_GONE",
     "Embedder",
     "EndpointEmbedder",
     "LocalWeights",
+    "Metered",
     "SentenceTransformerEmbedder",
-    "SessionEmbedder",
+    "Served",
     "TokenBounded",
     "Vectors",
     "estimate_tokens",
@@ -69,7 +66,6 @@ character is about one token a character. So bytes over three is seldom under.""
 
 ENDPOINT_UNREACHABLE = "TEXT_INDEX_ENDPOINT_UNREACHABLE"
 ENDPOINT_FAILED = "TEXT_INDEX_ENDPOINT_FAILED"
-SESSION_GONE = "TEXT_INDEX_SESSION_GONE"
 
 log = logging.getLogger("ph_text_index.embed")
 
@@ -139,6 +135,32 @@ class TokenBounded(Protocol):
         """How many tokens each of `texts` adds to a passage it is part of: its
         own, with no prefix and no markers. What passages are packed by
         (`_chunk.Weight`), so it is asked of a paragraph and of a line."""
+
+
+@runtime_checkable
+class Served(Protocol):
+    """An embedder behind a server. **Optional capability.**
+
+    What such an embedder reads is the server's to say, and a server can be
+    moved or reconfigured — so what it said is kept with where it was asked
+    (`EmbedderRecord`), and asked again of another address."""
+
+    def asked_of(self) -> str:
+        """The address `limit` asks."""
+
+    def reported(self) -> Facts:
+        """What the server said when `limit` last asked it, as it said it; empty
+        when it was not asked or did not answer."""
+
+
+@runtime_checkable
+class Metered(Protocol):
+    """An embedder that counts what it spends. **Optional capability.**"""
+
+    def spent(self) -> Mapping[str, int]:
+        """What it has spent since it was made, by unit: the `requests` it made
+        and the `texts` it embedded, and the `tokens` its provider reported,
+        where the provider reports any. Counted once each succeeds."""
 
 
 @runtime_checkable
@@ -242,6 +264,7 @@ class SentenceTransformerEmbedder:
     operator granted or revoked it.
     """
     _model: Any = field(default=None, init=False)
+    _spent: Counter[str] = field(default_factory=Counter, init=False)
 
     @property
     def name(self) -> str:
@@ -341,9 +364,11 @@ class SentenceTransformerEmbedder:
         own = getattr(self._load(), "max_seq_length", None)
         if isinstance(own, int) and own > 0:
             if self.max_tokens is not None and self.max_tokens < own:
-                return Limit(self.max_tokens, "configured")
-            return Limit(own, "model")
-        return None if self.max_tokens is None else Limit(self.max_tokens, "configured")
+                return Limit(tokens=self.max_tokens, source="configured")
+            return Limit(tokens=own, source="model")
+        return (
+            None if self.max_tokens is None else Limit(tokens=self.max_tokens, source="configured")
+        )
 
     def measure(
         self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False
@@ -409,7 +434,13 @@ class SentenceTransformerEmbedder:
             normalize_embeddings=True,
             show_progress_bar=False,
         )
+        self._spent.update(requests=1, texts=len(texts))
         return np.ascontiguousarray(rows, dtype=np.float32)
+
+    def spent(self) -> Mapping[str, int]:
+        """Calls of the model and texts embedded. A local model reports no
+        tokens and costs none."""
+        return self._spent
 
 
 def _estimated(prefix: str, texts: Sequence[str], bytes_per_token: float) -> list[int]:
@@ -421,7 +452,7 @@ def _batched(
     texts: Sequence[str],
     prefix: str,
     batch_size: int,
-    ask: Callable[[list[str]], Sequence[Sequence[float]] | Vectors],
+    ask: Callable[[list[str]], Sequence[Sequence[float]]],
 ) -> Vectors:
     """`texts`, behind `prefix`, embedded by `ask` a batch at a time, as one
     float32 row each.
@@ -441,23 +472,107 @@ def _batched(
     return np.ascontiguousarray(vectors / norms, dtype=np.float32)
 
 
-@dataclass(slots=True, kw_only=True)
-class _Remote(ABC):
-    """What the two embedders that are another process share: no tokenizer
-    here, so a passage is estimated; texts sent a batch at a time behind their
-    prefix; and a limit that is the setting, else what whoever embeds reports.
-    Each says only how it asks (`_ask`, `_reported`) and what it is called."""
+def _embeddings_body(
+    model: str, inputs: Sequence[str], dimensions: int | None
+) -> dict[str, JsonValue]:
+    """The OpenAI `/embeddings` request: `model` left out when empty — a server
+    that serves one model needs no name — and `dimensions` when not asked for."""
+    body: dict[str, JsonValue] = {"input": list(inputs)}
+    if model:
+        body["model"] = model
+    if dimensions is not None:
+        body["dimensions"] = dimensions
+    return body
 
+
+def _vectors_of(reply: JsonValue, expected: int) -> tuple[tuple[float, ...], ...]:
+    """The vectors of an OpenAI `/embeddings` answer, in the inputs' order:
+    placed by `index`, because the wire allows them back in any order.
+
+    An answer with another count of embeddings than inputs is the server
+    answering in another shape, and refused with a `ValueError`: matched up by
+    position it would file each passage under a neighbor's vector."""
+    data = sorted(
+        (as_obj(one) for one in as_seq(as_obj(reply).get("data"))),
+        key=lambda one: as_int(one.get("index")),
+    )
+    if len(data) != expected:
+        raise ValueError(
+            f"the embeddings API answered {expected} inputs with {len(data)} embeddings"
+        )
+    return tuple(_vector(one.get("embedding")) for one in data)
+
+
+def _vector(values: object) -> tuple[float, ...]:
+    """A server's JSON array of numbers as one vector.
+
+    Anything in the array that is not a number is the server answering in
+    another shape, and is refused rather than coerced — `float("nan")` from a
+    string would be a vector that scores against nothing and says so nowhere."""
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("the embeddings API returned an embedding that is not a list")
+    vector: list[float] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("the embeddings API returned a value that is not a number")
+        vector.append(float(value))
+    return tuple(vector)
+
+
+_PROPS = ("total_slots", "model_path", "model_alias")
+"""The top-level fields of a llama.cpp's `/props` kept with its window: enough
+to tell, later, which server and model answered, and nothing that is long."""
+
+
+@dataclass(slots=True, kw_only=True)
+class EndpointEmbedder:
+    """An embedder that is somebody else's process: the OpenAI-compatible
+    `/v1/embeddings` request, to a local server or a hosted API.
+
+    Nothing to load and nothing to download, so it is not a `LocalWeights`, and
+    no tokenizer here, so a passage is estimated. What can go wrong is said
+    rather than a traceback, each with a code a caller can route on — and the
+    two an adapter would also meet are the adapter's codes: the key's variable
+    is empty (`MISSING_CREDENTIAL`), an input is too long
+    (`CONTEXT_WINDOW_EXCEEDED`); and the endpoint cannot be reached, or answered
+    with something that is not embeddings.
+
+    `urllib`, because this is one POST and the standard library honors the proxy
+    variables a sandbox sets for a confined command — which is the only way such
+    a command reaches a host its deployment allows.
+    """
+
+    base_url: str
+    model: str = ""
+    api_key_env: str = ""
+    timeout_s: float = 60.0
     query_prefix: str = ""
     document_prefix: str = ""
     dimensions: int | None = None
     batch_size: int = 32
     max_tokens: int | None = None
+    _props: Facts = field(default_factory=dict, init=False, repr=False)
+    """What `/props` last answered, down to `_PROPS`."""
+    _spent: Counter[str] = field(default_factory=Counter, init=False, repr=False)
+    """Requests, texts, and the tokens the server's `usage` added up to — a
+    unit it never reported is not there."""
 
     def limit(self) -> Limit | None:
+        """The setting, else what the server reports."""
         if self.max_tokens is not None:
-            return Limit(self.max_tokens, "configured")
+            return Limit(tokens=self.max_tokens, source="configured")
         return self._reported()
+
+    def asked_of(self) -> str:
+        return self.base_url.rstrip("/").removesuffix("/v1").rstrip("/")
+
+    def spent(self) -> Mapping[str, int]:
+        """Requests answered, texts embedded, and the tokens the server's
+        `usage` reported, where it reported any."""
+        return self._spent
+
+    def reported(self) -> Facts:
+        return dict(self._props)
 
     def measure(
         self, texts: Sequence[str], bytes_per_token: float, *, query: bool = False
@@ -472,42 +587,6 @@ class _Remote(ABC):
         prefix = self.query_prefix if query else self.document_prefix
         return _batched(texts, prefix, self.batch_size, self._ask)
 
-    def _space(self, kind: str, model: str) -> str:
-        """A `name`: the model, both prefixes and an asked-for width."""
-        width = "" if self.dimensions is None else f":{self.dimensions}"
-        return f"{kind}:{model}{width}:{self.query_prefix}|{self.document_prefix}"
-
-    @abstractmethod
-    def _reported(self) -> Limit | None:
-        """The limit whoever embeds reports, or `None` when it says nothing."""
-
-    @abstractmethod
-    def _ask(self, inputs: list[str]) -> Sequence[Sequence[float]] | Vectors:
-        """One batch's vectors, `inputs` already behind their prefix."""
-
-
-@dataclass(slots=True, kw_only=True)
-class EndpointEmbedder(_Remote):
-    """An embedder that is somebody else's process: the OpenAI-compatible
-    `/v1/embeddings` request, to a local server or a hosted API.
-
-    Nothing to load and nothing to download, so it is not a `LocalWeights`. What
-    can go wrong is said rather than a traceback, each with a code a caller can
-    route on — and the two an adapter would also meet are the adapter's codes:
-    the key's variable is empty (`MISSING_CREDENTIAL`), an input is too long
-    (`CONTEXT_WINDOW_EXCEEDED`); and the endpoint cannot be reached, or answered
-    with something that is not embeddings.
-
-    `urllib`, because this is one POST and the standard library honors the proxy
-    variables a sandbox sets for a confined command — which is the only way such
-    a command reaches a host its deployment allows.
-    """
-
-    base_url: str
-    model: str = ""
-    api_key_env: str = ""
-    timeout_s: float = 60.0
-
     def _reported(self) -> Limit | None:
         """What the server says it reads, where it says.
 
@@ -515,16 +594,27 @@ class EndpointEmbedder(_Remote):
         ask, so it needs the setting — and without one a passage the API refuses
         is cut smaller and sent again, which costs a request and is why the
         setting is worth writing."""
-        root = self.base_url.rstrip("/").removesuffix("/v1").rstrip("/")
         try:
-            request = urllib.request.Request(f"{root}/props", headers=self._headers(body=False))
+            request = urllib.request.Request(
+                f"{self.asked_of()}/props", headers=self._headers(body=False)
+            )
             with urllib.request.urlopen(request, timeout=5.0) as response:
-                answer = loads(response.read())
+                answer = as_obj(loads(response.read()))
         except (OSError, ValueError, HarnessError):
             # Not a llama.cpp, or not answering, or no key: nothing says.
+            self._props = {}
             return None
-        window = as_obj(as_obj(answer).get("default_generation_settings")).get("n_ctx")
-        return Limit(window, "server") if isinstance(window, int) and window > 0 else None
+        window = as_obj(answer.get("default_generation_settings")).get("n_ctx")
+        said: dict[str, JsonValue] = {"n_ctx": window}
+        said |= {name: answer.get(name) for name in _PROPS}
+        self._props = {
+            name: value for name, value in said.items() if isinstance(value, (str, int, float))
+        }
+        return (
+            Limit(tokens=window, source="server")
+            if isinstance(window, int) and window > 0
+            else None
+        )
 
     def _headers(self, *, body: bool = True) -> dict[str, str]:
         headers = {"Content-Type": "application/json"} if body else {}
@@ -548,11 +638,13 @@ class EndpointEmbedder(_Remote):
         is the same space, and moving a server must not cost an index. A hosted
         model that changes under an unchanged name cannot be told apart beyond
         its width, which the index checks on every add."""
-        return self._space("endpoint", self.model)
+        width = "" if self.dimensions is None else f":{self.dimensions}"
+        return f"endpoint:{self.model}{width}:{self.query_prefix}|{self.document_prefix}"
 
     def _ask(self, inputs: list[str]) -> tuple[tuple[float, ...], ...]:
+        """One batch's vectors, `inputs` already behind their prefix."""
         headers = self._headers()
-        body = openai_embeddings_body(self.model, inputs, self.dimensions)
+        body = _embeddings_body(self.model, inputs, self.dimensions)
         address = f"{self.base_url.rstrip('/')}/embeddings"
         request = urllib.request.Request(
             address, data=dumps(body).encode("utf-8"), headers=headers, method="POST"
@@ -580,88 +672,12 @@ class EndpointEmbedder(_Remote):
                 ENDPOINT_FAILED,
             ) from error
         try:
-            return openai_vectors(answer, len(inputs))
-        except LlmError as error:
-            raise HarnessError(f"{address}: {error}", ENDPOINT_FAILED) from error
-
-
-@dataclass(slots=True, kw_only=True)
-class SessionEmbedder(_Remote):
-    """An embedder that is the pH session this command is run for.
-
-    The command sends its texts down a unix socket and the session embeds them
-    through one of its own model routes. What that buys is where the credential
-    is: in the harness, resolved by the adapter at its edge, and never in this
-    process — which runs inside an agent's sandbox, where everything it holds is
-    something the agent's own tools could read.
-
-    One request a connection, a frame each way (`ph.framing`), answered in
-    `ph.toolcli`'s envelope. A failure carries the adapter's own code and
-    sentence, so a missing key reads here as it would on a model call: by the
-    variable's name. Vectors travel as the bytes of a float32 array, base64 —
-    a quarter of the size of a JSON list of them, and nothing to parse.
-    """
-
-    where: str
-    """The session's socket."""
-    route: str
-    """The session's provider and model, `provider/model`."""
-    agent: str | None = None
-    """The agent this command works for (`ph.toolcli.AGENT_ENV`), told to the
-    session with each request so what the route spends is in that agent's log.
-    `None` where nobody said, and then the spend is in no log."""
-
-    @property
-    def name(self) -> str:
-        """The route, both prefixes and an asked-for width: what moves the vector
-        space, as `EndpointEmbedder.name` says it."""
-        return self._space("adapter", self.route)
-
-    def _reported(self) -> Limit | None:
-        """The window the session's route reports.
-
-        A route's window is its server's, which for a llama.cpp is the model
-        being served. For a hosted provider it is the chat model's and far above
-        an embedding model's, so it bounds nothing there: write the setting."""
-        try:
-            window = as_obj(self._request({"limit": True})).get("limit")
-        except HarnessError:
-            return None
-        return Limit(window, "route") if isinstance(window, int) and window > 0 else None
-
-    def _request(self, asked: dict[str, Any]) -> JsonValue:
-        """One request of the session, and the value it answered with."""
-        try:
-            answer = ask(self.where, asked)
-        except (OSError, FramingError) as error:
-            raise HarnessError(
-                f"the session that embeds for this index is not answering at {self.where} "
-                f"({error}); it has ended, or this command was not started by it",
-                SESSION_GONE,
-            ) from error
-        try:
-            value, _ = read_envelope(answer)
+            vectors = _vectors_of(answer, len(inputs))
         except ValueError as error:
-            raise HarnessError(
-                f"the session answered with something that is not an envelope: {error}",
-                ENDPOINT_FAILED,
-            ) from error
-        return value
-
-    def _ask(self, inputs: list[str]) -> Vectors:
-        """The session's answer, read back: the bytes of one float32 array, as
-        `row._Embedding` packs them."""
-        # Heavy, and needed only where an index is built or searched.
-        import numpy as np  # noqa: PLC0415
-
-        answered = as_obj(self._request({"inputs": inputs, "agent": self.agent}))
-        packed = base64.b64decode(as_str(answered.get("vectors")))
-        rows = np.frombuffer(packed, dtype=np.float32)
-        width = as_int(answered.get("dim"))
-        if width <= 0 or rows.size != width * len(inputs):
-            raise HarnessError(
-                f"the session answered {len(inputs)} texts with {rows.size} numbers of "
-                f"{width} a vector",
-                ENDPOINT_FAILED,
-            )
-        return rows.reshape(len(inputs), width)
+            raise HarnessError(f"{address}: {error}", ENDPOINT_FAILED) from error
+        self._spent.update(requests=1, texts=len(inputs))
+        usage = as_obj(as_obj(answer).get("usage"))
+        used = usage.get("total_tokens", usage.get("prompt_tokens"))
+        if isinstance(used, int):
+            self._spent["tokens"] += used
+        return vectors

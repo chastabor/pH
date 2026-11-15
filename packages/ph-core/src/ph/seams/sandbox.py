@@ -43,7 +43,7 @@ write. The TUI renders it with the `/sandbox` line that lifts it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
@@ -574,7 +574,12 @@ class ConfinedArgv:
     result back knows what was actually bounded rather than what it asked for."""
 
     def spawn_spec(
-        self, cwd: Path, *, env: dict[str, str] | None = None, timeout_ms: int | None = None
+        self,
+        cwd: Path,
+        *,
+        env: dict[str, str] | None = None,
+        timeout_ms: int | None = None,
+        on_stderr_line: Callable[[str], None] | None = None,
     ) -> SubprocessSpawnSpec:
         """This argv as a spawn, carrying `forwards_signals` with it: the one door
         from a confined argv to a child, so no spawn of one can drop the flag that
@@ -584,6 +589,7 @@ class ConfinedArgv:
             cwd=cwd,
             env=env,
             timeout_ms=timeout_ms,
+            on_stderr_line=on_stderr_line,
             forwards_signals=self.forwards_signals,
         )
 

@@ -17,7 +17,6 @@ a directory the engine never writes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -28,14 +27,11 @@ from ph.seams.fs import IndexScope
 from ph.wire import EnvName, WireModel
 
 __all__ = [
-    "ADAPTER_ROW",
-    "EMBEDDER_ENV",
     "ENDPOINT_ROW",
     "LOCAL_ROW",
     "MISSING_MODEL",
     "ROW",
     "STATE",
-    "AdapterConfig",
     "Config",
     "EndpointConfig",
     "Limit",
@@ -69,29 +65,21 @@ have to type it."""
 ENDPOINT_ROW = "text-index-endpoint"
 """The endpoint embedder's row id, in a session and in the command alike."""
 
-ADAPTER_ROW = "text-index-adapter"
-"""The adapter embedder's row id, in a session and in the command alike."""
-
-EMBEDDER_ENV = "PH_TEXT_INDEX_EMBEDDER"
-"""The unix socket a session embeds on, for a command whose embedder is one of
-the session's own model routes. Set by the session's row; a command run from a
-shell has none, and says so."""
-
 STATE = "text-index"
 """The directory, in the calling agent's scratch, a session's indexes are kept
 in: one per embedder beneath it."""
 
 
-@dataclass(frozen=True, slots=True)
-class Limit:
+class Limit(WireModel):
     """How long an input an embedder reads, in its own tokens, and who said so.
 
     Here and not with the embedders, because a session says it too — a setting,
-    a route's window, in `phern doctor` — and a session's process never imports
-    the module the embedders are in."""
+    in `phern doctor` — and a session's process never imports the module the
+    embedders are in. A wire model, because it is kept in a file too
+    (`EmbedderRecord`)."""
 
     tokens: int
-    source: Literal["configured", "model", "server", "route", "refused"]
+    source: Literal["configured", "model", "server", "refused"]
     """`refused` is one learned the hard way: the embedder turned an input away
     as too long, and said in doing so how long an input it takes."""
 
@@ -100,10 +88,55 @@ class Limit:
             "configured": "configured",
             "model": "the model's",
             "server": "the server's",
-            "route": "the route's window",
             "refused": "what its refusal said",
         }[self.source]
         return f"{self.tokens} tokens ({whose})"
+
+
+Facts = dict[str, str | int | float]
+"""What an embedder's server said of itself, down to plain values."""
+
+
+class Learned(WireModel):
+    """What refusals taught about an embedder, beyond what it said when asked."""
+
+    tokens: int | None = None
+    """The limit a refusal named, where one did: lower than the one reported.
+    A llama.cpp reports its window and refuses past its batch."""
+    density: float | None = None
+    """How many bytes of this corpus make a token, where a refusal said: lower
+    than the careful guess, for a corpus of paths, code and tables."""
+
+
+class EmbedderRecord(WireModel):
+    """What an embedder said of itself when an index run asked it: one entry of
+    the index's embedder log (`TextIndex.embedder`), kept in the sidecar and
+    saved with the passages it was used to cut, under the same writer lock.
+
+    An index run that embeds asks, and an answer that differs from the newest
+    entry — a server moved or given another window, or a refusal that taught
+    something — is added as a new entry. The newest is the one used; the ones
+    before it say what changed, and when. A search reads the newest and asks
+    nothing: for an endpoint that is a request saved on every search, since
+    each is a command of its own."""
+
+    asked_of: str | None = None
+    """The address that was asked, for an embedder behind a server; `None` for
+    one that is a model in the command's own process."""
+    asked_at_ms: int
+    """When this answer was first given, in milliseconds since the epoch."""
+    reported: Facts = Field(default_factory=dict)
+    """What it said, as it said it: a llama.cpp's `/props`, down to the fields
+    read here."""
+    limit: Limit | None = None
+    """How long an input it reads, by the setting or by what it reported."""
+    learned: Learned = Field(default_factory=Learned)
+
+    def effective(self) -> Limit | None:
+        """The limit to pack to: what a refusal taught, over what was reported."""
+        if self.learned.tokens is not None:
+            return Limit(tokens=self.learned.tokens, source="refused")
+        return self.limit
 
 
 class Scope(IndexScope):
@@ -117,9 +150,7 @@ class Scope(IndexScope):
     for it. The footer says how far it has got and the agent is told when it
     finishes.
 
-    `false` leaves indexing to `text_index` calls. Either way the command that
-    answers the tools stays up between calls, and holds the embedding model once
-    it has loaded it: `on_mount` decides only whether it starts unasked."""
+    `false` leaves indexing to `text_index` calls."""
 
 
 class Config(WireModel):
@@ -166,9 +197,9 @@ class Config(WireModel):
     kept nothing, and the next one embedded all of it again. A run that is
     stopped loses at most this much."""
     wait_s: float = 5.0
-    """How long `text_index` waits for its run before it answers "indexing" and
-    lets the run go on in the background. Where the tools are answered by a host,
-    which is in a session; a call that runs by itself always waits to the end.
+    """How long a `text_index` call waits on a run before it answers "indexing":
+    on the run a session started for it in the background, and, in the command,
+    on another run that holds the index.
 
     Long enough that a run with little to embed — a few documents, a second run
     over a corpus — answers with its counts. What it bounds is the run nobody
@@ -290,43 +321,6 @@ class EndpointConfig(WireModel):
     a passage it refuses is cut smaller and sent again."""
     timeout_s: float = 60.0
     """How long one request may take."""
-
-
-class AdapterConfig(WireModel):
-    """Row config for `text-index-adapter`: an embedder that is one of the
-    session's own model routes, named the way a session names a model.
-
-    **The key stays in the harness.** The tools run in a command inside the
-    calling agent's sandbox, and a route's credential is not handed in there:
-    the command sends its passages to the session over a socket, the session's
-    adapter embeds them — resolving the credential at its own edge, as it does
-    for a model call — and vectors come back. So nothing the agent's tools can
-    read, print or log ever held the key.
-
-    The provider is sent the text of every document indexed and of every
-    question asked, as it is sent the conversation.
-    """
-
-    provider: str
-    """A provider a model-adapter row of this profile registers, whose adapter
-    can embed (`ph.llm.adapter.EmbeddingAdapter`)."""
-    model: str
-    """The embedding model to ask that provider for."""
-    query_prefix: str = ""
-    """What an asymmetric model wants in front of a question (`search_query: `)."""
-    document_prefix: str = ""
-    """What it wants in front of a passage (`search_document: `)."""
-    dimensions: int | None = None
-    """Ask for vectors of this width, where the model can shorten them. Part of
-    the embedder's identity: another width is another index."""
-    batch_size: int = 32
-    """How many passages are sent to the session, and on to the provider, at once."""
-    max_tokens: int | None = None
-    """The longest passage the embedding model reads, in its tokens: 8191 for
-    OpenAI's. Left unset the route's own window is the bound — right for a
-    llama.cpp serving the embedding model, and far too large for a hosted
-    provider, whose window is its chat model's. A passage the provider refuses is
-    cut smaller and sent again, so the setting saves requests rather than runs."""
 
 
 def index_base() -> Path:

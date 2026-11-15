@@ -76,8 +76,8 @@ Or in a profile document:
     languages: [python]
 ```
 
-The index is built for you: a host is started at the agent's first step and
-indexes the row's `index` scope in the background (see "The two tools").
+The index is built for you: before the agent's first step an indexing run is
+started over the row's `index` scope, in the background (see "The two tools").
 `/code-graph status` and `/code-graph install` ask the command about its
 grammars, and `phern doctor` reports where the index is.
 
@@ -105,13 +105,25 @@ ph-code-graph status     # grammars, and what the index holds
 | `status` | which grammars are ready, where the index is and what it holds |
 | `install` | fetch every grammar now |
 | `manual` | the UTCP manual; `manual --registration` is what a harness registers |
-| `serve --socket PATH` | stay up and answer `call`s on a unix socket |
 
 **A call prints one JSON object** and nothing else: `{"ok": true, "value": ...,
 "text": ...}`, or `{"ok": false, "error": {"code": ..., "message": ...}}`.
 `value` is the tool's result as data and `text` is the same result written for a
 model to read; `--format text` prints only that. The exit code is 0, or 1 for a
 failure, and the failure is in the object either way.
+
+**Every call is one command.** Nothing stays up between calls and nothing
+listens on a socket. Two flags of `call` are for a run that takes a while:
+
+- **`--progress`** reports how far the run has got on stderr, as JSONL — one
+  JSON object a line. `{"state":"working","done":4,"total":8,"what":"files"}`
+  at most every 0.5 s, then exactly one last line: `"state":"done"` with
+  `changed` and a `note`, `"state":"busy"` when another run held the index and
+  this one did nothing, or `"state":"failed"` with a `code` and a `failure`.
+  A stream that ends with no last line is a command that was killed or died.
+  stdout is unchanged: one object.
+- **`--wait SECONDS`** is how long the call waits for another run that holds
+  the index, over the row's `wait_s`. `--wait 0` answers at once.
 
 **Settings** are the session row's own, by row id, read from three places with
 the later winning: `$PH_HOME/tools/ph-code-graph.yaml`, then `$PH_TOOL_CONFIG`
@@ -126,7 +138,7 @@ code-graph:
     exclude: ["**/tests/**"]
 ```
 
-**Where things go** is said by five variables, none of which has to be set:
+**Where things go** is said by four variables, none of which has to be set:
 
 | variable | default | what the command keeps there |
 |---|---|---|
@@ -134,7 +146,6 @@ code-graph:
 | `PH_CACHE` | `$XDG_CACHE_HOME/ph`, so `~/.cache/ph` | the grammars, the log, and the index when nothing else says where |
 | `PH_TOOL_STATE` | unset | the directory for the index; `--state DIR` is the same |
 | `PH_TOOL_CONFIG` | unset | row settings as one JSON object, for a caller that writes no file |
-| `PH_TOOL_HOST` | unset | the socket of a `serve` to ask instead of running the call here |
 
 See "Where things live" for each path.
 
@@ -150,8 +161,8 @@ ph-code-graph manual --registration
 ```json
 {"name": "ph_code_graph",
  "call_template_type": "cli",
- "commands": [{"command": "/path/to/python -m ph_code_graph manual"}],
- "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_TOOL_STATE", "PH_TOOL_HOST"]}
+ "commands": [{"command": "/path/to/python -P -m ph_code_graph manual"}],
+ "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_TOOL_STATE"]}
 ```
 
 The harness runs that command once to read the manual, and from then on runs the
@@ -187,7 +198,8 @@ What a harness needs to know:
   client prefixes each tool with the manual's name.
 - **The registration names this install.** Its command is the absolute path of
   the interpreter the package is installed in, so it needs no `PATH`, and it is
-  printed again after the package moves.
+  printed again after the package moves. `-P` keeps the working directory off
+  the module path, so no file of the tree is imported by the command.
 - **The workspace is the directory the command is started in.** Start the
   harness in the tree, or have it run its commands there. A `working_dir` on
   the registered template covers reading the manual and not the tool calls, so
@@ -208,13 +220,16 @@ What a harness needs to know:
   `$PH_CACHE/tree-sitter` and `$PH_CACHE/logs`. Nothing in the tree is. The
   grammars come from GitHub the first time, so run `ph-code-graph install`
   outside the sandbox; after that the tools need no network.
-- **A host is optional.** A call takes about 0.3 s by itself. A harness that
-  wants indexing to go on in the background starts
-  `ph-code-graph serve --socket PATH --warm code_index` in the tree and sets
-  `PH_TOOL_HOST=PATH` on its calls: `code_index` then answers
-  `state: indexing` after `wait_s` and the run goes on. A call that finds
-  nobody on the socket runs by itself. Keep the path short; a unix socket's is
-  limited to about a hundred characters.
+- **One indexing run at a time.** A `code_index` call is one command and
+  finishes before it answers. One made while another run holds the index waits
+  `wait_s` for it and then answers `state: indexing`: another run is building
+  the graph and this call did nothing. `code_graph` never waits. It answers
+  from what is indexed so far, with `indexing: true` in its value.
+- **Progress is for a harness that starts the command itself.** A stock UTCP
+  client merges stderr into stdout, so no template of the manual carries
+  `--progress`. A harness that wants indexing to go on in the background runs
+  `ph-code-graph call code_index --progress` in the tree, reads stdout and
+  stderr apart, and lets its model call `code_graph` meanwhile.
 - **The model's instructions ship with the package**, as
   `ph_code_graph/skills/code-graph/SKILL.md`: index first, ask the question you
   have, then read the narrow thing.
@@ -261,21 +276,29 @@ What it looks at when a call does not say is the row's `index` block:
     wait_s: 15                         # how long code_index waits before answering "indexing"
 ```
 
-**It starts unasked, and does not hold a call up.** In a session one
-`ph-code-graph serve` stays up for each tree, kept by `ph-utcp` for the agent
-whose tree it is. When a root session's agent takes its first step it is started
-and indexes the `index` scope in the background; the footer shows the count
-moving and the agent is told when it ends. A `code_index` call waits `wait_s`
-for its run and then answers `state: indexing` with how far it has got, and
-`code_graph` answers meanwhile from what is indexed so far and says so.
+**It starts unasked, and does not hold a call up.** Before a root session's
+agent takes its first step, `ph-utcp` starts one `code_index` run over the
+`index` scope, in the background: a job of that agent, under its sandbox. The
+footer shows the count moving, and the agent is told when the run ends if it
+changed the graph. A `code_index` call starts a run, or joins the same request
+already going, and waits `wait_s` for it. A run that ends in time is the call's
+answer. Past that the call answers `state: indexing` with a line saying how far
+the run has got, the run goes on, and the agent is told when it ends.
 `on_mount: false` leaves indexing to `code_index` calls.
+
+**One run at a time for each index.** A run holds the index's lock while it
+works. `state: indexing` means another run holds the index and this call did
+nothing: the totals beside it are what the graph holds so far. A different
+request made during a run is not queued, so call `code_index` again once the
+run has ended. `code_graph` takes no lock and never waits. It answers from what
+is indexed so far, and its value's `indexing` is `true` while a run holds the
+index.
 
 **A child builds its own graph only when it has a tree it writes for keeps.** A
 child in its parent's checkout, or one granted only to read the project — every
-child of a read-only fan-out — asks its parent's graph through its parent's
-host, and its results say which tree their paths belong to. A child with a
-worktree or an overlay of its own has files that diverge, so it gets its own, at
-its first call.
+child of a read-only fan-out — asks its parent's graph, and its results say
+which tree their paths belong to. A child with a worktree or an overlay of its
+own has files that diverge, so it gets its own, at its first call.
 
 `paths` is how the row is pointed at one package of a monorepo, so a bare
 `code_index` stays under `max_files` instead of walking everything. `exclude` is
@@ -468,10 +491,12 @@ would make `callers` return every place that merely *mentions* a type.
 - **the grammars**: `$PH_CACHE/tree-sitter`, set by the engine row when the
   command mounts it.
 - **the writer lock**: `graph.db.lock` beside the database. One indexing run at a
-  time per index, across every process on the workspace; a second run waits for
-  the first and then finds most of the tree current.
+  time per index, across every process on the workspace; a second run waits
+  `wait_s` for the first and then finds most of the tree current, or answers
+  `state: indexing`.
 - **the command's log**: `$PH_CACHE/logs/ph-code-graph.log`. A call prints one
-  JSON object and nothing on stderr, so this is where a traceback goes.
+  JSON object, and nothing on stderr but the progress lines `--progress` asks
+  for, so this is where a traceback goes.
 
 That second one is not housekeeping. The pack keeps every grammar it uses in a
 writable cache — its bundled ones too, which it downloads there on first use —

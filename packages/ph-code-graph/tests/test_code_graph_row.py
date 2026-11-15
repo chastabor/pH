@@ -416,36 +416,35 @@ async def test_status_counts_the_index_of_the_agent_that_asked(
     assert "not built" in unbuilt
 
 
-# -------------------------------------------------------------------- the host --
+# ------------------------------------------------------- runs in the background --
 
 
-async def test_a_session_keeps_one_host_for_a_tree_and_its_calls_go_through_it(
+async def test_a_call_is_answered_by_the_run_it_started_and_nothing_stays_up(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The command that answers the tools stays up between calls, one for each
-    tree: started at the first call, by `ctx.shell`, for the agent that made it."""
+    """`code_index` is run by the session in the background and waited for: a run
+    that ends within `wait_s` answers the call with its own counts, and when it
+    has ended there is no process left — every call is one command."""
     shared_tree(tmp_path)
     ctx = await mount(*ROWS)
     agent = new_agent(ctx)
     utcp = ctx.require(UTCP)
 
-    await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
-    [first] = utcp.hosts.values()
+    built = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=agent)
     asked = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
-    [again] = utcp.hosts.values()
 
-    assert len(asked.value["edges"]) == 2
-    assert again is first and first.running
-    assert first.owner is agent and first.socket.exists()
-    assert first.host.label == "code graph"
+    assert built.value["state"] == "done" and built.value["indexed"] == 3
+    assert len(asked.value["edges"]) == 2 and asked.value["indexing"] is False
+    assert not utcp.runs
+    assert not list(resolve_roots().runtime.glob("utcp/*")), "nothing listens anywhere"
 
 
 async def test_a_root_agents_first_step_builds_the_graph_and_it_is_told_when_it_ends(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The gate.** No tool is called: the row's `agent/pre-step` listener starts
-    the host with `code_index` to run, the graph is built in the background, and
-    the agent is told with a note that waits for its next step."""
+    `code_index` in the background, its progress is read from the command's
+    stderr, and the agent is told with a note that waits for its next step."""
     shared_tree(tmp_path, callers=4)
     ctx = await mount(*ROWS)
     agent = new_agent(ctx)
@@ -459,13 +458,15 @@ async def test_a_root_agents_first_step_builds_the_graph_and_it_is_told_when_it_
 
     [note] = agent.inbox.next_step
     said = text_of(note.content)
-    assert "The code graph is finished: 5 files" in said
+    # The count is of files walked; in this suite the scratch, and so the
+    # graph's lock file, is inside the tree.
+    assert "The code graph is finished: " in said
     # And what a caller that waited would have read: the run's own counts.
     assert "Indexed 5 files (0 already current)" in said
     assert "The graph holds" in said
     asked = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
     assert len(asked.value["edges"]) == 4
-    assert asked.value["indexing"] is None
+    assert asked.value["indexing"] is False
 
 
 async def test_on_mount_false_starts_nothing_until_a_tool_is_called(
@@ -481,5 +482,6 @@ async def test_on_mount_false_starts_nothing_until_a_tool_is_called(
     request = PreStepRequest(agent=agent, session=session_of(agent), messages=(), turn=1, step=1)
     await ctx.require(UTCP).eager(request, entered)
 
-    assert not ctx.require(UTCP).hosts
-    assert manual(Config.model_validate({"index": {"onMount": False}})).host is not None
+    assert not ctx.require(UTCP).runs
+    background = manual(Config.model_validate({"index": {"onMount": False}})).background
+    assert background is not None and background.eager is False

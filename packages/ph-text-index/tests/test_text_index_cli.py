@@ -44,15 +44,7 @@ from text_index_stub import STUB_CLI, HashingEmbedder
 
 from ph.paths import resolve_roots
 from ph.testing import MountProfile, run_tool
-from ph.toolcli import (
-    CONFIG_ENV,
-    HOST_ENV,
-    PROGRESS_FILE,
-    STATE_ENV,
-    ToolCli,
-    manual_call_template,
-    read_progress,
-)
+from ph.toolcli import CONFIG_ENV, STATE_ENV, ToolCli, manual_call_template
 from ph.workspace_caches import digest
 from ph_text_index.cli import CLI
 from ph_text_index.engine import TEXT_INDEX
@@ -139,12 +131,11 @@ async def test_the_index_goes_where_the_caller_says_and_is_found_there_again(
     )
 
     assert built["value"]["total_documents"] == 2
-    assert sorted(one.name for one in state.iterdir()) == sorted(
-        [digest(HashingEmbedder().name), PROGRESS_FILE]
-    )
+    assert [one.name for one in state.iterdir()] == [digest(HashingEmbedder().name)]
     assert [hit["path"] for hit in found["value"]["hits"]] == ["docs/w.md"]
     assert apart["value"]["searched"] == 0, "with no state named, it is a different index"
-    assert (resolve_roots().cache / "text-index" / digest(str(tmp_path))).is_dir()
+    # And a search of an index nobody has built makes nothing: it is a reader.
+    assert not (resolve_roots().cache / "text-index" / digest(str(tmp_path))).exists()
 
 
 async def test_a_failure_from_the_tool_is_in_the_answer(tmp_path: Path) -> None:
@@ -239,17 +230,18 @@ async def test_a_real_utcp_client_registers_the_manual_and_calls_a_tool(
     assert found["value"]["searched"] == indexed["value"]["total_chunks"]
 
 
-# -------------------------------------------------------------------- a host --
+# ----------------------------------------------------------- a run, reported --
 
 
 @contextmanager
-def _host(root: Path, *argv: str, config: dict[str, Any] | None = None) -> Iterator[Path]:
-    """`serve`, as whoever wants a host starts one: a process of its own, on a
-    socket, ended with its owner. Yields the socket once something listens."""
-    socket_path = root.parent / f"{root.name}.sock"
+def _running(
+    root: Path, *argv: str, config: dict[str, Any] | None = None
+) -> Iterator[subprocess.Popen[str]]:
+    """`call text_index --progress`, as a session starts a run in the background:
+    a process of its own, its stderr a pipe to read the report from."""
     env = {**os.environ, **({CONFIG_ENV: json.dumps(config)} if config else {})}
     process = subprocess.Popen(
-        [*STUB_CLI.invocation(), "serve", "--socket", str(socket_path), *argv],
+        [*STUB_CLI.invocation(), "call", "text_index", "--progress", *argv],
         cwd=root,
         env=env,
         stdout=subprocess.PIPE,
@@ -257,153 +249,87 @@ def _host(root: Path, *argv: str, config: dict[str, Any] | None = None) -> Itera
         text=True,
     )
     try:
-        deadline = time.monotonic() + 30
-        while not socket_path.exists():
-            assert process.poll() is None, f"the host left at once: {process.communicate()}"
-            assert time.monotonic() < deadline, "the host never listened"
-            time.sleep(0.02)
-        yield socket_path
+        yield process
     finally:
         if process.poll() is None:
-            process.terminate()
+            process.kill()
         process.communicate(timeout=30)
 
 
-def _asked(root: Path, socket_path: Path, tool: str, *argv: str) -> dict[str, Any]:
-    """`_call`, with the host named as `ph-utcp` names it."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv(HOST_ENV, str(socket_path))
-        return _call(root, tool, *argv)
+def _reported(process: subprocess.Popen[str], until: Callable[[dict[str, Any]], bool]) -> None:
+    """Read the run's report, a line at a time, up to the line `until` accepts."""
+    assert process.stderr is not None
+    for line in process.stderr:
+        if until(json.loads(line)):
+            return
+    raise AssertionError("the report ended before the line that was waited for")
 
 
-def _until(done: Callable[[], bool], what: str) -> None:
-    deadline = time.monotonic() + 60
-    while not done():
-        assert time.monotonic() < deadline, f"never saw {what}"
-        time.sleep(0.05)
-
-
-def test_a_host_loads_once_what_every_call_would_load(tmp_path: Path) -> None:
-    """**The gate.** A second `text_search` does not load the model again.
-
-    The stub's row writes a line each time it is mounted — each time a process
-    "loads the model". Three calls through a host leave the one line the host
-    wrote; the same three calls with no host leave three more, one a process.
-    And a call that names a host nobody is running is still answered.
+def test_a_run_reports_on_stderr_and_a_search_meanwhile_reads_what_it_has_saved(
+    tmp_path: Path,
+) -> None:
+    """**The gate.** A run says how far it has got on stderr and ends with one
+    last line. While it works nothing waits for it: a second `text_index` that
+    will not wait answers `indexing`, and `text_search` answers at once from
+    what the run has saved so far and says the index is not finished. When the
+    run is over the warning is gone, and asking again finds nothing to embed.
     """
-    docs_tree(tmp_path, documents=2)
-    record = tmp_path.parent / f"{tmp_path.name}-loads"
-    config = {"text-index-stub": {"record": str(record)}}
+    docs_tree(tmp_path, documents=20)
+    config = {"text-index": {"saveEveryS": 0.2}, "text-index-stub": {"delay": 0.25}}
 
     with (
         pytest.MonkeyPatch.context() as patch,
-        _host(tmp_path, config=config) as socket_path,
+        _running(tmp_path, "--paths", "docs", config=config) as run,
     ):
         patch.setenv(CONFIG_ENV, json.dumps(config))
-        indexed = _asked(tmp_path, socket_path, "text_index", "--paths", "docs")
-        first = _asked(tmp_path, socket_path, "text_search", "--query", "containment tier")
-        second = _asked(tmp_path, socket_path, "text_search", "--query", "containment tier")
-        hosted = len(record.read_text(encoding="utf-8").splitlines())
-
-        alone = [
-            _call(tmp_path, "text_search", "--query", "containment tier"),
-            _asked(
-                tmp_path, tmp_path / "nobody.sock", "text_search", "--query", "containment tier"
-            ),
-        ]
-        every = len(record.read_text(encoding="utf-8").splitlines())
-
-    assert indexed["value"]["state"] == "done"
-    assert first == second
-    assert first["value"]["hits"][0]["path"] == "docs/w.md"
-    assert hosted == 1, "a call through the host mounted the rows again"
-    assert [one["value"] for one in alone] == [first["value"], first["value"]]
-    assert every == 3
-
-
-def test_a_host_answers_at_once_and_a_search_says_the_index_is_not_finished(
-    tmp_path: Path,
-) -> None:
-    """**The gate.** In a host `text_index` does not wait for the run: it answers
-    `indexing` with how far it has got, and `text_search` answers meanwhile from
-    what is indexed so far and says so. When the run is over the progress file
-    says `done`, the warning is gone, and asking again finds nothing to embed.
-    """
-    docs_tree(tmp_path, documents=20)
-    # Slow enough that the run is still going two calls later: each waits a
-    # second for it before it answers.
-    config = {"text-index": {"waitS": 1.0}, "text-index-stub": {"delay": 0.25}}
-
-    with _host(tmp_path, config=config) as socket_path:
+        _reported(run, lambda line: line["done"] >= 6)
         began = time.monotonic()
-        started = _asked(tmp_path, socket_path, "text_index", "--paths", "docs")
+        second = _call(tmp_path, "text_index", "--paths", "docs", "--wait", "0")
+        during = _call(tmp_path, "text_search", "--query", "invoices issued monthly")
         waited = time.monotonic() - began
-        joined = _asked(tmp_path, socket_path, "text_index", "--paths", "docs")
-        during = _asked(tmp_path, socket_path, "text_search", "--query", "invoices issued monthly")
+        out, err = run.communicate(timeout=120)
+        after = _call(tmp_path, "text_search", "--query", "invoices issued monthly")
+        again = _call(tmp_path, "text_index", "--paths", "docs")
 
-        home = resolve_roots().cache / "text-index" / digest(str(tmp_path))
-        _until(lambda: getattr(read_progress(home), "state", "") == "done", "the run finish")
-        after = _asked(tmp_path, socket_path, "text_search", "--query", "invoices issued monthly")
-        again = _asked(tmp_path, socket_path, "text_index", "--paths", "docs")
-
-    assert started["value"]["state"] == "indexing"
-    assert started["value"]["total"] == 20
-    assert waited < 3, "the call waited for the run"
-    assert "Indexing in the background" in started["text"]
-    # The same request, asked again while its run is going, joins it.
-    assert joined["value"]["state"] == "indexing"
-    assert joined["value"]["done"] >= started["value"]["done"]
-    assert 0 < during["value"]["indexing"]["done"] < 20
-    assert during["value"]["hits"], "a search during the run found nothing indexed so far"
+    last = json.loads(err.splitlines()[-1])
+    assert (last["state"], last["done"], last["total"]) == ("done", 20, 20)
+    assert last["changed"] is True and "20 documents" in last["note"]
+    assert json.loads(out)["value"]["state"] == "done"
+    assert second["value"]["state"] == "indexing"
+    assert "already building this index" in second["text"]
+    assert waited < 4, "a call waited for the run"
+    assert during["value"]["indexing"] is True
+    assert during["value"]["hits"], "a search during the run found nothing saved so far"
+    assert 0 < during["value"]["searched"] < 20
     assert "Not finished indexing" in during["text"]
-    assert after["value"]["indexing"] is None
+    assert after["value"]["indexing"] is False
     assert after["value"]["searched"] == 20
     assert again["value"]["state"] == "done"
     assert (again["value"]["unchanged"], again["value"]["chunks_added"]) == (20, 0)
 
 
-def test_a_host_that_is_killed_keeps_what_it_saved_and_the_next_run_goes_on(
+def test_a_run_that_is_killed_writes_no_last_line_and_the_next_one_goes_on(
     tmp_path: Path,
 ) -> None:
-    """**The gate.** A worker killed with SIGKILL embeds nothing twice — up to its
-    last save. The run saves as it goes, so the documents it had saved are found
+    """**The gate.** A run killed with SIGKILL embeds nothing twice — up to its
+    last save — and its report ends without a last line, which is how whoever
+    reads it knows the run did not finish. The documents it had saved are found
     by the next run, by their digests, and only the rest are embedded.
     """
     docs_tree(tmp_path, documents=12)
     config = {"text-index": {"saveEveryS": 0.2}, "text-index-stub": {"delay": 0.3}}
-    home = resolve_roots().cache / "text-index" / digest(str(tmp_path))
 
-    with _host(tmp_path, "--warm", "text_index", config=config):
-        _until(lambda: getattr(read_progress(home), "done", 0) >= 5, "five documents")
-        host = int(subprocess.check_output(["pgrep", "-f", f"{tmp_path.name}.sock"]).split()[0])
-        os.kill(host, signal.SIGKILL)
+    with _running(tmp_path, config=config) as run:
+        _reported(run, lambda line: line["done"] >= 5)
+        run.send_signal(signal.SIGKILL)
+        _out, err = run.communicate(timeout=30)
 
-    resumed = _call(tmp_path, "text_index")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(CONFIG_ENV, json.dumps(config))
+        resumed = _call(tmp_path, "text_index")
 
+    assert all(json.loads(line)["state"] == "working" for line in err.splitlines())
     assert resumed["ok"] is True, resumed
-    assert resumed["value"]["unchanged"] >= 3, "nothing the killed host embedded was kept"
+    assert resumed["value"]["unchanged"] >= 3, "nothing the killed run embedded was kept"
     assert resumed["value"]["unchanged"] + len(resumed["value"]["documents"]) == 12
     assert resumed["value"]["total_documents"] == 12
-
-
-def test_a_host_leaves_when_nobody_has_asked_and_a_second_start_stands_down(
-    tmp_path: Path,
-) -> None:
-    """A host costs a process and, for a model, memory — so it goes when it has
-    been idle, and whoever wants one starts another. And two starts for one
-    socket end with one host: the second finds it answering and leaves."""
-    with _host(tmp_path, "--idle", "30") as socket_path:
-        second = _run(STUB_CLI, tmp_path, "serve", "--socket", str(socket_path), "--idle", "30")
-        assert second.returncode == 0
-        assert socket_path.exists(), "the second start took the first one's socket"
-
-    brief = subprocess.run(
-        [*STUB_CLI.invocation(), "serve", "--socket", str(socket_path), "--idle", "0.3"],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert brief.returncode == 0, brief.stderr
-    assert not socket_path.exists(), "an idle host left its socket behind"

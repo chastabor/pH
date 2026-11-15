@@ -317,9 +317,9 @@ async def test_a_confined_agent_that_may_not_write_its_tree_still_indexes_it(
     assert _indexes(ctx, agent).is_dir()
     _, changed, _ = await git(ctx, repo, "status", "--porcelain")
     assert changed == "", "the tree was written"
-    # And the three calls were answered by one host: a confined command reached a
-    # confined host, on a socket both sandboxes were granted.
-    assert len(record.read_text(encoding="utf-8").splitlines()) == 2
+    # Each call was a confined command of its own, beside the one that printed
+    # the manual: nothing stayed up between them.
+    assert len(record.read_text(encoding="utf-8").splitlines()) == 4
 
 
 async def test_a_profile_that_names_a_different_embedder_gets_a_separate_index(
@@ -608,14 +608,14 @@ def _recording(tmp_path: Path, **config: object) -> tuple[Path, dict[str, Any]]:
     return record, {**ROWS[2], "config": {"record": str(record), **config}}
 
 
-async def test_a_session_keeps_one_host_and_every_call_is_answered_by_it(
+async def test_every_call_is_one_command_and_nothing_stays_up(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** A second `text_search` does not load the model again.
+    """**The gate.** No process outlives its call, and none listens anywhere.
 
-    Two processes mount the embedder: the one that printed the manual, and the
-    host. Three tool calls add none — where, with no host, each is a process
-    that loads what the last one loaded.
+    Four processes mount the embedder: the one that printed the manual, the run
+    `text_index` started — whose result answered that call — and one for each
+    search.
     """
     docs_tree(tmp_path)
     record, embedder = _recording(tmp_path)
@@ -628,16 +628,17 @@ async def test_a_session_keeps_one_host_and_every_call_is_answered_by_it(
 
     assert [hit["path"] for hit in first.value["hits"]][:1] == ["docs/w.md"]
     assert again.value == first.value
-    assert _loads(record) == 2
-    assert [name for name, _ in ctx.require(UTCP).hosts] == ["ph_text_index"]
+    assert _loads(record) == 4
+    assert not ctx.require(UTCP).runs
+    assert not list(resolve_roots().runtime.glob("utcp/*")), "something listens"
 
 
-async def test_a_child_that_shares_its_parents_tree_shares_its_index_and_its_host(
+async def test_a_child_that_shares_its_parents_tree_shares_its_index(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """One host a tree, not one an agent. A child with no worktree of its own
+    """One index a tree, not one an agent. A child with no worktree of its own
     reads its parent's files, so it asks its parent's index — and a fan-out of
-    such children is one index and one model, not one of each a child."""
+    such children is one index, not the same documents embedded for each."""
     docs_tree(tmp_path, documents=3)
     record, embedder = _recording(tmp_path)
     ctx = await mount(*ROWS[:2], embedder)
@@ -656,8 +657,7 @@ async def test_a_child_that_shares_its_parents_tree_shares_its_index_and_its_hos
     utcp = ctx.require(UTCP)
     assert utcp.owner_of(child) is parent
     assert [hit["path"] for hit in found.value["hits"]] == ["docs/w.md"]
-    assert list(utcp.hosts) == [("ph_text_index", parent.id)]
-    assert _loads(record) == 2
+    assert _loads(record) == 3, "the manual, the parent's run and the child's search"
     assert not _indexes(ctx, child).exists(), "the child built an index of its own"
 
 
@@ -668,8 +668,8 @@ async def test_a_root_agents_first_step_starts_the_index_and_it_is_told_when_it_
     footer reading moves while it is; and when it ends the agent is told, with a
     note that waits in its inbox for its next step and starts no turn.
 
-    No tool is called here. The row's `agent/pre-step` listener starts the host
-    with the index tool to run, and the host does the rest in the background.
+    No tool is called here. The row's `agent/pre-step` listener starts the index
+    tool in the background, and its progress is read from the command's stderr.
     """
     docs_tree(tmp_path, documents=12)
     _, embedder = _recording(tmp_path, delay=0.15)
@@ -693,11 +693,10 @@ async def test_a_root_agents_first_step_starts_the_index_and_it_is_told_when_it_
     # With what the tool's result would have said to a caller that waited for it.
     assert "Indexed 12 documents: 12 passages added, 0 removed." in text_of(note.content)
     assert "The index now holds 12 passages from 12 documents." in text_of(note.content)
-    # Once for the tree: a later step neither starts another host nor indexes
-    # the tree again for nobody.
-    [hosted] = utcp.hosts.values()
+    # Once for the tree: a later step does not index the tree again for nobody.
+    assert not utcp.runs
     await utcp.eager(_step(agent), _entered)
-    assert list(utcp.hosts.values()) == [hosted]
+    assert not utcp.runs
     assert ("ph_text_index", agent.id) in utcp.warmed
     assert len(readings) >= 2, f"the reading did not move: {readings}"
     assert all(one.startswith("text index ") and one.endswith("/12 documents") for one in readings)
@@ -711,7 +710,7 @@ async def test_on_mount_false_leaves_indexing_to_the_tool_and_a_child_waits_for_
 ) -> None:
     """`index.on_mount: false`, and the other half of the rule for free: a
     sub-agent's step starts nothing either way, so a child in a throwaway
-    worktree that never searches never holds a model."""
+    worktree that never searches never embeds a document."""
     docs_tree(tmp_path)
     off = {**ROWS[1], "config": {"index": {"onMount": False}}}
     ctx = await mount(ROWS[0], off, ROWS[2])
@@ -719,7 +718,7 @@ async def test_on_mount_false_leaves_indexing_to_the_tool_and_a_child_waits_for_
     agent = new_agent(ctx)
 
     await utcp.eager(_step(agent), _entered)
-    assert not utcp.hosts
+    assert not utcp.runs
 
     eager = await mount(*ROWS)
     parent = new_agent(eager)
@@ -727,25 +726,28 @@ async def test_on_mount_false_leaves_indexing_to_the_tool_and_a_child_waits_for_
         admitted_child(eager, session_of(parent), "c1"), FAKE_OPTIONS
     )
     await eager.require(UTCP).eager(_step(child), _entered)
-    assert not eager.require(UTCP).hosts
+    assert not eager.require(UTCP).runs
 
 
-async def test_unmounting_the_embedder_ends_its_host(mount: MountProfile, tmp_path: Path) -> None:
-    """A host is a job of the agent it serves, and it is the manual's too: the
-    tools go with the embedder's row, and so does the process that answers them."""
-    docs_tree(tmp_path)
-    ctx = await mount(*ROWS)
-    utcp = ctx.require(UTCP)
-    await run_tool(ctx, "text_search", {"query": "x"}, agent=new_agent(ctx))
-    [hosted] = utcp.hosts.values()
-    assert hosted.socket.exists()
+async def test_unmounting_the_embedder_ends_its_run(mount: MountProfile, tmp_path: Path) -> None:
+    """A run is a job of the agent whose tree it works on, and it is the manual's
+    too: the tools go with the embedder's row, and so does a run still going.
+    Stopped, and not said to have failed: nobody is told of a run its own row
+    ended."""
+    docs_tree(tmp_path, documents=12)
+    _, embedder = _recording(tmp_path, delay=0.3)
+    ctx = await mount(ROWS[0], {**ROWS[1], "config": {"waitS": 0.2}}, embedder)
+    utcp, agent = ctx.require(UTCP), new_agent(ctx)
+    started = await run_tool(ctx, "text_index", {"paths": ["docs"]}, agent=agent)
+    assert started.value["state"] == "indexing"
+    [run] = utcp.runs.values()
 
-    await ctx.require(MOUNT).forks[STUB_ROW].dispose()
+    await ctx.require(MOUNT).forks[embedder["id"]].dispose()
     await settle_background(ctx)
 
-    assert not utcp.hosts
-    assert not hosted.running
-    assert not hosted.socket.exists()
+    assert not utcp.runs
+    assert run.ended.is_set() and run.last is None
+    assert not agent.inbox.next_step
 
 
 async def test_a_child_builds_its_own_index_only_when_it_has_a_tree_it_writes_for_keeps(
@@ -798,6 +800,5 @@ async def test_a_child_builds_its_own_index_only_when_it_has_a_tree_it_writes_fo
     assert swept.value["total_documents"] == 3, "the reader swept its parent's index"
     assert wrote.value["total_documents"] == 5
     assert "[Paths here" not in text_of(wrote.content)
-    assert sorted(owner for _, owner in utcp.hosts) == sorted([parent.id, writer.id])
     assert not _indexes(ctx, reader).exists()
-    assert _loads(record) == 3, "the manual, the parent's host and the writer's"
+    assert _loads(record) == 5, "the manual, three indexing runs and the reader's search"

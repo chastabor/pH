@@ -270,6 +270,55 @@ async def test_a_child_is_a_group_leader_so_a_group_can_be_signalled(
     await child.terminate()
 
 
+async def test_a_stderr_listener_is_handed_every_line_however_many_there_are(
+    tmp_path: Path,
+) -> None:
+    """A child whose stderr is a report of how far it has got: each line reaches
+    the listener as it is written, the last one included — which a kept stream
+    would lose, since `pump` keeps the head and a progress stream's last line is
+    the one that matters. Delivered and not kept; stdout is untouched; and a
+    last line the child never ended is still handed over."""
+    heard: list[str] = []
+    script = (
+        "import sys\n"
+        "for n in range(2000): print('line', n, file=sys.stderr)\n"
+        "print('answer')\n"
+        "sys.stderr.write('last words')\n"
+    )
+    _root, service = _service()
+    service.max_output = 1024
+
+    result = await service.run(
+        SubprocessSpawnSpec(
+            argv=(sys.executable, "-c", script), cwd=tmp_path, on_stderr_line=heard.append
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == "answer\n"
+    assert result.stderr == ""
+    assert heard[0] == "line 0" and heard[1999] == "line 1999"
+    assert heard[-1] == "last words" and len(heard) == 2001
+
+
+async def test_a_listener_that_raises_does_not_stop_the_child(tmp_path: Path) -> None:
+    """What a reader gets wrong must not leave the child blocked on a full pipe."""
+
+    def broken(_line: str) -> None:
+        raise RuntimeError("a reader's mistake")
+
+    _root, service = _service()
+    script = "import sys\nfor n in range(50000): print('x' * 80, file=sys.stderr)\n"
+
+    result = await service.run(
+        SubprocessSpawnSpec(
+            argv=(sys.executable, "-c", script), cwd=tmp_path, on_stderr_line=broken
+        )
+    )
+
+    assert result.exit_code == 0
+
+
 async def test_a_cancel_token_stops_a_running_child(tmp_path: Path) -> None:
     """The bound a *person* can reach, which there was not one of (C7).
 

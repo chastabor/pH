@@ -77,6 +77,20 @@ async def test_a_frame_over_the_limit_is_refused_whatever_the_chunk_size(chunk: 
     assert str(MAX_LINE) in str(refused.value)
 
 
+@pytest.mark.parametrize(
+    "line",
+    [b"\xff\n", b"[" * 100_000 + b"\n", b"not json\n", b"[1]\n"],
+    ids=["not-utf-8", "nested-past-the-parser", "not-json", "not-an-object"],
+)
+async def test_a_line_that_is_not_a_frame_is_the_peers_fault_and_said_as_that(line: bytes) -> None:
+    """Every way a line can fail to be a frame is a `FramingError`, which ends
+    that connection and nothing else. Two of them were not: bytes that are not
+    UTF-8 and nesting past the parser's depth raised errors of their own, and
+    one peer's line took down whoever was serving the socket."""
+    with pytest.raises(FramingError):
+        await _frames(line, LINUX_CHUNK)
+
+
 @pytest.mark.parametrize("chunk", [MACOS_CHUNK, LINUX_CHUNK], ids=["macos", "linux"])
 async def test_a_frame_at_the_limit_still_arrives(chunk: int) -> None:
     """The other half, for `probe_sandbox`'s reason: a cap that refused everything

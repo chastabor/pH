@@ -49,8 +49,10 @@ is the one thing it throws for contention, for the caller to translate.
 from __future__ import annotations
 
 import errno
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+import fcntl
+import os
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import anyio
@@ -64,9 +66,9 @@ __all__ = [
     "acquire_file_lock",
     "describe_lock",
     "file_lock",
+    "file_lock_held",
     "try_file_lock",
     "wait_for_file_lock",
-    "waited_file_lock",
 ]
 
 
@@ -140,6 +142,34 @@ def try_file_lock(path: Path | str, *, what: str) -> Callable[[], None] | None:
         return None
 
 
+def file_lock_held(path: Path | str) -> bool:
+    """Whether some process holds the lock at `path` this instant.
+
+    For a reader that wants to say "a run is building this" and must not take the
+    lock to find out. Asked with a *shared*, non-blocking `flock`, which only an
+    exclusive holder refuses — so two processes asking at one moment never see
+    each other, as two that each tried the lock itself would. Opened without
+    `O_CREAT`: a lock nobody has made is a lock nobody holds, and asking must not
+    make it. Any other failure to ask — a filesystem with no `flock` — answers
+    no: nobody is known to hold it.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
 async def wait_for_file_lock(
     path: Path | str, *, what: str, poll: float = 0.1
 ) -> Callable[[], None]:
@@ -153,17 +183,6 @@ async def wait_for_file_lock(
     while (release := try_file_lock(path, what=what)) is None:
         await anyio.sleep(poll)
     return release
-
-
-@asynccontextmanager
-async def waited_file_lock(path: Path | str, *, what: str) -> AsyncIterator[None]:
-    """Hold the lock for the body, waited for as `wait_for_file_lock` waits.
-    `file_lock`'s twin for a caller on the event loop."""
-    release = await wait_for_file_lock(path, what=what)
-    try:
-        yield
-    finally:
-        release()
 
 
 @contextmanager

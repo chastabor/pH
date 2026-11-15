@@ -36,16 +36,17 @@ Resolving properly means an import graph, scope, and per-language type
 inference. That is the 29 708 lines this package declined to port. Name-based
 answers most of what an agent actually asks and reports where it cannot.
 
-## One call, or a host
+## One run at a time
 
-Run for one call, `code_index` finishes before it answers. Mounted in a host
-(`ph-code-graph serve`, `ph.toolcli.TOOL_HOST`) the process outlives the call, so
-the tool answers at once when a run is long — `state: indexing`, with how far it
-has got — and the run goes on in the background; `code_graph` answers meanwhile
-from what is indexed so far, and says the index is still being built. Either way
-the run reports to `progress.json` beside the database. Nothing else differs:
-each file is its own transaction, so a run that is stopped keeps every file it
-finished, and the next one finds them by their digests.
+`code_index` is one command and finishes before it answers. A run holds the
+index's lock while it works, and a second waits its turn for `wait_s`; past that
+it answers `state: indexing` — another run is building this — instead of
+standing behind it. `code_graph` never waits: it answers from what is indexed so
+far and says the index is still being built. Called with `--progress` the
+command reports how far it has got on stderr (`ph.toolcli.reported`), which is
+how a session shows a run it started in the background. Each file is its own
+transaction, so a run that is stopped keeps every file it finished, and the next
+one finds them by their digests.
 
 ## Where this row is mounted
 
@@ -65,7 +66,7 @@ import importlib.util
 import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
@@ -77,14 +78,14 @@ from ph.cordis import Context, MountRefusal, ServiceKey, plugin
 from ph.json import JsonObject, as_int
 from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.types import ContentBlock, text_of
-from ph.locks import waited_file_lock
+from ph.locks import file_lock_held
 from ph.seams._registry import contribute_item
 from ph.seams.changes import tree_state
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.fs import FsService, skipped_lines
 from ph.text import BRIEFLY, count_of
-from ph.toolcli import TOOL_HOST, BackgroundRuns, Progress, RunProgress, claim_home
+from ph.toolcli import RunProgress, claim_home, reported, run_lock
 from ph.tools.definition import ToolModel, ToolOutput, ToolRunContext, define_tool, text_content
 from ph.tools.errors import HarnessError
 from ph.tools.presentation import simple_views
@@ -174,8 +175,6 @@ class CodeGraphSeam:
     ctx: Context
     grammars: Path
     """Where the tree-sitter grammar cache was pointed. See `_extract.use_cache`."""
-    runs: BackgroundRuns = field(default_factory=BackgroundRuns)
-    """The indexing runs, by index directory, and how far each has got."""
 
     def store_for(self, root: Path) -> CodeGraphStore:
         """This workspace's index: where the caller said, or a directory per root
@@ -190,14 +189,16 @@ class CodeGraphSeam:
         """
         return CodeGraphStore(path=index_path(root))
 
-    def indexing(self, store: CodeGraphStore) -> Progress | None:
-        """The run building `store` right now, or `None`
-        (`BackgroundRuns.working`): a run holds the index's lock while it works."""
-        return self.runs.working(store.path.parent, _lock_of(store), what=_LOCKED)
+    def indexing(self, store: CodeGraphStore) -> bool:
+        """Whether a run is building `store` right now: one holds the index's lock
+        for as long as it works, and only a run takes it."""
+        return file_lock_held(_lock_of(store))
 
     @asynccontextmanager
-    async def writing(self, store: CodeGraphStore) -> AsyncIterator[None]:
+    async def writing(self, store: CodeGraphStore, *, wait_s: float) -> AsyncIterator[bool]:
         """Hold `store` for one indexing run, against every other writer of it.
+        Yields whether it is held: `False` when another run still had it after
+        `wait_s` (`ph.toolcli.run_lock`).
 
         **A lock file beside the database, not a lock in this process.** The index
         is shared by everything on one workspace — two roots in a daemon, a
@@ -209,11 +210,10 @@ class CodeGraphSeam:
         seam's own calls too.
 
         Waited for rather than refused: a second indexing run is expected to queue
-        behind the first, and then finds most of the tree already current. The
-        directory needs no making here — taking the lock makes it.
+        behind the first, and then finds most of the tree already current.
         """
-        async with waited_file_lock(_lock_of(store), what=_LOCKED):
-            yield
+        async with run_lock(_lock_of(store), what=_LOCKED, wait_s=wait_s) as held:
+            yield held
 
     def report(self) -> list[tuple[str, str]]:
         """`phern doctor`'s section."""
@@ -278,12 +278,9 @@ class SkippedValue(ToolModel):
 
 class IndexValue(ToolModel):
     state: Literal["done", "indexing"] = "done"
-    """`indexing`: the run goes on in the background, and the counts below are
-    how far it has got. Only a host answers that; a call that ran by itself
-    answers `done`."""
-    done: int = 0
-    total: int = 0
-    """Files this run has been through, and how many it will go through."""
+    """`indexing`: another run holds the index and was still working after this
+    call had waited `wait_s`. Nothing below was done by this call; the totals
+    are what the graph holds so far."""
     indexed: int = 0
     """Files parsed this call — changed or new only."""
     unchanged: int = 0
@@ -344,11 +341,6 @@ class RingValue(ToolModel):
     symbols: list[SymbolValue]
 
 
-class IndexingValue(ToolModel):
-    done: int
-    total: int
-
-
 class GraphValue(ToolModel):
     mode: str
     query: str | None
@@ -359,9 +351,9 @@ class GraphValue(ToolModel):
     offset: int
     truncated: bool
     indexed_files: int
-    indexing: IndexingValue | None = None
-    """Set while a run is still building the index: the answer is from what it
-    has indexed so far."""
+    indexing: bool = False
+    """A run is still building the index: the answer is from what it has indexed
+    so far."""
     symbols: list[SymbolValue] = Field(default_factory=list)
     edges: list[EdgeValue] = Field(default_factory=list)
     rings: list[RingValue] = Field(default_factory=list)
@@ -382,11 +374,10 @@ def _doc(one: dict[str, Any]) -> str:
 def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     if value.get("state") == "indexing":
         return text_content(
-            f"Indexing in the background: {value['done']} of "
-            f"{count_of(value['total'], 'file')} so far. `code_graph` answers now, from "
-            "what is indexed already, and says while the index is still being built. "
-            "You will be told when it finishes; call `code_index` again to see how far "
-            "it has got.\n"
+            "An indexing run is already building this graph, so this call started "
+            "none. `code_graph` answers now, from what is indexed already, and says "
+            "while the index is still being built. Call `code_index` again once that "
+            "run has finished.\n"
             f"The graph holds {count_of(value['total_symbols'], 'symbol')} "
             f"from {count_of(value['total_files'], 'file')} so far."
         )
@@ -422,6 +413,21 @@ def _index_summary(value: Mapping[str, Any], *, shown: int = SHOWN) -> str:
     return "\n".join(lines)
 
 
+def _said(value: Mapping[str, Any]) -> str:
+    """A run's note for whoever did not wait for it (`ph.toolcli.reported`)."""
+    return _index_summary(value, shown=BRIEFLY)
+
+
+def _changed(value: Mapping[str, Any]) -> bool:
+    """Whether a run changed the graph: a file parsed, or one removed."""
+    return as_int(value.get("indexed")) + as_int(value.get("removed")) > 0
+
+
+def _busy(value: Mapping[str, Any]) -> bool:
+    """Whether another run held the graph, so this one did nothing."""
+    return value.get("state") == "indexing"
+
+
 def _ambiguity(value: Any) -> str:  # noqa: ANN401
     if value["definitions"] <= 1:
         return ""
@@ -441,9 +447,8 @@ def _render_graph(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
         return answer
     return text_content(
         f"{text_of(answer)}\n"
-        f"[Not finished indexing: {indexing['done']} of "
-        f"{count_of(indexing['total'], 'file')}. This answer covers what is indexed so "
-        "far; ask again once it finishes.]"
+        "[Not finished indexing. This answer covers what is indexed so far; ask "
+        "again once it finishes.]"
     )
 
 
@@ -584,9 +589,7 @@ async def apply(ctx: Context, config: Config) -> None:
             f"{GRAMMAR_CACHE_ENV}."
         ) from error
 
-    seam = CodeGraphSeam(
-        ctx=ctx, grammars=grammar_cache(), runs=BackgroundRuns(grace=config.wait_s)
-    )
+    seam = CodeGraphSeam(ctx=ctx, grammars=grammar_cache())
     ctx.provide(CODE_GRAPH, seam)
 
     def store(run: ToolRunContext) -> CodeGraphStore:
@@ -603,60 +606,46 @@ async def apply(ctx: Context, config: Config) -> None:
         return book.forget(gone) if gone else 0
 
     async def index_tool(args: IndexArgs, run: ToolRunContext) -> dict[str, Any]:
-        # In a host the run outlives this call, which answers with the run's
-        # counts if it ends within the grace and with how far it has got if not.
-        book = store(run)
-        value: dict[str, Any] | None = await seam.runs.run(
-            ctx.get(TOOL_HOST),
-            book.path.parent,
-            args,
+        return await reported(
             partial(index_run, args, run),
             what="files",
-            said=partial(_index_summary, shown=BRIEFLY),
-            raise_if_canceled=run.raise_if_canceled,
+            said=_said,
+            changed=_changed,
+            busy=_busy,
         )
-        if value is not None:
-            return value
-        progress = seam.indexing(book)
-        stats: dict[str, Any] = (
-            await anyio.to_thread.run_sync(book.stats)
-            if await anyio.to_thread.run_sync(book.exists)
-            else {"files": 0, "symbols": 0, "refs": 0, "languages": []}
-        )
-        return IndexValue(
-            state="indexing",
-            done=0 if progress is None else progress.done,
-            total=0 if progress is None else progress.total,
-            total_files=stats["files"],
-            total_symbols=stats["symbols"],
-            total_refs=stats["refs"],
-            languages=stats["languages"],
-        ).model_dump()
 
     async def index_run(
         args: IndexArgs, run: ToolRunContext, progress: RunProgress
     ) -> dict[str, Any]:
-        """One indexing run, to its end. Its caller's cancellation is asked at
-        each `progress.tick`, for as long as the run is that caller's own."""
+        """One indexing run, to its end — or the answer that another run holds
+        the index. Its caller's cancellation is asked at each file."""
         fs = ctx.require(FS)
         book = store(run)
-        wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
-        paths = await fs.collect(
-            wanted.paths,
-            wanted.include,
-            scope=run.scope,
-            limit=config.max_files,
-            agent=run.agent,
-            exclude=wanted.exclude,
-        )
         skipped: list[dict[str, str]] = []
         indexed = unchanged = symbols = removed = 0
-        total = len(paths)
 
-        # Before the lock: the record and the sweep touch nothing an index holds.
-        await anyio.to_thread.run_sync(claim_home, index_base(), fs.root_for(run.agent))
-        async with seam.writing(book):
-            # Under the lock, so the report is this run's and not one waiting.
+        async with seam.writing(book, wait_s=config.wait_s) as held:
+            if not held:
+                stats: dict[str, Any] = await anyio.to_thread.run_sync(book.stats)
+                return IndexValue(
+                    state="indexing",
+                    total_files=stats["files"],
+                    total_symbols=stats["symbols"],
+                    total_refs=stats["refs"],
+                    languages=stats["languages"],
+                ).model_dump()
+            # Under the lock: a call that will answer "indexing" walks nothing.
+            await anyio.to_thread.run_sync(claim_home, index_base(), fs.root_for(run.agent))
+            wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
+            paths = await fs.collect(
+                wanted.paths,
+                wanted.include,
+                scope=run.scope,
+                limit=config.max_files,
+                agent=run.agent,
+                exclude=wanted.exclude,
+            )
+            total = len(paths)
             progress.begin(total)
             await anyio.to_thread.run_sync(book.prepare)
             if args.forget:
@@ -677,6 +666,7 @@ async def apply(ctx: Context, config: Config) -> None:
             stored_token = await anyio.to_thread.run_sync(book.token)
             state = await tree_state(ctx, fs.root_for(run.agent), since=stored_token)
             for count, path in enumerate(paths):
+                run.raise_if_canceled()
                 progress.tick(count)
                 language = detect_language(path)
                 # Derived from the pack rather than checked against a name
@@ -793,8 +783,6 @@ async def apply(ctx: Context, config: Config) -> None:
 
         return {
             "state": "done",
-            "done": total,
-            "total": total,
             "indexed": indexed,
             "unchanged": unchanged,
             "removed": removed,
@@ -815,7 +803,7 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         if args.mode != "entities" and not args.query:
             raise HarnessError(f"mode={args.mode} needs `query`", CODE_GRAPH_FAILED)
-        progress = seam.indexing(book)
+        indexing = await anyio.to_thread.run_sync(seam.indexing, book)
 
         # `file_count`, not `stats()`: the header needs one number and `stats`
         # counts symbols and refs and groups files by language — three full
@@ -879,9 +867,7 @@ async def apply(ctx: Context, config: Config) -> None:
             "definitions": defined,
             "offset": args.offset,
             "indexed_files": indexed,
-            "indexing": (
-                None if progress is None else {"done": progress.done, "total": progress.total}
-            ),
+            "indexing": indexing,
             **body,
         }
 

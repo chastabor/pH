@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ph-code-graph"
-version = "0.11.0"
+version = "0.12.0"
 description = "pH plugin: `code_index` and `code_graph`, a Python-native tree-sitter code graph with line-accurate answers."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,8 +33,8 @@ classifiers = [
 # `ph-utcp` because the row a session mounts registers this package's manual with
 # it rather than registering the tools itself; the tools run in `ph-code-graph`.
 dependencies = [
-    "ph-core==0.11.0",
-    "ph-utcp==0.11.0",
+    "ph-core==0.12.0",
+    "ph-utcp==0.12.0",
     "tree-sitter>=0.25",
     "tree-sitter-language-pack>=1.16",
 ]
