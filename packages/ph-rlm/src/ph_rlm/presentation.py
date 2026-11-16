@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ph.characters import head
 from ph.cordis import Context, plugin
 from ph.json import JsonObject, as_bool, as_int, as_str
 from ph.keys import TOOLS
@@ -152,9 +153,9 @@ def _present_call(args: JsonObject) -> ToolCallView:
     # A bounded prefix: the card wants the program, not every line of a
     # generated file these views re-materialize per replayed cell. `input` is the
     # header line, `body` the program the code cell renders under it (P3-19).
-    head = _program(args)[:2048]
-    first = next((line for line in head.splitlines() if line.strip()), "")
-    return ToolCallView(card="terminal", title=PYTHON, input=first, body=head)
+    shown = head(_program(args), 2048)
+    first = next((line for line in shown.splitlines() if line.strip()), "")
+    return ToolCallView(card="terminal", title=PYTHON, input=first, body=shown)
 
 
 def _present_result(args: JsonObject, result: ToolResult) -> ToolResultView:

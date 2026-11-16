@@ -24,24 +24,25 @@ from typing import Any
 
 import httpx
 
+from ph.characters import head
 from ph.cordis import Context
 from ph.json import as_str
 from ph.keys import CREDENTIALS
-from ph.llm.adapter import LlmError
+from ph.llm.adapter import LlmError, failure_of
 from ph.llm.types import (
     CONTEXT_WINDOW_EXCEEDED,
     FILE_EXPIRED,
     MISSING_CREDENTIAL,
+    TIMEOUT,
     Finish,
     FinishReason,
-    LlmFailure,
 )
 
 from .sse import iter_sse
 
 __all__ = ["HttpClient", "failure_from_status", "resolve_secret", "wire_error_finish"]
 
-TIMEOUT = httpx.Timeout(600.0, connect=15.0)
+CLIENT_TIMEOUT = httpx.Timeout(600.0, connect=15.0)
 
 _STATUS_CODES = {429: "RATE_LIMIT", 401: "AUTHENTICATION", 403: "AUTHENTICATION", 529: "OVERLOADED"}
 
@@ -116,11 +117,11 @@ def failure_from_status(
         is_overflow=is_overflow,
         is_missing_file=is_missing_file,
     )
-    detail = body[:400] or f"HTTP {status}"
+    detail = head(body, 400) or f"HTTP {status}"
     return LlmError(
         f"provider returned {status}: {detail}",
         code,
-        LlmFailure(message=detail, code=code, status=status),
+        failure_of(detail, code, said=body, status=status),
     )
 
 
@@ -145,7 +146,7 @@ def _classified_transport() -> Iterator[None]:
     try:
         yield
     except httpx.TransportError as error:
-        code = "TIMEOUT" if isinstance(error, httpx.TimeoutException) else "CONNECTION_ERROR"
+        code = TIMEOUT if isinstance(error, httpx.TimeoutException) else "CONNECTION_ERROR"
         # The class name carries the diagnosis — `ConnectError`, `ReadTimeout`,
         # `RemoteProtocolError` — and httpx's message for several of them is
         # empty, so a bare `str(error)` would log a failure with no text at all.
@@ -169,7 +170,7 @@ _WIRE_ERROR_CODES = {
     "RESOURCE_EXHAUSTED": "RATE_LIMIT",
     "UNAVAILABLE": "SERVICE_UNAVAILABLE",
     "INTERNAL": "SERVER_ERROR",
-    "DEADLINE_EXCEEDED": "TIMEOUT",
+    "DEADLINE_EXCEEDED": TIMEOUT,
     "UNAUTHENTICATED": "AUTHENTICATION",
     "PERMISSION_DENIED": "AUTHENTICATION",
 }
@@ -244,7 +245,7 @@ def wire_error_finish(
         is_overflow=is_overflow,
         is_missing_file=is_missing_file,
     )
-    failure = LlmFailure(message=as_str(error.get("message"), "provider error"), code=code)
+    failure = failure_of(as_str(error.get("message"), "provider error"), code)
     return Finish(reason=FinishReason(kind="error", failure=failure))
 
 
@@ -256,7 +257,7 @@ class HttpClient:
 
     def _get(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=TIMEOUT)
+            self._client = httpx.AsyncClient(timeout=CLIENT_TIMEOUT)
         return self._client
 
     async def aclose(self) -> None:
@@ -346,7 +347,7 @@ class HttpClient:
     ) -> dict[str, Any]:
         """GET and parse — the poll half of an upload that finishes asynchronously.
 
-        `timeout` overrides `TIMEOUT` for one call, and exists for the caller
+        `timeout` overrides `CLIENT_TIMEOUT` for one call, and exists for the caller
         that is not waiting on a model: a *mount-time* probe inherits a ten
         minute read budget otherwise, so a host that accepts the socket and then
         stalls holds up plugin mount — and with it a TUI start and `phern doctor`.

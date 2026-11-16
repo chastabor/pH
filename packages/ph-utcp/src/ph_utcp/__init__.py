@@ -98,6 +98,7 @@ from pydantic import Field
 
 from ph.agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ph.cancel import Canceled, Cancellation
+from ph.characters import head
 from ph.cordis import Context, Disposer, Next, ServiceKey, plugin
 from ph.json import JsonObject, as_obj, as_str, dumps, loads
 from ph.keys import AGENTS, FS, JOBS, SHELL, SUBPROCESS, SYSTEM_PROMPT, TOOLS, TUI_STATUS
@@ -112,7 +113,7 @@ from ph.seams.tui_status import StatusField, StatusReading
 from ph.seams.workspace import project_access, scratch_of, workspace_of
 from ph.session import Session
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
-from ph.text import count_of
+from ph.text import count_of, elide
 from ph.toolcli import STATE_ENV, Progress, read_envelope, value_schema
 from ph.tools.definition import (
     ToolDefinition,
@@ -768,7 +769,7 @@ class UtcpSeam:
                 f"{summary}.{got} What it finished is kept, and running its tool "
                 "again goes on from there."
             )
-            log.warning("ph_utcp: %s", summary[:_CLIP])
+            log.warning("ph_utcp: %s", head(summary, _CLIP))
         self._tell(run.owner, summary, text)
 
     def _tell(self, owner: AgentHandle, summary: str, text: str) -> None:
@@ -788,7 +789,7 @@ class UtcpSeam:
                     source=PluginSource(
                         plugin="ph_utcp",
                         form="notice",
-                        summary=summary[:CONTEXT_SUMMARY_MAX_CHARS],
+                        summary=head(summary, CONTEXT_SUMMARY_MAX_CHARS),
                     ),
                 )
             )
@@ -1062,8 +1063,9 @@ def _read_line(run: _Run, line: str) -> None:
         run.progress = Progress.model_validate_json(line)
     except ValueError:
         if line.strip():
-            run.stray.append(line.strip()[:_CLIP])
-            log.debug("ph_utcp: %s wrote: %s", run.name, line.strip()[:_CLIP])
+            said = head(line.strip(), _CLIP)
+            run.stray.append(said)
+            log.debug("ph_utcp: %s wrote: %s", run.name, said)
 
 
 def _answer_of(result: ShellResult, what: str) -> object:
@@ -1143,7 +1145,7 @@ def _made(paths: Sequence[str], root: str) -> tuple[list[str], list[str]]:
 
 def _clip(answer: object) -> str:
     text = answer if isinstance(answer, str) else dumps(answer)
-    return text if len(text) <= _CLIP else f"{text[:_CLIP]}…"
+    return elide(text, _CLIP)
 
 
 # ---------------------------------------------------------------------- row ----

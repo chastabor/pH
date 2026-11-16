@@ -77,6 +77,13 @@ steps 3/4/6, `incident-response` steps 3/4/6, `pr-ready` steps 5/6) is prose in
 the port. This is the one gap where a ported example is genuinely weaker than its
 source.
 
+**Narrowed, not closed, by a decision model.** The prose had a second weakness:
+a model that *did* stop and ask was nudged onward by `skill-steps`, since a step
+was still startable. With `decision` set on that row
+([../README.md](../README.md#asking-a-decision-model-first)) a turn that is
+ending to wait for a person is let end. A model that never asks is still not
+stopped by anything.
+
 ### 2. Step outputs — `output: name` and `{{state.name}}` (23 declared, 8 read)
 
 A playbook step names a value and later steps interpolate it. pH has nothing: the

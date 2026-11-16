@@ -22,7 +22,7 @@ from textual.widgets import Rule, Static
 from ph.json import as_str
 from ph.seams.subprocess import first_line
 from ph.seams.tui_status import ReadingSlot, StatusReading
-from ph.text import duration, thousands
+from ph.text import duration, elide, thousands
 
 from ...payloads import DaemonLifetime
 from ..state import CatalogEntry, TuiState
@@ -536,4 +536,4 @@ def shorten_path(path: str, width: int = Sidebar.WIDTH - 10) -> str:
     """
     if path.startswith(_HOME):
         path = f"~{path[len(_HOME) :]}"
-    return path if len(path) <= width else f"…{path[-(width - 1) :]}"
+    return elide(path, width, keep="tail")

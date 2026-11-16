@@ -48,6 +48,9 @@ profile arms them.
   disabled: false
 ```
 
+With a decision model to ask, the steer also knows when a turn is ending to
+wait for you — see [*Asking a decision model first*](#asking-a-decision-model-first).
+
 Or, without editing a profile:
 
 ```
@@ -339,6 +342,91 @@ Everything lives in the log — `todo/write` is a fold — so a seeded procedure
 survives a resume, a passivation and a fork for free, and the TUI sidebar and the
 model's view are one projection rather than two that can disagree (A11).
 
+### Asking a decision model first
+
+A step that says *"stop for approval"* is prose. When the model obeys it — stops
+and asks — the turn is ending with a step startable, and the rule above answers
+with a nudge to carry on: the row steers the model past the gate the skill
+wrote. A profile closes that by naming a **decision model** for the row to ask
+before it nudges:
+
+```yaml
+# One more route in the profile's own `llm-openai-compatible` row. A second row
+# of that plugin collides with the first; a list in row config is replaced, not
+# merged, so restate the routes that are already there.
+- id: llm-llama
+  config:
+    profiles:
+      - provider: llama
+        # … the chat route, as it was
+      - provider: decision
+        baseUrl: ${env:DECISION_BASE_URL:-http://127.0.0.1:9932/v1}
+        apiKeyEnv: DECISION_API_KEY     # a name; `local` for a llama.cpp
+        maxDecisionTokens: 8192         # the server's --ubatch-size; leave out for 512
+
+- id: skill-steps
+  disabled: false
+  config:
+    decision:
+      provider: decision
+      model: bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L
+```
+
+A decision model is not a chat model. It is asked typed questions about a state
+and answers with probabilities — here one `noul`, a yes-or-no: *did the
+assistant stop to wait for the person?* It is shown the step that can start and
+the end of what the assistant said, and answers in about a third of a second.
+At `agent/turn-stopping`, once everything above has said a nudge is due:
+
+* **Waiting on a person, at least `holdAt` likely** → no nudge. The turn ends
+  with the list on show, and your answer starts the next one. A held nudge spends
+  none of the budget.
+* **Otherwise** → the nudge, as before.
+* **The model cannot be asked** — no adapter for that provider decides, the
+  server is down or slow, it answered in another shape → the nudge, as before,
+  with one warning in the daemon's log. A decision that cannot be had costs the
+  exception, never the feature.
+* **The model timed out** → the nudge, and the row stops asking it for a minute.
+  A server that is down refuses in milliseconds and is asked at every turn; one
+  that stalls would otherwise hold up every nudged turn by `timeoutMs`.
+
+| `decision` | default | |
+|---|---|---|
+| `provider` | — | The route's provider, as an adapter row registered it. |
+| `model` | `""` | The model to ask for. Empty for a server that serves one. |
+| `holdAt` | `0.8` | The nudge is held when "waiting" is at least this likely. Clear cases read 0.98 and up or 0.07 and down against Clef; a reply unsure of its own result, with no question in it, reads 0.3 to 0.4 and keeps its nudge. Lower it to end a turn sooner than risk walking past a question. |
+| `timeoutMs` | `3000` | How long a turn that is ending waits for the answer, both tries together. |
+
+Each ask is in the session's log twice: `llm/decided` (or `llm/decision-failed`,
+with the code and the server's sentence) says which route was asked and what it
+cost, and `skill-steps/decided` says what it answered and what was done —
+`{waiting: 0.97, holdAt: 0.8}`, held because the first reaches the second.
+`phern doctor` has a *Skill steps*
+section naming the route and whether its adapter can decide.
+
+Servers: llama.cpp and Ollama answer the request (`/v1/systemone`) for the model
+families they support. **A llama.cpp reads a decision in one batch**, so what it
+takes is bounded by `--ubatch-size` and not by its context window — 512 tokens
+unless it was started with more — and it does not publish the number. How much
+of the message the row shows follows the route's limit:
+
+* **What the route declares** with `maxDecisionTokens` on its row. Set it to the
+  server's `--ubatch-size` to show more: about 800 bytes at 512 tokens (800
+  characters of English, fewer in a script that takes more bytes a character), up
+  to 4000 from about 1600 tokens on. Raising the batch alone shows nothing more.
+* **What a refusal names.** A llama.cpp's refusal says the batch it reads, and
+  the seam keeps the smaller of that and the declared limit until the daemon
+  restarts (`ctx.llm.decision_limit`), so the next turn is sized to fit.
+* **512, where neither says.**
+
+A message denser than the row's estimate is still refused now and then. That ask
+is sent once more with less of the message, aimed by the two numbers in the
+refusal.
+
+This is a judgement about a message, not a gate on the world: it keeps the row
+from pushing a model past a question it asked, and it does nothing about a model
+that never asks. `ctx.approval` is still what stops a tool call (§6).
+
 ---
 
 ## 4. Writing steps that work
@@ -409,7 +497,9 @@ these is gated as well as written down.
   tick *visible* to a person reading the card, and a model can generate tool
   calls. Real gates check the world: `ctx.goals` (a process exiting zero) and
   `ctx.approval` (a person). A Playbook's per-step `Confirm`/`Approve` maps onto
-  approval, not onto this.
+  approval, not onto this. A decision model, where a profile names one, keeps
+  this row from *undoing* a pause the model took — it does not make the model
+  take one.
 * **`allowed-tools` is a declaration, not a boundary.** pH has the enforcing
   mechanism — `ctx.tools.restrict` — and deliberately does not wire it here: a
   restriction is a scope boundary with a disposer, restrictions intersect, and a

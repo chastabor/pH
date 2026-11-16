@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass
 
 from ph.agent.types import AgentHandle
+from ph.characters import tail
 from ph.cordis import Context
 from ph.keys import LLM
 from ph.llm.structured import SchemaViolation, ask_for_shape
@@ -274,7 +275,7 @@ class RefinementPlanner:
         rendered = "\n\n".join(reversed(parts))
         if len(rendered) <= budget:
             return rendered
-        return "…\n\n" + rendered[-budget:]
+        return "…\n\n" + tail(rendered, budget)
 
     # ------------------------------------------------------------ the call --
 

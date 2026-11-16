@@ -388,11 +388,16 @@ EOF
 # are stripped first: that document carries a worked overlay example with a
 # `baseUrl` in it, and matching the example instead of the setting would be the
 # same bug one layer down.
+#
+# `test_local_decision.py` asks a *decision* model, which is another server on
+# another port, so it has its own opt-in: it skips unless `DECISION_BASE_URL` is
+# set, here as anywhere.
 SMOKE_TESTS=(
   tests/test_local_server.py
   tests/test_local_rlm.py
   tests/test_local_clm.py
   tests/test_local_typed_results.py
+  tests/test_local_decision.py
 )
 SMOKE_PROFILE="packages/phern/src/ph_app/profiles/llama.yaml"
 
@@ -432,6 +437,13 @@ gate_smoke() {
     return
   fi
   ok "$root answers /health"
+  # Said rather than left to the skip list: no profile names a decision server,
+  # so nothing here can find one, and a suite that skips silently is one nobody
+  # runs.
+  if [ -z "${DECISION_BASE_URL:-}" ]; then
+    note "DECISION_BASE_URL is not set, so test_local_decision.py skips; export it to"
+    note "ask a decision model too (its /v1 address, e.g. http://127.0.0.1:9932/v1)"
+  fi
   gate_test "${SMOKE_TESTS[@]}" "$@"
 }
 

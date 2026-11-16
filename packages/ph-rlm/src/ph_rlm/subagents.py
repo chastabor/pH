@@ -50,6 +50,7 @@ import anyio
 from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
+from ph.characters import head
 from ph.cordis import Context, InactiveScopeError, plugin
 from ph.json import JsonValue, dumps
 from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
@@ -595,7 +596,7 @@ class RlmChildProvider:
                 own,
                 "done",
                 notice=notice,
-                answerPreview=answer[: self.config.answer_preview_chars] or None,
+                answerPreview=head(answer, self.config.answer_preview_chars) or None,
             )
             # The other half of retain-by-default (P6-28): a child that finished
             # is a child whose checkout is not evidence of anything, so the mark
@@ -624,7 +625,7 @@ class RlmChildProvider:
         run, own = child.run, child.session
         assert own is not None, "a child fails only while it has its own log"
         child.result = SubagentResult(status="error", answer=answer, error=message)
-        preview = answer[: self.config.answer_preview_chars]
+        preview = head(answer, self.config.answer_preview_chars)
         await record_ended(
             self.ctx,
             own,

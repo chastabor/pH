@@ -47,6 +47,7 @@ from ph.persistence.jsonl import (
 )
 from ph.session import SessionHeader, cwd_tag
 from ph.session_profile import LoggedEnvironment, fold_environment
+from ph.text import one_line
 from ph.wire import WireModel
 
 from .wire import text_of_wire
@@ -268,7 +269,7 @@ def _summarize(path: Path, modified: float, size: int, *, cwd: str = "") -> Sess
                     continue
                 if record.get("type") == "user/message":
                     text = text_of_wire(as_obj(record.get("data")).get("content")).strip()
-                    title = text.splitlines()[0][:72] if text else ""
+                    title = one_line(text.splitlines()[0], 72) if text else ""
                     break
     except OSError:
         return None

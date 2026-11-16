@@ -46,6 +46,8 @@ import pickle
 from types import ModuleType
 from typing import Any
 
+from ._characters import head
+
 __all__ = ["NamespaceSnapshotter", "restore", "serializable_names"]
 
 _IMMUTABLE: tuple[type, ...] = (bytes, str, int, float, complex, bool, type(None))
@@ -117,7 +119,7 @@ def _serialize(value: object, cap: int) -> tuple[bytes | None, str, str]:
         except _Overflow:
             return None, "too-large", ""
         except Exception as error:  # a reducer may raise anything at all
-            return None, "unpicklable", str(error)[:200]
+            return None, "unpicklable", head(str(error), 200)
     return b"".join(sink.chunks), "", ""
 
 

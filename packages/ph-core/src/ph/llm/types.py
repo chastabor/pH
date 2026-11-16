@@ -497,9 +497,26 @@ class LlmFailure(WireModel):
     status: int | None = None
     provider_retry_after_ms: int | None = None
     request_id: str | None = None
+    sent_tokens: int | None = None
+    """For a request refused as too long (`CONTEXT_WINDOW_EXCEEDED`): how many
+    tokens the provider counted in it, where its refusal said."""
+    limit_tokens: int | None = None
+    """And how many it reads, where its refusal said: what a shorter request is
+    aimed at. Both read once, from the provider's whole answer, by whoever built
+    the failure (`ph.llm.adapter.too_long_facts`) — not again from a message
+    that may have been cut down for showing."""
 
 
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
+TIMEOUT = "TIMEOUT"
+"""A request that did not finish in the time it was given: a transport's read or
+connect timeout, a provider's own deadline, or the time a caller said it would
+wait (`LlmRuntime.decide`)."""
+NO_DECISIONS = "NO_DECISIONS"
+"""The adapter registered for a provider does not decide."""
+BAD_DECISION = "BAD_DECISION"
+"""A route answered a decision in another shape than it was asked in: a question
+with no answer, or an answer of another kind than its question."""
 MISSING_CREDENTIAL = "MISSING_CREDENTIAL"
 """A route's key is not set where it is resolved. Named here, beside the other
 codes a caller routes on, because the embedders that resolve a key outside an

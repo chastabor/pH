@@ -48,18 +48,19 @@ from text_index_helpers import new_agent as _agent
 from text_index_helpers import prose
 from text_index_stub import DOCUMENT, BoundedEmbedder, HashingEmbedder
 
+from ph.characters import cut_before
 from ph.cordis import DEPLOYMENT, Context
 from ph.indexable import paragraphs, triage
 from ph.keys import COMMANDS, FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import text_of
-from ph.testing import MountProfile, raising, report_section, run_tool
+from ph.testing import EMOJI_FAMILY, MountProfile, raising, report_section, run_tool
 from ph.testing.git import git, git_repo
 from ph.testing.jj import jj_repo
 from ph.toolcli import STATE_ENV, reporting_to
 from ph.workspace_caches import WORKSPACE_FILE, digest
-from ph_text_index._chunk import Weight, chunk_paragraphs, chunk_text, head_of
+from ph_text_index._chunk import Chunk, Weight, chunk_paragraphs, chunk_text, head_of
 from ph_text_index._config import index_base
-from ph_text_index._embed import Vectors
+from ph_text_index._embed import Vectors, weigh_by_bytes
 from ph_text_index._store import IndexMismatch, TextIndex
 from ph_text_index.engine import TEXT_INDEX, Config, TextIndexSeam
 
@@ -2076,3 +2077,40 @@ def test_the_local_model_says_what_it_reads_and_counts_with_its_own_tokenizer() 
     assert embedder.limit() == Limit(tokens=8, source="model"), (
         "a setting above the model's put the silence back"
     )
+
+
+def test_a_long_line_is_cut_between_characters_never_through_one() -> None:
+    """The last-resort cut on a single long line (X5) and the cut by weight
+    after it land between characters as a reader sees them (`ph.text`): a
+    family emoji, a flag, a skin tone and an accent written as two code points
+    each stay whole in one chunk. Cut by index, half of those cut points fell
+    inside one — an accent indexed apart from its letter, a flag split into two
+    letters nobody searches for.
+
+    Sabotage: slice the line by index in `_split_line` again and a family is
+    split between two chunks.
+    """
+    line = " ".join(
+        ["cafe\u0301", EMOJI_FAMILY, "\U0001f1fa\U0001f1f8", "\U0001f44d\U0001f3fd"] * 40
+    )
+
+    def cut_between(chunks: list[Chunk]) -> bool:
+        """Whether every chunk starts and ends where `ph.characters` — held to
+        Unicode's own segmentation in ph-core's suite — says a cut may fall."""
+        at, ends = 0, []
+        for chunk in chunks:
+            at = line.index(chunk.text, at) + len(chunk.text)
+            ends.append(at)
+        return all(cut_before(line, end) == end for end in ends)
+
+    by_length = chunk_text(line, max_chars=37, overlap_chars=0)
+    assert "".join(chunk.text for chunk in by_length) == line
+    assert cut_between(by_length) and all(len(chunk.text) <= 37 for chunk in by_length)
+
+    by_bytes = Weight(of=lambda texts: weigh_by_bytes(texts, 3), most=20)
+    by_weight = chunk_paragraphs(
+        paragraphs(line), max_chars=len(line), overlap_chars=0, weight=by_bytes
+    )
+    assert cut_between(by_weight)
+    first = head_of(EMOJI_FAMILY * 30, by_bytes)
+    assert first and not first.replace(EMOJI_FAMILY, "")

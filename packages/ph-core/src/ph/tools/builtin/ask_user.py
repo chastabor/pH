@@ -29,6 +29,7 @@ from typing import Any
 
 from pydantic import Field
 
+from ...characters import head
 from ...cordis import Context, plugin
 from ...json import as_str
 from ...keys import TOOLS, USER_QUESTIONS
@@ -186,7 +187,7 @@ async def apply(ctx: Context, config: None) -> None:
             ),
             present_result=lambda args, result: ToolResultView(
                 title=as_str(args.get("header"), "Question"),
-                subtitle=str(args.get("question", ""))[:120],
+                subtitle=head(str(args.get("question", "")), 120),
                 is_error=result.is_error,
             ),
         )

@@ -50,6 +50,7 @@ from ph.json import as_int, as_str
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
 from ph.llm.adapter import LlmError, ResolvedModel, resolved
 from ph.llm.types import (
+    TIMEOUT,
     AttachmentRef,
     BlockEnd,
     BlockStart,
@@ -432,7 +433,7 @@ class GoogleAdapter:
         while as_str(record.get("state"), "ACTIVE") == "PROCESSING":
             if waited >= self.config.upload_ready_ms:
                 self._pending[attachment_id] = name
-                raise LlmError(f"{name} was still processing after the upload budget", "TIMEOUT")
+                raise LlmError(f"{name} was still processing after the upload budget", TIMEOUT)
             await anyio.sleep(UPLOAD_POLL_MS / 1000)
             waited += UPLOAD_POLL_MS
             record = _file_record(await self._file(name))
@@ -532,6 +533,7 @@ class GoogleAdapter:
             structured_output=False,
             credential=self.config.api_key_env,
             sampling=frozenset(SAMPLING_WIRE),
+            max_decision_tokens=None,
         )
 
 

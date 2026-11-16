@@ -36,7 +36,7 @@ from ..keys import COMMANDS, SUBPROCESS, WORKSPACE
 from ..seams.commands import CommandContext, CommandDefinition, CommandVerb, Verbs
 from ..seams.workspace import checkpoints, workspace_of
 from ..session import IntentNotDurable, Session
-from ..text import brief_value
+from ..text import brief_value, one_line
 
 __all__ = ["apply"]
 
@@ -186,12 +186,6 @@ def _brief(arguments: JsonValue) -> str:
     """
     if not isinstance(arguments, Mapping):
         return ""
-    return ", ".join(f"{key}={_clip(value)}" for key, value in islice(arguments.items(), 2))
-
-
-def _clip(value: JsonValue) -> str:
-    """One argument, short enough for a listing — see `brief_value` for why it
-    is not `str()`: a nested argument object rendered as a Python literal in the
-    one report a person reads while deciding whether a restore was enough."""
-    text = brief_value(value)
-    return text if len(text) <= 40 else f"{text[:37]}..."
+    return ", ".join(
+        f"{key}={one_line(brief_value(value), 40)}" for key, value in islice(arguments.items(), 2)
+    )

@@ -50,6 +50,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
+from ph.characters import head
 from ph.cordis import DEPLOYMENT, Boundary, Context, Next, plugin
 from ph.json import JsonObject, JsonValue
 from ph.keys import SPILL_STORE, TOOLS
@@ -179,13 +180,14 @@ def content_preview(text: str) -> str:
     head_lines, tail_lines = PREVIEW_HEAD_LINES, PREVIEW_TAIL_LINES
     lines = text.splitlines()
     if len(lines) <= head_lines + tail_lines:
-        return _number_lines([line[:PREVIEW_LINE_CLIP] for line in lines], 1)
-    head = _number_lines([line[:PREVIEW_LINE_CLIP] for line in lines[:head_lines]], 1)
+        return _number_lines([head(line, PREVIEW_LINE_CLIP) for line in lines], 1)
+    top = _number_lines([head(line, PREVIEW_LINE_CLIP) for line in lines[:head_lines]], 1)
     notice = f"\n... [{len(lines) - head_lines - tail_lines} lines truncated] ...\n"
-    tail = _number_lines(
-        [line[:PREVIEW_LINE_CLIP] for line in lines[-tail_lines:]], len(lines) - tail_lines + 1
+    bottom = _number_lines(
+        [head(line, PREVIEW_LINE_CLIP) for line in lines[-tail_lines:]],
+        len(lines) - tail_lines + 1,
     )
-    return head + notice + tail
+    return top + notice + bottom
 
 
 def over_token_limit(text: str, limit: int | None) -> bool:

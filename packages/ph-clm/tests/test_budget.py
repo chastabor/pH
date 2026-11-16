@@ -32,6 +32,7 @@ from ph.keys import CODE_RUNTIME_STUB, COMPACTION, TOKEN_METER, TOOLS
 from ph.llm.types import TokenUsage, text_of
 from ph.session import SurfaceIntent
 from ph.testing import (
+    EMOJI_FAMILY,
     MountProfile,
     StubCompactionEngine,
     assistant_payload,
@@ -43,6 +44,7 @@ from ph.testing import (
 from ph.tools.registry import RUN_CODE
 from ph_clm.budget import Shares
 from ph_clm.keys import CLM_MIRROR
+from ph_clm.tools import _bounded
 
 pytestmark = pytest.mark.anyio
 
@@ -240,3 +242,17 @@ async def test_under_code_mode_the_readout_spells_the_call(mount: MountProfile) 
     said = _readout(text_of(result.content))
     assert said is not None, text_of(result.content)[-300:]
     assert "await tools.context_tombstone(sections=['S12'], reason='...')" in said, said
+
+
+def test_a_recall_cut_at_its_token_bound_ends_between_characters() -> None:
+    """`context_recall` halves its way to the longest start that fits the bound,
+    and that start is moved back to fall between characters: a family is never
+    recalled in part.
+
+    Sabotage: return `text[:low]` again and the recall ends inside a family.
+    """
+
+    for bound in range(80, 120):
+        cut, was_cut = _bounded(len, EMOJI_FAMILY * 50, bound)
+        kept = cut.split("\n[recall cut")[0]
+        assert was_cut and not kept.replace(EMOJI_FAMILY, "")

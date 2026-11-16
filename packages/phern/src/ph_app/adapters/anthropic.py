@@ -423,6 +423,7 @@ class AnthropicAdapter:
             structured_output=False,
             credential=self.config.api_key_env,
             sampling=frozenset(SAMPLING_WIRE),
+            max_decision_tokens=None,
         )
 
 

@@ -121,6 +121,61 @@ the schema.
 llama.cpp, and they do not agree about media — a constant made every one of them
 promise images.
 
+## Deciding, if the provider has a decision model
+
+A decision model is asked typed questions about a state and answers with
+probabilities rather than text. An adapter whose provider has one implements a
+second method, and that is the whole of the opt-in:
+
+```python
+async def decide(self, request: DecisionRequest) -> Decisions: ...
+```
+
+`DecisionAdapter` is its own `runtime_checkable` Protocol beside `LlmAdapter`,
+asked with `isinstance` — an adapter without the method is simply not one, and
+`ctx.llm.decides(provider)` says which is which. Callers go through
+`ctx.llm.decide(request, session=, timeout_s=)`, which runs the adapter as the
+row that registered it, records the spend (`llm/decided`) or the failure
+(`llm/decision-failed`) in the session it was for, and holds every adapter to
+one rule: each question gets the kind of answer it is owed.
+
+The three kinds of question, and their fields, carry the wire's own names:
+
+| question | answer | |
+|---|---|---|
+| `Noul(instructions)` | `NoulAnswer(noul)` | How likely yes is. Never a verdict: the line is the caller's. |
+| `Choice(instructions, criteria)` | `ChoiceAnswer(choice, probabilities, confidence)` | `criteria` maps each key to what it means; shares come back in that order. |
+| `Score(instructions, criteria)` | `ScoreAnswer(score, probabilities, confidence)` | `criteria` lowest first; shares in that order. |
+
+A caller reads each answer as the kind it asked for — `decided.answer("team",
+ChoiceAnswer)` — and gets `BAD_DECISION` for any other.
+
+A route that decides should also say how much one decision may carry, where its
+server will not: `resolved(..., max_decision_tokens=)`, from row config —
+required, so an adapter that does not decide passes `None`. The seam lowers it
+by what a refusal names, and askers size their state by
+`ctx.llm.decision_limit(provider, model)`, through `ph.llm.tokens` (`bytes_of`,
+`tokens_of`) where they have no tokenizer to ask. Text cut to such a size is cut
+with `ph.characters`, which only stops between characters, never inside an
+accent or an emoji sequence — and so is every other cut in the tree: `head` and
+`tail` by code points, `head_bytes` and `tail_bytes` by bytes, `capped_text` for
+a buffer a byte cap threw the rest of away, `stream_decoder` for bytes read in
+pieces.
+
+`openai_compatible.py` is the worked example: `/systemone` beside
+`/chat/completions`, answered by llama.cpp and Ollama. Three things it does that
+yours should:
+
+* **Refuse a reply in another shape** with `BAD_DECISION`, and say what was
+  wrong. A caller draws a line through these numbers; a string coerced to a
+  float is a decision made on nothing.
+* **Leave an unanswered question out** rather than inventing an answer. The seam
+  refuses the reply for it.
+* **Classify "the state did not fit" as `CONTEXT_WINDOW_EXCEEDED`**, with the
+  server's sentence kept: `too_long_facts` reads the two numbers out of it, and a
+  caller aims a shorter state by them. `input_too_long` is the phrase list for
+  servers that read a decision in one batch, as llama.cpp does.
+
 ## Media, if the route takes any
 
 `ph.llm.media` (`media-degrade`) answers the *policy* question above every
@@ -151,4 +206,6 @@ the retry.
 - [ ] the credential resolved only in `_headers`, from a variable *name*
 - [ ] `is_overflow` matches this provider's phrasing and nothing broader
 - [ ] `resolve_model` goes through `resolved(...)`
+- [ ] if it decides: a reply in another shape is `BAD_DECISION`, an overflow
+      `CONTEXT_WINDOW_EXCEEDED`
 - [ ] a test against a stubbed transport — `test_uploads_openai.py` is the shape

@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, TypeAlias
 
+from ..characters import head
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_int, as_str
 from ..keys import SCHEDULE
@@ -544,7 +545,7 @@ def scheduled_source(schedule: Schedule) -> PluginSource:
     return PluginSource(
         plugin="ph.seams.schedule",
         form="notice",
-        summary=f"scheduled: {schedule.id}"[:CONTEXT_SUMMARY_MAX_CHARS],
+        summary=head(f"scheduled: {schedule.id}", CONTEXT_SUMMARY_MAX_CHARS),
     )
 
 

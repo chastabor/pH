@@ -158,6 +158,24 @@ def test_chunking_pages_the_whole_corpus_deterministically() -> None:
     assert corpus.chunk(by="bytes", size=8, index=0).text == "# a\n1\n2\n"
 
 
+def test_a_page_by_bytes_is_bytes_cut_between_characters() -> None:
+    """`by="bytes"` pages the corpus by its bytes, each page cut between
+    characters. Sliced by index it counted code points under the name of bytes,
+    so a page of CJK text was three times its size, and a page could end inside
+    a character.
+
+    Sabotage: slice `joined.text` by `size` again and a page of CJK runs past
+    its size in bytes.
+    """
+    corpus = _corpus(a="日本語の文章です。" * 10)
+
+    first = corpus.chunk(by="bytes", size=20, index=0)
+    pages = [corpus.chunk(by="bytes", size=20, index=n).text for n in range(first.chunks)]
+
+    assert "".join(pages) == corpus.chunk(by="lines", size=10_000, index=0).text
+    assert all(len(page.encode()) <= 20 for page in pages)
+
+
 # --------------------------------------------------------------- the gate --
 
 

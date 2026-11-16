@@ -517,6 +517,46 @@ def tool_runtime() -> tuple[Context, ToolRuntime]:
     return root, runtime
 
 
+class StoppingAgent:
+    """An agent, as far as `agent/turn-stopping` is concerned.
+
+    For driving that boundary's listeners through `ctx.serial` rather than
+    through a whole turn: the loop has no step cap of its own, so a fake
+    provider a listener keeps steering would be steered forever — which is what
+    `skill-steps`' nudge budget and the subagent seam's one reminder exist to
+    bound, and what neither can be tested by.
+
+    `steer` **appends what the driver would append**, and that is load-bearing
+    rather than decorative: both listeners count their own past steers by
+    folding those very messages out of the log, so a stub that only collected
+    them in a list would leave the stand-down and the once-only rule untested.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.steers: list[Any] = []
+
+    def steer(self, message: Any) -> None:  # noqa: ANN401
+        self.steers.append(message)
+        log_event(self.session, "user/message", message.to_wire(), SurfaceIntent("append"))
+
+
+EMOJI_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+"""One character of five code points: a man, a woman and a girl joined by ZWJs.
+What a test of a cut that must fall between characters cuts — four of its five
+inner code-point cuts land inside it."""
+
+
+def llama_refusal(sent: int, reads: int) -> str:
+    """What a llama.cpp says when an input — an embedding's or a decision's — is
+    longer than its batch: both numbers, as `ph.llm.adapter.too_long_facts`
+    reads them."""
+    return (
+        f"input ({sent} tokens) is too large to process. increase the "
+        f"physical batch size (current batch size: {reads})"
+    )
+
+
 class StubAgent:
     """The minimum an approval prompt or a tool call needs of an agent.
 

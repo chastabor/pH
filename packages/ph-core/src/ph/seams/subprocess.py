@@ -45,6 +45,7 @@ import anyio.abc
 from pydantic import Field
 
 from ..cancel import Cancellation, raced
+from ..characters import capped_text
 from ..cordis import Context, Disposer, maybe_await, plugin
 from ..keys import SUBPROCESS
 from ..orphans import OrphanJournal, host_journal, signal_child
@@ -652,8 +653,8 @@ class SubprocessService:
         # spelling. `-1` only when a child left no status at all.
         return SubprocessResult(
             exit_code=-1 if child.returncode is None else child.returncode,
-            stdout=child.stdout.decode("utf-8", errors="replace"),
-            stderr=child.stderr.decode("utf-8", errors="replace"),
+            stdout=capped_text(child.stdout, child.cap),
+            stderr=capped_text(child.stderr, child.cap),
             dropped=child.dropped,
             timed_out=bound.cancelled_caught,
             canceled=canceled,
@@ -669,7 +670,7 @@ async def _delivered(
 
     def deliver(line: bytes) -> None:
         try:
-            listener(line.decode("utf-8", errors="replace"))
+            listener(capped_text(line, cap))
         except Exception:
             log.warning("ph.seams.subprocess: a stderr listener failed", exc_info=True)
 

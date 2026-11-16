@@ -39,6 +39,7 @@ from stat import S_ISREG
 from typing import TypeAlias
 
 from ..agent.types import AgentHandle
+from ..characters import head_bytes
 from ..cordis import Context, plugin
 from ..keys import FS, SYSTEM_PROMPT
 from ..paths import resolve_roots
@@ -119,11 +120,13 @@ def _read(path: Path, scope: str) -> DiscoveredInstructions:
 
     `MAX_BYTES` bounds what a *request* can carry, so reading 5 MiB in order to
     keep the first 64 KiB of it is the cost this cap exists to avoid — the same
-    `handle.read(limit)` the skills reader uses on `SKILL.md`.
+    `handle.read(limit)` the skills reader uses on `SKILL.md`. A text read counts
+    characters, so it is cut again to the bytes the cap names, between
+    characters (`ph.characters.head_bytes`).
     """
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
-            text = handle.read(MAX_BYTES)
+            text = head_bytes(handle.read(MAX_BYTES), MAX_BYTES)
     except OSError as error:
         log.warning("ph.system_prompt.memory: %s could not be read: %s", path, error)
         text = ""

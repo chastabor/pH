@@ -36,15 +36,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
 
+from ph.characters import capped_text
 from ph.json import JsonValue, as_int, as_obj, as_seq, dumps, loads
 from ph.llm.adapter import input_too_long
+from ph.llm.tokens import tokens_of
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, MISSING_CREDENTIAL
 from ph.tools.errors import HarnessError
 
 from ._config import Facts, Limit
 
 __all__ = [
-    "BYTES_PER_TOKEN",
     "ENDPOINT_FAILED",
     "ENDPOINT_UNREACHABLE",
     "Embedder",
@@ -58,11 +59,6 @@ __all__ = [
     "estimate_tokens",
     "weigh_by_bytes",
 ]
-
-BYTES_PER_TOKEN = 3
-"""What `estimate_tokens` assumes, on the careful side. English prose runs near
-four characters a token and code nearer three; a script that is three bytes a
-character is about one token a character. So bytes over three is seldom under."""
 
 ENDPOINT_UNREACHABLE = "TEXT_INDEX_ENDPOINT_UNREACHABLE"
 ENDPOINT_FAILED = "TEXT_INDEX_ENDPOINT_FAILED"
@@ -91,7 +87,7 @@ def estimate_tokens(text: str, bytes_per_token: float) -> int:
     """About how many tokens `text` is, for an embedder with no tokenizer to ask:
     its bytes over `bytes_per_token` — `BYTES_PER_TOKEN`, or the corpus's density
     once a refusal said it — and two for the markers a model adds."""
-    return math.ceil(weigh_by_bytes([text], bytes_per_token)[0]) + 2
+    return math.ceil(tokens_of(text, bytes_per_token)) + 2
 
 
 def weigh_by_bytes(texts: Sequence[str], bytes_per_token: float) -> list[float]:
@@ -99,7 +95,7 @@ def weigh_by_bytes(texts: Sequence[str], bytes_per_token: float) -> list[float]:
     tokenizer to ask: its bytes over `bytes_per_token`, unrounded — so the
     weights of a passage's parts add up to the passage's, and `estimate_tokens`
     of the whole is never over what they said."""
-    return [len(text.encode("utf-8")) / bytes_per_token for text in texts]
+    return [tokens_of(text, bytes_per_token) for text in texts]
 
 
 @runtime_checkable
@@ -653,7 +649,7 @@ class EndpointEmbedder:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 answer = loads(response.read())
         except urllib.error.HTTPError as error:
-            said = error.read(600).decode("utf-8", errors="replace").strip()
+            said = capped_text(error.read(600), 600).strip()
             raise HarnessError(
                 f"the embeddings endpoint {address} answered {error.code}: {said or error.reason}",
                 CONTEXT_WINDOW_EXCEEDED if input_too_long(said) else ENDPOINT_FAILED,

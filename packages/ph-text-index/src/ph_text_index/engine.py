@@ -91,7 +91,8 @@ from ph.cordis import Context, Disposer, MountRefusal, Running, ServiceKey, plug
 from ph.indexable import Paragraph, triage
 from ph.json import JsonObject, as_bool, as_int
 from ph.keys import COMMANDS, FS, TOOLS
-from ph.llm.adapter import too_long_facts
+from ph.llm.adapter import refused_share, too_long_facts
+from ph.llm.tokens import BYTES_PER_TOKEN
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, ContentBlock
 from ph.locks import file_lock_held
 from ph.seams._registry import claim_slot, contribute_item
@@ -123,7 +124,6 @@ from ._config import (
     weights_cache,
 )
 from ._embed import (
-    BYTES_PER_TOKEN,
     Embedder,
     EndpointEmbedder,
     LocalWeights,
@@ -1336,7 +1336,8 @@ async def _refused(
         and (room is None or named < room or (named == room and seam.density < density))
     ):
         return named
-    share = reads / sent * 0.9 if sent and reads and sent > reads else 0.5
+    refused = refused_share(sent, reads)
+    share = 0.5 if refused is None else refused * 0.9
     return _lighter(heaviest, room, share)
 
 

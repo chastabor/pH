@@ -9,6 +9,9 @@ replay and session-title attach, then `llm/send`, where a barrier waits. An adap
 raises is normalized into a terminal `finish{error}` chunk before any consumer
 sees it, so a consumer never handles two shapes for the same failure.
 
+A route may also *decide* (`DecisionAdapter`): typed questions about a state,
+answered with probabilities rather than text. `ctx.llm.decide` is that door.
+
 @module ph.llm.adapter
 """
 
@@ -16,13 +19,21 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator, Callable, Collection, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
+
+import anyio
 
 from ..cordis import Context, Running, events, plugin, running
+from ..json import JsonValue
 from ..keys import LLM
+from ..session.writers import log_writer
 from .types import (
+    BAD_DECISION,
+    CONTEXT_WINDOW_EXCEEDED,
+    NO_DECISIONS,
+    TIMEOUT,
     CallSetting,
     Finish,
     FinishReason,
@@ -32,23 +43,53 @@ from .types import (
     Sampling,
     SamplingSetting,
     StreamChunk,
+    TokenUsage,
     unmapped_effort,
 )
 
+if TYPE_CHECKING:
+    from ..session import Session
+
 __all__ = [
+    "DECIDED",
+    "DECISION_FAILED",
     "AdapterHandle",
+    "Answer",
+    "Choice",
+    "ChoiceAnswer",
+    "DecisionAdapter",
+    "DecisionRequest",
+    "Decisions",
     "LlmAdapter",
     "LlmError",
     "LlmRuntime",
     "MediaRoute",
+    "Noul",
+    "NoulAnswer",
+    "Question",
     "ResolvedModel",
+    "Score",
+    "ScoreAnswer",
     "apply",
+    "failure_of",
     "input_too_long",
+    "refused_share",
     "resolved",
     "too_long_facts",
 ]
 
 log = logging.getLogger("ph.llm")
+
+_LOG = log_writer(__name__)
+
+DECIDED = "llm/decided"
+"""A decision model answered questions on a route for a session's agent: the
+route, how many questions, and the provider's `usage` when it reports one. A
+record that spends tokens (`ph.seams.token_meter.SPENDING_TYPES`)."""
+
+DECISION_FAILED = "llm/decision-failed"
+"""A route would not decide: the route, how many questions, and the failure's
+`code` and `reason`."""
 
 events.declare(
     "llm/stream",
@@ -83,7 +124,7 @@ class LlmError(Exception):
     def __init__(self, message: str, code: str, failure: LlmFailure | None = None) -> None:
         super().__init__(message)
         self.code = code
-        self.failure = failure or LlmFailure(message=message, code=code)
+        self.failure = failure or failure_of(message, code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +195,15 @@ class ResolvedModel:
     failing at its first request. Checked against the mounted profile's adapters,
     never a name copied into the log, because a profile that renamed the variable
     must be asked about the new name."""
+    max_decision_tokens: int | None = None
+    """The most tokens one decision on this route may carry, where its row says.
+
+    A fact about the server rather than the model, and one a llama.cpp does not
+    publish: it reads a decision in one physical batch, so its limit is
+    `--ubatch-size` — 512 unless it was started with more — and not its context
+    window. `None` for a route that says nothing, and for every route that does
+    not decide. `LlmRuntime.decision_limit` is what an asker reads, since a
+    refusal can teach less than this says."""
 
 
 class MediaRoute(Protocol):
@@ -198,6 +248,7 @@ def resolved(
     structured_output: bool,
     credential: str | None,
     sampling: frozenset[SamplingSetting],
+    max_decision_tokens: int | None,
 ) -> ResolvedModel:
     """One route's config as the `ResolvedModel` every layer above reads.
 
@@ -218,7 +269,9 @@ def resolved(
     its adapter does not implement. `credential` is passed for the plainer reason
     that it is not a media fact: it is the name the adapter resolves at its edge,
     and **required** so an adapter cannot forget to say (T5). `sampling` is the
-    wire's too, and required for the same reason.
+    wire's too, and required for the same reason. So is `max_decision_tokens`,
+    which is config but not a media fact: an adapter that does not decide says
+    `None`, and one that does cannot drop its route's limit unnoticed.
     """
     return ResolvedModel(
         context_window=route.context_window,
@@ -230,6 +283,7 @@ def resolved(
         structured_output=structured_output,
         credential=credential,
         sampling=sampling,
+        max_decision_tokens=max_decision_tokens,
     )
 
 
@@ -237,6 +291,146 @@ class LlmAdapter(Protocol):
     """The one required method is `stream`; `resolve_model` is optional."""
 
     def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Noul:
+    """A yes-or-no question, answered with how likely *yes* is (`NoulAnswer`).
+
+    The three kinds of question carry the decision API's own names — `noul`,
+    `choice`, `score` — and so do their fields, so a reader of the wire and a
+    reader of this module are reading one vocabulary."""
+
+    instructions: str
+
+
+@dataclass(frozen=True, slots=True)
+class Choice:
+    """A question answered with one of its `criteria` (`ChoiceAnswer`)."""
+
+    instructions: str
+    criteria: Mapping[str, str]
+    """Each option's key, and what choosing it means; `""` for a key that says
+    it. Two at least, in the order a tie is broken in."""
+
+
+@dataclass(frozen=True, slots=True)
+class Score:
+    """A question answered with a place on a scale (`ScoreAnswer`)."""
+
+    instructions: str
+    criteria: tuple[str, ...]
+    """What each level means, lowest first. Two to ten."""
+
+
+Question: TypeAlias = Noul | Choice | Score
+"""One thing a decision model is asked about a state."""
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRequest:
+    """Questions about one state, on one route.
+
+    Not a conversation: `state` is what is judged, as text, and each question is
+    answered by itself, so one answer never colors another and several are one
+    request."""
+
+    provider: str
+    model: str
+    state: str
+    questions: Mapping[str, Question]
+    """Each question under the name its answer comes back under."""
+
+
+@dataclass(frozen=True, slots=True)
+class NoulAnswer:
+    """A `Noul`'s answer."""
+
+    noul: float
+    """How likely *yes* is, from 0 to 1. A probability, never a verdict: where
+    to draw the line is the asker's rule."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChoiceAnswer:
+    """A `Choice`'s answer."""
+
+    choice: str
+    """The likeliest option's key."""
+    probabilities: Mapping[str, float]
+    """Each option's share, adding up to 1, in the order the criteria were given."""
+    confidence: float | None = None
+    """How far from an even split the shares are, from 0 to 1, when the
+    provider says. Not a measure of how often it is right."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreAnswer:
+    """A `Score`'s answer."""
+
+    score: float
+    """The expected level, counted from 0 at the lowest; it can fall between two."""
+    probabilities: tuple[float, ...]
+    """Each level's share, lowest first. The wire keys them `"0"`, `"1"`, …; the
+    order is the key, and the question's `criteria` are the legend."""
+    confidence: float | None = None
+    """As `ChoiceAnswer.confidence`."""
+
+
+Answer: TypeAlias = NoulAnswer | ChoiceAnswer | ScoreAnswer
+
+_ANSWERS: Mapping[type[Question], type[Answer]] = {
+    Noul: NoulAnswer,
+    Choice: ChoiceAnswer,
+    Score: ScoreAnswer,
+}
+"""The kind of answer each kind of question is owed."""
+
+
+@dataclass(frozen=True, slots=True)
+class Decisions:
+    """One answer a question, under the question's name.
+
+    Each is the kind its question is owed, which `LlmRuntime.decide` holds every
+    adapter to: a caller that asked a `Noul` reads a `NoulAnswer`."""
+
+    answers: Mapping[str, Answer]
+    input_tokens: int | None = None
+    """What the provider says the request cost, when it says. A decision model
+    scores and writes nothing, so there are no output tokens to report."""
+
+    def answer[A: Answer](self, name: str, kind: type[A]) -> A:
+        """The answer to `name`, as the `kind` its question was owed — the reader
+        that lets a caller skip narrowing what `decide` already checked.
+
+        :raises LlmError: `BAD_DECISION`, for a question with no answer or with
+            an answer of another kind.
+        """
+        found = self.answers.get(name)
+        if isinstance(found, kind):
+            return found
+        got = "no answer" if found is None else f"a {type(found).__name__}"
+        raise LlmError(
+            f'the question "{name}" has {got}, where a {kind.__name__} is owed', BAD_DECISION
+        )
+
+
+@runtime_checkable
+class DecisionAdapter(Protocol):
+    """An adapter that can decide. **Optional capability.**
+
+    Its own Protocol beside `LlmAdapter`, and asked with `isinstance`, never a
+    `getattr` probe — the rule this tree states for every optional capability:
+    a probe reports an adapter whose method is misnamed as one that cannot. An
+    adapter for a provider with no decision API implements none of this and is
+    simply not an instance.
+
+    The credential is resolved inside `decide`, at the adapter's edge, as it is
+    for `stream`: a caller hands a state and questions in and gets answers
+    back, and at no point holds a key.
+    """
+
+    async def decide(self, request: DecisionRequest) -> Decisions: ...
 
 
 _TOO_LONG = (
@@ -250,19 +444,21 @@ _TOO_LONG = (
     "too large to process",
     "too long",
 )
-"""How embeddings servers say an input did not fit. llama.cpp: *"input (1602
-tokens) is too large to process"*, with a 500; OpenAI: *"maximum context length is
-8192 tokens"*, with a 400. Phrases, because the status says nothing either way."""
+"""How embeddings and decision servers say an input did not fit. llama.cpp:
+*"input (1602 tokens) is too large to process"*, with a 500; OpenAI: *"maximum
+context length is 8192 tokens"*, with a 400. Phrases, because the status says
+nothing either way."""
 
 
 def input_too_long(body: str) -> bool:
-    """Whether an embeddings server refused a request because an input did not fit.
+    """Whether an embeddings or decision server refused a request because an
+    input did not fit.
 
-    The one list, for every client of an embeddings API, because a refusal one
-    of them reads as "too long" and another as a plain failure sends the same
-    server's answer down two roads: one sends a smaller input and goes on, the
-    other ends the run. Classified as `CONTEXT_WINDOW_EXCEEDED`, which is what a
-    caller can act on."""
+    The one list, for every client of such an API, because a refusal one of them
+    reads as "too long" and another as a plain failure sends the same server's
+    answer down two roads: one sends a smaller input and goes on, the other ends
+    the run. Classified as `CONTEXT_WINDOW_EXCEEDED`, which is what a caller can
+    act on."""
     lowered = body.lower()
     return any(phrase in lowered for phrase in _TOO_LONG)
 
@@ -291,6 +487,27 @@ def too_long_facts(body: str) -> tuple[int | None, int | None]:
         return None
 
     return found(_SENT), found(_READS)
+
+
+def failure_of(message: str, code: str, *, said: str = "", status: int | None = None) -> LlmFailure:
+    """A provider's failure, `message` as it is shown. A refusal as too long
+    carries the two numbers it gave (`too_long_facts`) as fields, read here once
+    from all of what the provider `said` — the message, unless a builder cut it
+    down for showing — so no caller reads them again out of a shortened one."""
+    sent, reads = (
+        too_long_facts(said or message) if code == CONTEXT_WINDOW_EXCEEDED else (None, None)
+    )
+    return LlmFailure(
+        message=message, code=code, status=status, sent_tokens=sent, limit_tokens=reads
+    )
+
+
+def refused_share(sent: int | None, reads: int | None) -> float | None:
+    """The share of a refused input the server reads, by the two numbers its
+    refusal gave (`too_long_facts`), or `None` when it did not give both or gave
+    a limit the input was within. What a caller aims its next, shorter input by,
+    a margin under."""
+    return reads / sent if sent and reads and sent > reads else None
 
 
 @dataclass(slots=True)
@@ -330,6 +547,13 @@ class LlmRuntime:
     _warned: set[str] = field(default_factory=set)
     """Each warning about a withheld setting already given, so a session warns once
     rather than on every request."""
+    _decision_limits: dict[tuple[str, str], int] = field(default_factory=dict)
+    """The most tokens a route was found to read in one decision, by route, as
+    its refusals said (`too_long_facts`). Kept so the next asker sizes its state
+    to fit rather than spending a refusal to learn it again; only ever lowered,
+    and kept for the life of the process — a server restarted with a bigger
+    batch is read at the smaller one until then, which shows an asker less and
+    fails nothing."""
 
     def register_adapter(self, providers: Sequence[str], adapter: LlmAdapter) -> AdapterHandle:
         """Claim one or more provider routes for `adapter`.
@@ -370,6 +594,103 @@ class LlmRuntime:
         if handle is None:
             raise LlmError(f'no adapter is registered for provider "{provider}"', "NO_ADAPTER")
         return handle
+
+    def decision_limit(self, provider: str, model: str) -> int | None:
+        """The most tokens one decision on this route may carry, where anything
+        says: the route's own `max_decision_tokens`, or what a refusal taught,
+        whichever is less. `None` when neither says, and the asker assumes."""
+        said = (
+            self.resolve_model(provider, model).max_decision_tokens,
+            self._decision_limits.get((provider, model)),
+        )
+        return min((one for one in said if one is not None), default=None)
+
+    def decides(self, provider: str) -> bool:
+        """Whether the adapter registered for `provider` can decide. `False` for a
+        provider nothing is registered for, too: there is no adapter to ask."""
+        handle = self._routes.get(provider)
+        return handle is not None and isinstance(handle.adapter, DecisionAdapter)
+
+    async def decide(
+        self,
+        request: DecisionRequest,
+        *,
+        session: Session | None = None,
+        timeout_s: float | None = None,
+    ) -> Decisions:
+        """Ask `request.questions` of the adapter that owns its route.
+
+        Run as the row that registered the adapter, like `stream`. Refused with a
+        code when the route has no adapter (`NO_ADAPTER`), its adapter cannot
+        decide (`NO_DECISIONS`), or the answers are not the ones the questions
+        are owed (`BAD_DECISION`), each naming the provider.
+
+        **`timeout_s` is how long the asker will wait**, and a route that takes
+        longer is refused as `TIMEOUT`. Here rather than around the call, so a
+        decision given up on is recorded like any other that failed: whoever
+        asks is usually holding something up until the answer comes — a turn
+        about to end — and an adapter's own patience is a model call's.
+
+        **`session` is whose spend it is.** A decision is not a turn's request,
+        so nothing else in a log says a route was used: given a session, what
+        the request cost is recorded in it (`DECIDED`), where a budget and a
+        child's account read every other spend, and so is a request the route
+        refused or failed (`DECISION_FAILED`), with why. Without one the caller
+        is deciding for nobody's account, and nothing is recorded. What was
+        *asked* and *answered* is the asker's to record: it knows what the
+        answer was for."""
+        account: dict[str, JsonValue] = {
+            "provider": request.provider,
+            "model": request.model,
+            "questions": len(request.questions),
+        }
+        try:
+            handle = self._route(request.provider)
+            adapter = handle.adapter
+            if not isinstance(adapter, DecisionAdapter):
+                raise LlmError(
+                    f'the adapter for provider "{request.provider}" does not decide; name '
+                    "a provider whose adapter does",
+                    NO_DECISIONS,
+                )
+            try:
+                with anyio.fail_after(timeout_s), running(handle.by):
+                    result = await adapter.decide(request)
+            except TimeoutError:
+                raise LlmError(
+                    f'provider "{request.provider}" did not decide within {timeout_s:g} s',
+                    TIMEOUT,
+                ) from None
+            _owed(request, result)
+        except Exception as error:
+            self._learn(request, error)
+            if session is not None:
+                failure = _failure_of(error)
+                _LOG.append(
+                    session,
+                    DECISION_FAILED,
+                    {**account, "code": failure.code, "reason": failure.message},
+                )
+            raise
+        if session is not None:
+            tokens = result.input_tokens
+            usage = (
+                None
+                if tokens is None
+                else TokenUsage(input_tokens=tokens, output_tokens=0).to_wire()
+            )
+            _LOG.append(session, DECIDED, {**account, "usage": usage})
+        return result
+
+    def _learn(self, request: DecisionRequest, error: Exception) -> None:
+        """Keep the limit a refusal names (`decision_limit`): a route that said
+        its input was too long, and said how long a one it reads."""
+        if not isinstance(error, LlmError) or error.code != CONTEXT_WINDOW_EXCEEDED:
+            return
+        reads = error.failure.limit_tokens
+        if reads is not None:
+            route = (request.provider, request.model)
+            self._decision_limits[route] = min(reads, self._decision_limits.get(route, reads))
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         """Ask the owning adapter what it knows about one exact route."""
@@ -470,6 +791,29 @@ class LlmRuntime:
         return await self.ctx.waterfall("llm/stream", options, inner=inner)
 
 
+def _owed(request: DecisionRequest, result: Decisions) -> None:
+    """Refuse `result` unless every question has the kind of answer it is owed.
+
+    Here rather than in each adapter, so what a caller may assume of `Decisions`
+    is one rule: an answer read as a likelihood that was a choice would be a
+    decision made on a number nobody gave."""
+    for name, question in request.questions.items():
+        try:
+            result.answer(name, _ANSWERS[type(question)])
+        except LlmError as error:
+            raise LlmError(f'provider "{request.provider}": {error}', BAD_DECISION) from None
+
+
+def _failure_of(error: Exception) -> LlmFailure:
+    """What an adapter's raise says, as a failure: an `LlmError`'s own, and any
+    other exception's message under `UNKNOWN`. One reading for a stream that
+    ends in error and a decision that does, so a route that fails both ways is
+    recorded with one code."""
+    if isinstance(error, LlmError):
+        return error.failure
+    return LlmFailure(message=str(error) or type(error).__name__, code="UNKNOWN")
+
+
 async def _normalized(
     source: AsyncIterator[StreamChunk], request: GenerateOptions, by: Running
 ) -> AsyncIterator[StreamChunk]:
@@ -507,11 +851,7 @@ async def _normalized(
                     return
             yield chunk
     except Exception as error:
-        failure = (
-            error.failure
-            if isinstance(error, LlmError)
-            else LlmFailure(message=str(error) or type(error).__name__, code="UNKNOWN")
-        )
+        failure = _failure_of(error)
         log.debug("ph.llm: adapter for %s failed: %s", request.provider, failure.message)
         yield Finish(reason=FinishReason(kind="error", failure=failure))
 

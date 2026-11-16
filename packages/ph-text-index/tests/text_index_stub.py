@@ -44,6 +44,7 @@ import numpy as np
 from ph.cordis import Context, plugin
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED
 from ph.seams._registry import contribute_item
+from ph.testing import llama_refusal
 from ph.toolcli import ToolCli, main
 from ph.tools.errors import HarnessError
 from ph.wire import WireModel
@@ -175,15 +176,6 @@ class BoundedEmbedder(HashingEmbedder):
             )
         self.took.append(longest)
         return HashingEmbedder.encode(self, texts, query=query)
-
-
-def llama_refusal(sent: int, reads: int) -> str:
-    """What a llama.cpp says when an input is longer than its batch: both numbers,
-    as `ph.llm.adapter.too_long_facts` reads them."""
-    return (
-        f"input ({sent} tokens) is too large to process. increase the "
-        f"physical batch size (current batch size: {reads})"
-    )
 
 
 class StubConfig(WireModel):

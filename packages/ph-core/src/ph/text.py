@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from types import MappingProxyType
+from typing import Literal
 
+from .characters import head, head_bytes, tail, tail_bytes, utf8_size
 from .json import JsonValue
 
 __all__ = [
@@ -23,6 +25,7 @@ __all__ = [
     "brief_value",
     "count_of",
     "duration",
+    "elide",
     "first_lines",
     "one_line",
     "redacted_marker",
@@ -163,10 +166,32 @@ def one_line(text: str, limit: int = 120) -> str:
 
     Here rather than in `ph_app.wire`, where it was written, because a plugin needs
     the same row-sized line (ph-clm's section previews and the summaries its
-    revisions carry) and may not import the app.
+    revisions carry) and may not import the app. The cut is `elide`'s.
     """
-    flat = " ".join(text.split())
-    return flat if len(flat) <= limit else f"{flat[: limit - 1]}…"
+    return elide(" ".join(text.split()), limit)
+
+
+ELLIPSIS = "…"
+
+
+def elide(
+    text: str, size: int, *, keep: Literal["head", "tail"] = "head", in_bytes: bool = False
+) -> str:
+    """`text` whole when it fits in `size` — code points, or UTF-8 bytes
+    `in_bytes` — and otherwise as much of its start (`keep="head"`) or its end as
+    fits beside an ellipsis that stands for the rest.
+
+    The one way a cut is said: the ellipsis is one glyph and is counted inside
+    `size`, so a 40-wide column is 40 wide, and the cut falls between characters
+    (`ph.characters`). Whitespace is left as it is; `one_line` is this on one
+    line."""
+    measure = utf8_size if in_bytes else len
+    if measure(text) <= size:
+        return text
+    room = max(size - measure(ELLIPSIS), 0)
+    if keep == "tail":
+        return ELLIPSIS + (tail_bytes(text, room) if in_bytes else tail(text, room))
+    return (head_bytes(text, room) if in_bytes else head(text, room)) + ELLIPSIS
 
 
 def thousands(count: int) -> str:

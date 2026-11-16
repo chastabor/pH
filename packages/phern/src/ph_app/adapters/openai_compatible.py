@@ -19,23 +19,43 @@ completed calls would quietly make that promise false.
 The credential is resolved **here and nowhere above** (I-3): the seam hands
 around a `CredentialRef`, and only this function turns one into a header.
 
+A route may serve a *decision* model instead of a chat one: `decide` posts
+`/systemone`, the request llama.cpp and Ollama answer beside this wire.
+
 @module ph_app.adapters.openai_compatible
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+import math
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, assert_never
+from typing import Any, Literal, TypeGuard, assert_never
 
 import anyio
 
 from ph.cordis import Context, plugin
 from ph.json import as_int, as_obj, as_seq, as_str
 from ph.keys import ATTACHMENTS, CREDENTIALS, LLM, UPLOADS
-from ph.llm.adapter import LlmError, ResolvedModel, resolved
+from ph.llm.adapter import (
+    Answer,
+    Choice,
+    ChoiceAnswer,
+    DecisionRequest,
+    Decisions,
+    LlmError,
+    Noul,
+    NoulAnswer,
+    Question,
+    ResolvedModel,
+    Score,
+    ScoreAnswer,
+    input_too_long,
+    resolved,
+)
 from ph.llm.types import (
+    BAD_DECISION,
     AttachmentRef,
     BlockEnd,
     BlockStart,
@@ -255,6 +275,15 @@ class ProviderProfile(WireModel):
     safe assumption — one route scales at 2048, another not at all, and a profile
     that invented a number would warn a person about an overpayment that is not
     happening. A deployment that knows its route sets them."""
+    max_decision_tokens: int | None = None
+    """The most tokens one decision request may carry, for a route that serves a
+    decision model (`ResolvedModel.max_decision_tokens`).
+
+    Written here because the server will not say: a llama.cpp reads a decision in
+    one physical batch, so this is its `--ubatch-size` — 512 unless it was started
+    with more — and its `/props` publishes the context window and not the batch.
+    Left out, an asker assumes the default and learns a smaller limit from the
+    first refusal; set it to show an asker more of what it decides about."""
 
 
 class Config(WireModel):
@@ -464,6 +493,32 @@ class OpenAiCompatibleAdapter:
         for chunk in state.finish():
             yield chunk
 
+    async def decide(self, request: DecisionRequest) -> Decisions:
+        """`/systemone`, the request a decision model answers
+        (`ph.llm.adapter.DecisionAdapter`).
+
+        Beside `/chat/completions` under the same base address, on the servers
+        that have one: llama.cpp and Ollama. A server without it answers with a
+        status and its own sentence, which is the error, and so does one whose
+        model is a chat model. One request for every question; the model scores
+        and writes nothing, so the reply is whole and there is no stream.
+
+        An input the server will not take is `CONTEXT_WINDOW_EXCEEDED`, in the
+        words an embeddings server uses (`input_too_long`), because the limit is
+        the same one: a llama.cpp reads a decision in one batch, and refuses
+        what does not fit it whatever its context window is."""
+        reply, _ = await self.http.post_raw(
+            f"{self.profile.base_url.rstrip('/')}/systemone",
+            headers=self._headers(),
+            json=_systemone_body(request),
+            is_overflow=input_too_long,
+        )
+        usage = as_obj(reply.get("usage")).get("input_tokens")
+        return Decisions(
+            answers=_answers(as_obj(reply.get("answers")), request.questions),
+            input_tokens=usage if isinstance(usage, int) else None,
+        )
+
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         # This wire takes `response_format: {"type": "json_schema", …}` with
         # `strict`, so the server builds a grammar and the reply cannot come back
@@ -473,12 +528,115 @@ class OpenAiCompatibleAdapter:
             structured_output=True,
             credential=self.profile.api_key_env,
             sampling=self.sampling,
+            max_decision_tokens=self.profile.max_decision_tokens,
         )
 
     @property
     def sampling(self) -> frozenset[SamplingSetting]:
         """The sampling settings this route carries: OpenAI's, and its server's extras."""
         return OPENAI_SAMPLING | frozenset(self.profile.sampling_extras)
+
+
+def _systemone_body(request: DecisionRequest) -> dict[str, Any]:
+    """The `/systemone` request: `model` left out when empty — a server that
+    serves one model needs no name — and `state` as text, which every server
+    that answers this takes."""
+    body: dict[str, Any] = {
+        "state": request.state,
+        "questions": {name: _question(one) for name, one in request.questions.items()},
+    }
+    if request.model:
+        body["model"] = request.model
+    return body
+
+
+def _question(question: Question) -> dict[str, Any]:
+    """One question as this wire spells it. A `noul` takes no criteria; an
+    option with nothing said of it is sent as `null`."""
+    match question:
+        case Noul():
+            return {"type": "noul", "instructions": question.instructions}
+        case Choice():
+            return {
+                "type": "choice",
+                "instructions": question.instructions,
+                "criteria": {key: said or None for key, said in question.criteria.items()},
+            }
+        case Score():
+            return {
+                "type": "score",
+                "instructions": question.instructions,
+                "criteria": list(question.criteria),
+            }
+        case _:
+            assert_never(question)
+
+
+def _answers(answers: Mapping[str, object], questions: Mapping[str, Question]) -> dict[str, Answer]:
+    """Each question's answer, read as the kind its question is owed.
+
+    A question the reply does not answer is left out, and the seam refuses the
+    whole reply for it (`LlmRuntime.decide`). One answered in another shape is
+    refused here, where the reply is at hand to say what was wrong with it."""
+    found: dict[str, Answer] = {}
+    for name, question in questions.items():
+        answer = as_obj(answers.get(name))
+        if not answer:
+            continue
+        match question:
+            case Noul():
+                found[name] = NoulAnswer(noul=_share(answer.get("noul"), name, "noul"))
+            case Choice():
+                choice = as_str(answer.get("choice"))
+                if choice not in question.criteria:
+                    raise _bad(name, f'chose "{choice}", which is not one of its criteria')
+                found[name] = ChoiceAnswer(
+                    choice=choice,
+                    probabilities=_shares(answer, name, question.criteria),
+                    confidence=_confidence(answer),
+                )
+            case Score():
+                levels = [str(index) for index in range(len(question.criteria))]
+                score = answer.get("score")
+                if not _is_number(score):
+                    raise _bad(name, 'has no number under "score"')
+                found[name] = ScoreAnswer(
+                    score=float(score),
+                    probabilities=tuple(_shares(answer, name, levels).values()),
+                    confidence=_confidence(answer),
+                )
+            case _:
+                assert_never(question)
+    return found
+
+
+def _shares(answer: Mapping[str, object], name: str, keys: Iterable[str]) -> dict[str, float]:
+    """An answer's `probabilities`, one share for each of `keys`, in their order."""
+    said = as_obj(answer.get("probabilities"))
+    return {key: _share(said.get(key), name, f"probabilities.{key}") for key in keys}
+
+
+def _share(value: object, name: str, field: str) -> float:
+    """A probability, or a refusal: anything but a number from 0 to 1 is the
+    server answering in another shape, and a rule that hangs on it would be
+    applied to a number nobody gave."""
+    if not _is_number(value) or not 0.0 <= value <= 1.0:
+        raise _bad(name, f'has no probability under "{field}"')
+    return float(value)
+
+
+def _confidence(answer: Mapping[str, object]) -> float | None:
+    """An answer's `confidence`, where the server gave one."""
+    value = answer.get("confidence")
+    return float(value) if _is_number(value) else None
+
+
+def _is_number(value: object) -> TypeGuard[int | float]:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _bad(name: str, what: str) -> LlmError:
+    return LlmError(f'the decision API\'s answer to "{name}" {what}', BAD_DECISION)
 
 
 @dataclass(slots=True)

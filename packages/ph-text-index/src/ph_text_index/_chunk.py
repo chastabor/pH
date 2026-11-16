@@ -36,6 +36,7 @@ import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 
+from ph.characters import cut_after, cut_before, pieces
 from ph.indexable import Paragraph, paragraphs
 
 __all__ = ["Chunk", "Weight", "chunk_paragraphs", "chunk_text", "head_of"]
@@ -126,17 +127,21 @@ class _Block:
         return len(self.text)
 
 
-def _fitting(text: str, heavy: float, weight: Weight) -> tuple[int, float]:
-    """How many characters of the start of `text`, which weighs `heavy`, weigh no
+def _fitting(text: str, heavy: float, weight: Weight, least: int) -> tuple[int, float]:
+    """How many code points of the start of `text`, which weighs `heavy`, weigh no
     more than `weight.most`, and what they weigh: all of it, where it does.
 
     Cut in proportion and weighed, because weight is not even along a line: the
     start of a line that is half prose and half base64 does not weigh what the
-    line's average says, and is cut again, smaller, until it fits. A single
-    character is as far as it goes."""
+    line's average says, and is cut again, smaller, until it fits. Every cut is
+    between characters (`ph.characters.cut_before`), so an accent is not left on one
+    side of it and its letter on the other; a single whole character is as far
+    as it goes: `least`, where the first character ends. `text` has to end
+    between characters itself — all of a line, or a stretch of one cut by
+    `cut_after`."""
     size, own = len(text), heavy
-    while own > weight.most and size > 1:
-        size = max(1, int(size * weight.most / own))
+    while own > weight.most and size > least:
+        size = max(least, cut_before(text, int(size * weight.most / own)))
         [own] = weight.of([text[:size]])
     return size, own
 
@@ -152,11 +157,13 @@ def _lightened(text: str, heavy: float, at: int, weight: Weight) -> Iterator[_Bl
     where the next cut falls, on a line whose weight is not even; a stretch that
     fits whole is taken whole, and the next one is aimed by it."""
     ahead, heavy_ahead = len(text), heavy
-    while len(text) > 1 and (ahead < len(text) or heavy_ahead > weight.most):
-        size, own = _fitting(text[:ahead], heavy_ahead, weight)
+    first = cut_after(text, 1)
+    while first < len(text) and (ahead < len(text) or heavy_ahead > weight.most):
+        size, own = _fitting(text[:ahead], heavy_ahead, weight, first)
         yield _Block(text[:size], at, at, own)
         text = text[size:]
-        ahead = min(len(text), 2 * size)
+        ahead = cut_after(text, 2 * size)
+        first = cut_after(text, 1)
         [heavy_ahead] = weight.of([text[:ahead]]) if text else [0.0]
     if text:
         # All that is left, so what it weighs is known.
@@ -180,7 +187,7 @@ def head_of(text: str, weight: Weight) -> str:
     paragraphs, a head would stop at the first paragraph the next did not fit
     after, which for a title and a page is the title."""
     [heavy] = weight.of([text])
-    size, _ = _fitting(text, heavy, weight)
+    size, _ = _fitting(text, heavy, weight, cut_after(text, 1))
     if size == len(text):
         return text
     first = text[:size]
@@ -209,18 +216,18 @@ def _split_line(line: str, heavy: float, at: int, bounds: _Bounds) -> list[_Bloc
     being approximate for exactly those lines costs a precision that was
     already notional.
 
-    Cut to `max_chars` first, and each piece that is still too heavy cut again
-    (`_lightened`). `heavy` is what the line weighs: the one piece of a line
-    that `max_chars` does not cut.
+    Cut to `max_chars` first, between characters (`ph.characters.pieces`), and each
+    piece that is still too heavy cut again (`_lightened`). `heavy` is what the
+    line weighs: the one piece of a line that `max_chars` does not cut.
     """
-    pieces = [line[cut : cut + bounds.chars] for cut in range(0, len(line), bounds.chars)]
+    parts = pieces(line, bounds.chars)
     if bounds.weight is None:
-        return [_Block(piece, at, at) for piece in pieces]
-    weights = [heavy] if len(pieces) == 1 else bounds.weigh(pieces)
+        return [_Block(part, at, at) for part in parts]
+    weights = [heavy] if len(parts) == 1 else bounds.weigh(parts)
     return [
         block
-        for piece, own in zip(pieces, weights, strict=True)
-        for block in _lightened(piece, own, at, bounds.weight)
+        for part, own in zip(parts, weights, strict=True)
+        for block in _lightened(part, own, at, bounds.weight)
     ]
 
 

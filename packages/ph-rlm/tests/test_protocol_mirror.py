@@ -164,6 +164,34 @@ def test_the_vendored_json_is_byte_identical_to_ph_core_s() -> None:
         assert body == host_defs[name], f"the vendored `{name}` has drifted — {fix}"
 
 
+def test_the_vendored_characters_are_ph_core_s_word_for_word() -> None:
+    """`ph_runtime/_characters.py` against `ph/characters.py`, everything below
+    each module's own docstring.
+
+    The guest cuts what a cell prints at a byte cap, and that cut has to fall
+    between characters by the same rule the host's cuts do — so it carries a copy
+    of the rule, and the rule is tables as well as functions. Whole-module
+    identity rather than `_definitions`', because a table that drifted (a mark
+    added to `_EXTENDING_LETTERS` on one side) is as much a drift as a function.
+    """
+    from ph import characters as host
+
+    guest_path = Path(guest.__file__).with_name("_characters.py")
+    host_code = _below_docstring(Path(host.__file__).read_text(encoding="utf-8"))
+    guest_code = _below_docstring(guest_path.read_text(encoding="utf-8"))
+
+    assert guest_code == host_code, (
+        "the vendored `_characters.py` has drifted — copy `ph/characters.py` across "
+        "again, below the guest's docstring"
+    )
+
+
+def _below_docstring(source: str) -> str:
+    """A module's text after its docstring."""
+    first = ast.parse(source).body[0]
+    return "".join(source.splitlines(keepends=True)[first.end_lineno :])
+
+
 def _definitions(source: str) -> dict[str, str]:
     """Each top-level function, by name, as the exact text that defines it.
 

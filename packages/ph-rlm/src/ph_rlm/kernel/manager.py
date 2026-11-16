@@ -54,6 +54,7 @@ from pydantic import PositiveFloat
 
 from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, first_of, is_canceled
+from ph.characters import capped_text, head_bytes, stream_decoder, utf8_size
 from ph.cordis import Context, Disposer, plugin
 from ph.json import as_str, thaw_json
 from ph.keys import CODE_RUNTIME
@@ -604,7 +605,7 @@ class Kernel:
         Empty is an ordinary answer — a child that died without a word — and the
         callers leave the quote off rather than inventing one.
         """
-        return bytes(self._boot_noise).decode("utf-8", "replace")
+        return capped_text(self._boot_noise, self.limits.max_log_bytes)
 
     async def _rehydrate(self) -> None:
         """Hand a freshly started kernel the namespace the log remembers (D17).
@@ -673,7 +674,7 @@ class Kernel:
                 return (
                     "the runtime's first frame could not be read as protocol "
                     f"{PROTOCOL_VERSION} ({self.environment.describe()}): "
-                    f"{line[:200].decode('utf-8', 'replace')!r}"
+                    f"{head_bytes(line[:800].decode('utf-8', 'replace'), 200)!r}"
                 )
             if frame["type"] == "boot-ack":
                 if frame["protocol"] != PROTOCOL_VERSION:
@@ -1179,6 +1180,10 @@ class Kernel:
             return
         written = 0
         cap = self.limits.max_log_bytes
+        # One decoder for the whole stream, so a character split between two
+        # reads is joined rather than shown as two U+FFFDs; and the cap counted
+        # in the bytes it names, cut between characters.
+        decoder = stream_decoder()
         # `ClosedResourceError` is the ordinary end of this task: the run is over
         # and the group canceled it, or the child exited. Neither is a failure
         # to report, and letting it escape would mask the real outcome.
@@ -1186,16 +1191,23 @@ class Kernel:
             async for chunk in stream:
                 if written >= cap:
                     continue
-                text = chunk.decode("utf-8", "replace")
+                text = decoder.decode(chunk)
+                size = utf8_size(text)
                 room = cap - written
-                if len(text) > room:
-                    active.logs.append(text[:room])
-                    active.logs.append(truncation_marker(len(text) - room, cap))
+                if size > room:
+                    kept = head_bytes(text, room)
+                    active.logs.append(kept)
+                    active.logs.append(truncation_marker(size - utf8_size(kept), cap))
                     active.truncated = True
                     written = cap
                 else:
                     active.logs.append(text)
-                    written += len(text)
+                    written += size
+        # What a character the stream ended inside of left: one U+FFFD, said
+        # rather than lost, where the cap has room for it.
+        rest = decoder.decode(b"", final=True)
+        if rest and written + utf8_size(rest) <= cap:
+            active.logs.append(rest)
 
     async def _recv_line(self) -> bytes | None:
         """The next frame's bytes, or `None` when the child is gone or hostile.

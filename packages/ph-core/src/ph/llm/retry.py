@@ -31,7 +31,7 @@ from ..cordis import Context, Next, plugin
 from ..keys import SESSIONS
 from ..session.writers import log_writer
 from ..wire import WireModel
-from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, LlmFailure
+from .types import CONTEXT_WINDOW_EXCEEDED, EMPTY_RESPONSE, FILE_EXPIRED, TIMEOUT, LlmFailure
 
 _LOG = log_writer(__name__)
 
@@ -52,7 +52,7 @@ TRANSIENT_CODES: frozenset[str] = frozenset(
         "RATE_LIMITED",
         "SERVER_ERROR",
         "SERVICE_UNAVAILABLE",
-        "TIMEOUT",
+        TIMEOUT,
         "CONNECTION_ERROR",
         "OVERLOADED",
         EMPTY_RESPONSE,

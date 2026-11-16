@@ -38,10 +38,25 @@ import pytest
 from ph.cordis import Context
 from ph.json import as_obj
 from ph.keys import AGENTS, ATTACHMENTS, SESSIONS
-from ph.llm.adapter import LlmError, MediaRoute
+from ph.llm.adapter import (
+    Choice,
+    ChoiceAnswer,
+    DecisionAdapter,
+    DecisionRequest,
+    LlmError,
+    MediaRoute,
+    Noul,
+    NoulAnswer,
+    Question,
+    Score,
+    ScoreAnswer,
+    input_too_long,
+    too_long_facts,
+)
 from ph.llm.assembler import BlockAssembler
 from ph.llm.retry import is_transient
 from ph.llm.types import (
+    BAD_DECISION,
     CONTEXT_WINDOW_EXCEEDED,
     BlockEnd,
     BlockStart,
@@ -61,7 +76,7 @@ from ph.llm.types import (
     create_user_message,
 )
 from ph.seams.credentials import CredentialService
-from ph.testing import anthropic_reply, as_kind, block_text
+from ph.testing import EMOJI_FAMILY, anthropic_reply, as_kind, block_text, llama_refusal
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.anthropic import (
     CACHE_BREAKPOINTS,
@@ -659,6 +674,207 @@ async def test_a_response_schema_reaches_the_wire_as_a_constraint() -> None:
     assert adapter.resolve_model("p", "m").structured_output is True, "and the route says so"
 
 
+_QUESTIONS: dict[str, Question] = {
+    "waiting": Noul("Is it waiting for a person?"),
+    "why": Choice("Why did it stop?", {"asked": "It needs an answer", "done": ""}),
+    "urgency": Score("How soon is a reply needed?", ("can wait", "soon", "now")),
+}
+
+_SYSTEMONE_REPLY: dict[str, Any] = {
+    "model": "clef",
+    "answers": {
+        "waiting": {"type": "noul", "noul": 0.9926},
+        "why": {
+            "type": "choice",
+            "choice": "asked",
+            "probabilities": {"done": 0.06, "asked": 0.94},
+            "confidence": 0.91,
+        },
+        "urgency": {
+            "type": "score",
+            "score": 0.3,
+            "legend": {"0": "can wait", "1": "soon", "2": "now"},
+            "probabilities": {"0": 0.77, "1": 0.17, "2": 0.06},
+            "confidence": 0.55,
+        },
+    },
+    "usage": {"input_tokens": 403, "output_tokens": 0},
+}
+"""What a llama.cpp serving Clef answered these three questions with, with the
+numbers rounded: taken from the server, not from its documentation."""
+
+
+def _deciding(
+    answer: httpx.Response | dict[str, Any], *, model: str = "clef"
+) -> tuple[OpenAiCompatibleAdapter, DecisionRequest, list[httpx.Request]]:
+    """A route whose server answers `/systemone` with `answer`, the request to
+    put to it, and every request the server was sent."""
+    root = Context()
+    credentials = CredentialService(ctx=root)
+    credentials.provide_value("PH_TEST_DECISION_KEY", "local")
+    root.provide("credentials", credentials)
+    adapter = OpenAiCompatibleAdapter(
+        ctx=root,
+        profile=ProviderProfile(
+            provider="decision",
+            base_url="http://127.0.0.1:9932/v1/",
+            api_key_env="PH_TEST_DECISION_KEY",
+        ),
+    )
+    sent: list[httpx.Request] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
+
+    adapter.http._client = httpx.AsyncClient(transport=httpx.MockTransport(serve))
+    asked = DecisionRequest(
+        provider="decision", model=model, state="It asked to go on.", questions=_QUESTIONS
+    )
+    return adapter, asked, sent
+
+
+async def test_a_decision_is_asked_at_systemone_in_the_wire_s_own_words() -> None:
+    """The request a decision model answers, beside `/chat/completions` under
+    the same base address and behind the same key: pH's three kinds of question
+    under the names this wire gives them — a yes-or-no is its `noul`, and takes
+    no criteria — and an option with nothing said of it as `null`.
+
+    Asserted whole, because the shape is the server's: a field one level out of
+    place is a 400 on the server this was measured against, and on a laxer one
+    it is a question asked without its options.
+
+    Sabotage: rename `noul` to `boolean` in `_question` — the name anyone would
+    guess — and a real server refuses the request.
+    """
+    adapter, asked, sent = _deciding(_SYSTEMONE_REPLY)
+    assert isinstance(adapter, DecisionAdapter), "the capability is this adapter's"
+
+    await adapter.decide(asked)
+
+    (request,) = sent
+    assert str(request.url) == "http://127.0.0.1:9932/v1/systemone"
+    assert request.headers["Authorization"] == "Bearer local"
+    assert json.loads(request.content) == {
+        "model": "clef",
+        "state": "It asked to go on.",
+        "questions": {
+            "waiting": {"type": "noul", "instructions": "Is it waiting for a person?"},
+            "why": {
+                "type": "choice",
+                "instructions": "Why did it stop?",
+                "criteria": {"asked": "It needs an answer", "done": None},
+            },
+            "urgency": {
+                "type": "score",
+                "instructions": "How soon is a reply needed?",
+                "criteria": ["can wait", "soon", "now"],
+            },
+        },
+    }
+
+
+async def test_a_server_with_one_model_is_not_sent_a_name() -> None:
+    adapter, asked, sent = _deciding(_SYSTEMONE_REPLY, model="")
+    await adapter.decide(asked)
+    assert "model" not in json.loads(sent[0].content)
+
+
+async def test_each_answer_comes_back_as_the_kind_its_question_is_owed() -> None:
+    """Probabilities, not verdicts: a yes-or-no is how likely yes is, a choice
+    is the likeliest option with every option's share in the order they were
+    asked — the server sorts them by name — and a score's shares come back
+    lowest level first rather than keyed by a number spelled as a string.
+
+    Sabotage: read a score's shares with `.values()` straight off the reply and
+    a server that orders its keys another way files each under its neighbor.
+    """
+    adapter, asked, _sent = _deciding(_SYSTEMONE_REPLY)
+
+    decided = await adapter.decide(asked)
+
+    assert decided.answers == {
+        "waiting": NoulAnswer(noul=0.9926),
+        "why": ChoiceAnswer(
+            choice="asked", probabilities={"asked": 0.94, "done": 0.06}, confidence=0.91
+        ),
+        "urgency": ScoreAnswer(score=0.3, probabilities=(0.77, 0.17, 0.06), confidence=0.55),
+    }
+    assert list(decided.answer("why", ChoiceAnswer).probabilities) == ["asked", "done"]
+    assert decided.input_tokens == 403
+
+
+@pytest.mark.parametrize(
+    ("answers", "named"),
+    [
+        ({"waiting": {"type": "noul", "noul": "yes"}}, "noul"),
+        ({"waiting": {"type": "noul", "noul": 1.4}}, "noul"),
+        ({"waiting": {"type": "noul", "noul": True}}, "noul"),
+        ({"why": {"type": "choice", "choice": "later", "probabilities": {}}}, "later"),
+        (
+            {"why": {"type": "choice", "choice": "asked", "probabilities": {"asked": 1.0}}},
+            "probabilities.done",
+        ),
+        ({"urgency": {"type": "score", "probabilities": {}}}, "score"),
+    ],
+)
+async def test_an_answer_in_another_shape_is_refused_rather_than_read(
+    answers: dict[str, Any], named: str
+) -> None:
+    """A rule hangs on these numbers — a nudge held or sent — so one that is
+    not a probability, or a choice that was never offered, is the server
+    answering in another shape and is refused with what was wrong, never coerced
+    into a number nobody gave.
+
+    Sabotage: `float(value)` without `_share`'s check and `"yes"` raises a bare
+    `ValueError`, `True` becomes a certainty and 1.4 passes any line drawn.
+    """
+    adapter, asked, _sent = _deciding({"answers": answers})
+
+    with pytest.raises(LlmError) as refused:
+        await adapter.decide(asked)
+
+    assert refused.value.code == BAD_DECISION
+    assert named in str(refused.value)
+
+
+async def test_a_question_the_server_did_not_answer_is_left_for_the_seam_to_refuse() -> None:
+    """The adapter reads what is there; that every question was answered is the
+    seam's rule, held for every adapter (`LlmRuntime.decide`)."""
+    adapter, asked, _sent = _deciding({"answers": {"waiting": {"type": "noul", "noul": 0.2}}})
+
+    decided = await adapter.decide(asked)
+
+    assert decided.answers == {"waiting": NoulAnswer(noul=0.2)}
+    assert decided.input_tokens is None, "and a server that reports no usage claims none"
+
+
+async def test_a_state_too_long_for_the_server_s_batch_is_an_overflow() -> None:
+    """The refusal a llama.cpp gives a decision that does not fit one batch,
+    word for word as the server gave it, with a 500. It has to read as the one
+    code a caller can act on — send less — and keep its two numbers, which are
+    what the caller aims the next request by.
+
+    Sabotage: pass `_is_overflow`, the chat wire's list, and this is a
+    `SERVER_ERROR`: retried as it stands, and refused again.
+    """
+    body = {
+        "error": {
+            "code": 500,
+            "message": "input (695 tokens) is too large to process. increase the physical "
+            "batch size (current batch size: 512)",
+            "type": "server_error",
+        }
+    }
+    adapter, asked, _sent = _deciding(httpx.Response(500, json=body))
+
+    with pytest.raises(LlmError) as refused:
+        await adapter.decide(asked)
+
+    assert refused.value.code == CONTEXT_WINDOW_EXCEEDED
+    assert too_long_facts(str(refused.value)) == (695, 512)
+
+
 def test_a_route_with_no_wire_support_says_so_rather_than_defaulting_quietly() -> None:
     """Anthropic has no `response_format`, so a caller there gets the instruction,
     the validation and the retry — and not the wire's guarantee (P7-17).
@@ -846,6 +1062,37 @@ def test_the_overflow_phrases_are_the_ones_these_servers_say(body: str, overflow
     mentions a context.
     """
     assert _is_overflow(body) is overflow
+
+
+def test_a_long_error_body_is_cut_between_characters() -> None:
+    """A provider's error sentence is kept to 400 code points in the failure,
+    and the cut is between characters, so an error in a script of
+    several-code-point characters does not end in half of one."""
+    said = "error: " + EMOJI_FAMILY * 100
+
+    detail = failure_from_status(500, said, is_overflow=_is_overflow).failure.message
+
+    assert len(detail) <= 400
+    assert detail.startswith("error: ") and not detail[len("error: ") :].replace(EMOJI_FAMILY, "")
+
+
+def test_a_refusal_s_numbers_are_read_from_the_whole_body() -> None:
+    """A refusal as too long names how long the input was and how long a one the
+    server reads, and both are read once, here, from all of what it said — into
+    the failure's own fields — not again further up out of the message, which
+    is cut to 400 characters for showing. A server that put its numbers after
+    that would otherwise teach the seam nothing.
+
+    Sabotage: build the failure from `detail` alone and both fields are `None`.
+    """
+    said = "x" * 500 + " " + llama_refusal(695, 512)
+
+    failure = failure_from_status(500, said, is_overflow=input_too_long).failure
+
+    assert failure.code == CONTEXT_WINDOW_EXCEEDED and len(failure.message) <= 400
+    assert (failure.sent_tokens, failure.limit_tokens) == (695, 512)
+    other = failure_from_status(500, "x" * 500, is_overflow=input_too_long).failure
+    assert (other.sent_tokens, other.limit_tokens) == (None, None), "only a refusal carries them"
 
 
 def test_status_classification_is_shared_and_overflow_is_per_wire() -> None:
@@ -1138,6 +1385,21 @@ async def test_anthropic_sends_a_pdf_as_a_document(tmp_path: Path) -> None:
 
     (entry,) = body["messages"]
     assert any(block["type"] == "document" for block in entry["content"])
+
+
+def test_a_decision_route_says_how_much_one_decision_may_carry() -> None:
+    """The one route fact a llama.cpp will not publish — the batch a decision is
+    read in — written on the profile and answered by `resolve_model`, where the
+    seam's `decision_limit` reads it. Unset, the route says nothing, and an
+    asker assumes."""
+
+    def said(**declared: Any) -> int | None:  # noqa: ANN401
+        profile = ProviderProfile(provider="decision", **declared)
+        adapter = OpenAiCompatibleAdapter(ctx=Context(), profile=profile)
+        return adapter.resolve_model("decision", "clef").max_decision_tokens
+
+    assert said(max_decision_tokens=8192) == 8192
+    assert said() is None
 
 
 def test_every_route_capability_reaches_resolve_model() -> None:

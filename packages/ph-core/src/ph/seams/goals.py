@@ -98,14 +98,15 @@ A loop that reported the second as the first would be claiming work it did not
 do, which is the failure this whole layer exists to make impossible.
 """
 
-TokenSource: TypeAlias = Literal["own", "compaction", "children"]
+TokenSource: TypeAlias = Literal["own", "compaction", "decision", "children"]
 """Who spent the tokens a goal's log records (P2).
 
 `own` is the agent's replies (`assistant/message`), `compaction` the summarize
-calls that shortened its context (`compaction/summarized`), `children` the
-sub-agents admitted under the goal and everything beneath them — read from their
+calls that shortened its context (`compaction/summarized`), `decision` the
+questions a row had a decision model answer about it (`llm/decided`), `children`
+the sub-agents admitted under the goal and everything beneath them — read from their
 own logs (Phase 11), since nothing about a child is in this one. The fold counts the
-first two and `GoalService.spent` adds the third; `Budget.token_sources` decides
+first three and `GoalService.spent` adds the fourth; `Budget.token_sources` decides
 which spend `max_tokens`."""
 
 
@@ -138,8 +139,8 @@ class Budget(WireModel):
     timeout_ms: int = 30 * 60 * 1000
     token_sources: list[TokenSource] = Field(default_factory=own_tokens_only)
     """Whose tokens `max_tokens` charges (P2). The agent's own by default, which
-    is what this budget always counted; add `compaction` and `children` for a
-    ceiling on everything the run cost.
+    is what this budget always counted; add `compaction`, `decision` and
+    `children` for a ceiling on everything the run cost.
 
     **Decided here, not by the fold.** The fold used to answer this by which
     record types it read — only `assistant/message` — so a compaction's summary
@@ -226,6 +227,7 @@ class GoalState:
 _SOURCES: Mapping[str, TokenSource] = {
     "assistant/message": "own",
     "compaction/summarized": "compaction",
+    "llm/decided": "decision",
 }
 """Whose tokens each record in a goal's own log that spends them is. `children` is
 not a record here — see `GoalService.spent`.

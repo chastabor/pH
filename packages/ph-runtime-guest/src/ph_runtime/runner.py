@@ -50,6 +50,7 @@ from types import FrameType
 from typing import Any, NoReturn
 
 from . import snapshot as snapshot_module
+from ._characters import head, head_bytes, utf8_size
 from .cell import CELL_FILENAME, CELL_FUNCTION, compile_cell
 from .channel import Channel, jsonable
 from .errors import RunStopped, ToolFailed
@@ -134,20 +135,22 @@ class _CappedStream(io.TextIOBase):
     def write(self, text: str) -> int:
         if not text:
             return 0
-        # ASCII is the common case and its character count *is* its byte count,
-        # so the encode is only paid for text that needs it.
-        size = len(text) if text.isascii() else len(text.encode("utf-8", "replace"))
+        # Measured as the cut is (`utf8_size`), which spares ASCII the encode.
+        size = utf8_size(text)
         room = max(self._cap - self.written, 0)
         if size <= room:
             self.written += size
             self._buffer(text)
             return len(text)
-        if room:
-            self._buffer(text[:room])
+        # The cap counts bytes, so it is cut in bytes — between characters, never
+        # through one (`_characters`, ph-core's rule).
+        kept = head_bytes(text, room) if room else ""
+        if kept:
+            self._buffer(kept)
         if not self.truncated:
             self.truncated = True
             self._mark_truncated = True
-            self._buffer(truncation_marker(size - room, self._cap))
+            self._buffer(truncation_marker(size - utf8_size(kept), self._cap))
         self.written = self._cap
         return len(text)
 
@@ -326,7 +329,7 @@ class Runner:
             try:
                 module = importlib.import_module(name)
             except Exception as error:
-                self.globals[name] = UnavailableSkill(name, str(error)[:200])
+                self.globals[name] = UnavailableSkill(name, head(str(error), 200))
             else:
                 self.globals[name] = wrap_skill_module(module)
 
@@ -756,7 +759,7 @@ def _bounded_repr(value: object, cap: int) -> str:
     printer.maxlist = printer.maxtuple = printer.maxdict = printer.maxset = 64
     printer.maxlevel = 6
     try:
-        return printer.repr(value)[:cap]
+        return head_bytes(printer.repr(value), cap)
     except Exception:  # a __repr__ may raise anything at all
         return f"<unprintable {type(value).__name__}>"
 

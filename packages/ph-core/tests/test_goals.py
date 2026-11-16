@@ -154,6 +154,36 @@ def test_the_fold_counts_the_sources_in_its_own_log() -> None:
     assert spent.tokens == {"own": 100, "compaction": 50}
 
 
+def test_what_a_decision_model_was_asked_is_a_source_of_its_own() -> None:
+    """A row that asks a decision model about a session spends one of its routes
+    (`LlmRuntime.decide`), on a record that is no turn's request. The fold counts
+    it under `decision`, and a budget charges it where it names the source — the
+    agent's own stays what the default counts.
+
+    Sabotage: give `llm/decided` the source `own` in `_SOURCES` and a run is
+    charged for questions its model never saw.
+    """
+    session, service = Session("g"), GoalService()
+    goal = _open(session, service)
+    _answered(session, 100)
+    log_event(
+        session,
+        "llm/decided",
+        {
+            "provider": "decision",
+            "model": "clef",
+            "questions": 1,
+            "usage": {"inputTokens": 40, "outputTokens": 0},
+        },
+    )
+
+    spent = goals(session)[goal.id].spent
+
+    assert spent.tokens == {"own": 100, "decision": 40}
+    assert spent.charged_tokens(Budget(max_tokens=1)) == 100
+    assert spent.charged_tokens(Budget(max_tokens=1, token_sources=["own", "decision"])) == 140
+
+
 def _admitted_child(ctx: Context, parent: Session, run_id: str, goal_id: str | None) -> Session:
     """A child's own log, admitted under `goal_id`, as the seam writes one."""
     return admitted_child(ctx, parent, run_id, {"goalId": goal_id} if goal_id else None)

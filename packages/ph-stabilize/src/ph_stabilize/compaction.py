@@ -82,6 +82,7 @@ from ph.agent.types import (
     RequestProposal,
 )
 from ph.cancel import Canceled
+from ph.characters import head
 from ph.cordis import Context, Next, plugin
 from ph.json import as_obj, as_seq, as_str, dumps
 from ph.keys import COMPACTION, LLM, SPILL_STORE, TOKEN_METER, TOOLS
@@ -444,7 +445,7 @@ def truncated_arguments(arguments: str, max_length: int) -> str | None:
     if not isinstance(parsed, dict):
         return None
     elided = {
-        key: (value[:ARG_HEAD_CHARS] + TRUNCATION_TEXT)
+        key: (head(value, ARG_HEAD_CHARS) + TRUNCATION_TEXT)
         if isinstance(value, str) and len(value) > max_length
         else value
         for key, value in parsed.items()

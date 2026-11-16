@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from ph.json import JsonObject
 from ph.session.json import freeze_json_value
-from ph.text import brief_value, count_of, first_lines
+from ph.testing import EMOJI_FAMILY
+from ph.text import brief_value, count_of, elide, first_lines, one_line
 
 
 def test_a_container_is_named_rather_than_dumped() -> None:
@@ -90,3 +91,31 @@ def test_count_of_agrees_with_itself() -> None:
     assert count_of(1, "item") == "1 item"
     assert count_of(2, "item") == "2 items"
     assert count_of(2, "entry", "entries") == "2 entries"
+
+
+def test_a_row_sized_line_ends_between_characters() -> None:
+    """`one_line` cuts with `ph.characters.head`, so the ellipsis never follows
+    half of a character — here, part of a family."""
+    line = one_line("a " + EMOJI_FAMILY * 20, 30)
+
+    assert line.endswith("…") and len(line) <= 30
+    assert line.startswith("a ") and not line[2:-1].replace(EMOJI_FAMILY, "")
+
+
+def test_a_cut_is_said_one_way() -> None:
+    """`elide` is the one spelling of "cut, and say so": the ellipsis is one
+    glyph and counted inside the size, from either end, by code points or by
+    bytes, and the cut falls between characters.
+
+    Sabotage: add the ellipsis outside the size and every elided text is one
+    over its width.
+    """
+    text = "a " + EMOJI_FAMILY * 20
+
+    for size in range(3, 40):
+        start, end = elide(text, size), elide(text, size, keep="tail")
+        assert len(start) <= size and start.endswith("…")
+        assert len(end) <= size and end.startswith("…")
+        assert not start[2:-1].replace(EMOJI_FAMILY, "") and not end[1:].replace(EMOJI_FAMILY, "")
+        assert len(elide(text, size * 3, in_bytes=True).encode()) <= size * 3
+    assert elide("short", 40) == "short" and elide("short", 40, in_bytes=True) == "short"

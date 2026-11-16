@@ -28,6 +28,15 @@ model to *its own accepted plan*, not to reality (P5-16): marking a step done is
 still the model's word. Gates that check the world are `ctx.goals` and
 `ctx.approval`, and a procedure that needs one says so in the step's own text.
 
+**And one question it can now have answered before it objects** (`Decision`).
+A step that says "stop for approval" is prose, and this row used to answer the
+model obeying it with a nudge to carry on — steering it past the very gate the
+skill wrote. Where a profile names a decision model, the row asks it whether the
+turn is ending to wait for a person, and holds the nudge when it is. A decision
+model and not the session's own: it answers in a third of a second with a
+probability, where a chat model would spend a turn's worth of tokens to write a
+sentence this row would then have to parse.
+
 @module ph_stabilize.skill_steps
 """
 
@@ -37,15 +46,34 @@ import logging
 from itertools import islice
 from typing import Any
 
+import anyio
 from pydantic import Field, ValidationError
 
 from ph.agent.types import AgentDriver
 from ph.cordis import Context, plugin
 from ph.json import as_int, as_obj, as_str
-from ph.llm.types import PluginSource, create_user_message
-from ph.session import Session
+from ph.keys import LLM
+from ph.llm.adapter import (
+    DecisionRequest,
+    Decisions,
+    LlmError,
+    LlmRuntime,
+    Noul,
+    NoulAnswer,
+    refused_share,
+)
+from ph.llm.tokens import bytes_of
+from ph.llm.types import (
+    CONTEXT_WINDOW_EXCEEDED,
+    TIMEOUT,
+    PluginSource,
+    create_user_message,
+    text_of,
+)
+from ph.seams.diagnostics import Diagnostic, contribute
+from ph.session import Session, derive_event_message
 from ph.session.writers import log_writer
-from ph.text import count_of
+from ph.text import count_of, elide
 from ph.wire import WireModel
 
 from .todo import (
@@ -62,7 +90,18 @@ from .todo import (
 
 _LOG = log_writer(__name__)
 
-__all__ = ["Config", "apply", "latest_skill_budget", "nudges_since", "seeded", "steer_text"]
+__all__ = [
+    "DECIDED",
+    "Config",
+    "Decision",
+    "apply",
+    "decision_state",
+    "latest_skill_budget",
+    "nudges_since",
+    "said_bytes",
+    "seeded",
+    "steer_text",
+]
 
 log = logging.getLogger("ph_stabilize.skill_steps")
 
@@ -104,13 +143,139 @@ exactly one plan. Nor a field on the seeded entries, which `tool-todo` echoes
 back to the model on every write — a harness number paid for in tokens forever."""
 
 
+DECIDED = "skill-steps/decided"
+"""What a decision model said of a turn that stopped with a procedure
+unfinished: how likely it is waiting on a person (`waiting`), and the line that
+was held to (`holdAt`) — the nudge was held where the first reaches the second.
+Beside the route's own `llm/decided`, which says what asking cost and not what
+was asked."""
+
+WAITING = "waiting"
+"""The one question this row asks, by the name its answer comes back under."""
+
+ASKS = (
+    "Did the assistant stop to wait for the person: a question it needs answered, or an "
+    "approval or confirmation it asked for, before it goes on with the procedure?"
+)
+"""The question, as the decision model reads it. A `noul` — a yes-or-no — on
+purpose: the answer is one number, and the rule over it is one line
+(`HOLD_AT`)."""
+
+HOLD_AT = 0.8
+"""How likely "waiting on a person" has to be before the nudge is held, by
+default.
+
+Above an even chance on purpose. The two mistakes cost differently: a nudge
+held wrongly ends a turn with the list on show, and a person says "go on"; a
+nudge sent wrongly steers a model past an approval it had stopped for. The
+answers leave room for it. Measured against Clef on a llama.cpp, with this
+question and `decision_state`: a request to approve, a choice put to the person
+and a missing password read 0.98 to 0.99; a turn that reported and stopped read
+0.01; a sign-off — *"let me know if you want anything else"* — 0.03 to 0.07;
+and a reply unsure of its own result, with no question in it, 0.3 to 0.4. So
+the line sits above the unsure middle, which still gets its nudge."""
+
+DECIDE_WITHIN_MS = 3_000
+"""How long a turn that is ending waits for the decision, by default, both tries
+together. A decision model answers in well under a second — 0.4 s against Clef —
+and every turn that would be nudged waits on it; one that takes this long is not
+going to answer, and the turn gets the nudge it would have had without it."""
+
+REST_S = 60.0
+"""How long the row stops asking a decision model that did not answer in time.
+
+A route that is down refuses in milliseconds and is asked again at the next
+turn's end, which is how one that comes back is found. A route that stalls
+costs every turn that would be nudged its whole `timeoutMs`, in every session,
+for as long as it stalls — so after one timeout the row nudges without asking
+for this long, and then tries again."""
+
+_now = anyio.current_time
+"""The clock a rest is kept by: a name of its own so a test steps it rather than
+waiting `REST_S` out."""
+
+DEFAULT_BATCH = 512
+"""What a decision route is taken to read in one request when nothing says
+otherwise (`LlmRuntime.decision_limit`): a llama.cpp's default physical batch.
+A llama.cpp reads a decision in one batch and refuses what does not fit it,
+whatever its context window is, so this and not the window is what the state,
+the question and the model's own framing have to fit together."""
+
+FRAMING_TOKENS = 175
+"""What of a decision's tokens is neither the steps nor the message: the model's
+own framing and the question — 170, measured against Clef for a state of one
+character."""
+
+MOST_SAID = 4_000
+"""The most of the message the decision model is shown, in bytes, however much
+its route reads. The end of a message is where a question or a request to
+confirm is, and a turn that is ending waits on an answer that takes longer the
+more is read."""
+
+MIN_SAID = 200
+"""The shortest tail worth asking about, in bytes. Less than this is a sentence
+fragment, and a server that cannot take it is one this row nudges without."""
+
+STEP_BYTES = 120
+"""How much of a step's text the decision model is shown, in bytes as the rest
+of the state is sized: enough to tell which step it is. A step may run to 500
+characters, and the state has a batch to fit."""
+
+
+def said_bytes(limit: int | None, ready: list[str], blocked: int) -> int:
+    """How much of the assistant's last message — its end, in UTF-8 bytes — the
+    decision model is shown: what a route that reads `limit` tokens in one
+    decision (`DEFAULT_BATCH` where nothing says) has left once the framing and
+    the steps it is shown are counted. About 800 bytes at a llama.cpp's default
+    with one step named, which is 800 characters of English; up to `MOST_SAID`
+    where the route reads more.
+
+    One unit for the whole state: the route's tokens by `bytes_of`, the careful
+    estimate a caller with no tokenizer shares with text-index (prose ran 3.2
+    characters a token and code 4 against Clef), and the steps by the bytes they
+    are sent as. Bytes rather than characters, so neither a step nor a message
+    in a script three bytes a character is sent three times what fits. Text
+    denser still is refused, and answered with a shorter tail (`_fitting`)."""
+    room = bytes_of((DEFAULT_BATCH if limit is None else limit) - FRAMING_TOKENS)
+    steps = len(decision_state(ready, blocked, "", 0).encode("utf-8"))
+    return max(MIN_SAID, min(MOST_SAID, room - steps))
+
+
+class Decision(WireModel):
+    """The decision model a profile gives this row to ask before it nudges.
+
+    A route, named the way a session's is: the `provider` an adapter row
+    registered and the `model` it serves there. The adapter has to be one that
+    decides (`ph.llm.adapter.DecisionAdapter`); phern's `llm-openai-compatible`
+    is, against a llama.cpp or an Ollama serving a decision model."""
+
+    provider: str
+    model: str = ""
+    """Left empty for a server that serves one model and needs no name."""
+    hold_at: float = Field(default=HOLD_AT, gt=0.0, le=1.0)
+    """The nudge is held when "waiting on a person" is at least this likely."""
+    timeout_ms: int = Field(default=DECIDE_WITHIN_MS, gt=0)
+    """How long a turn that is ending waits for the answer before it is nudged
+    without one."""
+
+    @property
+    def route(self) -> str:
+        """The route as a warning and `phern doctor` name it."""
+        return f"{self.provider}/{self.model}" if self.model else self.provider
+
+
 class Config(WireModel):
-    """Row config: the nudge budget a profile gives every procedure (D16)."""
+    """Row config: the nudge budget a profile gives every procedure (D16), and
+    the decision model it asks first, where it has one."""
 
     max_nudges: int = Field(default=MAX_NUDGES, ge=0)
     """Nudges without the plan moving before the row stands down. A skill's own
     `max-nudges` overrides it for that skill's procedure; `0` seeds steps but
     never steers."""
+    decision: Decision | None = None
+    """The decision model asked whether a turn is ending to wait for a person,
+    in which case it is let end. Without one every unfinished procedure is
+    nudged, as it is when the model cannot be asked."""
 
 
 def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, Any]] | None:
@@ -187,20 +352,111 @@ def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, An
     return grown
 
 
-def steer_text(outstanding: list[str], blocked: int) -> str:
-    """What the model is told when it tries to stop with a procedure unfinished."""
-    named = ", ".join(repr(one) for one in outstanding[:MAX_NAMED])
-    rest = len(outstanding) - MAX_NAMED
+def _startable(ready: list[str], blocked: int, *, room: int | None = None) -> str:
+    """The steps that can start — a few named, the rest counted — and how many
+    wait on them: the one sentence the steer and the decision model's state
+    share. `room` shortens each named step to a line of that many bytes."""
+    named = ", ".join(
+        repr(one if room is None else elide(" ".join(one.split()), room, in_bytes=True))
+        for one in ready[:MAX_NAMED]
+    )
+    rest = len(ready) - MAX_NAMED
     more = f", and {rest} more" if rest > 0 else ""
     waiting = ""
     if blocked:
         verb = "waits" if blocked == 1 else "wait"
         waiting = f" {count_of(blocked, 'further step')} {verb} on these."
+    return f"{named}{more} can be started now.{waiting}"
+
+
+def steer_text(outstanding: list[str], blocked: int) -> str:
+    """What the model is told when it tries to stop with a procedure unfinished."""
     return (
-        f"A skill you read set out a procedure and it is not finished: {named}{more} "
-        f"can be started now.{waiting} Continue with it, or if a step genuinely does not "
-        "apply, mark it completed and say why in your next message."
+        f"A skill you read set out a procedure and it is not finished: "
+        f"{_startable(outstanding, blocked)} Continue with it, or if a step genuinely does "
+        "not apply, mark it completed and say why in your next message."
     )
+
+
+def decision_state(ready: list[str], blocked: int, said: str, room: int) -> str:
+    """What the decision model is shown: the steps that can start, and how the
+    assistant's last message ended — its last `room` bytes, starting between
+    characters (`ph.characters.tail_bytes`).
+
+    The steps are here so the question has something to be about: "is it
+    waiting" is asked of a turn that left *this* undone, and a model shown only
+    the message cannot tell a question about the procedure from small talk."""
+    tail = elide(said, room, keep="tail", in_bytes=True)
+    return (
+        f"An assistant is following a procedure and has not finished it: "
+        f"{_startable(ready, blocked, room=STEP_BYTES)}\n\nThe assistant ended its turn "
+        f"with this message:\n{tail}"
+    )
+
+
+def _last_said(session: Session) -> str:
+    """The text of the assistant's latest message: what it said as it stopped.
+    Empty when it said nothing, and then there is nothing to ask about.
+
+    The latest message and not `ph.seams.subagents.last_answer`, which scans
+    back to the last one with text: a turn that ended on tool calls alone would
+    then be judged by what an earlier turn said."""
+    event = session.latest("assistant/message")
+    message = derive_event_message(event) if event is not None else None
+    return text_of(message.content).strip() if message is not None else ""
+
+
+def _fitting(error: LlmError, shown: int) -> int | None:
+    """How many bytes of the message to show a server that refused `shown` bytes
+    of it as too long, or `None` when the refusal is not one a shorter tail
+    answers.
+
+    Aimed by the refusal's own numbers (`refused_share`): the server said how
+    many tokens it was sent and how many it reads, and the tail is cut in that
+    proportion and a quarter more, since the question and the steps are part of
+    what was counted and are not what gets shorter. What it reads is the
+    route's to keep (`LlmRuntime.decision_limit`); how dense this message ran
+    is this message's alone."""
+    if error.code != CONTEXT_WINDOW_EXCEEDED:
+        return None
+    share = refused_share(error.failure.sent_tokens, error.failure.limit_tokens)
+    if share is None:
+        return None
+    fits = int(shown * share * 0.75)
+    return fits if fits >= MIN_SAID else None
+
+
+async def _decided(
+    llm: LlmRuntime,
+    session: Session,
+    decision: Decision,
+    ready: list[str],
+    blocked: int,
+    said: str,
+) -> Decisions:
+    """The decision model's answer about this stop, asked again once with less
+    of the message when the first try was too long for the server — both tries
+    within the one `timeout_ms` a turn waits."""
+    deadline = anyio.current_time() + decision.timeout_ms / 1000
+
+    async def ask(room: int) -> Decisions:
+        request = DecisionRequest(
+            provider=decision.provider,
+            model=decision.model,
+            state=decision_state(ready, blocked, said, room),
+            questions={WAITING: Noul(ASKS)},
+        )
+        left = max(deadline - anyio.current_time(), 0.0)
+        return await llm.decide(request, session=session, timeout_s=left)
+
+    first = said_bytes(llm.decision_limit(decision.provider, decision.model), ready, blocked)
+    try:
+        return await ask(first)
+    except LlmError as error:
+        fits = _fitting(error, min(len(said.encode("utf-8")), first))
+        if fits is None:
+            raise
+        return await ask(fits)
 
 
 def latest_skill_budget(session: Session) -> int | None:
@@ -252,11 +508,80 @@ def nudges_since(session: Session, seq: int, *, up_to: int | None = None) -> int
 async def apply(ctx: Context, config: Config) -> None:
     """Seed a read skill's steps, and object while they are unfinished.
 
-    No `inject`: the body registers two listeners and touches no service. `inject`
-    is an activation gate — a row is reported inactive on an unmet key and its
-    scope unwinds when the service goes — so naming `tools` here would tie this
-    row's life to something it never calls.
+    No `inject`: the body registers two listeners and needs no service to do
+    it. `inject` is an activation gate — a row is reported inactive on an unmet
+    key and its scope unwinds when the service goes — so naming `tools` here
+    would tie this row's life to something it never calls, and naming `llm`
+    would stop the seeding and the nudge for want of a decision model they work
+    without. `ctx.llm` is looked up when a decision is asked for, and its
+    absence is one more reason the answer could not be had.
     """
+
+    # Each code the decision model could not be asked for, warned about once, so
+    # a route that is down says so once rather than at every turn's end; and
+    # when a route that timed out is worth asking again (`REST_S`).
+    warned: set[str] = set()
+    resting_until: float | None = None
+
+    async def waits_for_a_person(session: Session, ready: list[str], blocked: int) -> bool:
+        """Whether this turn is ending to wait for a person, as the profile's
+        decision model reads it. `False` wherever it cannot say — no model
+        named, nothing said, a route that would not answer — which is the nudge
+        this row always sent: a decision that cannot be had degrades to the
+        behavior before there was one, with a warning, and never holds a turn
+        up on a server that is down."""
+        decision = config.decision
+        if decision is None or (resting_until is not None and _now() < resting_until):
+            return False
+        said = _last_said(session)
+        if not said:
+            return False
+        llm = ctx.get(LLM)
+        if llm is None:
+            unasked(decision, "ctx.llm", "not mounted")
+            return False
+        try:
+            decided = await _decided(llm, session, decision, ready, blocked, said)
+        except LlmError as error:
+            # The route's own record of the failure is in the session's log
+            # (`llm/decision-failed`); this is the line an operator reads.
+            unasked(decision, error.code, str(error))
+            return False
+        waiting = decided.answer(WAITING, NoulAnswer).noul
+        _LOG.append(session, DECIDED, {"waiting": waiting, "holdAt": decision.hold_at})
+        return waiting >= decision.hold_at
+
+    def unasked(decision: Decision, code: str, reason: str) -> None:
+        """Rest a route that timed out, and say once for each code that the
+        decision model could not be asked."""
+        nonlocal resting_until
+        rests = code == TIMEOUT
+        if rests:
+            resting_until = _now() + REST_S
+        if code in warned:
+            return
+        warned.add(code)
+        log.warning(
+            "ph_stabilize.skill_steps: the decision model %s could not be asked (%s: %s); "
+            "nudging without it%s",
+            decision.route,
+            code,
+            reason,
+            f", and not asking it again for {REST_S:g} s" if rests else "",
+        )
+
+    def describe() -> list[tuple[str, str]]:
+        """`phern doctor`'s line: which decision model is asked, and whether it
+        can be. Read when asked, so an adapter row mounted after this one counts."""
+        decision = config.decision
+        if decision is None:
+            return []
+        llm = ctx.get(LLM)
+        if llm is not None and llm.decides(decision.provider):
+            said = f"a nudge is held at {decision.hold_at:g} likely to be waiting on a person"
+        else:
+            said = "no adapter registered for that provider decides, so every procedure is nudged"
+        return [("decision model", f"{decision.route}; {said}")]
 
     def on_skill_read(payload: Any) -> None:  # noqa: ANN401
         session = payload.get("session")
@@ -325,11 +650,16 @@ async def apply(ctx: Context, config: Config) -> None:
             # the list is a fold of a log that a hand-edit, a future seeding
             # shape or a second row could put another arrangement into.
             return
+        # Asked last, once everything cheaper has said a nudge is due: it is a
+        # request to a server, and a turn that would not be nudged anyway owes
+        # nobody the wait. A held nudge is not a nudge, so it spends none of the
+        # budget, and the next turn that stops is asked about afresh.
+        blocked = len(outstanding) - len(ready)
+        if await waits_for_a_person(session, ready, blocked):
+            return
         agent.steer(
             create_user_message(
-                content=[
-                    {"type": "text", "text": steer_text(ready, len(outstanding) - len(ready))}
-                ],
+                content=[{"type": "text", "text": steer_text(ready, blocked)}],
                 source=PluginSource(
                     plugin=PLUGIN,
                     form="notice",
@@ -340,3 +670,4 @@ async def apply(ctx: Context, config: Config) -> None:
 
     ctx.on("skills/read", on_skill_read)
     ctx.on("agent/turn-stopping", keep_going)
+    contribute(ctx, Diagnostic(id="skill-steps", title="Skill steps", read=describe, order=45))

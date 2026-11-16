@@ -15,6 +15,10 @@ done; that is the difference between a procedure and a suggestion.
 **The loop objects while work remains.** On `agent/turn-stopping` — the same
 boundary `/autonomous` uses, by steering rather than by reaching into loop
 state — a turn that would end with a startable step left is nudged instead.
+
+And one exception a profile can buy: a turn that is ending *to wait for a
+person* is let end, where a decision model is there to say so. Everything about
+that is at the foot of this file.
 """
 
 from __future__ import annotations
@@ -26,19 +30,46 @@ from typing import Any
 import anyio
 import anyio.lowlevel
 import pytest
-from stabilize_helpers import PROFILE, row, run_tool_calls, todo_call
+from stabilize_helpers import PROFILE, events_of, row, run_tool_calls, todo_call
 
 from ph.agent.types import AgentOptions
-from ph.keys import AGENTS, LLM, SESSIONS
+from ph.keys import AGENTS, DIAGNOSTICS, LLM, SESSIONS
+from ph.llm.adapter import (
+    DECIDED,
+    DECISION_FAILED,
+    LlmError,
+    Noul,
+    ResolvedModel,
+)
 from ph.llm.replay import tool_call_chunks
-from ph.llm.types import GenerateOptions, text_of
+from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, GenerateOptions, text_of
 from ph.seams.skills import discover_skills, rendered_skill
 from ph.session import Session, SurfaceIntent
-from ph.testing import FAKE_OPTIONS, MountProfile, log_event, result_text, run_tool, write_skill
+from ph.testing import (
+    EMOJI_FAMILY,
+    FAKE_OPTIONS,
+    MountProfile,
+    StoppingAgent,
+    StubDecider,
+    assistant_payload,
+    llama_refusal,
+    log_event,
+    result_text,
+    run_tool,
+    write_skill,
+)
+from ph_stabilize import skill_steps
 from ph_stabilize.skill_steps import (
+    HOLD_AT,
     MAX_NAMED,
     MAX_NUDGES,
+    MIN_SAID,
+    MOST_SAID,
+    STEP_BYTES,
+    WAITING,
+    decision_state,
     nudges_since,
+    said_bytes,
     seeded,
     steer_text,
 )
@@ -81,17 +112,24 @@ async def _reading(
     *,
     skill_budget: int | None = None,
     profile_budget: int | None = None,
+    decision: dict[str, Any] | None = None,
 ) -> Any:  # noqa: ANN401
     """A mounted deployment that has just read a three-step skill.
 
     `skill_budget` is the skill's own `max-nudges`; `profile_budget` the row's
     `maxNudges`. Either left out says nothing, so the default applies.
+    `decision` is the row's `decision`: the route of a decision model to ask.
     """
     extra = STEPS if skill_budget is None else f"{STEPS}max-nudges: {skill_budget}\n"
     write_skill(tmp_path, "port", description="port a row", extra=extra, body="Do it.")
     planning, steering = ROWS
+    config: dict[str, Any] = {}
     if profile_budget is not None:
-        steering = {**steering, "config": {"maxNudges": profile_budget}}
+        config["maxNudges"] = profile_budget
+    if decision is not None:
+        config["decision"] = decision
+    if config:
+        steering = {**steering, "config": config}
     ctx = await mount(
         planning,
         steering,
@@ -347,30 +385,7 @@ def test_the_ported_examples_all_load_and_render() -> None:
             )
 
 
-class _Stopping:
-    """An agent, as far as `agent/turn-stopping` is concerned.
-
-    The listener is driven through `ctx.serial` on the real waterfall rather than
-    through a whole turn, because the loop has no step cap of its own — a fake
-    provider that never marks a step done would be steered forever, which is the
-    thing `MAX_NUDGES` exists to bound and cannot be used to test itself.
-
-    `steer` **appends what the driver would append**, and that is load-bearing
-    rather than decorative: `nudges_since` folds those very messages out of
-    the log, so a stub that only collected them in a list would make the
-    stand-down untestable and would model the boundary wrongly.
-    """
-
-    def __init__(self, session: Session) -> None:
-        self.session = session
-        self.steers: list[Any] = []
-
-    def steer(self, message: Any) -> None:  # noqa: ANN401
-        self.steers.append(message)
-        log_event(self.session, "user/message", message.to_wire(), SurfaceIntent("append"))
-
-
-async def _nudges(ctx: Any, stopping: _Stopping, tries: int) -> int:  # noqa: ANN401
+async def _nudges(ctx: Any, stopping: StoppingAgent, tries: int) -> int:  # noqa: ANN401
     """How many of `tries` turn-stopping boundaries the row steered at."""
     before = len(stopping.steers)
     for _ in range(tries):
@@ -388,7 +403,7 @@ async def test_a_turn_trying_to_end_with_a_procedure_unfinished_is_steered(
     whatever it felt like doing first.
     """
     ctx, session, _agent = await _reading(mount, tmp_path)
-    stopping = _Stopping(session)
+    stopping = StoppingAgent(session)
 
     await ctx.serial("agent/turn-stopping", stopping, 1)
 
@@ -406,7 +421,7 @@ async def test_a_finished_procedure_lets_the_turn_end(mount: MountProfile, tmp_p
     await run_tool_calls(
         ctx, session, todo_call("done", [_entry(step, status="completed") for step in STEP_TEXTS])
     )
-    stopping = _Stopping(session)
+    stopping = StoppingAgent(session)
 
     await ctx.serial("agent/turn-stopping", stopping, 1)
 
@@ -421,7 +436,7 @@ async def test_a_session_with_no_procedure_is_never_steered(
     session = ctx.require(SESSIONS).create("plain")
     ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     await run_tool_calls(ctx, session, todo_call("own", [_entry("my own work")]))
-    stopping = _Stopping(session)
+    stopping = StoppingAgent(session)
 
     await ctx.serial("agent/turn-stopping", stopping, 1)
 
@@ -443,7 +458,7 @@ async def test_the_row_stands_down_when_its_nudges_change_nothing(
     """
     ctx, session, _agent = await _reading(mount, tmp_path)
 
-    assert await _nudges(ctx, _Stopping(session), MAX_NUDGES + 2) == MAX_NUDGES, (
+    assert await _nudges(ctx, StoppingAgent(session), MAX_NUDGES + 2) == MAX_NUDGES, (
         "it stops after the plan has not moved"
     )
 
@@ -452,7 +467,7 @@ async def test_progress_on_the_plan_earns_more_nudges(mount: MountProfile, tmp_p
     """A run that is getting somewhere is never cut off — which is what makes the
     ceiling a stall detector rather than a budget."""
     ctx, session, _agent = await _reading(mount, tmp_path)
-    stopping = _Stopping(session)
+    stopping = StoppingAgent(session)
     await _nudges(ctx, stopping, MAX_NUDGES)
 
     steps = steps_of(todos_of(session))
@@ -475,7 +490,7 @@ async def test_a_profile_sets_the_nudge_budget(mount: MountProfile, tmp_path: Pa
     """
     ctx, session, _agent = await _reading(mount, tmp_path, profile_budget=1)
 
-    assert await _nudges(ctx, _Stopping(session), 5) == 1
+    assert await _nudges(ctx, StoppingAgent(session), 5) == 1
 
 
 async def test_a_skill_budget_overrides_the_profile(mount: MountProfile, tmp_path: Path) -> None:
@@ -487,7 +502,7 @@ async def test_a_skill_budget_overrides_the_profile(mount: MountProfile, tmp_pat
     `todo/write`, and one of the two counts below falls to the profile's 1.
     """
     ctx, session, _agent = await _reading(mount, tmp_path, skill_budget=4, profile_budget=1)
-    stopping = _Stopping(session)
+    stopping = StoppingAgent(session)
     assert await _nudges(ctx, stopping, 6) == 4
 
     steps = steps_of(todos_of(session))
@@ -507,7 +522,7 @@ async def test_a_skill_budget_of_zero_seeds_but_never_steers(
     ctx, session, _agent = await _reading(mount, tmp_path, skill_budget=0)
 
     assert steps_of(todos_of(session)) == STEP_TEXTS, "the procedure is still the plan"
-    assert await _nudges(ctx, _Stopping(session), 3) == 0
+    assert await _nudges(ctx, StoppingAgent(session), 3) == 0
 
 
 async def test_a_later_procedure_without_a_budget_uses_the_profile(
@@ -519,7 +534,7 @@ async def test_a_later_procedure_without_a_budget_uses_the_profile(
     ctx, session, agent = await _reading(mount, tmp_path, skill_budget=5, profile_budget=1)
     await run_tool(ctx, "skill", {"name": "notes"}, agent=agent, session=session)
 
-    assert await _nudges(ctx, _Stopping(session), 5) == 1
+    assert await _nudges(ctx, StoppingAgent(session), 5) == 1
 
 
 @pytest.mark.parametrize("budget", [0, 2])
@@ -639,3 +654,389 @@ def test_a_re_read_links_around_a_step_that_is_already_there() -> None:
     by_content = {one["content"]: one for one in grown}
     assert by_content["one"]["requires"] == []
     assert by_content["three"]["requires"] == ["two"], "the chain skipped the step that was there"
+
+
+# ----------------------------------------------------- the decision model --
+
+READY = (["survey the callers"], 2)
+"""What can start, and how many wait, once the three-step skill is read."""
+
+ROUTE = {"provider": "decision", "model": "clef"}
+"""The row's `decision`: a route, named the way a session's is."""
+
+ASKING = "The dry run passed on staging. Shall I apply it to production? Reply yes to go on."
+"""A turn ending the way a step that says "stop for approval" asks it to."""
+
+TOO_LONG = f"provider returned 500: {llama_refusal(1100, 512)}"
+"""A llama.cpp's refusal of a decision that does not fit its batch, as the
+adapter raises it."""
+
+
+async def _stopping_with(
+    mount: MountProfile,
+    tmp_path: Path,
+    decider: StubDecider | None,
+    said: str = ASKING,
+    decision: dict[str, Any] = ROUTE,
+) -> Any:  # noqa: ANN401
+    """A deployment whose `skill-steps` asks the decision model `decision`
+    names, a procedure just read in it, and a turn that is ending with `said` as
+    its last words."""
+    ctx, session, _agent = await _reading(mount, tmp_path, decision=decision)
+    if decider is not None:
+        ctx.require(LLM).register_adapter(["decision"], decider)
+    if said:
+        log_event(
+            session, "assistant/message", assistant_payload(said, "a9"), SurfaceIntent("append")
+        )
+    return ctx, session, StoppingAgent(session)
+
+
+def _decided(session: Session) -> list[dict[str, Any]]:
+    return [dict(one.data) for one in events_of(session, skill_steps.DECIDED)]
+
+
+async def test_a_turn_ending_to_wait_for_a_person_is_let_end(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The gate a skill writes in prose, kept. A step says "stop for approval",
+    the model stops and asks — and the row used to answer with a nudge to carry
+    on, steering it past the approval it had been told to wait for. Asked first,
+    a decision model says the turn is waiting on a person, and it is let end.
+
+    Both halves are in the log: what asking cost, on the route's own record,
+    and what was said and done about it, on the row's.
+
+    Sabotage: drop the `waits_for_a_person` check in `keep_going` and the turn
+    is nudged past the question.
+    """
+    decider = StubDecider(0.97)
+    ctx, session, stopping = await _stopping_with(mount, tmp_path, decider)
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    assert stopping.steers == [], "the model asked a person something; the turn is theirs"
+    (asked,) = decider.asked
+    assert (asked.provider, asked.model) == ("decision", "clef")
+    assert list(asked.questions) == [WAITING] and isinstance(asked.questions[WAITING], Noul)
+    assert "survey the callers" in asked.state, "it is told what was left undone"
+    assert asked.state.endswith(ASKING), "and how the turn ended"
+    assert _decided(session) == [{"waiting": 0.97, "holdAt": HOLD_AT}]
+    assert [one.data["usage"]["inputTokens"] for one in events_of(session, DECIDED)] == [120]
+
+
+async def test_a_turn_that_just_stopped_is_still_nudged(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The other answer, which has to leave the row doing what it always did —
+    and say in the log that it asked, so a nudge can be told from one sent with
+    nobody consulted."""
+    decider = StubDecider(0.02)
+    ctx, session, stopping = await _stopping_with(
+        mount, tmp_path, decider, "I surveyed the callers; there are four."
+    )
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    assert len(stopping.steers) == 1
+    assert _decided(session) == [{"waiting": 0.02, "holdAt": HOLD_AT}]
+
+
+@pytest.mark.parametrize(("hold_at", "held"), [(HOLD_AT, False), (0.5, True)])
+async def test_the_line_a_nudge_is_held_at_is_the_profile_s(
+    mount: MountProfile, tmp_path: Path, hold_at: float, held: bool
+) -> None:
+    """A probability, never a verdict: where the line goes is the deployment's.
+    The default leaves the unsure middle its nudge; a profile that would rather
+    end a turn than risk walking past a question lowers it."""
+    ctx, _session, stopping = await _stopping_with(
+        mount, tmp_path, StubDecider(0.65), "ok?", decision={**ROUTE, "holdAt": hold_at}
+    )
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    assert (not stopping.steers) is held
+
+
+async def test_a_held_nudge_spends_none_of_the_budget(mount: MountProfile, tmp_path: Path) -> None:
+    """A nudge that was not sent is not a nudge. The stall detector counts the
+    row's own messages in the log, and a hold writes none, so a procedure that
+    paused for an answer comes back to its whole budget.
+
+    Sabotage: write the hold as a `user/message` under this row's tag and the
+    turn after the person answers has one nudge fewer.
+    """
+    decider = StubDecider(0.97, 0.01)
+    ctx, _session, stopping = await _stopping_with(mount, tmp_path, decider)
+
+    assert await _nudges(ctx, stopping, 1) == 0, "held"
+    assert await _nudges(ctx, stopping, MAX_NUDGES + 2) == MAX_NUDGES, "then the whole budget"
+    assert len(decider.asked) == 1 + MAX_NUDGES, "and a row that has stood down asks nothing"
+
+
+@pytest.mark.parametrize(
+    ("decider", "code"),
+    [
+        (None, "NO_ADAPTER"),
+        (StubDecider(LlmError("the model is loading", "SERVER_ERROR")), "SERVER_ERROR"),
+    ],
+)
+async def test_a_decision_model_that_cannot_be_asked_leaves_the_nudge(
+    mount: MountProfile,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    decider: StubDecider | None,
+    code: str,
+) -> None:
+    """Graceful degradation: a route nobody registered, or a server that is
+    down, costs the deployment the exception and not the feature — the turn is
+    nudged as it was before there was a decision model. The reason is kept
+    where each reader looks: in the session's log, by code and sentence, every
+    time; and on the operator's, once, not at the end of every turn.
+
+    Sabotage: let the `LlmError` out of `waits_for_a_person` and a decision
+    server that is down fails every turn that ends with a procedure unfinished.
+    """
+    ctx, session, stopping = await _stopping_with(mount, tmp_path, decider)
+
+    with caplog.at_level("WARNING", logger="ph_stabilize.skill_steps"):
+        assert await _nudges(ctx, stopping, 2) == 2
+
+    assert [one.data["code"] for one in events_of(session, DECISION_FAILED)] == [code, code]
+    assert _decided(session) == [], "nothing was decided, so nothing says it was"
+    warnings = [one.getMessage() for one in caplog.records if "decision model" in one.getMessage()]
+    assert len(warnings) == 1 and "decision/clef" in warnings[0] and code in warnings[0]
+
+
+async def test_a_state_too_long_for_the_server_is_asked_again_with_less(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A decision is read in one batch, and a llama.cpp's is 512 tokens unless
+    it was started with more — the state, the question and the model's framing
+    together. How many characters that is depends on the text, so the row sends
+    the end of the message and, refused, sends less of it: aimed by the two
+    numbers the refusal gives, once.
+
+    The end, because that is where a question is.
+
+    Sabotage: drop the retry in `_decided` and a reply in a script denser than
+    prose is nudged past its question on every server left at the default.
+    """
+    said = "I checked another caller and it was fine. " * 200 + ASKING
+    decider = StubDecider(LlmError(TOO_LONG, CONTEXT_WINDOW_EXCEEDED), 0.97)
+    ctx, session, stopping = await _stopping_with(mount, tmp_path, decider, said)
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    first, second = (one.state for one in decider.asked)
+    assert said_bytes(None, *READY) < len(first) < len(said), "only the end of it, at first"
+    assert len(second) < len(first) * 0.5, "the second is cut by what the server said it reads"
+    assert first.endswith(ASKING) and second.endswith(ASKING)
+    assert stopping.steers == [] and _decided(session)[0]["waiting"] == 0.97
+    assert [one.type for one in session.events if one.type.startswith("llm/")] == [
+        DECISION_FAILED,
+        DECIDED,
+    ], "and the refusal is on the record beside the answer"
+
+
+@pytest.mark.parametrize(
+    ("limit", "shown"), [(None, said_bytes(None, *READY)), (8192, MOST_SAID), (300, MIN_SAID)]
+)
+async def test_how_much_of_the_message_is_shown_is_the_route_s(
+    mount: MountProfile, tmp_path: Path, limit: int | None, shown: int
+) -> None:
+    """How much fits is a fact about the route (`LlmRuntime.decision_limit`),
+    and what to cut is the row's: the end of the message is kept. A route that
+    declares a bigger batch is shown more — a question followed by a long
+    listing keeps its question in view — up to `MOST_SAID`, since a turn waits
+    on the answer; one that reads less is shown less, down to `MIN_SAID`.
+
+    Sabotage: size the tail by a constant again and the 8192-token route is
+    shown what a 512-token one is.
+    """
+    said = ASKING + " This is what I would run:\n" + "\n".join(["rows += 1"] * 800)
+    decider = StubDecider(0.97, route=ResolvedModel(max_decision_tokens=limit))
+    ctx, _session, stopping = await _stopping_with(mount, tmp_path, decider, said)
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    (asked,) = decider.asked
+    assert asked.state.endswith("\n…" + said[-(shown - len("…".encode())) :]), (
+        "the mark inside the budget"
+    )
+
+
+async def test_a_limit_one_refusal_named_sizes_the_next_ask(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The seam keeps what a refusal said the route reads, so the next turn's
+    state is sized to fit it instead of being refused the same way again."""
+    small = f"provider returned 500: {llama_refusal(1100, 300)}"
+    said = "I checked another caller and it was fine. " * 200 + ASKING
+    decider = StubDecider(LlmError(small, CONTEXT_WINDOW_EXCEEDED), 0.01)
+    ctx, _session, stopping = await _stopping_with(mount, tmp_path, decider, said)
+
+    await _nudges(ctx, stopping, 2)
+
+    first, second = (one.state for one in decider.asked)
+    assert ctx.require(LLM).decision_limit("decision", "clef") == 300
+    first_room, second_room = said_bytes(None, *READY), said_bytes(300, *READY)
+    assert first.endswith("\n…" + said[-(first_room - len("…".encode())) :])
+    assert second.endswith("\n…" + said[-(second_room - len("…".encode())) :]), (
+        "sized by what it said"
+    )
+
+
+async def test_a_route_that_timed_out_rests_before_it_is_asked_again(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A route that stalls costs every turn that would be nudged its whole
+    `timeoutMs`, in every session. After one timeout the row nudges without
+    asking for `REST_S`, then asks again — and a route that is merely down is
+    asked at every turn, since it refuses in milliseconds (see the test above).
+
+    Sabotage: drop the `resting` check in `waits_for_a_person` and the second
+    turn waits on the stalled route again.
+    """
+    clock = [100.0]
+    monkeypatch.setattr(skill_steps, "_now", lambda: clock[0])
+    stalled = LlmError('provider "decision" did not decide within 3 s', "TIMEOUT")
+    decider = StubDecider(stalled, 0.97)
+    ctx, session, stopping = await _stopping_with(mount, tmp_path, decider)
+
+    assert await _nudges(ctx, stopping, 2) == 2
+    assert len(decider.asked) == 1, "resting: the second turn did not wait on it"
+    assert [one.data["code"] for one in events_of(session, DECISION_FAILED)] == ["TIMEOUT"]
+
+    clock[0] += skill_steps.REST_S
+    assert await _nudges(ctx, stopping, 1) == 0, "asked again, and it was waiting"
+    assert len(decider.asked) == 2
+
+
+async def test_a_refusal_a_shorter_state_cannot_answer_is_not_asked_twice(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Only the one refusal is worth a second request, and only when it says
+    how far over the state was: anything else would be asked the same thing
+    again, with a turn waiting on it."""
+    decider = StubDecider(LlmError("it did not fit", CONTEXT_WINDOW_EXCEEDED), 0.97)
+    ctx, _session, stopping = await _stopping_with(mount, tmp_path, decider)
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    assert len(decider.asked) == 1 and len(stopping.steers) == 1
+
+
+async def test_a_turn_that_said_nothing_is_not_asked_about(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """There is nothing to judge, and a request about an empty message would be
+    a decision about the question's own wording."""
+    decider = StubDecider(0.97)
+    ctx, _session, stopping = await _stopping_with(mount, tmp_path, decider, said="")
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    assert decider.asked == [] and len(stopping.steers) == 1
+
+
+async def test_a_finished_procedure_asks_no_decision(mount: MountProfile, tmp_path: Path) -> None:
+    """Asked last, once everything cheaper has said a nudge is due: it is a
+    request to a server, and a turn that would not be nudged owes nobody the
+    wait."""
+    decider = StubDecider(0.97)
+    ctx, session, stopping = await _stopping_with(mount, tmp_path, decider)
+    await run_tool_calls(
+        ctx, session, todo_call("done", [_entry(step, status="completed") for step in STEP_TEXTS])
+    )
+
+    await ctx.serial("agent/turn-stopping", stopping, 1)
+
+    assert decider.asked == [] and stopping.steers == []
+
+
+async def test_doctor_says_which_decision_model_is_asked_and_whether_it_can_be(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """`phern doctor` is what a person runs when the nudges are not being held,
+    and the usual reason is a route that names no adapter that decides. Read
+    when asked, so an adapter row mounted after this one counts."""
+    ctx, _session, _stopping = await _stopping_with(mount, tmp_path, None)
+
+    def line() -> str:
+        report = dict(ctx.require(DIAGNOSTICS).report())
+        said: str = dict(report["Skill steps"])["decision model"]
+        return said
+
+    assert "decision/clef" in line() and "no adapter" in line()
+    ctx.require(LLM).register_adapter(["decision"], StubDecider(0.5))
+    assert "decision/clef" in line() and f"held at {HOLD_AT:g}" in line()
+
+
+async def test_a_row_with_no_decision_model_has_nothing_for_doctor(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    ctx, _session, _agent = await _reading(mount, tmp_path)
+    assert "Skill steps" not in dict(ctx.require(DIAGNOSTICS).report())
+
+
+def test_the_decision_model_is_shown_the_end_of_a_long_message() -> None:
+    """What it is asked about: the step that can start, on one line however the
+    skill wrapped it, how many wait behind it, and the last of what was said —
+    marked as cut, so a clipped sentence is not read as the whole reply."""
+    step = "Apply the migration\n  to production " + "and verify " * 40
+    said = "x" * 5000 + " Shall I go on?"
+
+    state = decision_state([step], 2, said, 100)
+
+    assert "'Apply the migration to production and verify" in state
+    assert "…'" in state and "2 further steps wait on these" in state
+    assert state.endswith("Shall I go on?")
+    assert "\n…" + said[-(100 - len("…".encode())) :] in state
+    assert decision_state([step], 0, "short", 100).endswith("\nshort")
+
+
+def test_the_end_of_the_message_is_cut_by_bytes_between_characters() -> None:
+    """The decision model is shown a byte budget of the message, since its
+    server counts tokens and bytes are the careful estimate of them — and the
+    cut never lands inside a character: not a byte sequence, and not an emoji
+    sequence or an accent either (`ph.text.tail_bytes`).
+
+    Sabotage: cut the encoded message at `-room` and decode it, and the tail
+    starts with the last members of a family.
+    """
+    said = "Shall I go on? " + EMOJI_FAMILY * 40
+
+    state = decision_state(["port the row"], 0, said, 50)
+
+    shown = state.rsplit("\n…", 1)[1]
+    assert len(shown.encode()) <= 50
+    assert not shown.replace(EMOJI_FAMILY, ""), "whole families only"
+
+
+def test_the_whole_state_is_sized_in_bytes() -> None:
+    """One unit for everything the decision model is shown. A step is clipped by
+    bytes as the message is, so three steps written in a script three bytes a
+    character take what three in English take; and the message gets what the
+    route reads less the framing and the steps as they are sent — not a reserve
+    measured once on English steps, which three long Chinese ones overran.
+
+    Sabotage: clip steps by characters again and the Chinese steps take three
+    times their share, leaving the message the floor.
+    """
+    english = ["Run the migration against staging and report every table it touched " * 3]
+    chinese = ["在预发布环境运行数据库迁移并报告它修改过的每一张表格以及每一个索引和约束" * 3]
+
+    for steps in (english * 3, chinese * 3):
+        prefix = decision_state(steps, 4, "", 0)
+        named = prefix.split(": ", 1)[1].split(" can be started now")[0]
+        assert all(
+            len(one.encode()) <= STEP_BYTES + len("''…".encode()) for one in named.split(", ")
+        )
+
+    assert said_bytes(None, english * 3, 4) < said_bytes(None, english, 0), (
+        "steps shown are room the message loses"
+    )
+    assert abs(said_bytes(None, chinese * 3, 4) - said_bytes(None, english * 3, 4)) <= 3 * 2, (
+        "and three long steps take the same room in either script, to a character's cut"
+    )

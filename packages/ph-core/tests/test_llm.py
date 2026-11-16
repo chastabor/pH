@@ -21,9 +21,24 @@ from ph.cordis import Context, running
 from ph.json import JsonObject
 from ph.keys import LLM
 from ph.llm import BlockAssembler, named_call
-from ph.llm.adapter import ResolvedModel
+from ph.llm.adapter import (
+    DECIDED,
+    DECISION_FAILED,
+    Choice,
+    ChoiceAnswer,
+    DecisionRequest,
+    Decisions,
+    LlmError,
+    Noul,
+    NoulAnswer,
+    ResolvedModel,
+)
 from ph.llm.adapter import apply as llm_apply
+from ph.llm.tokens import BYTES_PER_TOKEN, bytes_of, tokens_of
 from ph.llm.types import (
+    BAD_DECISION,
+    CONTEXT_WINDOW_EXCEEDED,
+    NO_DECISIONS,
     BlockEnd,
     BlockStart,
     CallSetting,
@@ -46,7 +61,9 @@ from ph.llm.types import (
     is_token_delta,
     user_text,
 )
-from ph.testing import as_kind, block_text, text_chunks
+from ph.seams.token_meter import SPENDING_TYPES, event_tokens
+from ph.session import Session
+from ph.testing import FakeAdapter, StubDecider, as_kind, block_text, llama_refusal, text_chunks
 
 pytestmark = pytest.mark.anyio
 
@@ -357,6 +374,171 @@ async def test_an_adapters_stream_body_runs_inside_its_rows_binding() -> None:
     await root.dispose()
 
 
+def _asked(model: str, provider: str = "fx") -> DecisionRequest:
+    return DecisionRequest(
+        provider=provider,
+        model=model,
+        state="the build is red",
+        questions={"broken": Noul("Is it broken?"), "next": Choice("What now?", {"a": "fix"})},
+    )
+
+
+async def _runtime(*adapters: tuple[str, Any]) -> tuple[Context, Any]:
+    """The seam alone, with `adapters` registered under their providers."""
+    root = Context()
+    await llm_apply(root, None)
+    runtime = root.require(LLM)
+    for provider, adapter in adapters:
+        runtime.register_adapter([provider], adapter)
+    return root, runtime
+
+
+async def test_a_decision_is_recorded_in_the_log_of_the_session_it_was_for() -> None:
+    """A decision is not a turn's request, so no `assistant/message` carries
+    what it cost: a route could be spent by a row and no log say so. Given the
+    session it is for, the door records each request there — the route, how many
+    questions, and the provider's own count where it gives one — and a request
+    the route failed with why. Asked for nobody, it records nothing.
+
+    The record is one that spends (`SPENDING_TYPES`), which is how a goal's
+    budget and a child's account come to read it.
+
+    Sabotage: drop either `_LOG.append` in `LlmRuntime.decide`, or take
+    `llm/decided` out of `SPENDING_TYPES`.
+    """
+    uncounted = Decisions(
+        {"broken": NoulAnswer(0.9), "next": ChoiceAnswer("a", {"a": 1.0})}, input_tokens=None
+    )
+    decider = StubDecider(
+        0.9, uncounted, LlmError("the model is loading", "PROVIDER_ERROR"), 0.9, input_tokens=80
+    )
+    root, runtime = await _runtime(("fx", decider))
+    session = Session("s")
+
+    decided = await runtime.decide(_asked("m"), session=session)
+    await runtime.decide(_asked("silent"), session=session)
+    with pytest.raises(LlmError):
+        await runtime.decide(_asked("down"), session=session)
+    with pytest.raises(LlmError):
+        await runtime.decide(_asked("m", provider="nobody"), session=session)
+    await runtime.decide(_asked("m"))
+
+    assert decided.answer("broken", NoulAnswer) == NoulAnswer(0.9)
+    route = {"provider": "fx", "questions": 2}
+    assert [(one.type, dict(one.data)) for one in session.events] == [
+        (DECIDED, {**route, "model": "m", "usage": {"inputTokens": 80, "outputTokens": 0}}),
+        (DECIDED, {**route, "model": "silent", "usage": None}),
+        (
+            DECISION_FAILED,
+            {**route, "model": "down", "code": "PROVIDER_ERROR", "reason": "the model is loading"},
+        ),
+        (
+            DECISION_FAILED,
+            {
+                "provider": "nobody",
+                "model": "m",
+                "questions": 2,
+                "code": "NO_ADAPTER",
+                "reason": 'no adapter is registered for provider "nobody"',
+            },
+        ),
+    ]
+    assert DECIDED in SPENDING_TYPES and DECISION_FAILED not in SPENDING_TYPES
+    assert [event_tokens(one) for one in session.events] == [80, 0, 0, 0]
+    await root.dispose()
+
+
+async def test_a_route_that_cannot_decide_is_refused_by_name() -> None:
+    """Deciding is an optional capability, asked with `isinstance`: an adapter
+    that only streams is not asked to decide, and the refusal names the provider
+    and has a code a caller can route on. `decides` answers the same question
+    without a request, for a row that wants to say so before it needs to.
+
+    Sabotage: drop the `isinstance` check in `LlmRuntime.decide` and the refusal
+    becomes an `AttributeError` under `UNKNOWN`.
+    """
+    root, runtime = await _runtime(("chat", FakeAdapter()), ("fx", StubDecider(0.9)))
+
+    assert runtime.decides("fx")
+    assert not runtime.decides("chat") and not runtime.decides("nobody")
+    with pytest.raises(LlmError) as refused:
+        await runtime.decide(_asked("m", provider="chat"))
+    assert refused.value.code == NO_DECISIONS and '"chat"' in str(refused.value)
+    await root.dispose()
+
+
+async def test_an_answer_of_another_kind_than_its_question_is_refused() -> None:
+    """What a caller may assume of `Decisions` is one rule, held here for every
+    adapter: a `Noul` is answered with a `NoulAnswer`. A caller that drew a line
+    through a number that was never given would be deciding on nothing — and
+    `Decisions.answer` reads by the same rule, so a caller asks for the kind it
+    is owed and gets it, or the refusal.
+
+    Sabotage: drop the `_owed` call and a `ChoiceAnswer` comes back under a
+    noul's name.
+    """
+    muddled = Decisions({name: ChoiceAnswer("a", {"a": 1.0}) for name in ("broken", "next")})
+    root, runtime = await _runtime(("fx", StubDecider(muddled)))
+    session = Session("s")
+
+    with pytest.raises(LlmError) as refused:
+        await runtime.decide(_asked("muddled"), session=session)
+
+    assert refused.value.code == BAD_DECISION and '"broken"' in str(refused.value)
+    assert [one.type for one in session.events] == [DECISION_FAILED]
+    with pytest.raises(LlmError) as misread:
+        muddled.answer("broken", NoulAnswer)
+    assert misread.value.code == BAD_DECISION
+    await root.dispose()
+
+
+async def test_a_decision_that_takes_too_long_is_a_recorded_failure() -> None:
+    """Whoever asks is holding something up until the answer comes, so the wait
+    is the asker's to bound — and a decision given up on is recorded like any
+    other that failed, which a cancel scope around the call would not do.
+
+    Sabotage: drop the `fail_after` and this test never returns.
+    """
+    root, runtime = await _runtime(("fx", StubDecider(hangs=True)))
+    session = Session("s")
+
+    with pytest.raises(LlmError) as refused:
+        await runtime.decide(_asked("slow"), session=session, timeout_s=0)
+
+    assert refused.value.code == "TIMEOUT"
+    assert [(one.type, one.data["code"]) for one in session.events] == [
+        (DECISION_FAILED, "TIMEOUT")
+    ]
+    await root.dispose()
+
+
+async def test_a_route_s_decision_limit_is_what_it_says_or_what_it_refused() -> None:
+    """How much one decision may carry is a fact about the route, so the seam
+    keeps it for every asker: what the route's row declares, lowered by what a
+    refusal names — a llama.cpp says the batch it reads — and never raised by
+    one. An asker sizes its state by it rather than spending a refusal to learn
+    it on every request.
+
+    Sabotage: drop `_learn` from `decide`'s failure path and the limit stays at
+    the declared 2048 after the server said it reads 300.
+    """
+    too_long = LlmError(llama_refusal(695, 300), CONTEXT_WINDOW_EXCEEDED)
+    louder = LlmError(llama_refusal(900, 600), CONTEXT_WINDOW_EXCEEDED)
+    declared = StubDecider(too_long, louder, route=ResolvedModel(max_decision_tokens=2048))
+    root, runtime = await _runtime(("fx", declared), ("quiet", StubDecider(0.9)))
+
+    assert runtime.decision_limit("fx", "m") == 2048, "what the route declares"
+    assert runtime.decision_limit("quiet", "m") is None, "and nothing, where nothing says"
+    with pytest.raises(LlmError):
+        await runtime.decide(_asked("m"))
+    assert runtime.decision_limit("fx", "m") == 300, "lowered by what the server said"
+    assert runtime.decision_limit("fx", "other") == 2048, "for that route alone"
+    with pytest.raises(LlmError):
+        await runtime.decide(_asked("m"))
+    assert runtime.decision_limit("fx", "m") == 300, "and never raised by a refusal"
+    await root.dispose()
+
+
 async def test_a_setting_the_route_cannot_carry_is_dropped_with_one_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -448,3 +630,15 @@ def test_what_a_header_withholds_is_asked_for_again_whole() -> None:
 
     assert sent == LlmCallConfig(provider="p", model="m", sampling=Sampling(temperature=0.6))
     assert sent.asking(withheld) == config
+
+
+def test_one_estimate_of_tokens_for_every_caller_without_a_tokenizer() -> None:
+    """Text-index weighs passages by it and `skill-steps` sizes the decision
+    model's state by it, so both count the same way: UTF-8 bytes, not
+    characters, at `BYTES_PER_TOKEN`. A character three bytes long is about a
+    token, and counting characters would send three times what fits."""
+    assert tokens_of("abc") == 1.0
+    assert tokens_of("日本語") == 3.0, "three bytes a character: a token each"
+    assert tokens_of("abcdef", bytes_per_token=2) == 3.0, "or a density a caller learned"
+    assert bytes_of(10) == 10 * BYTES_PER_TOKEN
+    assert tokens_of("x" * bytes_of(7)) == 7

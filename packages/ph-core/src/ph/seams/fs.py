@@ -45,6 +45,7 @@ import anyio
 from pydantic import Field
 
 from ..agent.types import AgentHandle
+from ..characters import head
 from ..cordis import (
     Boundary,
     Context,
@@ -1070,7 +1071,7 @@ class FsService:
                     continue
                 for number, line in enumerate(text.splitlines(), start=1):
                     if expression.search(line):
-                        matches.append(GrepMatch(path=found, line=number, text=line[:500]))
+                        matches.append(GrepMatch(path=found, line=number, text=head(line, 500)))
                         if len(matches) >= limit:
                             return matches
             return matches

@@ -22,6 +22,7 @@ governed call"**.
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 from typing import cast
 
@@ -44,6 +45,7 @@ from ph_app.tui.widgets.status import (
     _todo_line,
     children_heading,
     render_subagents,
+    shorten_path,
 )
 from ph_app.tui.widgets.transcript import (
     CodeCellWidget,
@@ -495,3 +497,19 @@ def test_only_a_completion_carries_the_receipt() -> None:
     """
     assert _todo_line({"content": "gate it", "status": "pending"}) == "○ gate it"
     assert _todo_line({"content": "wire it", "status": "in_progress"}) == "◐ wire it"
+
+
+def test_a_shortened_path_keeps_its_end_whole() -> None:
+    """The sidebar keeps the end of a long path, the part that names it, and
+    cuts between characters: a name a filesystem stored decomposed — "é" as two
+    code points, as macOS writes them — does not lose its accent's letter.
+
+    Sabotage: cut with `path[-(width - 1):]` again and the shortened path starts
+    with a bare combining accent.
+    """
+    path = "/srv/" + "nested/" * 6 + "re\u0301sume\u0301.md"
+
+    for width in range(8, 24):
+        short = shorten_path(path, width)
+        assert short.startswith("…") and len(short) <= width
+        assert path.endswith(short[1:]) and not unicodedata.combining(short[1])

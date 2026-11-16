@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cancel import Canceled, raced
+from ...characters import head
 from ...cordis import Context, maybe_await, plugin
 from ...json import JsonObject, as_str, dumps
 from ...keys import SUBAGENTS, TOOLS
@@ -335,7 +336,7 @@ async def apply(ctx: Context, config: Config) -> None:
             present_call=lambda args: ToolCallView(
                 card="generic",
                 title=f"Delegate to {args.get('name') or 'a subagent'}",
-                input=str(args.get("prompt", ""))[:200],
+                input=head(str(args.get("prompt", "")), 200),
             ),
             present_result=lambda args, result: ToolResultView(
                 card="generic",

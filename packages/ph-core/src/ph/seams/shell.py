@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ..agent.types import AgentHandle
 from ..cancel import Cancellation
+from ..characters import head_bytes, utf8_size
 from ..cordis import Context, plugin
 from ..json import JsonObject, JsonValue
 from ..keys import FS, SANDBOX, SHELL, SUBPROCESS
@@ -103,16 +104,17 @@ def _shell_settled(command_seq: int, result: ShellResult) -> JsonObject:
         "ok": result.exit_code == 0,
         "cwd": result.cwd,
         "confinedBy": result.confined_by,
-        "stdout": result.stdout[:SHELL_OUTPUT],
-        "stderr": result.stderr[:SHELL_OUTPUT],
+        "stdout": head_bytes(result.stdout, SHELL_OUTPUT),
+        "stderr": head_bytes(result.stderr, SHELL_OUTPUT),
         # **Two bounds, two keys.** A fold that wants to know why a person is looking
         # at a prefix wants to tell "the seam threw 37 MB away" from "we kept 64 KiB
         # of what survived" — one `truncated` bool lost that. Compared on the
-        # originals, which is O(1) and *before* anything is concatenated.
+        # originals, in the bytes the cap names, *before* anything is concatenated.
         "dropped": result.dropped,
         "cap": result.cap,
         "timedOut": result.timed_out,
-        "clipped": len(result.stdout) > SHELL_OUTPUT or len(result.stderr) > SHELL_OUTPUT,
+        "clipped": utf8_size(result.stdout) > SHELL_OUTPUT
+        or utf8_size(result.stderr) > SHELL_OUTPUT,
     }
 
 

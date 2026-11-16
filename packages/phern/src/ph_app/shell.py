@@ -39,6 +39,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ph.agent.types import AgentDriver
+from ph.characters import head_bytes, utf8_size
 from ph.cordis import Context
 from ph.json import JsonObject, as_int, as_str
 from ph.keys import SHELL
@@ -130,8 +131,10 @@ def shell_message(command: str, data: JsonObject) -> str:
     reason from a file it thinks it has seen the end of.
     """
     body = shell_body(data) or NO_OUTPUT
-    if len(body) > SURFACE_OUTPUT:
-        body = body[:SURFACE_OUTPUT] + truncation_marker(len(body) - SURFACE_OUTPUT, SURFACE_OUTPUT)
+    size = utf8_size(body)
+    if size > SURFACE_OUTPUT:
+        kept = head_bytes(body, SURFACE_OUTPUT)
+        body = kept + truncation_marker(size - utf8_size(kept), SURFACE_OUTPUT)
     return f"$ {command}\n{body}"
 
 

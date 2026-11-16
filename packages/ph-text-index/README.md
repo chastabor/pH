@@ -686,7 +686,7 @@ and each is as long as both allow:
 | embedder | where its limit comes from | how text is counted |
 |---|---|---|
 | `text-index-local` | the model's own length; `max_tokens` can lower it | the model's tokenizer, exactly |
-| `text-index-endpoint` | `max_tokens`, else a llama.cpp's `/props` | its bytes, three to a token |
+| `text-index-endpoint` | `max_tokens`, else a llama.cpp's `/props` | its bytes, three to a token (`ph.llm.tokens.tokens_of`, the estimate the decision model's state is sized by too) |
 
 - **Packed in the embedder's unit.** `max_chars` says how big a passage should
   be; the limit says how much the embedder reads, in its tokens, and a
@@ -695,7 +695,10 @@ and each is as long as both allow:
   bounds: `max_chars`, and the limit less the passage prefix and the model's
   start and end markers. Each paragraph and line is weighed for itself, so a
   table in a page of prose is cut small and the prose around it is not, and
-  text in any script fits at the first cut. On this repository's `docs/seams`
+  text in any script fits at the first cut. Every cut inside a line falls
+  between characters as a reader sees them (`ph.characters.cut_before`): an accent,
+  an emoji sequence or a flag is never split across two passages. On this
+  repository's `docs/seams`
   with the default model: 316 passages, none over 256 tokens, where sizing in
   characters gave 388 and packed three documents twice.
 - **A larger limit changes nothing.** Smaller passages retrieve better, so

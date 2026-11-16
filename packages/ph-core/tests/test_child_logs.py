@@ -21,7 +21,7 @@ from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
 from ph.json import JsonValue, as_obj, as_seq, as_str
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SKILLS, SUBAGENTS, TOOLS
-from ph.llm.types import Message, Sampling, text_of
+from ph.llm.types import Sampling, text_of
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
@@ -47,6 +47,7 @@ from ph.testing import (
     FAKE_OPTIONS,
     KIND_OUTPUT,
     MountProfile,
+    StoppingAgent,
     StubSubagentProvider,
     admitted_child,
     assistant_payload,
@@ -349,17 +350,6 @@ async def test_a_readmitted_child_runs_on_its_parent_s_route_where_a_spawn_is_re
 KIND = dict(KIND_OUTPUT)
 
 
-@dataclass(slots=True)
-class _Stopping:
-    """An agent at the end of a turn, as `agent/turn-stopping` hands one to a listener."""
-
-    session: Session
-    steered: list[Message] = field(default_factory=list)
-
-    def steer(self, message: Message) -> None:
-        self.steered.append(message)
-
-
 def _owing(ctx: Context, *records: tuple[str, dict[str, JsonValue]]) -> Session:
     """A child admitted owing a value in `KIND`, its log holding `records` after."""
     parent = ctx.require(SESSIONS).create("lead")
@@ -402,15 +392,14 @@ async def test_a_child_that_owes_a_value_is_reminded_once_a_start(mount: MountPr
     every turn's end."""
     ctx = await mount()
     child = _owing(ctx, RESUMED, PROSE)
-    agent = _Stopping(child)
+    agent = StoppingAgent(child)
 
     await ctx.serial("agent/turn-stopping", agent, 1)
-    (reminder,) = agent.steered
-    log_event(child, "user/message", dict(reminder.to_wire()), SurfaceIntent("append"))
+    (reminder,) = agent.steers
     await ctx.serial("agent/turn-stopping", agent, 1)
 
     assert "You have not returned your result" in text_of(reminder.content)
-    assert len(agent.steered) == 1
+    assert len(agent.steers) == 1
 
 
 async def test_a_woken_child_owes_nothing_again(mount: MountProfile) -> None:
@@ -419,13 +408,13 @@ async def test_a_woken_child_owes_nothing_again(mount: MountProfile) -> None:
     child is reminded, then failed, for an answer it gave long ago."""
     ctx = await mount()
     child = _owing(ctx, WOKEN, PROSE)
-    agent = _Stopping(child)
+    agent = StoppingAgent(child)
 
     await ctx.serial("agent/turn-stopping", agent, 1)
     assert settle_value(child) == Returned()
     await record_ended(ctx, child, "done")
 
-    assert agent.steered == []
+    assert agent.steers == []
     assert child_state(child).status == "done"
 
 

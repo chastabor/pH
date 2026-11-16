@@ -470,3 +470,24 @@ async def test_a_canceled_command_is_an_abort_rather_than_an_exit_code() -> None
     # After dispatch, not before: the child ran, so the call is not safe to retry
     # blind — which is the distinction `aborted_result` keeps two codes for.
     assert (result.error.info or {}).get("code") == TOOL_ABORTED
+
+
+async def test_a_stream_cut_at_its_cap_ends_on_a_whole_character(tmp_path: Path) -> None:
+    """A stream is kept to `max_output` bytes and the rest counted, so the cut
+    falls wherever the cap does — inside a character as often as not. That
+    character is left off rather than ending the output in U+FFFD.
+
+    Sabotage: decode the kept bytes with `errors="replace"` again and the output
+    ends in a replacement character.
+    """
+    _root, service = _service()
+    service.max_output = 1000
+
+    result = await service.run(
+        SubprocessSpawnSpec(
+            argv=(sys.executable, "-c", "import sys; sys.stdout.write('✓' * 1000)"), cwd=tmp_path
+        )
+    )
+
+    assert result.truncated
+    assert result.stdout == "✓" * (1000 // len("✓".encode()))

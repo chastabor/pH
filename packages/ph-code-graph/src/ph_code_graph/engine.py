@@ -74,6 +74,7 @@ from typing import Any, Literal
 import anyio
 from pydantic import Field
 
+from ph.characters import head
 from ph.cordis import Context, MountRefusal, ServiceKey, plugin
 from ph.json import JsonObject, as_int
 from ph.keys import COMMANDS, FS, TOOLS
@@ -368,7 +369,7 @@ def _where(one: dict[str, Any]) -> str:
 
 def _doc(one: dict[str, Any]) -> str:
     doc = (one.get("doc") or "").strip().splitlines()
-    return f"  — {doc[0][:70]}" if doc else ""
+    return f"  — {head(doc[0], 70)}" if doc else ""
 
 
 def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401

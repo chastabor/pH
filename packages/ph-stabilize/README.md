@@ -118,7 +118,8 @@ phern --patch '{insert: [{id: tool-result-offload, name: tool-result-offload}]}'
 | `limits` | `modelCalls` (`exit: end \| error`), `toolCalls` (plus `perTool`, `exit: continue \| end \| error`), `children`, `breaker.consecutiveFailures` — each budget takes `turnLimit` and `sessionLimit` | all ceilings unset; breaker `5` |
 | `hitl` | `mode` (`manual` \| `auto` \| `yolo`), `declared`, `interruptOn` | `auto`, nothing configured |
 | `permissions-fs` | `rules` — each `operations`, `paths`, `scope` (`anywhere` \| `outside-workspace`), `mode` (default `deny`), `description` | one rule: `write` anywhere `outside-workspace` → `interrupt` |
-| `tool-todo`, `skill-steps`, `command-compact` | — | no configuration |
+| `skill-steps` | `maxNudges`, `decision` (`provider`, `model`, `holdAt`, `timeoutMs`) | `3`; no decision model, so every unfinished procedure is nudged. With one, a turn ending to wait for a person is let end, and a route that times out rests a minute — [docs/skills](../../docs/skills/README.md#asking-a-decision-model-first) |
+| `tool-todo`, `command-compact` | — | no configuration |
 
 ### Writing a `hitl` rule
 
@@ -212,6 +213,11 @@ escape hatch, but it is matched against the decoded strings.
   Gates that check the world are `ctx.goals` and `ctx.approval`. It is also
   useless without `tool-todo` — the list it seeds is that row's — so a profile
   enabling one enables both.
+- **A decision model is asked, never relied on.** `skill-steps` asks one whether
+  a turn is ending to wait for a person (`ctx.llm.decide`), and holds its nudge
+  when it is. A route that cannot be asked — unregistered, down, slow, answering
+  in another shape — leaves the nudge the row always sent, with a warning and a
+  `llm/decision-failed` record: the row has no `inject` on `llm`, on purpose.
 
 ## Tests
 

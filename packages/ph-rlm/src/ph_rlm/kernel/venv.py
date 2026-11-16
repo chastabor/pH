@@ -40,6 +40,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, TypeAlias
 
+from ph.characters import head
 from ph.locks import LockBusy, file_lock
 from ph.orphans import argv_digest
 
@@ -271,5 +272,5 @@ def _run(argv: list[str]) -> None:
     if completed.returncode != 0:
         raise RuntimeVenvError(
             f"{' '.join(argv[:3])} failed with status {completed.returncode}:\n"
-            f"{completed.stderr.strip()[:2000]}"
+            f"{head(completed.stderr.strip(), 2000)}"
         )

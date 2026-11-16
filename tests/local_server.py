@@ -14,7 +14,7 @@ the root conftest's `pytest_plugins` as the per-package fixture sets are.
 from __future__ import annotations
 
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Any
 
 import httpx
@@ -68,7 +68,9 @@ PROBE_TIMEOUT = 30.0
 is minutes — a 27B model on a laptop takes them."""
 
 
-def get_json(url: str, *, absent: Collection[int] = ()) -> Any:  # noqa: ANN401
+def get_json(
+    url: str, *, absent: Collection[int] = (), headers: Mapping[str, str] | None = None
+) -> Any:  # noqa: ANN401
     """One metadata read — `None` for a status in `absent` — or a failure that names
     the URL.
 
@@ -78,7 +80,7 @@ def get_json(url: str, *, absent: Collection[int] = ()) -> Any:  # noqa: ANN401
     absence is genuinely inconclusive — a fact about the server, not a defect.
     """
     try:
-        reply = httpx.get(url, timeout=PROBE_TIMEOUT)
+        reply = httpx.get(url, headers=headers, timeout=PROBE_TIMEOUT)
         if reply.status_code in absent:
             return None
         reply.raise_for_status()
@@ -106,7 +108,9 @@ def server_props() -> Any | None:  # noqa: ANN401
     return get_json(f"{server_root()}/props", absent=(httpx.codes.NOT_FOUND,))
 
 
-def local_model(monkeypatch: pytest.MonkeyPatch) -> str:
+def local_model(
+    monkeypatch: pytest.MonkeyPatch, *, base_url: str = BASE_URL, prefix: str = "LLAMA"
+) -> str:
     """The profile's credential, defaulted — and the model to ask for.
 
     `LLAMA_API_KEY` is a formality llama.cpp ignores unless it was started with
@@ -117,15 +121,23 @@ def local_model(monkeypatch: pytest.MonkeyPatch) -> str:
     The model is *discovered* rather than configured, because `--model` names a
     `.gguf` path on one host and an alias on the next. `LLAMA_MODEL` overrides for a
     server holding more than one.
+
+    `prefix` names the variables (`{prefix}_API_KEY`, `{prefix}_MODEL`) for a
+    second server, at `base_url`: the decision model's is `DECISION`. The list is
+    asked for with the key, since a server started with `--api-key` answers it to
+    nobody else.
     """
-    if not os.environ.get("LLAMA_API_KEY"):
-        monkeypatch.setenv("LLAMA_API_KEY", "local")
-    configured = os.environ.get("LLAMA_MODEL")
+    key = f"{prefix}_API_KEY"
+    if not os.environ.get(key):
+        monkeypatch.setenv(key, "local")
+    configured = os.environ.get(f"{prefix}_MODEL")
     if configured:
         return configured
-    models = get_json(f"{BASE_URL.rstrip('/')}/models").get("data") or []
+    address = f"{base_url.rstrip('/')}/models"
+    asked = {"Authorization": f"Bearer {os.environ[key]}"}
+    models = get_json(address, headers=asked).get("data") or []
     if not models:
-        pytest.fail(f"{BASE_URL} has no model loaded; /models listed none")
+        pytest.fail(f"{base_url} has no model loaded; /models listed none")
     return str(models[0]["id"])
 
 

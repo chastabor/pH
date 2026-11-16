@@ -263,6 +263,15 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "workspace/checkpoint",
         # retry
         "llm/retry",
+        # Questions a decision model answered on one of the session's routes, for
+        # this session's agent (`LlmRuntime.decide`): which route, how many
+        # questions, and what the provider said it cost — or why it would not.
+        # Not a turn's request, so no `assistant/message` carries the spend; this
+        # is where a budget and a child's account find it (`SPENDING_TYPES`).
+        # Ignorable: nothing in the conversation moves, and a reader that skips
+        # it loses the metering.
+        "llm/decided",
+        "llm/decision-failed",
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
         "tool/code-dispatch",
         "tool/code-dispatch-start",
@@ -343,6 +352,11 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # which changes how many nudges come *next* — every nudge already sent
         # is a required `user/message` of its own.
         "skill-steps/budget",
+        # What a decision model said of a turn that stopped with a procedure
+        # unfinished, and the line `skill-steps` held its nudge at. Ignorable:
+        # a held nudge is a message that was never sent, so a reader that skips
+        # this reads the same conversation and loses why the turn was let end.
+        "skill-steps/decided",
         # Compaction (P4-03, G4; emitted by `ph-stabilize`'s `compaction-summarize`).
         # The accounting for one landed summary: what it shadowed, what that
         # cost, and which model wrote it. Ignorable — the summary the model
@@ -417,7 +431,10 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "offload/spilled",
         "offload/input-spilled",
         "skill-steps/budget",
+        "skill-steps/decided",
         "step/retry",
+        "llm/decided",
+        "llm/decision-failed",
         "compaction/summarized",
         "compaction/declined",
         "compaction/args-truncated",
@@ -564,6 +581,13 @@ AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # A skill's nudge budget (D16): each nudge is a row; the number behind them
         # is the auditor's.
         "skill-steps/budget",
+        # Why a turn was let end with a procedure unfinished, or was not: the
+        # nudge it decided for is the row.
+        "skill-steps/decided",
+        # What a decision cost, and one that failed: whoever asked records what
+        # it was for.
+        "llm/decided",
+        "llm/decision-failed",
         # The accounting for a compaction, whose summary already draws a row as the
         # replacement `user/message` it rides on. `compaction/declined` is not here:
         # a compaction that did not happen leaves no row of its own.
@@ -596,6 +620,8 @@ EXPORTED_SESSION_EVENT_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "turn/end": ("reason",),
         # A model call failed in a way worth another try, and which failure it was.
         "llm/retry": ("code",),
+        # A route would not decide: which failure, and its sentence.
+        "llm/decision-failed": ("code", "reason"),
         "compaction/declined": ("code", "reason"),
         "harness/refine-considered": ("reason",),
         "goal/settled": ("outcome", "detail"),
@@ -699,6 +725,7 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "user/message",
             }
         ),
+        "ph.llm.adapter": frozenset({"llm/decided", "llm/decision-failed"}),
         "ph.llm.media": frozenset({"attachment/degraded", "attachment/oversized"}),
         "ph.llm.retry": frozenset({"llm/retry"}),
         "ph.persistence.resume": frozenset({"session/resumed"}),
@@ -771,7 +798,9 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph_stabilize.offload": frozenset({"offload/spilled"}),
         # Two writers of one list on purpose: a procedure a skill declares is a todo
         # list, and both rows mean "the list is now this".
-        "ph_stabilize.skill_steps": frozenset({"skill-steps/budget", "todo/write"}),
+        "ph_stabilize.skill_steps": frozenset(
+            {"skill-steps/budget", "skill-steps/decided", "todo/write"}
+        ),
         "ph_stabilize.todo": frozenset({"todo/write"}),
     }
 )

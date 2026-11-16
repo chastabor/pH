@@ -28,12 +28,12 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
+from ph.characters import head
 from ph.cordis import Context, Next, plugin
 from ph.json import JsonObject
 from ph.keys import COMPACTION, TOKEN_METER, TOOLS
 from ph.llm.types import ContentBlock, TextBlock, text_of
 from ph.seams.invariants import contribute_fold_cache
-from ph.seams.token_meter import TokenMeter
 from ph.session import (
     Session,
     SessionEvent,
@@ -282,7 +282,9 @@ async def apply(ctx: Context, config: Config) -> None:
     def recall_tool(args: RecallArgs, run: ToolRunContext) -> JsonObject:
         session = _session(run)
         section = _revised(session, mapper, args.section)
-        text, truncated = _bounded(meter, _original_text(session, section), args.max_tokens)
+        text, truncated = _bounded(
+            meter.measure_text, _original_text(session, section), args.max_tokens
+        )
         return RecallValue(
             section=section.name,
             text=text,
@@ -303,7 +305,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 for seq in section.nodes
                 for event in session.history(seq)
             ],
-            diff=diff[:DIFF_CHARS],
+            diff=head(diff, DIFF_CHARS),
             truncated=len(diff) > DIFF_CHARS,
         ).model_dump()
 
@@ -500,19 +502,21 @@ def _original_text(session: Session, section: Section) -> str:
     return render_messages(message for seq in section.nodes for message in originals(session, seq))
 
 
-def _bounded(meter: TokenMeter, text: str, max_tokens: int) -> tuple[str, bool]:
-    """`text` cut to at most `max_tokens`, and whether it was cut."""
-    if meter.measure_text(text) <= max_tokens:
+def _bounded(measure: Callable[[str], int], text: str, max_tokens: int) -> tuple[str, bool]:
+    """`text` cut to at most `max_tokens`, and whether it was cut: the longest
+    start that fits, found by halving, then moved back to fall between
+    characters (`ph.characters.head`) — a shorter start never measures more."""
+    if measure(text) <= max_tokens:
         return text, False
     marker = "\n[recall cut at the token bound; the session log holds the rest]"
     low, high = 0, len(text)
     while low < high:
         middle = (low + high + 1) // 2
-        if meter.measure_text(text[:middle] + marker) <= max_tokens:
+        if measure(text[:middle] + marker) <= max_tokens:
             low = middle
         else:
             high = middle - 1
-    return text[:low] + marker, True
+    return head(text, low) + marker, True
 
 
 def _section_value(section: Section) -> SectionValue:
@@ -573,8 +577,8 @@ def _render_edit(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
 
 
 def _render_recall(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
-    head = f"[{value['section']} as first written, ~{thousands(value['tokens'])} tokens]"
-    return text_content(f"{head}\n{value['text']}")
+    heading = f"[{value['section']} as first written, ~{thousands(value['tokens'])} tokens]"
+    return text_content(f"{heading}\n{value['text']}")
 
 
 def _render_diff(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401

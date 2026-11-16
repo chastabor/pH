@@ -39,9 +39,11 @@ from ..llm.replay import (
 from ..seams.code_runtime_stub import StubCodeRuntime
 from .anthropic_wire import anthropic_reply
 from .builders import (
+    EMOJI_FAMILY,
     FAKE_OPTIONS,
     SCAFFOLDING,
     FarSide,
+    StoppingAgent,
     StoredLogs,
     StubAgent,
     admitted_child,
@@ -57,6 +59,7 @@ from .builders import (
     isolated_intent_kinds,
     isolated_log_types,
     live_settles,
+    llama_refusal,
     log_event,
     log_interrupted_call,
     logged_events,
@@ -106,6 +109,7 @@ from .diagnostics import report_section
 from .folds import VerifyingFoldCache, assert_fold_laws, check_fold_laws, prefix_of
 from .skills import KIND_OUTPUT, skill, write_skill
 from .stub_compaction import StubCompactionEngine
+from .stub_decider import StubDecider
 from .stub_sandbox import StubSandboxProvider
 from .stub_subagent import HoldingProvider, RefusingProvider, StubSubagentProvider
 from .stub_workspace import (
@@ -138,6 +142,7 @@ removed.
 """
 
 __all__ = [
+    "EMOJI_FAMILY",
     "FAKE_OPTIONS",
     "KIND_OUTPUT",
     "REPLAY_ROW",
@@ -150,11 +155,13 @@ __all__ = [
     "RecordedStep",
     "RefusingProvider",
     "ReplayAdapter",
+    "StoppingAgent",
     "StoredLogs",
     "StubAgent",
     "StubCheckpointingProvider",
     "StubCodeRuntime",
     "StubCompactionEngine",
+    "StubDecider",
     "StubSandboxProvider",
     "StubSubagentProvider",
     "StubWorkspaceProvider",
@@ -176,6 +183,7 @@ __all__ = [
     "isolated_intent_kinds",
     "isolated_log_types",
     "live_settles",
+    "llama_refusal",
     "log_event",
     "log_interrupted_call",
     "logged_events",

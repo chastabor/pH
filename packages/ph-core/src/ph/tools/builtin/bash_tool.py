@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import Field
 
 from ...cancel import Canceled
+from ...characters import head
 from ...cordis import Context, plugin
 from ...json import JsonObject, as_str
 from ...keys import SHELL, TOOLS
@@ -137,7 +138,7 @@ async def apply(ctx: Context, config: None) -> None:
             present_result=lambda args, result: ToolResultView(
                 card="terminal",
                 title=as_str(args.get("description"), "Run command"),
-                subtitle=str(args.get("command", ""))[:120],
+                subtitle=head(str(args.get("command", "")), 120),
                 is_error=result.is_error,
             ),
         )

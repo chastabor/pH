@@ -75,6 +75,7 @@ from urllib.parse import quote
 
 import anyio
 
+from ..characters import head
 from ..cordis import Context, plugin, releasing
 from ..keys import SANDBOX, SUBPROCESS
 from ..paths import default_home_path, resolve_roots
@@ -212,7 +213,7 @@ def _line_at(output: str, at: int) -> str:
     start = output.rfind("\n", 0, at) + 1
     end = output.find("\n", at)
     line = output[start:] if end < 0 else output[start:end]
-    return line.strip()[:200]
+    return head(line.strip(), 200)
 
 
 # ------------------------------------------------------------------ bwrap --

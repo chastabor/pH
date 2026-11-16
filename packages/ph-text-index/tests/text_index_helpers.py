@@ -26,11 +26,10 @@ from text_index_stub import (
     STUB_ROW,
     HashingEmbedder,
     StubConfig,
-    llama_refusal,
 )
 
 from ph.cordis import Context, plugin
-from ph.testing import new_agent
+from ph.testing import llama_refusal, new_agent
 from ph_text_index.row import TEXT_INDEX, Provider
 from ph_utcp import UTCP
 

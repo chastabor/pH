@@ -55,6 +55,7 @@ from typing import Any, Literal
 import anyio
 from pydantic import Field
 
+from ph.characters import pieces
 from ph.cordis import Context, plugin
 from ph.json import JsonObject, as_str
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
@@ -257,6 +258,21 @@ class Corpus:
                 )
         return SearchValue(matches=matches, truncated=False)
 
+    def _pages(self, size: int) -> list[str]:
+        """The joined corpus in pages of at most `size` bytes, cut between
+        characters (`ph.characters.pieces`). Worked out once for each size a
+        model asks for, so a walk of the pages is a lookup per page. Sliced by
+        index, "bytes" counted code points, and a page could end inside one."""
+        found = self._paged.get(size)
+        if found is None:
+            found = self._paged[size] = pieces(self._joined.text, size, in_bytes=True)
+        return found
+
+    @cached_property
+    def _paged(self) -> dict[int, list[str]]:
+        """`_pages` by size, filled as sizes are asked for."""
+        return {}
+
     @cached_property
     def _joined(self) -> Document:
         """Every document as one pageable text, headed by its name.
@@ -280,9 +296,10 @@ class Corpus:
         """
         joined = self._joined
         if by == "bytes":
-            total = max(1, ceil(len(joined.text) / size))
+            paged = self._pages(size)
+            total = max(1, len(paged))
             bounded = max(0, min(index, total - 1))
-            text = joined.text[bounded * size : (bounded + 1) * size]
+            text = paged[bounded] if paged else ""
         else:
             total = max(1, ceil(joined.line_count / size))
             bounded = max(0, min(index, total - 1))

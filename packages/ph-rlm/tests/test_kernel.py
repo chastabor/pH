@@ -56,7 +56,7 @@ from runtime_helpers import namespace
 from ph.orphans import process_alive
 from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
 from ph.seams.subprocess import scrub_env
-from ph.testing import settled
+from ph.testing import EMOJI_FAMILY, settled
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph_rlm.kernel.manager import (
     MAX_FRAME_BYTES,
@@ -1405,3 +1405,33 @@ async def test_a_finished_cell_cannot_leave_a_thread_burning_a_core(
     revived = await kernel.run("'alive'", (), None)
     assert revived.value == "alive"
     assert RESET_NOTICE in revived.logs, "the namespace went and nobody said so"
+
+
+async def test_capped_output_ends_between_characters(make_kernel: MakeKernel) -> None:
+    """The cap counts bytes and is cut between characters, in the guest's print
+    and in the host's pipe alike — never inside a family, never into U+FFFD.
+
+    Sabotage: slice by index in the guest's `write` again and the kept output
+    ends in the first members of a family.
+    """
+    kernel = await make_kernel(max_log_bytes=2_048)
+    result = await kernel.run(f"print({EMOJI_FAMILY!r} * 1000)", (), None)
+
+    kept = result.logs.partition("\n")[0]
+    assert result.truncated and "\ufffd" not in result.logs
+    assert kept and not kept.replace(EMOJI_FAMILY, "")
+
+
+async def test_a_character_split_between_two_writes_is_joined(make_kernel: MakeKernel) -> None:
+    """What a cell's own subprocess writes reaches the host's pipe in pieces, and
+    a character can be split between two of them. One decoder for the stream
+    joins it; decoding each piece by itself made it two U+FFFDs."""
+    kernel = await make_kernel()
+    cell = (
+        "import os, time\n"
+        "os.write(1, 'é'.encode()[:1]); time.sleep(0.2); os.write(1, 'é'.encode()[1:])\n"
+    )
+
+    result = await kernel.run(cell, (), None)
+
+    assert "é" in result.logs and "\ufffd" not in result.logs

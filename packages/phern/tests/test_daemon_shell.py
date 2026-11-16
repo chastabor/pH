@@ -34,6 +34,7 @@ from ph.bundles import BASE, HEADLESS
 from ph.cordis import Profile, ProfileDocument, load_profile_documents
 from ph.json import as_str
 from ph.llm.types import text_of
+from ph.seams.shell import ShellResult, _shell_settled
 from ph.testing import not_none, stored_types
 from ph.text import NO_OUTPUT
 from ph_app.daemon.client import DaemonClient
@@ -108,6 +109,25 @@ async def test_a_surfaced_command_reaches_the_model_as_a_user_message(tmp_path: 
         shown = text_of(pending[0].content)
         assert "$ echo hello-from-the-person" in shown, "the command, so the model reads a run"
         assert "hello-from-the-person" in shown, "and what it printed"
+
+
+def test_both_shell_bounds_count_the_bytes_they_name() -> None:
+    """`SHELL_OUTPUT` is 64 KiB and `SURFACE_OUTPUT` 4 KiB, and both are now
+    applied in bytes, cut between characters. Sliced by index they counted
+    code points, so output in a script three bytes a character kept three
+    times its bound — in the log, and in a prompt re-sent every step.
+
+    Sabotage: clip with `head` again and the CJK output is three times over.
+    """
+    wide = "日本語" * SHELL_OUTPUT
+    settled = _shell_settled(
+        1, ShellResult(exit_code=0, stdout=wide, stderr="", argv=("cat",), cwd="/")
+    )
+    shown = shell_message("cat", {"stdout": wide, "exitCode": 0})
+
+    assert len(str(settled["stdout"]).encode()) <= SHELL_OUTPUT and settled["clipped"]
+    spliced = shown.split("\n", 1)[1].split("\n[ph:", 1)[0]
+    assert len(spliced.encode()) <= SURFACE_OUTPUT and "\ufffd" not in shown
 
 
 def test_the_splice_is_clipped_far_shorter_than_the_log_keeps() -> None:
