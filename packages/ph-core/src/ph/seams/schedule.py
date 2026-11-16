@@ -35,11 +35,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, TypeAlias
 
-from ..characters import head
 from ..cordis import Context, plugin
 from ..json import JsonValue, as_int, as_str
 from ..keys import SCHEDULE
-from ..llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource
+from ..llm.types import PluginSource
 from ..paths import resolve_roots
 from ..session import Session, SessionEvent, SessionFoldCache, now_ms, session_written
 from ..session.writers import log_writer
@@ -545,7 +544,7 @@ def scheduled_source(schedule: Schedule) -> PluginSource:
     return PluginSource(
         plugin="ph.seams.schedule",
         form="notice",
-        summary=head(f"scheduled: {schedule.id}", CONTEXT_SUMMARY_MAX_CHARS),
+        summary=f"scheduled: {schedule.id}",
     )
 
 

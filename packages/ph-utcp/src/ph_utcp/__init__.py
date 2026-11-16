@@ -102,7 +102,7 @@ from ph.characters import head
 from ph.cordis import Context, Disposer, Next, ServiceKey, plugin
 from ph.json import JsonObject, as_obj, as_str, dumps, loads
 from ph.keys import AGENTS, FS, JOBS, SHELL, SUBPROCESS, SYSTEM_PROMPT, TOOLS, TUI_STATUS
-from ph.llm.types import CONTEXT_SUMMARY_MAX_CHARS, PluginSource, create_user_message
+from ph.llm.types import PluginSource, create_user_message
 from ph.seams._registry import contribute_item
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.jobs import Job
@@ -789,7 +789,7 @@ class UtcpSeam:
                     source=PluginSource(
                         plugin="ph_utcp",
                         form="notice",
-                        summary=head(summary, CONTEXT_SUMMARY_MAX_CHARS),
+                        summary=summary,
                     ),
                 )
             )

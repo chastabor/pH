@@ -11,7 +11,7 @@ from __future__ import annotations
 from ph.json import JsonObject
 from ph.session.json import freeze_json_value
 from ph.testing import EMOJI_FAMILY
-from ph.text import brief_value, count_of, elide, first_lines, one_line
+from ph.text import around, brief_value, count_of, elide, first_lines, one_line
 
 
 def test_a_container_is_named_rather_than_dumped() -> None:
@@ -119,3 +119,23 @@ def test_a_cut_is_said_one_way() -> None:
         assert not start[2:-1].replace(EMOJI_FAMILY, "") and not end[1:].replace(EMOJI_FAMILY, "")
         assert len(elide(text, size * 3, in_bytes=True).encode()) <= size * 3
     assert elide("short", 40) == "short" and elide("short", 40, in_bytes=True) == "short"
+
+
+def test_an_excerpt_shows_what_it_was_found_by() -> None:
+    """`around` keeps the span in view however far along the text it sits,
+    centered where it can be, marks each side it cut, stays inside its size and
+    cuts between characters — a match on a minified line is shown where it
+    matched, not from the start of the line.
+
+    Sabotage: return `elide(text, size)` and the match far along the line is
+    cut off the excerpt that claims to show it.
+    """
+    line = "x" * 5_000 + "NEEDLE" + EMOJI_FAMILY * 400
+
+    shown = around(line, 5_000, 80, stop=5_006)
+
+    assert "NEEDLE" in shown and len(shown) <= 80
+    assert shown.startswith("…") and shown.endswith("…")
+    assert not shown.split("NEEDLE")[1].removesuffix("…").replace(EMOJI_FAMILY, "")
+    assert around(line, 0, 80).startswith("x") and not around(line, 0, 80).startswith("…")
+    assert around("short", 2, 80) == "short"

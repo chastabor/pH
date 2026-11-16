@@ -45,7 +45,6 @@ import anyio
 from pydantic import Field
 
 from ..agent.types import AgentHandle
-from ..characters import head
 from ..cordis import (
     Boundary,
     Context,
@@ -62,7 +61,7 @@ from ..keys import FS, PROJECT_ROOT
 from ..paths import write_atomic
 from ..session import Session
 from ..session.writers import log_writer
-from ..text import first_lines
+from ..text import around, first_lines
 from ..tools.errors import FailureKind, HarnessError
 from ..wire import WireModel
 from ._registry import claim_entry, claim_slot
@@ -136,6 +135,9 @@ class GrepMatch(WireModel):
     path: str
     line: int
     text: str
+    """The matching line, or as much of it as fits around the match
+    (`ph.text.around`): a minified line is shown where it matched, not from its
+    start, which may hold no match at all."""
 
 
 WalkDecision = Literal["yield", "skip", "prune"]
@@ -1070,8 +1072,10 @@ class FsService:
                 except OSError:
                     continue
                 for number, line in enumerate(text.splitlines(), start=1):
-                    if expression.search(line):
-                        matches.append(GrepMatch(path=found, line=number, text=head(line, 500)))
+                    hit = expression.search(line)
+                    if hit is not None:
+                        shown = around(line, hit.start(), 500, stop=hit.end())
+                        matches.append(GrepMatch(path=found, line=number, text=shown))
                         if len(matches) >= limit:
                             return matches
             return matches

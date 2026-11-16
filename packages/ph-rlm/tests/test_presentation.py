@@ -19,6 +19,7 @@ from ph.cancel import CancelToken
 from ph.keys import TOOLS
 from ph.llm.types import ToolCallBlock
 from ph.testing import block_text, simple_tool
+from ph.text import truncation_marker
 from ph.tools.batch import execute_tool_calls
 from ph.tools.registry import RUN_CODE
 from ph_rlm.presentation import PYTHON, PYTHON_DESCRIPTION, cell_details, render_cell
@@ -197,6 +198,10 @@ async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: MountedRuntime
     assert result.meta["truncated"] is True
     text = "\n".join(block.text for block in result.content if hasattr(block, "text"))
     assert "output truncated" in text
+    # And the run's total, at the end of the logs every renderer passes on:
+    # every byte printed past the default 64 KiB cap, in `tool-bash`'s sentence.
+    dropped = 4_000 * 65 - 65_536
+    assert text.rstrip().endswith(truncation_marker(dropped, 65_536).strip())
 
 
 async def test_a_failing_cell_is_an_error_carrying_its_traceback(

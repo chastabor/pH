@@ -1071,3 +1071,19 @@ async def test_every_edit_refusal_is_routable_rather_than_a_bare_value_error(
     # the catchers that predate the code keep working.
     assert all(isinstance(one, ValueError) for one in refusals)
     assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nalpha\n"
+
+
+async def test_a_match_far_along_a_long_line_is_shown_where_it_matched(tmp_path: Path) -> None:
+    """A grep excerpt is the line, or as much of it as fits around the match:
+    on a minified bundle the first five hundred characters hold no match at all.
+
+    Sabotage: excerpt with `head(line, 500)` again and the match is missing from
+    the text that reports it.
+    """
+    fs = await _mounted(tmp_path)
+    (tmp_path / "bundle.js").write_text("var a=1;" * 2_000 + "TARGET_CALL()" + ";var b=2" * 50)
+
+    [match] = await fs.grep("TARGET_CALL", scope=DEPLOYMENT)
+
+    assert "TARGET_CALL" in match.text and len(match.text) <= 500
+    assert match.text.startswith("…")

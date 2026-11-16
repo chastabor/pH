@@ -592,3 +592,24 @@ async def test_a_child_s_path_limit_goes_with_its_scope(mount: MountProfile) -> 
     await child.dispose()
 
     assert not sandbox._path_limits, "the table empties with its last limit"
+
+
+def test_denial_evidence_shows_the_signature_wherever_it_falls_on_its_line() -> None:
+    """Evidence is the line around the signature that was found, so one far
+    along a long line is not cut off the record of it; and Seatbelt tells a
+    filesystem refusal from a network one on the whole line, so a path before
+    the window's edge still counts.
+
+    Sabotage: decide Seatbelt's kind on the evidence window and the refusal
+    below reads as a network one.
+    """
+    long_line = "note " * 100 + "sh: 1: cannot create /etc/x: Read-only file system"
+    found = Bubblewrap().read_denial(long_line, network=False)
+    evidence = not_none(not_none(found).evidence)
+    assert "Read-only file system" in evidence and len(evidence) <= 200
+
+    path_first = "cp: /Users/x/target: " + "." * 400 + " Operation not permitted"
+    seatbelt = not_none(Seatbelt().read_denial(path_first, network=False))
+    shown = not_none(seatbelt.evidence)
+    assert seatbelt.kind == "filesystem"
+    assert "Operation not permitted" in shown and "/Users" not in shown

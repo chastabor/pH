@@ -56,7 +56,7 @@ from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, first_of, is_canceled
 from ph.characters import capped_text, head_bytes, stream_decoder, utf8_size
 from ph.cordis import Context, Disposer, plugin
-from ph.json import as_str, thaw_json
+from ph.json import as_int, as_str, thaw_json
 from ph.keys import CODE_RUNTIME
 from ph.orphans import OrphanJournal, host_journal, signal_child
 from ph.paths import resolve_roots
@@ -202,6 +202,9 @@ class _ActiveRun:
     value: Any = None
     error: str | None = None
     truncated: bool = False
+    dropped: int = 0
+    """Bytes of output this run's caps threw away, in all: what the guest's
+    print streams report on `done` and what the pipe drains here skipped."""
     failure: CodeRunFailure | None = None
     """A refusal or a budget, raised out of `run()` once the program unwinds (C3)."""
     probe_id: int = 0
@@ -747,11 +750,18 @@ class Kernel:
             logs = "".join(active.logs)
             if restarted:
                 logs = f"{RESET_NOTICE} the runtime restarted; the namespace is empty.\n{logs}"
+            if active.dropped:
+                # The run's whole drop, said once now that every stream has
+                # ended: the markers in the logs could say only where each was
+                # cut. The one sentence `tool-bash` says it in (D4), so every
+                # renderer of the logs passes it on.
+                logs += truncation_marker(active.dropped, self.limits.max_log_bytes)
             return CodeRunResult(
                 logs=logs,
                 value=active.value,
                 error=active.error,
                 truncated=active.truncated,
+                dropped=active.dropped,
                 reset=restarted,
                 displays=tuple(active.displays),
             )
@@ -1090,11 +1100,14 @@ class Kernel:
             )
         else:
             settled = active.settle(value=frame.get("value"))
-        if settled and frame.get("truncated"):
-            # Only alongside an outcome this frame actually supplied: a
-            # `done` arriving after a kill describes a program the caller is
-            # not being told about, and its truncation flag with it.
-            active.truncated = True
+        if settled:
+            # Only alongside an outcome this frame actually supplied: a `done`
+            # arriving after a kill describes a program the caller is not being
+            # told about, and its truncation flag and total with it.
+            if frame.get("truncated"):
+                active.truncated = True
+            # The guest's total, known only now that its streams have ended.
+            active.dropped += max(as_int(frame.get("dropped")), 0)
 
     async def _serve_call(self, frame: CallFrame, active: _ActiveRun) -> None:
         """One binding call, back through the full tool pipeline (C1)."""
@@ -1184,30 +1197,43 @@ class Kernel:
         # reads is joined rather than shown as two U+FFFDs; and the cap counted
         # in the bytes it names, cut between characters.
         decoder = stream_decoder()
+
+        def take(text: str) -> None:
+            """Keep `text`, or as much as the cap has room for, marking where it
+            was cut — the one rule for a read and for what the stream left."""
+            nonlocal written
+            size = utf8_size(text)
+            room = cap - written
+            if size <= room:
+                active.logs.append(text)
+                written += size
+                return
+            kept = head_bytes(text, room)
+            active.logs.append(kept)
+            # Where the cut fell; how much followed is the run's total.
+            active.logs.append(truncation_marker(None, cap))
+            active.dropped += size - utf8_size(kept)
+            active.truncated = True
+            written = cap
+
         # `ClosedResourceError` is the ordinary end of this task: the run is over
         # and the group canceled it, or the child exited. Neither is a failure
         # to report, and letting it escape would mask the real outcome.
         with suppress(*_STREAM_ENDED):
             async for chunk in stream:
                 if written >= cap:
-                    continue
-                text = decoder.decode(chunk)
-                size = utf8_size(text)
-                room = cap - written
-                if size > room:
-                    kept = head_bytes(text, room)
-                    active.logs.append(kept)
-                    active.logs.append(truncation_marker(size - utf8_size(kept), cap))
-                    active.truncated = True
-                    written = cap
+                    # Read, so the child never blocks on a full pipe, and
+                    # counted, so the run's total is the whole of it.
+                    active.dropped += len(chunk)
                 else:
-                    active.logs.append(text)
-                    written += size
+                    take(decoder.decode(chunk))
         # What a character the stream ended inside of left: one U+FFFD, said
-        # rather than lost, where the cap has room for it.
+        # rather than lost.
         rest = decoder.decode(b"", final=True)
-        if rest and written + utf8_size(rest) <= cap:
-            active.logs.append(rest)
+        if rest and written >= cap:
+            active.dropped += utf8_size(rest)
+        elif rest:
+            take(rest)
 
     async def _recv_line(self) -> bytes | None:
         """The next frame's bytes, or `None` when the child is gone or hostile.

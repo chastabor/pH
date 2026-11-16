@@ -41,7 +41,6 @@ import anyio
 from pydantic import Field, ValidationError
 
 from ..agent.types import AgentDriver, AgentHandle, AgentOptions
-from ..characters import head
 from ..cordis import (
     ChildReach,
     Context,
@@ -74,7 +73,6 @@ from ..keys import (
 from ..llm.media import untaken
 from ..llm.structured import SchemaViolation, structural_warning, validated_shape
 from ..llm.types import (
-    CONTEXT_SUMMARY_MAX_CHARS,
     DEFAULT_EFFORT,
     Message,
     PluginSource,
@@ -1398,7 +1396,7 @@ def _notice_message(text: str, summary: str, message_id: str | None = None) -> M
         source=PluginSource(
             plugin="ph.seams.subagents",
             form="notice",
-            summary=head(summary, CONTEXT_SUMMARY_MAX_CHARS),
+            summary=summary,
         ),
         message_id=message_id,
     )

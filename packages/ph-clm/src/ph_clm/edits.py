@@ -52,7 +52,6 @@ from typing import Any, Literal, assert_never, cast, get_args
 
 from ph.json import JsonObject, as_int, as_obj, as_seq, as_str
 from ph.llm.types import (
-    CONTEXT_SUMMARY_MAX_CHARS,
     ContentBlock,
     ContextForm,
     MediaBlock,
@@ -82,7 +81,7 @@ from ph.session import (
     substitute,
 )
 from ph.session.writers import log_writer
-from ph.text import NO_OUTPUT, one_line, thousands
+from ph.text import NO_OUTPUT, thousands
 
 from .kinds import REVISED
 from .sections import EditRefused, Section, SectionMap, label, resolve_one, resolve_run, span_label
@@ -598,9 +597,7 @@ def _note(texts: Sequence[str], summary: str, *, form: ContextForm = "compaction
     own block (`labeled`)."""
     return create_user_message(
         content=[{"type": "text", "text": text} for text in texts],
-        source=PluginSource(
-            plugin=PLUGIN, form=form, summary=one_line(summary, CONTEXT_SUMMARY_MAX_CHARS)
-        ),
+        source=PluginSource(plugin=PLUGIN, form=form, summary=summary),
     )
 
 

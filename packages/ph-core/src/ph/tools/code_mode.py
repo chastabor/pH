@@ -477,6 +477,7 @@ async def apply(ctx: Context, config: Config) -> None:
             error=outcome.error,
             dispatches=bridge.dispatch_count,
             truncated=outcome.truncated,
+            dropped=outcome.dropped,
             reset=outcome.reset,
             displays=list(outcome.displays),
         ).to_wire()
@@ -539,6 +540,7 @@ class CodeCellValue(WireModel):
     error: str | None = None
     dispatches: int = 0
     truncated: bool = False
+    dropped: int = 0
     reset: bool = False
     displays: list[dict[str, Any]] = Field(default_factory=list)
 

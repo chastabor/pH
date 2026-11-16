@@ -288,6 +288,7 @@ class DoneFrame(TypedDict):
     value: NotRequired[Any]
     error: NotRequired[dict[str, Any]]
     truncated: NotRequired[bool]
+    dropped: NotRequired[int]
 
 
 class FaultFrame(TypedDict):

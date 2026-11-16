@@ -15,12 +15,13 @@ from collections.abc import Callable, Sequence
 from types import MappingProxyType
 from typing import Literal
 
-from .characters import head, head_bytes, tail, tail_bytes, utf8_size
+from .characters import cut_after, cut_before, head, head_bytes, tail, tail_bytes, utf8_size
 from .json import JsonValue
 
 __all__ = [
     "BRIEFLY",
     "NO_OUTPUT",
+    "around",
     "block_marker",
     "brief_value",
     "count_of",
@@ -194,6 +195,43 @@ def elide(
     return (head_bytes(text, room) if in_bytes else head(text, room)) + ELLIPSIS
 
 
+def around(text: str, start: int, size: int, *, stop: int | None = None) -> str:
+    """As much of `text` as fits in `size` code points around `text[start:stop]`
+    — a match, a signature — with an ellipsis on each side that was cut.
+
+    For the excerpt that has to show what it was found by: a line's first few
+    hundred characters do not hold a match that sits further along a minified
+    one. Centered on the span where the text allows; a span longer than the
+    room keeps its start. Each ellipsis is counted inside `size` and every cut
+    falls between characters, as `elide`'s do, and `text` is whole when it fits.
+    """
+    if len(text) <= size:
+        return text
+    # The span widened to whole characters first: a match that ends inside one
+    # is shown with all of it, rather than stopping at the character before.
+    stop = cut_after(text, start if stop is None else max(stop, start))
+    start = cut_before(text, start)
+    room = max(size - 2 * len(ELLIPSIS), 0)
+    lo = max(start - max(room - (stop - start), 0) // 2, 0)
+    if lo == 0:
+        return elide(text, size)
+    if lo + size - len(ELLIPSIS) >= len(text):
+        return elide(text, size, keep="tail")
+    # Snapped back to a character, but never so far the span's end falls out of
+    # the room — and never past the span's start, for a span wider than it.
+    lo = min(start, max(cut_before(text, lo), cut_after(text, stop - room)))
+    hi = cut_before(text, lo + room)
+    if hi <= lo:
+        # A room narrower than the one character there holds none of it, as
+        # `elide`'s does: never more than `size`.
+        return ELLIPSIS
+    # Marked where the window was cut, which snapping it to characters can
+    # move to an end of the text.
+    left = ELLIPSIS if lo > 0 else ""
+    right = ELLIPSIS if hi < len(text) else ""
+    return f"{left}{text[lo:hi]}{right}"
+
+
 def thousands(count: int) -> str:
     """`1777` → `1.8k`, `900` → `900`. One abbreviation for a token count.
 
@@ -206,7 +244,7 @@ def thousands(count: int) -> str:
     return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
 
 
-def truncation_marker(dropped: int, cap: int) -> str:
+def truncation_marker(dropped: int | None, cap: int) -> str:
     """The text that stands in for output a cap discarded (D4).
 
     Here because four things now discard output against a cap — the RLM kernel,
@@ -221,5 +259,14 @@ def truncation_marker(dropped: int, cap: int) -> str:
     guest venv with no dependencies at all, so it cannot import this. It is one
     of two — `ph_runtime._json` copies the one narrowing the guest imports out
     of `ph.json` — and `test_protocol_mirror` pins both.
+
+    **`dropped` is `None` where the cut is made on a stream still running** —
+    the kernel's pipes, the guest's prints — which cannot know yet how much will
+    follow. The marker then says where the cut fell and no number, and the
+    stream says its total once it has ended, in this same sentence with the
+    count: a count written at the cut was only the write that crossed it, and
+    read as the whole.
     """
+    if dropped is None:
+        return f"\n[ph: output truncated — the rest is not kept, cap {cap} bytes]\n"
     return f"\n[ph: output truncated — {dropped} bytes dropped, cap {cap} bytes]\n"

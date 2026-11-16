@@ -393,6 +393,8 @@ def _cell_facts(details: dict[str, JsonValue]) -> str:
     if attachments:
         facts.append(count_of(attachments, "attachment"))
     if details.get("truncated"):
+        # The count is the body's, which ends with the run's total: one number,
+        # one place (A11).
         facts.append("output truncated")
     if details.get("reset"):
         facts.append("kernel restarted — namespace empty")

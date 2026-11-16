@@ -75,11 +75,11 @@ from urllib.parse import quote
 
 import anyio
 
-from ..characters import head
 from ..cordis import Context, plugin, releasing
 from ..keys import SANDBOX, SUBPROCESS
 from ..paths import default_home_path, resolve_roots
 from ..resources import temporary_directory
+from ..text import around
 from ..wire import WireModel
 from .diagnostics import Diagnostic, contribute
 from .sandbox import (
@@ -184,8 +184,9 @@ about a command that actually failed.
 
 def _earliest(
     output: str, signatures: tuple[tuple[DenialKind, str], ...], *, network: bool
-) -> tuple[int, DenialKind] | None:
-    """The first refusal any signature shows in `output`, as `(offset, kind)`.
+) -> tuple[int, DenialKind, str] | None:
+    """The first refusal any signature shows in `output`, as `(offset, kind,
+    signature)` — the signature so the evidence can be centered on all of it.
 
     `find` over the whole buffer rather than a loop over `splitlines()`, because
     this runs on every failed confined command and the seam keeps up to 8 MiB *per
@@ -198,22 +199,32 @@ def _earliest(
     signatures: an outage is not the sandbox's doing, and saying so would be the
     misattribution this record must not make.
     """
-    found: tuple[int, DenialKind] | None = None
+    found: tuple[int, DenialKind, str] | None = None
     for kind, mark in signatures:
         if kind == "network" and network:
             continue
         at = output.find(mark)
         if at >= 0 and (found is None or at < found[0]):
-            found = (at, kind)
+            found = (at, kind, mark)
     return found
 
 
-def _line_at(output: str, at: int) -> str:
-    """The line `at` falls in, stripped and capped — the evidence a record carries."""
+EVIDENCE_CHARS = 200
+"""How much of a refusal's line a denial record carries."""
+
+
+def _line_at(output: str, at: int, mark: str) -> tuple[str, str]:
+    """The line the signature `mark` at `at` falls in, stripped, and the evidence
+    a record carries: as much of it as fits around the signature
+    (`ph.text.around`). The line whole, for a caller that reads it; the window,
+    because a signature further along a long line than its first
+    `EVIDENCE_CHARS` was cut off the evidence for it."""
     start = output.rfind("\n", 0, at) + 1
     end = output.find("\n", at)
-    line = output[start:] if end < 0 else output[start:end]
-    return head(line.strip(), 200)
+    raw = output[start:] if end < 0 else output[start:end]
+    line = raw.strip()
+    found = max(at - start - (len(raw) - len(raw.lstrip())), 0)
+    return line, around(line, found, EVIDENCE_CHARS, stop=found + len(mark))
 
 
 # ------------------------------------------------------------------ bwrap --
@@ -398,8 +409,9 @@ class Bubblewrap:
         found = _earliest(output, DENIAL_SIGNATURES, network=network)
         if found is None:
             return None
-        at, kind = found
-        return Denial(kind=kind, via="output", evidence=_line_at(output, at))
+        at, kind, mark = found
+        _line, evidence = _line_at(output, at, mark)
+        return Denial(kind=kind, via="output", evidence=evidence)
 
 
 # --------------------------------------------------------------- seatbelt --
@@ -587,13 +599,15 @@ class Seatbelt:
         found = _earliest(output, SEATBELT_SIGNATURES, network=network)
         if found is None:
             return None
-        at, kind = found
-        line = _line_at(output, at)
+        at, kind, mark = found
+        # Told apart on the whole line, and shown as its window: a path past
+        # the window's edge still makes this a filesystem denial.
+        line, evidence = _line_at(output, at, mark)
         if kind == "filesystem" and "/" not in line:
             if network:
                 return None
             kind = "network"
-        return Denial(kind=kind, via="output", evidence=line)
+        return Denial(kind=kind, via="output", evidence=evidence)
 
 
 LocalBackend: TypeAlias = Bubblewrap | Seatbelt

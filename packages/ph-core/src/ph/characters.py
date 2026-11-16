@@ -100,6 +100,10 @@ def _extends(char: str) -> bool:
     )
 
 
+_REGIONALS = "".join(map(chr, range(0x1F1E6, 0x1F200)))
+"""Every regional indicator, for counting a run of them in one C-level strip."""
+
+
 def _regional(char: str) -> bool:
     """A regional indicator: two of them are one flag."""
     return 0x1F1E6 <= ord(char) <= 0x1F1FF
@@ -170,10 +174,10 @@ def _between_characters(text: str, at: int, floor: int = 0) -> bool:
     if (_hangul(before), _hangul(after)) in _JAMO_JOINS:
         return False
     if _regional(before) and _regional(after):
-        run = 0
-        while at - 1 - run >= floor and _regional(text[at - 1 - run]):
-            run += 1
-        return run % 2 == 0
+        # The run before `at`, back to `floor`, counted by `rstrip` rather than
+        # a Python loop: a cut inside a long line of flags walked all of it.
+        since = text[floor:at]
+        return (len(since) - len(since.rstrip(_REGIONALS))) % 2 == 0
     return True
 
 

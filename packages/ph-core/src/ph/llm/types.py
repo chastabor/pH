@@ -19,9 +19,17 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, Literal, TypeAlias, TypeGuard, cast
 
-from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ..json import JsonObject, thaw_json
+from ..text import one_line
 from ..wire import WireDataclass, WireModel, validation_errors, wire_alias
 
 __all__ = [
@@ -333,10 +341,21 @@ class PluginSource(WireModel):
     kind: Literal["plugin"] = "plugin"
     plugin: str
     form: ContextForm | None = None
-    summary: Annotated[str, Field(max_length=CONTEXT_SUMMARY_MAX_CHARS)] | None = None
-    """Required for `notice`: the one-line account shown without expanding."""
+    summary: str | None = None
+    """Required for `notice`: the one-line account shown without expanding —
+    made one, and cut to `CONTEXT_SUMMARY_MAX_CHARS`, as it is set (`_one_line`)."""
     sections: list[ContextSnapshotSection] | None = None
     """Required for `snapshot`: the named contributions, in order."""
+
+    @field_validator("summary")
+    @classmethod
+    def _one_line(cls, value: str | None) -> str | None:
+        """A summary is a row, so it is put on one line and cut to its bound here
+        (`ph.text.one_line`), once, rather than by every producer. Four did it by
+        hand, two ways, and one that did not was refused — a notice lost to a
+        sentence a little too long. Idempotent, so a summary read back from a
+        log is the one written."""
+        return None if value is None else one_line(value, CONTEXT_SUMMARY_MAX_CHARS)
 
     @model_validator(mode="after")
     def _form_carries_its_fields(self) -> PluginSource:

@@ -122,9 +122,10 @@ def test_the_host_declares_no_frame_the_guest_does_not() -> None:
 
 
 @pytest.mark.parametrize(
-    ("dropped", "cap"), [(0, 65_536), (1, 65_536), (12_345, 65_536), (2, 8), (10**6, 10**6)]
+    ("dropped", "cap"),
+    [(0, 65_536), (1, 65_536), (12_345, 65_536), (2, 8), (10**6, 10**6), (None, 65_536), (None, 8)],
 )
-def test_the_truncation_marker_is_byte_identical(dropped: int, cap: int) -> None:
+def test_the_truncation_marker_is_byte_identical(dropped: int | None, cap: int) -> None:
     assert host.truncation_marker(dropped, cap) == guest.truncation_marker(dropped, cap)
 
 

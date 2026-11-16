@@ -1435,3 +1435,46 @@ async def test_a_character_split_between_two_writes_is_joined(make_kernel: MakeK
     result = await kernel.run(cell, (), None)
 
     assert "é" in result.logs and "\ufffd" not in result.logs
+
+
+async def test_a_run_reports_every_byte_its_prints_dropped(make_kernel: MakeKernel) -> None:
+    """The guest's print stream marks where it was cut, with no number, and
+    counts every write after — then reports the total on the `done` frame it
+    sends anyway, the first moment the whole of it is known. Counted at the cut,
+    it was only the write that crossed it.
+
+    Sabotage: count only the crossing write, as the marker used to, and the
+    hundred prints after it go missing from the total.
+    """
+    kernel = await make_kernel(max_log_bytes=2_048)
+
+    result = await kernel.run("for _ in range(100):\n    print('y' * 1_000)", (), None)
+
+    assert result.truncated
+    assert result.dropped == 100 * 1_001 - 2_048, "every byte printed past the cap"
+    assert truncation_marker(None, 2_048) in result.logs, "and the cut marked with no count"
+    assert result.logs.endswith(truncation_marker(result.dropped, 2_048)), (
+        "and the logs end with the total, in the sentence `tool-bash` says it in"
+    )
+
+
+async def test_a_run_reports_every_byte_its_pipes_dropped(make_kernel: MakeKernel) -> None:
+    """What a cell's own subprocesses write reaches the host's pipe drain, which
+    keeps reading past the cap — so the child never blocks — and counts what it
+    skips into the same total.
+
+    Sabotage: drop the count from the skip in `_drain` and the total is only the
+    chunk that crossed the cap.
+    """
+    kernel = await make_kernel(max_log_bytes=2_048)
+    cell = (
+        "import os, time\n"
+        "for _ in range(10):\n"
+        "    os.write(1, b'z' * 5_000); time.sleep(0.02)\n"
+        "time.sleep(0.3)\n"
+    )
+
+    result = await kernel.run(cell, (), None)
+
+    assert result.truncated
+    assert result.dropped == 10 * 5_000 - 2_048

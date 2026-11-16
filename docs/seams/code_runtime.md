@@ -38,8 +38,15 @@ class CodeRuntime(Protocol):
 `CodeRunRequest` carries `program`, `bindings`, `namespace` (`None` keeps the
 fresh-per-run contract; a key selects a persistent one) and `token`.
 
-`CodeRunResult` carries `logs`, `value`, `error`, `truncated`, `reset` and
-`displays`. Two of those are worth knowing:
+`CodeRunResult` carries `logs`, `value`, `error`, `truncated`, `dropped`, `reset`
+and `displays`. Three of those are worth knowing:
+
+* **`dropped`** — the bytes of output the caps threw away, counted to the end of
+  the run. A stream is cut while it is still running, so the marker in `logs`
+  says only where (`truncation_marker(None, cap)`); the guest sends its total on
+  the `done` frame that ends the run, the host adds what its pipe drains
+  skipped, and `logs` ends with the whole of it in `truncation_marker`'s counted
+  sentence — the one `tool-bash` uses — so every renderer passes it on.
 
 * **`reset`** — the runtime died since the last run, so this one got a fresh,
   empty namespace. The notice in `logs` tells the *model*; this flag tells the

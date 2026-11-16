@@ -127,7 +127,10 @@ class _CappedStream(io.TextIOBase):
         self._flushed_at = time.monotonic()
         self._mark_truncated = False
         self.written = 0
-        self.truncated = False
+        self.dropped = 0
+        """Bytes this stream threw away, counted to the end of the run — every
+        write after the cap as well as the one that crossed it — and sent on the
+        run's `done` frame, the first moment the whole of it is known."""
 
     def writable(self) -> bool:
         return True
@@ -137,20 +140,25 @@ class _CappedStream(io.TextIOBase):
             return 0
         # Measured as the cut is (`utf8_size`), which spares ASCII the encode.
         size = utf8_size(text)
-        room = max(self._cap - self.written, 0)
+        room = self._cap - self.written
         if size <= room:
             self.written += size
             self._buffer(text)
             return len(text)
-        # The cap counts bytes, so it is cut in bytes — between characters, never
-        # through one (`_characters`, ph-core's rule).
-        kept = head_bytes(text, room) if room else ""
+        if room <= 0:
+            # Past the cap: only counted. A cell printing megabytes pays this
+            # per write, so it is the least there is.
+            self.dropped += size
+            return len(text)
+        # The write that crosses the cap, cut in bytes — between characters,
+        # never through one (`_characters`, ph-core's rule) — and marked where it
+        # was cut, with no number: what follows is not known yet.
+        kept = head_bytes(text, room)
         if kept:
             self._buffer(kept)
-        if not self.truncated:
-            self.truncated = True
-            self._mark_truncated = True
-            self._buffer(truncation_marker(size - utf8_size(kept), self._cap))
+        self.dropped += size - utf8_size(kept)
+        self._mark_truncated = True
+        self._buffer(truncation_marker(None, self._cap))
         self.written = self._cap
         return len(text)
 
@@ -652,8 +660,10 @@ class Runner:
                 body["value"] = encoded
             if degraded:
                 body["truncated"] = True
-        if out.truncated or err.truncated:
+        dropped = out.dropped + err.dropped
+        if dropped:
             body["truncated"] = True
+            body["dropped"] = dropped
         self._send_done(run_id, body)
 
     def _send_done(self, run_id: int, body: dict[str, Any]) -> None:

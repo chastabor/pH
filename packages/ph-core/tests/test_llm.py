@@ -37,6 +37,7 @@ from ph.llm.adapter import apply as llm_apply
 from ph.llm.tokens import BYTES_PER_TOKEN, bytes_of, tokens_of
 from ph.llm.types import (
     BAD_DECISION,
+    CONTEXT_SUMMARY_MAX_CHARS,
     CONTEXT_WINDOW_EXCEEDED,
     NO_DECISIONS,
     BlockEnd,
@@ -47,6 +48,7 @@ from ph.llm.types import (
     GenerateOptions,
     LlmCallConfig,
     LlmFailure,
+    PluginSource,
     ReasoningDelta,
     Sampling,
     SamplingSetting,
@@ -63,7 +65,15 @@ from ph.llm.types import (
 )
 from ph.seams.token_meter import SPENDING_TYPES, event_tokens
 from ph.session import Session
-from ph.testing import FakeAdapter, StubDecider, as_kind, block_text, llama_refusal, text_chunks
+from ph.testing import (
+    EMOJI_FAMILY,
+    FakeAdapter,
+    StubDecider,
+    as_kind,
+    block_text,
+    llama_refusal,
+    text_chunks,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -642,3 +652,20 @@ def test_one_estimate_of_tokens_for_every_caller_without_a_tokenizer() -> None:
     assert tokens_of("abcdef", bytes_per_token=2) == 3.0, "or a density a caller learned"
     assert bytes_of(10) == 10 * BYTES_PER_TOKEN
     assert tokens_of("x" * bytes_of(7)) == 7
+
+
+def test_a_notice_summary_is_one_line_that_fits() -> None:
+    """A notice's summary is a row: put on one line and cut to its bound by the
+    model itself, so no producer has to — one that did not used to be refused,
+    and its notice lost. Idempotent, so a summary read back is the one written.
+
+    Sabotage: drop `_one_line` and the long summary below fails validation.
+    """
+    long = "line one\nline two " + EMOJI_FAMILY * 60
+
+    source = PluginSource(plugin="p", form="notice", summary=long)
+
+    assert source.summary is not None and "\n" not in source.summary
+    assert len(source.summary) <= CONTEXT_SUMMARY_MAX_CHARS and source.summary.endswith("…")
+    again = PluginSource.model_validate(source.to_wire())
+    assert again.summary == source.summary

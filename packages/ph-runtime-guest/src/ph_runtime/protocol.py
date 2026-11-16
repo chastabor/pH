@@ -190,7 +190,7 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
     "log": (frozenset({"type", "stream", "text"}), frozenset({"truncated"})),
     "display": (frozenset({"type", "mime", "data"}), frozenset({"meta"})),
     "snapshot": (frozenset({"type", "id", "variables"}), frozenset()),
-    "done": (frozenset({"type", "id"}), frozenset({"value", "error", "truncated"})),
+    "done": (frozenset({"type", "id"}), frozenset({"value", "error", "truncated", "dropped"})),
     "fault": (frozenset({"type", "message"}), frozenset()),
     # **The loop's own clock** (M2). `ping` is answered by the guest's reader
     # task, so the round trip measures how far behind the guest's event loop
@@ -213,12 +213,15 @@ field added on one side and not the other is a failing assertion instead of a
 frame the other half silently ignores."""
 
 
-def truncation_marker(dropped: int, cap: int) -> str:
+def truncation_marker(dropped: int | None, cap: int) -> str:
     """The text that stands in for output a cap discarded.
 
     Byte-identical on both sides by construction and by test (D4): the host
     counts what it received and the guest counts what it dropped, and a reader
     comparing a transcript to a log must not find two different sentences for
-    the same event.
+    the same event. `None` while the stream is still running: the guest's total
+    rides its `done` frame.
     """
+    if dropped is None:
+        return f"\n[ph: output truncated — the rest is not kept, cap {cap} bytes]\n"
     return f"\n[ph: output truncated — {dropped} bytes dropped, cap {cap} bytes]\n"

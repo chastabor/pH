@@ -204,6 +204,14 @@ class CodeRunResult:
     value: Any = None
     error: str | None = None
     truncated: bool = False
+    dropped: int = 0
+    """Bytes of output the runtime's caps threw away, counted to the end of the
+    run. The marker in `logs` where a stream was cut carries no number, because
+    a stream still running cannot know what will follow; `logs` ends with the
+    total, and this is the same total for a front end. `0` when nothing was
+    dropped — a value too large to return sets `truncated` and drops no output.
+    A run that was killed sends no `done`, so the guest's share of it is not
+    counted."""
     reset: bool = False
     """The runtime died since the last run, so this one got a fresh, empty
     namespace. The reset notice in `logs` tells the *model*; this flag tells the
